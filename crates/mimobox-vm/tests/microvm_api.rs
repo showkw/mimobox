@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError};
+use mimobox_core::SandboxConfig;
+#[cfg(any(not(target_os = "linux"), not(feature = "kvm")))]
+use mimobox_core::{Sandbox, SandboxError};
 use mimobox_vm::{MicrovmConfig, MicrovmSandbox, MicrovmSnapshot};
 
 #[test]

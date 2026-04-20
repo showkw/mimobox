@@ -72,7 +72,7 @@ enum SyntheticVmExit<'a> {
 
 /// Linux KVM 后端基础实现。
 pub struct KvmBackend {
-    base_config: SandboxConfig,
+    _base_config: SandboxConfig,
     config: MicrovmConfig,
     kvm: Kvm,
     vm_fd: VmFd,
@@ -125,7 +125,7 @@ impl KvmBackend {
         }
 
         let mut backend = Self {
-            base_config,
+            _base_config: base_config,
             config,
             kvm,
             vm_fd,
