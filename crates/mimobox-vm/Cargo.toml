@@ -1,0 +1,26 @@
+[package]
+name = "mimobox-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mimobox microVM 沙箱后端"
+
+[dependencies]
+mimobox-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls.workspace = true
+vm-memory.workspace = true
+vmm-sys-util.workspace = true
+
+[features]
+default = []
+kvm = []
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

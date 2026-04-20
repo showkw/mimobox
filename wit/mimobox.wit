@@ -1,0 +1,258 @@
+/// mimobox Agent Sandbox 接口定义
+///
+/// 定义 mimobox 的完整 WIT 接口体系：
+/// - tool-api: Agent 工具核心接口
+/// - stateful-tool-api: 有状态工具接口
+/// - sandbox-api: 宿主提供给工具的沙箱服务（filesystem/network/process/logging）
+/// - 四种 world: 从简单到复杂，按需选择
+package mimobox:agent;
+
+// =============================================================================
+// 通用类型定义
+// =============================================================================
+
+/// 工具执行错误类型
+variant tool-error {
+    execution-failed(string),
+    invalid-arguments(string),
+    permission-denied(string),
+    timeout,
+    resource-exhausted(string),
+}
+
+/// 动态值类型（JSON 兼容，覆盖 Agent 工具常见参数类型）
+variant value {
+    string(string),
+    integer(s64),
+    float(float64),
+    boolean(bool),
+    null,
+    array(list<value>),
+    object(list<tuple<string, value>>),
+}
+
+/// 工具参数定义
+record param-schema {
+    name: string,
+    type: string,
+    required: bool,
+    description: string,
+    default-value: option<value>,
+}
+
+/// 工具元数据（供 LLM 理解工具用途）
+record tool-description {
+    name: string,
+    description: string,
+    parameters: list<param-schema>,
+    version: string,
+}
+
+/// 工具执行上下文（由宿主注入）
+record execution-context {
+    timeout-ms: option<u64>,
+    memory-limit: option<u64>,
+    fuel-limit: option<u64>,
+    metadata: list<tuple<string, string>>,
+}
+
+/// 工具执行结果
+record tool-result {
+    output: value,
+    success: bool,
+    summary: option<string>,
+    elapsed-us: u64,
+}
+
+// =============================================================================
+// Agent 工具核心接口
+// =============================================================================
+
+/// 无状态工具接口
+///
+/// 每个 mimobox 工具必须实现此接口。
+/// 宿主通过调用 describe() 获取工具元数据，通过 execute() 执行工具。
+interface tool-api {
+    /// 返回工具元数据（注册时调用）
+    describe: func() -> tool-description;
+
+    /// 执行工具
+    execute: func(input: list<tuple<string, value>>, context: execution-context) -> result<tool-result, tool-error>;
+}
+
+/// 有状态工具接口
+///
+/// 需要跨多次调用保持状态的工具可实现此接口。
+/// 宿主通过 resource 生命周期管理独立的工具实例。
+interface stateful-tool-api {
+    /// 有状态工具实例
+    resource tool-instance {
+        /// 返回工具元数据
+        describe: func() -> tool-description;
+
+        /// 执行工具（可访问实例内部状态）
+        execute: func(input: list<tuple<string, value>>, context: execution-context) -> result<tool-result, tool-error>;
+
+        /// 重置实例状态
+        reset: func() -> result_;
+    }
+
+    /// 创建新的工具实例
+    create-instance: func() -> result<tool-instance, tool-error>;
+}
+
+// =============================================================================
+// 宿主沙箱服务接口
+// =============================================================================
+
+/// 文件系统错误
+variant fs-error {
+    access-denied(string),
+    not-found(string),
+    permission-denied(string),
+    io-error(string),
+}
+
+/// 网络错误
+variant network-error {
+    connection-refused(string),
+    dns-failed(string),
+    timeout(string),
+    host-denied(string),
+    tls-error(string),
+}
+
+/// HTTP 方法
+enum http-method {
+    get,
+    post,
+    put,
+    delete,
+    patch,
+    head,
+    options,
+}
+
+/// HTTP 请求
+record http-request {
+    method: http-method,
+    url: string,
+    headers: list<tuple<string, string>>,
+    body: option<list<u8>>,
+}
+
+/// HTTP 响应
+record http-response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+}
+
+/// 进程执行结果
+record process-result {
+    stdout: list<u8>,
+    stderr: list<u8>,
+    exit-code: option<i32>,
+    timed-out: bool,
+}
+
+/// 受限文件系统
+///
+/// 宿主根据工具的 Landlock/Seatbelt 策略控制实际可访问路径。
+interface filesystem {
+    read-file: func(path: string) -> result<list<u8>, fs-error>;
+    write-file: func(path: string, data: list<u8>) -> result_, fs-error>;
+    list-dir: func(path: string) -> result<list<string>, fs-error>;
+    exists: func(path: string) -> bool;
+    mkdir: func(path: string) -> result_, fs-error>;
+    remove: func(path: string) -> result_, fs-error>;
+}
+
+/// 受限网络
+///
+/// 宿主根据网络白名单策略控制实际可访问目标。
+interface network {
+    http-request: func(request: http-request) -> result<http-response, network-error>;
+    resolve-host: func(host: string) -> result<list<string>, network-error>;
+}
+
+/// 受限进程执行
+///
+/// 子进程在同一沙箱约束下运行。
+interface process {
+    execute: func(command: string, args: list<string>, timeout-ms: option<u64>) -> result<process-result, string>;
+    get-environment: func() -> list<tuple<string, string>>;
+}
+
+/// 日志服务
+///
+/// 工具输出日志由宿主统一收集转发。
+interface logging {
+    info: func(message: string);
+    warn: func(message: string);
+    error: func(message: string);
+    debug: func(message: string);
+}
+
+// =============================================================================
+// World 定义（四种工具类型，从简单到复杂）
+// =============================================================================
+
+/// 纯计算工具：仅需 WASI 基础服务，无外部资源访问
+///
+/// 适用场景：数据转换、数学计算、文本处理
+world agent-tool {
+    export tool-api;
+    import wasi:cli/environment@0.2.3;
+    import wasi:cli/stdout@0.2.3;
+    import wasi:cli/stderr@0.2.3;
+    import wasi:cli/stdin@0.2.3;
+    import wasi:clocks/monotonic-clock@0.2.3;
+    import wasi:random/random@0.2.3;
+}
+
+/// 文件系统工具：需要文件读写 + 日志
+///
+/// 适用场景：文件处理、数据分析、代码生成
+world agent-tool-with-fs {
+    export tool-api;
+    import wasi:cli/environment@0.2.3;
+    import wasi:cli/stdout@0.2.3;
+    import wasi:cli/stderr@0.2.3;
+    import wasi:clocks/monotonic-clock@0.2.3;
+    import wasi:random/random@0.2.3;
+    import filesystem;
+    import logging;
+}
+
+/// 全功能工具：文件 + 网络 + 进程执行 + 日志
+///
+/// 适用场景：API 调用、Web 爬取、需要子进程的任务
+world agent-tool-full {
+    export tool-api;
+    import wasi:cli/environment@0.2.3;
+    import wasi:cli/stdout@0.2.3;
+    import wasi:cli/stderr@0.2.3;
+    import wasi:clocks/monotonic-clock@0.2.3;
+    import wasi:random/random@0.2.3;
+    import filesystem;
+    import network;
+    import process;
+    import logging;
+}
+
+/// 有状态工具：跨调用保持状态，支持全部沙箱服务
+///
+/// 适用场景：数据库连接、SSH 会话、需要累积状态的多步操作
+world agent-stateful-tool {
+    export stateful-tool-api;
+    import wasi:cli/environment@0.2.3;
+    import wasi:cli/stdout@0.2.3;
+    import wasi:cli/stderr@0.2.3;
+    import wasi:clocks/monotonic-clock@0.2.3;
+    import wasi:random/random@0.2.3;
+    import filesystem;
+    import network;
+    import process;
+    import logging;
+}
