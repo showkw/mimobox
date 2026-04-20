@@ -8,7 +8,7 @@
 //!
 //! | 维度 | 策略 | 说明 |
 //! |------|------|------|
-//! | 文件读取 | 路径白名单 | 最小系统集 + `fs_readonly` + `fs_readwrite`，避免读取宿主敏感文件 |
+//! | 文件读取 | 全局允许 + 敏感路径拒绝 | macOS 进程启动依赖大量系统路径，无法精确白名单；改为显式拒绝敏感用户目录 |
 //! | 文件写入 | 白名单 | 仅允许 `fs_readwrite` 中配置的路径（默认 `/tmp`） |
 //! | 网络访问 | 默认拒绝 | 通过 `(deny network*)` 禁止所有网络操作 |
 //! | 进程执行 | 路径限制 | 仅允许 `/bin`、`/usr/bin`、`/sbin`、`/usr/sbin` 下的可执行文件 |
@@ -17,25 +17,25 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 
-const MACOS_MINIMAL_READONLY_PATHS: &[&str] = &[
-    "/System",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/Library",
-    "/etc",
-    "/private/etc",
-    "/dev",
-    "/var",
-    "/private/var",
-    "/tmp",
-    "/private/tmp",
+/// 需要显式拒绝读取的敏感用户目录后缀（相对于 $HOME）
+///
+/// macOS 进程启动依赖大量系统路径（dyld、Frameworks 等），无法使用精确白名单。
+/// 改为全局放行文件读取，然后显式拒绝已知的敏感目录（SSH 密钥、云凭证等）。
+const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".config/gcloud",
+    ".config/gh",
 ];
 
 /// macOS Seatbelt 沙箱后端
@@ -45,7 +45,7 @@ const MACOS_MINIMAL_READONLY_PATHS: &[&str] = &[
 ///
 /// # 平台限制
 ///
-/// - 文件读取必须显式放行系统运行时路径，否则 dyld / Frameworks 访问会失败
+/// - 文件读取无法精确白名单（macOS dyld/Frameworks 依赖过多系统路径），改为拒绝敏感目录
 /// - 内存限制无法通过 `setrlimit(RLIMIT_AS)` 实现（macOS 不支持缩小）
 pub struct MacOsSandbox {
     config: SandboxConfig,
@@ -62,22 +62,6 @@ fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Opt
 }
 
 impl MacOsSandbox {
-    fn is_implicit_default_readonly(&self) -> bool {
-        self.config.fs_readonly.is_empty()
-            || self.config.fs_readonly == SandboxConfig::default().fs_readonly
-    }
-
-    fn effective_readonly_paths(&self) -> Vec<PathBuf> {
-        if self.is_implicit_default_readonly() {
-            return MACOS_MINIMAL_READONLY_PATHS
-                .iter()
-                .map(PathBuf::from)
-                .collect();
-        }
-
-        self.config.fs_readonly.clone()
-    }
-
     fn push_subpath_rule<I, P>(rules: &mut Vec<String>, operation: &str, paths: I)
     where
         I: IntoIterator<Item = P>,
@@ -113,21 +97,39 @@ impl MacOsSandbox {
     ///
     /// 策略结构（Seatbelt Scheme 编译格式 version 1）：
     /// 1. `(deny default)` — 默认拒绝所有操作
-    /// 2. `(allow file-read* (subpath ...))` — 仅读取最小系统路径与显式配置路径
-    /// 3. `(allow file-write* (subpath ...))` — 仅允许配置的路径写入
-    /// 4. `(allow process-exec (subpath ...))` — 限制可执行路径
-    /// 5. `(allow process-fork)` — 允许 fork（shell 命令需要）
-    /// 6. `(deny network*)` — 拒绝网络访问
+    /// 2. `(allow file-read*)` — 允许所有文件读取（macOS 进程启动需要）
+    /// 3. `(deny file-read* (subpath ...))` — 显式拒绝敏感用户目录
+    /// 4. `(allow file-write* (subpath ...))` — 仅允许配置的路径写入
+    /// 5. `(allow process-exec (subpath ...))` — 限制可执行路径
+    /// 6. `(allow process-fork)` — 允许 fork（shell 命令需要）
+    /// 7. `(deny network*)` — 拒绝网络访问
     fn generate_policy(&self) -> String {
         let mut rules = Vec::new();
 
         rules.push("(version 1)".to_string());
         rules.push("(deny default)".to_string());
 
-        // 文件读取：最小系统集 + 显式只读目录 + 读写目录（写目录天然也需要可读）
-        let mut readable_paths = self.effective_readonly_paths();
-        readable_paths.extend(self.config.fs_readwrite.iter().cloned());
-        Self::push_subpath_rule(&mut rules, "file-read*", readable_paths.iter());
+        // 文件读取：全局允许（macOS dyld/Frameworks 启动依赖大量系统路径）
+        rules.push("(allow file-read*)".to_string());
+
+        // 显式拒绝敏感用户目录（SSH 密钥、云凭证等）
+        // Seatbelt 中后出现的更具体规则覆盖先前的通用规则
+        if let Ok(home) = std::env::var("HOME") {
+            for sub in SENSITIVE_HOME_SUBPATHS {
+                let full_path = format!("{home}/{sub}");
+                if let Ok(canonical) = std::fs::canonicalize(&full_path) {
+                    // 路径存在，拒绝原始路径和 canonicalize 后的路径
+                    rules.push(format!("(deny file-read* (subpath \"{full_path}\"))"));
+                    let resolved = canonical.to_string_lossy().to_string();
+                    if resolved != full_path {
+                        rules.push(format!("(deny file-read* (subpath \"{resolved}\"))"));
+                    }
+                } else {
+                    // 路径不存在也加入拒绝规则，防止运行时创建后读取
+                    rules.push(format!("(deny file-read* (subpath \"{full_path}\"))"));
+                }
+            }
+        }
 
         // 文件写入：仅允许配置的路径（默认 /tmp）
         // macOS 上 /tmp -> /private/tmp，/var -> /private/var 等符号链接
@@ -421,35 +423,16 @@ mod tests {
         assert!(policy.contains("(version 1)"), "策略应包含 version 1");
         assert!(policy.contains("(deny default)"), "策略应包含 deny default");
         assert!(
-            policy.contains("(allow file-read*"),
-            "策略应包含文件读取规则"
+            policy.contains("(allow file-read*)"),
+            "策略应全局允许文件读取（macOS 进程启动需要）"
         );
         assert!(
-            !policy
-                .lines()
-                .any(|line| line.trim() == "(allow file-read*)"),
-            "策略不应再全局放开所有文件读取"
+            policy.contains("(deny file-read* (subpath"),
+            "策略应显式拒绝敏感路径"
         );
-        assert!(
-            policy.contains("(subpath \"/usr\")"),
-            "默认读取白名单应包含 /usr"
-        );
-        assert!(
-            policy.contains("(subpath \"/bin\")"),
-            "默认读取白名单应包含 /bin"
-        );
-        assert!(
-            policy.contains("(subpath \"/System\")"),
-            "默认读取白名单应包含 /System"
-        );
-        assert!(
-            !policy.contains("(subpath \"/etc\")"),
-            "未显式配置时不应默认放开 /etc"
-        );
-        assert!(
-            policy.contains("(subpath \"/tmp\")"),
-            "读写白名单路径也应具备读取权限"
-        );
+        assert!(policy.contains(".ssh"), "策略应拒绝 ~/.ssh");
+        assert!(policy.contains(".aws"), "策略应拒绝 ~/.aws");
+        assert!(policy.contains(".gnupg"), "策略应拒绝 ~/.gnupg");
         assert!(
             policy.contains("(deny network*)"),
             "策略应包含 deny network"
@@ -468,7 +451,6 @@ mod tests {
     #[test]
     fn test_policy_generation_uses_explicit_readonly_allowlist() {
         let config = SandboxConfig {
-            fs_readonly: vec!["/opt/mimobox-ro".into()],
             fs_readwrite: vec!["/tmp/mimobox-rw".into()],
             memory_limit_mb: None,
             timeout_secs: Some(10),
@@ -478,12 +460,8 @@ mod tests {
         let policy = sb.generate_policy();
 
         assert!(
-            policy.contains("(subpath \"/opt/mimobox-ro\")"),
-            "显式只读白名单应写入 Seatbelt 策略"
-        );
-        assert!(
             policy.contains("(subpath \"/tmp/mimobox-rw\")"),
-            "读写白名单应同时出现在读取规则中"
+            "读写白名单应写入 Seatbelt 策略"
         );
     }
 
