@@ -688,19 +688,19 @@ fn checked_slice<'a>(bytes: &'a [u8], offset: usize, len: usize) -> Result<&'a [
 
 fn read_u16_at(bytes: &[u8], offset: usize) -> Result<u16, MicrovmError> {
     let mut raw = [0u8; 2];
-    raw.copy_from_slice(checked_slice(bytes, offset, raw.len())?);
+    raw.copy_from_slice(checked_slice(bytes, offset, 2)?);
     Ok(u16::from_le_bytes(raw))
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> Result<u32, MicrovmError> {
     let mut raw = [0u8; 4];
-    raw.copy_from_slice(checked_slice(bytes, offset, raw.len())?);
+    raw.copy_from_slice(checked_slice(bytes, offset, 4)?);
     Ok(u32::from_le_bytes(raw))
 }
 
 fn read_u64_at(bytes: &[u8], offset: usize) -> Result<u64, MicrovmError> {
     let mut raw = [0u8; 8];
-    raw.copy_from_slice(checked_slice(bytes, offset, raw.len())?);
+    raw.copy_from_slice(checked_slice(bytes, offset, 8)?);
     Ok(u64::from_le_bytes(raw))
 }
 
