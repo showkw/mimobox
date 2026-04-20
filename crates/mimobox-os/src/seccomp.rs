@@ -198,6 +198,7 @@ mod syscall_nr {
 /// - 设备控制: ioctl(16) — 攻击面过大（TIOCSTI 终端注入等）
 /// - 进程控制: prctl(157) — 可修改进程安全属性
 /// - 信号发送: kill(62), tkill(200), tgkill(234) — 禁止向其他进程发信号
+/// - 会话/进程组逃逸: setpgid(109), setsid(112) — 防止超时清理绕过
 /// - 符号链接: symlink(88), symlinkat(266) — 防止路径遍历
 /// - 权限/所有权: chmod(90), fchmod(91), fchmodat(268), chown(92), fchown(93),
 ///   lchown(94), fchownat(260)
@@ -291,9 +292,7 @@ fn essential_syscalls() -> Vec<u32> {
         GETEUID,
         GETEGID,
         GETGROUPS,
-        SETPGID,
         GETPGRP,
-        SETSID,
         // 系统（不含 syslog/ioctl/prctl）
         UNAME,
         SELECT,
