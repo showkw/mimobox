@@ -9,10 +9,10 @@ mod pool_tests {
     #[cfg(target_os = "macos")]
     use mimobox_core::{Sandbox, SandboxError};
     #[cfg(target_os = "macos")]
-    use std::sync::OnceLock;
+    use mimobox_os::MacOsSandbox;
     use mimobox_os::{PoolConfig, SandboxPool};
     #[cfg(target_os = "macos")]
-    use mimobox_os::MacOsSandbox;
+    use std::sync::OnceLock;
 
     fn pool_config(min_size: usize, max_size: usize) -> PoolConfig {
         PoolConfig {
