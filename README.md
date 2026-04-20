@@ -6,6 +6,7 @@ Rust 实现的跨平台 Agent Sandbox。`mimobox` 面向需要在本地或服务
 
 | 版本 | 日期 | 变更摘要 | 变更类型 | 责任人 |
 | --- | --- | --- | --- | --- |
+| v1.1 | 2026-04-21 | 同步文档与代码现状，补充 `mimobox-vm`/KVM、性能与 CI 信息 | 更新 | Codex |
 | v1.0 | 2026-04-20 | 重写根目录 README，补齐架构、API、性能、脚本与安全模型说明 | 新增 | Codex |
 
 ## 术语表
@@ -15,7 +16,7 @@ Rust 实现的跨平台 Agent Sandbox。`mimobox` 面向需要在本地或服务
 | Agent Sandbox | 用于执行不可信代码或命令的受限运行环境 |
 | OS 级沙箱 | 基于内核原语对进程进行隔离，例如 Landlock、Seccomp、Seatbelt |
 | Wasm 级沙箱 | 基于 Wasmtime/WASI 运行 Wasm 模块的语言级隔离 |
-| microVM 级沙箱 | 基于轻量虚拟机的硬件级隔离，本仓库当前处于路线图阶段 |
+| microVM 级沙箱 | 基于轻量虚拟机的硬件级隔离，仓库已提供 `mimobox-vm` crate 与 Linux + `kvm` feature 下的 KVM 基础实现 |
 | 预热池 | 预先创建一批空闲沙箱，通过复用降低获取延迟 |
 | `Sandbox` trait | `mimobox-core` 中定义的统一沙箱生命周期抽象 |
 
@@ -33,14 +34,28 @@ Rust 实现的跨平台 Agent Sandbox。`mimobox` 面向需要在本地或服务
 
 ## 1. 项目概览
 
-`mimobox` 当前是一个 Cargo workspace，根目录位于 `/Users/showkw/dev/mimobox`，主要包含四个 crate：
+`mimobox` 当前是一个 Cargo workspace，根目录位于 `/Users/showkw/dev/mimobox`，当前包含五个 crate：
 
 ```text
 /Users/showkw/dev/mimobox
+├── crates/mimobox-cli       # CLI 入口与基准测试命令
 ├── crates/mimobox-core      # 核心 trait、配置、结果与错误类型
 ├── crates/mimobox-os        # Linux/macOS OS 级沙箱与预热池
+│   └── src
+│       ├── lib.rs
+│       ├── linux.rs
+│       ├── macos.rs
+│       ├── pool.rs
+│       └── seccomp.rs
+├── crates/mimobox-vm        # microVM 后端、KVM 基础实现与快照格式
+│   └── src
+│       ├── kvm.rs
+│       ├── lib.rs
+│       ├── snapshot.rs
+│       └── vm.rs
 ├── crates/mimobox-wasm      # Wasmtime + WASI 的 Wasm 沙箱后端
-├── crates/mimobox-cli       # CLI 入口与基准测试命令
+│   └── src
+│       └── lib.rs
 ├── docs/research            # 技术调研与代码审查报告
 ├── scripts                  # 构建、测试、基准脚本
 └── wit                      # WIT 接口定义与工具协议
@@ -58,8 +73,9 @@ Rust 实现的跨平台 Agent Sandbox。`mimobox` 面向需要在本地或服务
 - macOS OS 沙箱：已实现，使用 Seatbelt `sandbox-exec`。
 - Wasm 沙箱：已实现，基于 Wasmtime + WASI Preview 1。
 - 预热池：已实现，适用于 Linux/macOS 的 OS 级后端。
+- microVM 后端：已提供 `mimobox-vm` crate，包含 `MicrovmSandbox`、`MicrovmSnapshot` 与 Linux + `kvm` feature 下的 `KvmBackend` 基础实现。
 - Windows OS 沙箱：规划中，目标后端为 AppContainer。
-- microVM 后端：规划中，当前仅保留架构位置和性能目标。
+- CLI 集成现状：当前 CLI 仍只暴露 `os` / `wasm` 运行路径，尚未开放 `--backend vm`。
 
 ## 2. 核心特性
 
@@ -70,29 +86,32 @@ Rust 实现的跨平台 Agent Sandbox。`mimobox` 面向需要在本地或服务
 2. Wasm 级隔离
    使用 Wasmtime 运行时执行 `.wasm` 模块，基于 Fuel 与 Epoch interruption 限制执行时间，使用 `StoreLimits` 限制内存和实例资源。
 3. microVM 级隔离
-   当前尚未实现，但设计目标已经明确，后续将承载最高强度的隔离需求。
+   已在 `crates/mimobox-vm` 中提供 crate 级实现：`MicrovmSandbox` 负责统一生命周期，`MicrovmSnapshot` 负责快照格式，Linux + `kvm` feature 下的 `KvmBackend` 负责 KVM 基础生命周期；当前仍属于基础实现阶段，尚未接入 CLI 默认入口。
 
 ### 2.2 工程级能力
 
 - 统一抽象：所有后端共享 `SandboxConfig`、`SandboxResult` 和 `SandboxError`。
 - 低延迟获取：`SandboxPool` 支持预热、命中/未命中统计、LRU 回收与健康检查。
 - 缓存优化：Wasm 后端使用内容哈希与磁盘缓存复用编译产物。
+- 策略自动升级：Linux 后端会在 `allow_fork = true` 时把 `Essential` / `Network` 自动提升为 `EssentialWithFork` / `NetworkWithFork`，覆盖 shell 等需要子进程的场景。
 - 可审计安全链路：Linux 后端严格执行“内存限制 -> Landlock -> namespace -> Seccomp -> exec”顺序。
 - 明确边界：文档中区分“已实现能力”和“路线图能力”，不把未落地特性描述成现状。
 
 ### 2.3 性能速览
 
-以下两项为本次交付要求记录的最新性能数据：
+以下三项为当前文档同步采用的最新实测基线：
 
 | 阶段 | 指标 | 数值 |
 | --- | --- | --- |
-| Phase 1 | OS 级沙箱冷启动 | 2.64ms |
-| Phase 2 | Wasm 沙箱冷启动 | 0.67ms |
+| Phase 1 | OS 级沙箱冷启动 P50 | 3.51ms |
+| Phase 2 | Wasm 沙箱冷启动 P50 | 0.61ms |
+| Phase 3 | 预热池热获取 P50 | 0.38us |
 
 补充说明：
 
-- 仓库内可直接复核的 Linux 审查基线见 `/Users/showkw/dev/mimobox/docs/research/10-code-review-round2.md`，其中记录 `冷启动 P50 ~3.51ms（含全部安全加固）`。
-- `scripts/bench.sh` 当前通过 SSH 连接 Linux 基准机；在本次文档整理环境中无法直接复跑该脚本，因此 README 同时保留上述仓库可见基线说明。
+- OS 级冷启动基线可在 `/Users/showkw/dev/mimobox/docs/research/10-code-review-round2.md` 中复核。
+- Wasm 冷启动基线已同步到 `/Users/showkw/dev/mimobox/docs/research/14-microvm-design.md` 的后端对比表。
+- microVM 后端当前已有 KVM 基础实现，但尚未固化稳定性能基线。
 
 ## 3. 快速开始
 
@@ -288,14 +307,14 @@ fn main() {
 | 生命周期：new(config) -> execute(&mut self, cmd)   |
 |          -> destroy(self)                          |
 +----------------------------------------------------+
-          |                     |                     |
-          v                     v                     v
-+------------------+  +------------------+  +-------------------+
-| LinuxSandbox     |  | MacOsSandbox     |  | WasmSandbox       |
-| Landlock         |  | Seatbelt         |  | Wasmtime Engine    |
-| Seccomp-bpf      |  | sandbox-exec     |  | WASI Preview 1     |
-| namespaces       |  | 写路径白名单     |  | Fuel + Epoch       |
-+------------------+  +------------------+  | 模块缓存           |
+          |                     |                     |                     |
+          v                     v                     v                     v
++------------------+  +------------------+  +-------------------+  +------------------------+
+| LinuxSandbox     |  | MacOsSandbox     |  | WasmSandbox       |  | MicrovmSandbox         |
+| Landlock         |  | Seatbelt         |  | Wasmtime Engine   |  | MicrovmSnapshot        |
+| Seccomp-bpf      |  | sandbox-exec     |  | WASI Preview 1    |  | KvmBackend (Linux+kvm) |
+| namespaces       |  | 写路径白名单     |  | Fuel + Epoch      |  | Guest kernel/rootfs    |
++------------------+  +------------------+  | 模块缓存          |  +------------------------+
                                             +-------------------+
           |
           v
@@ -304,11 +323,12 @@ fn main() {
 | warm() -> acquire() -> PooledSandbox::drop recycle  |
 | 统计：hit / miss / evict / idle / in_use            |
 +----------------------------------------------------+
-
-+----------------------------------------------------+
-| microVM backend（路线图阶段，当前未实现）          |
-+----------------------------------------------------+
 ```
+
+说明：
+
+- `mimobox-vm` 已经是 workspace member，但当前 CLI 还没有开放 `--backend vm`。
+- `SandboxPool` 当前只复用 OS 级后端，不负责 Wasm 或 microVM 实例池化。
 
 ## 6. 配置说明
 
@@ -326,7 +346,7 @@ fn main() {
 
 关键约束：
 
-- Linux 后端会根据 `allow_fork` 自动把 `Essential` 提升为 `EssentialWithFork`，把 `Network` 提升为 `NetworkWithFork`。
+- Linux 后端会根据 `allow_fork` 自动把 `Essential` 提升为 `EssentialWithFork`，把 `Network` 提升为 `NetworkWithFork`；显式传入 `EssentialWithFork` / `NetworkWithFork` 时不会再降级。
 - Wasm 后端当前无论 `deny_network` 是否为 `false`，都不会开放网络能力。
 - macOS 后端无法可靠施加 `RLIMIT_AS`，因此 `memory_limit_mb` 仅记录告警，不形成强约束。
 
@@ -337,6 +357,7 @@ fn main() {
 Linux 后端的安全链路由以下步骤组成：
 
 1. 清理环境变量，仅注入最小必要的 `PATH`、`HOME`、`TERM`。
+   同时补充 `USER`、`LOGNAME`、`SHELL`、`PWD`、`LANG`，避免 shell / NSS / userdb 查找链在空环境下触发额外依赖。
 2. 使用 `setrlimit(RLIMIT_AS)` 设定内存硬上限。
 3. 应用 Landlock，只对白名单路径开放读或读写权限。
 4. 通过 `unshare` 创建 Mount/PID/NET/IPC 命名空间。
@@ -365,7 +386,8 @@ Wasm 后端不依赖主机系统调用过滤，而是在运行时层面建立边
 
 ### 7.4 当前边界与限制
 
-- Windows 和 microVM 后端尚未落地，不应视为当前安全保证的一部分。
+- Windows 后端尚未落地，不应视为当前安全保证的一部分。
+- microVM 后端虽已存在 crate 级基础实现，但当前仅支持 Linux + `kvm` feature，依赖 `/dev/kvm` 与 guest 资产，尚未达到与 OS/Wasm 后端相同的通用成熟度。
 - macOS 文件读取目前无法像 Linux 一样细粒度收敛。
 - Wasm 后端默认使用 WASI Preview 1，尚未实现自定义宿主能力注入。
 
@@ -380,6 +402,8 @@ Wasm 后端不依赖主机系统调用过滤，而是在运行时层面建立边
 | 网络默认拒绝 | 通过 namespace + 策略 | 通过 Seatbelt 策略 | 未实现 | 当前始终拒绝 |
 | 内存限制 | `setrlimit` | 不支持硬限制 | 未实现 | `StoreLimits` |
 | 预热池 | 已实现 | 已实现 | 未实现 | 未实现 |
+| microVM 后端 | Linux + `kvm` feature 基础实现 | 未实现 | 未实现 | 不适用 |
+| VM 快照 | Linux + `kvm` feature 基础实现 | 未实现 | 未实现 | 不适用 |
 
 ## 9. 开发指南
 
@@ -397,10 +421,29 @@ Wasm 后端不依赖主机系统调用过滤，而是在运行时层面建立边
 | --- | --- | --- |
 | `mimobox-core` | `/Users/showkw/dev/mimobox/crates/mimobox-core` | 核心抽象与通用类型 |
 | `mimobox-os` | `/Users/showkw/dev/mimobox/crates/mimobox-os` | Linux/macOS OS 级沙箱与预热池 |
+| `mimobox-vm` | `/Users/showkw/dev/mimobox/crates/mimobox-vm` | microVM 后端抽象、KVM 基础实现与快照格式 |
 | `mimobox-wasm` | `/Users/showkw/dev/mimobox/crates/mimobox-wasm` | Wasm 运行时后端与基准 |
 | `mimobox-cli` | `/Users/showkw/dev/mimobox/crates/mimobox-cli` | CLI 参数解析、演示和基准入口 |
 
-### 9.3 文档索引
+### 9.3 CI 校验
+
+当前 `.github/workflows/ci.yml` 包含以下 job：
+
+- `check`
+- `release-check`
+- `test-linux`
+- `test-linux-kvm`
+- `test-wasm`
+- `test-macos`
+- `clippy`
+- `fmt`
+
+补充说明：
+
+- 当前源码中可统计到 66 个 `#[test]` 测试点。
+- `mimobox-vm` 的 `kvm_e2e` 3 项测试仅在 Linux + `kvm` feature 且 KVM 资产齐备时运行。
+
+### 9.4 文档索引
 
 | 文档 | 路径 | 说明 |
 | --- | --- | --- |
@@ -414,16 +457,17 @@ Wasm 后端不依赖主机系统调用过滤，而是在运行时层面建立边
 
 | 阶段 | 指标 | 目标 | 实际 |
 | --- | --- | --- | --- |
-| Phase 1 | OS 级冷启动 | `< 10ms` | `2.64ms` |
-| Phase 2 | Wasm 冷启动 | `< 5ms` | `0.67ms` |
-| Phase 3 | 预热池热获取 | `< 100us` | 代码已提供 `run_pool_benchmark`，当前仓库未固化单一验收值 |
-| Phase 4 | microVM 冷启动 | `< 200ms` | 未实现 |
+| Phase 1 | OS 级冷启动 | `< 10ms` | `3.51ms` |
+| Phase 2 | Wasm 冷启动 | `< 5ms` | `0.61ms` |
+| Phase 3 | 预热池热获取 | `< 100us` | `0.38us` |
+| Phase 4 | microVM 冷启动 | `< 200ms` | `mimobox-vm` 已实现 KVM 基础版，稳定基线待补充 |
 
 ### 10.2 可追溯数据来源
 
 - Linux OS 级基准入口：`/Users/showkw/dev/mimobox/crates/mimobox-cli/src/main.rs` 中的 `run_benchmark()`。
 - Wasm 基准入口：`/Users/showkw/dev/mimobox/crates/mimobox-wasm/src/lib.rs` 中的 `run_wasm_benchmark()`。
 - Linux 审查基线：`/Users/showkw/dev/mimobox/docs/research/10-code-review-round2.md` 记录 `冷启动 P50 ~3.51ms`。
+- Wasm / microVM 对比基线：`/Users/showkw/dev/mimobox/docs/research/14-microvm-design.md` 已同步 `OS 3.51ms P50 / Wasm 0.61ms P50`。
 - 预热池基准入口：`/Users/showkw/dev/mimobox/crates/mimobox-os/src/pool.rs` 中的 `run_pool_benchmark()`。
 
 ## 11. 许可证
