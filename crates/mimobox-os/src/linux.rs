@@ -132,6 +132,33 @@ impl LinuxSandbox {
                 b"dumb\0".as_ptr() as *const i8,
                 1,
             );
+            // 补齐常见 shell 依赖的身份/工作目录变量，避免在空环境下触发
+            // bash/getpwuid/NSS/userdb 查找链，从而额外依赖 AF_UNIX/socket/timerfd。
+            libc::setenv(
+                b"USER\0".as_ptr() as *const i8,
+                b"sandbox\0".as_ptr() as *const i8,
+                1,
+            );
+            libc::setenv(
+                b"LOGNAME\0".as_ptr() as *const i8,
+                b"sandbox\0".as_ptr() as *const i8,
+                1,
+            );
+            libc::setenv(
+                b"SHELL\0".as_ptr() as *const i8,
+                b"/bin/sh\0".as_ptr() as *const i8,
+                1,
+            );
+            libc::setenv(
+                b"PWD\0".as_ptr() as *const i8,
+                b"/tmp\0".as_ptr() as *const i8,
+                1,
+            );
+            libc::setenv(
+                b"LANG\0".as_ptr() as *const i8,
+                b"C\0".as_ptr() as *const i8,
+                1,
+            );
         }
 
         // 0. 重定向 fd
@@ -502,7 +529,6 @@ mod tests {
     /// 测试非零退出码
     /// 需要用 release 模式运行：cargo test --release test_sandbox_exit_code
     #[test]
-    #[ignore]
     fn test_sandbox_exit_code() {
         let config = SandboxConfig {
             allow_fork: true,
@@ -551,7 +577,6 @@ mod tests {
 
     /// 测试文件系统读写隔离（需要 release 模式）
     #[test]
-    #[ignore]
     fn test_fs_isolation() {
         let config = SandboxConfig {
             allow_fork: true,
@@ -591,7 +616,6 @@ mod tests {
 
     /// 测试只读路径的文件系统隔离（需要 release 模式）
     #[test]
-    #[ignore]
     fn test_fs_isolation_readonly() {
         let config = SandboxConfig {
             allow_fork: true,

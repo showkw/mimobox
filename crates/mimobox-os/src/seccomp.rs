@@ -62,6 +62,7 @@ mod syscall_nr {
     pub const BRK: u32 = 12;
     pub const RT_SIGACTION: u32 = 13;
     pub const RT_SIGPROCMASK: u32 = 14;
+    pub const RT_SIGRETURN: u32 = 15;
     pub const IOCTL: u32 = 16;
     pub const PREAD64: u32 = 17;
     pub const PWRITE64: u32 = 18;
@@ -92,6 +93,7 @@ mod syscall_nr {
     pub const GETSOCKOPT: u32 = 55;
     pub const CLONE: u32 = 56;
     pub const FORK: u32 = 57;
+    pub const VFORK: u32 = 58;
     pub const EXECVE: u32 = 59;
     pub const EXIT: u32 = 60;
     pub const WAIT4: u32 = 61;
@@ -153,6 +155,8 @@ mod syscall_nr {
     pub const EPOLL_CTL: u32 = 233;
     pub const EPOLL_CREATE1: u32 = 291;
     pub const EPOLL_PWAIT: u32 = 281;
+    pub const TIMERFD_CREATE: u32 = 283;
+    pub const TIMERFD_SETTIME: u32 = 286;
     pub const OPENAT: u32 = 257;
     pub const MKDIRAT: u32 = 258;
     pub const UNLINKAT: u32 = 263;
@@ -183,6 +187,7 @@ mod syscall_nr {
     pub const CLONE3: u32 = 435;
     pub const CLOSE_RANGE: u32 = 436;
     pub const OPENAT2: u32 = 437;
+    pub const FACCESSAT2: u32 = 439;
 }
 
 /// 构建 Essential profile 的系统调用白名单（最小权限原则）
@@ -229,6 +234,9 @@ fn essential_syscalls() -> Vec<u32> {
         STATX,
         ACCESS,
         FACCESSAT,
+        // glibc 2.33+ 在 access(2) 路径上会优先尝试 faccessat2。
+        // 不放行时，/bin/sh 这类程序在启动阶段可能直接触发 seccomp SIGSYS。
+        FACCESSAT2,
         READLINK,
         READLINKAT,
         GETDENTS,
@@ -261,6 +269,8 @@ fn essential_syscalls() -> Vec<u32> {
         // 信号（仅自身栈管理，不含 kill/tkill/tgkill）
         RT_SIGACTION,
         RT_SIGPROCMASK,
+        // shell 信号处理返回必须，缺少时 wait4 + SIGCHLD 路径会触发 SIGSYS
+        RT_SIGRETURN,
         SIGALTSTACK,
         // 文件系统（不含 symlink/chmod）
         FCNTL,
@@ -326,6 +336,8 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
     syscalls.extend_from_slice(&[
         CLONE,
         FORK,
+        // shell 执行外部命令时可能经由 vfork/posix_spawn 进入子进程路径。
+        VFORK,
         CLONE3,
         WAIT4,
         // 子进程信号管理
@@ -334,6 +346,9 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
         TGKILL,
         // shell 运行需要 ioctl（终端 TCGETS/TCSETS 等）
         IOCTL,
+        // Rocky/RHEL 9 的 NSS/systemd-userdb 查找链会在事件循环中使用 timerfd。
+        TIMERFD_CREATE,
+        TIMERFD_SETTIME,
     ]);
     syscalls
 }
