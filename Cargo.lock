@@ -2296,6 +2296,9 @@ version = "0.16.1"
 [[package]]
 name = "vmm-sys-util"
 version = "0.12.1"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"
