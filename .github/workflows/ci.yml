@@ -27,6 +27,25 @@ jobs:
       - name: Cargo Check
         run: cargo check
 
+  release-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Cargo Check Release
+        run: cargo check --workspace --release --all-features
+
   test-linux:
     runs-on: ubuntu-latest
     steps:
@@ -37,6 +56,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libseccomp-dev
+
+      - name: Configure Linux sandbox prerequisites
+        run: |
+          if sysctl kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if sysctl user.max_user_namespaces >/dev/null 2>&1; then
+            sudo sysctl -w user.max_user_namespaces=65536
+          fi
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -49,7 +77,77 @@ jobs:
           cache-targets: true
 
       - name: Test Linux Crates
-        run: cargo test
+        run: cargo test --features mimobox-cli/wasm
+
+  test-linux-kvm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Prepare KVM access
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "/dev/kvm 不存在，跳过 KVM 测试"
+            exit 0
+          fi
+
+          sudo chmod 666 /dev/kvm
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare KVM test assets
+        id: kvm-assets
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          mkdir -p "$HOME/mimobox-poc/vm-assets"
+
+          if [ -f "/var/lib/mimobox/vm/vmlinux" ] && [ -f "/var/lib/mimobox/vm/rootfs.cpio.gz" ]; then
+            ln -sf "/var/lib/mimobox/vm/vmlinux" "$HOME/mimobox-poc/vm-assets/vmlinux"
+            ln -sf "/var/lib/mimobox/vm/rootfs.cpio.gz" "$HOME/mimobox-poc/vm-assets/rootfs.cpio.gz"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "缺少 KVM 测试镜像，跳过 cargo test -p mimobox-vm --features kvm"
+          fi
+
+      - name: Test KVM backend
+        if: steps.kvm.outputs.available == 'true' && steps.kvm-assets.outputs.available == 'true'
+        run: cargo test -p mimobox-vm --features kvm
+
+      - name: Skip KVM backend tests
+        if: steps.kvm.outputs.available != 'true' || steps.kvm-assets.outputs.available != 'true'
+        run: echo "KVM backend 测试已跳过"
+
+  test-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Test Wasm backend
+        run: cargo test -p mimobox-wasm --features wasm
 
   test-macos:
     runs-on: macos-latest
@@ -88,7 +186,7 @@ jobs:
           cache-targets: true
 
       - name: Cargo Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-features -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest
