@@ -6,7 +6,13 @@ mod pool_tests {
     use std::time::Duration;
 
     use mimobox_core::SandboxConfig;
+    #[cfg(target_os = "macos")]
+    use mimobox_core::{Sandbox, SandboxError};
+    #[cfg(target_os = "macos")]
+    use std::sync::OnceLock;
     use mimobox_os::{PoolConfig, SandboxPool};
+    #[cfg(target_os = "macos")]
+    use mimobox_os::MacOsSandbox;
 
     fn pool_config(min_size: usize, max_size: usize) -> PoolConfig {
         PoolConfig {
@@ -35,8 +41,49 @@ mod pool_tests {
         vec!["/usr/bin/true".to_string()]
     }
 
+    #[cfg(target_os = "linux")]
+    fn should_skip_runtime_tests() -> bool {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    fn should_skip_runtime_tests() -> bool {
+        if let Some(reason) = seatbelt_runtime_skip_reason() {
+            eprintln!("跳过 macOS Seatbelt 预热池集成测试: {reason}");
+            return true;
+        }
+
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    fn seatbelt_runtime_skip_reason() -> Option<&'static str> {
+        static SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
+
+        SKIP_REASON
+            .get_or_init(|| {
+                let mut sandbox =
+                    MacOsSandbox::new(sandbox_config()).expect("创建 macOS 沙箱探测实例失败");
+
+                match sandbox.execute(&true_command()) {
+                    Ok(_) => None,
+                    Err(SandboxError::ExecutionFailed(message))
+                        if message.contains("Seatbelt 策略应用失败") =>
+                    {
+                        Some(message)
+                    }
+                    Err(err) => panic!("macOS Seatbelt 最小探测失败: {err}"),
+                }
+            })
+            .as_deref()
+    }
+
     #[test]
     fn sandbox_pool_prewarms_acquires_and_recycles() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
         let pool = SandboxPool::new(sandbox_config(), pool_config(1, 2))?;
         assert_eq!(pool.idle_len()?, 1);
 
@@ -59,6 +106,10 @@ mod pool_tests {
 
     #[test]
     fn sandbox_pool_is_safe_under_concurrency() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
         let pool = SandboxPool::new(sandbox_config(), pool_config(2, 4))?;
         let barrier = Arc::new(Barrier::new(5));
         let mut handles = Vec::new();

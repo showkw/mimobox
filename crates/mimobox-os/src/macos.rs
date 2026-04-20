@@ -34,6 +34,16 @@ pub struct MacOsSandbox {
     config: SandboxConfig,
 }
 
+fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Option<String> {
+    let stderr_text = String::from_utf8_lossy(stderr);
+
+    if exit_code == Some(71) && stderr_text.contains("sandbox_apply: Operation not permitted") {
+        return Some(format!("Seatbelt 策略应用失败: {}", stderr_text.trim()));
+    }
+
+    None
+}
+
 impl MacOsSandbox {
     /// 根据 SandboxConfig 生成 Seatbelt 策略字符串
     ///
@@ -185,6 +195,10 @@ impl Sandbox for MacOsSandbox {
             }
         };
 
+        if let Some(reason) = detect_seatbelt_backend_failure(exit_status, &stderr_buf) {
+            return Err(SandboxError::ExecutionFailed(reason));
+        }
+
         tracing::info!(
             "子进程退出, code={:?}, elapsed={:.2}ms, timed_out={timed_out}",
             exit_status,
@@ -208,6 +222,8 @@ impl Sandbox for MacOsSandbox {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
     use super::*;
     use mimobox_core::{Sandbox, SandboxConfig};
 
@@ -220,8 +236,77 @@ mod tests {
         }
     }
 
+    fn should_skip_runtime_tests() -> bool {
+        if let Some(reason) = seatbelt_runtime_skip_reason() {
+            eprintln!("跳过 macOS Seatbelt 运行时测试: {reason}");
+            return true;
+        }
+
+        false
+    }
+
+    fn seatbelt_runtime_skip_reason() -> Option<&'static str> {
+        static SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
+
+        SKIP_REASON
+            .get_or_init(|| {
+                let output = match Command::new("sandbox-exec")
+                    .args(["-p", "(version 1) (allow default)", "/usr/bin/true"])
+                    .output()
+                {
+                    Ok(output) => output,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        return Some("当前环境不存在 sandbox-exec".to_string());
+                    }
+                    Err(err) => {
+                        panic!("执行 sandbox-exec 最小探测失败: {err}");
+                    }
+                };
+
+                if output.status.success() {
+                    return None;
+                }
+
+                if let Some(reason) =
+                    detect_seatbelt_backend_failure(output.status.code(), &output.stderr)
+                {
+                    return Some(reason);
+                }
+
+                panic!(
+                    "sandbox-exec 最小探测出现未知失败: status={:?}, stderr={}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            })
+            .as_deref()
+    }
+
+    #[test]
+    fn test_detect_seatbelt_backend_failure() {
+        let stderr = b"sandbox-exec: sandbox_apply: Operation not permitted\n";
+        let reason = detect_seatbelt_backend_failure(Some(71), stderr);
+
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|value| value.contains("Seatbelt 策略应用失败")),
+            "应识别为 Seatbelt 后端错误, 实际: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn test_regular_exit_code_71_is_not_backend_failure() {
+        let reason = detect_seatbelt_backend_failure(Some(71), b"child failed\n");
+        assert!(reason.is_none(), "普通退出码 71 不应被误判");
+    }
+
     #[test]
     fn test_sandbox_create_and_execute() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
         let cmd = vec!["/bin/echo".to_string(), "hello macos test".to_string()];
         let result = sb.execute(&cmd).expect("执行失败");
@@ -237,6 +322,10 @@ mod tests {
 
     #[test]
     fn test_nonzero_exit_code() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
         let cmd = vec![
             "/bin/sh".to_string(),
@@ -250,6 +339,10 @@ mod tests {
 
     #[test]
     fn test_timeout() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let config = SandboxConfig {
             timeout_secs: Some(1),
             ..test_config()
@@ -297,6 +390,10 @@ mod tests {
 
     #[test]
     fn test_network_denied() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let config = SandboxConfig {
             deny_network: true,
             ..test_config()
@@ -321,6 +418,10 @@ mod tests {
 
     #[test]
     fn test_fs_write_restricted() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let config = SandboxConfig {
             fs_readwrite: vec!["/tmp".into()],
             ..test_config()
@@ -352,6 +453,10 @@ mod tests {
 
     #[test]
     fn test_fs_write_allowed() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
         let config = SandboxConfig {
             fs_readwrite: vec!["/tmp".into()],
             ..test_config()
