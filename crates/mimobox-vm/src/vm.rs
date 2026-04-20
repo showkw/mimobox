@@ -88,13 +88,13 @@ pub enum MicrovmState {
     Destroyed,
 }
 
-/// microVM 内部执行结果。
+/// guest 命令执行结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GuestCommandResult {
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) timed_out: bool,
+pub struct GuestCommandResult {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
 }
 
 /// microVM 级错误。

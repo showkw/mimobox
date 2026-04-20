@@ -13,7 +13,7 @@ mod vm;
 mod kvm;
 
 pub use snapshot::MicrovmSnapshot;
-pub use vm::{MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState};
+pub use vm::{GuestCommandResult, MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 pub use kvm::{KvmBackend, KvmExitReason, KvmLifecycle, KvmTransport};
