@@ -162,6 +162,27 @@ impl LinuxSandbox {
             }
         }
 
+        // 1.5 进程数限制：防止 fork bomb
+        // 当 allow_fork 为 true 时，通过 setrlimit(RLIMIT_NPROC) 限制子进程可创建的最大进程数。
+        // 注意：RLIMIT_NPROC 在 user namespace 中行为可能不同，
+        // 如果后续接入 per-sandbox cgroup 生命周期，应改用 cgroup pids.max 以获得更可靠的限制。
+        if config.allow_fork {
+            const MAX_NPROC: libc::rlim_t = 64;
+            let rlim = libc::rlimit {
+                rlim_cur: MAX_NPROC,
+                rlim_max: MAX_NPROC,
+            };
+            // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法
+            let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
+            if ret != 0 {
+                let errno = unsafe { *libc::__errno_location() };
+                tracing::warn!(
+                    "setrlimit(RLIMIT_NPROC, 64) 失败: errno={}，fork bomb 防护未生效",
+                    errno
+                );
+            }
+        }
+
         // 2. 应用 Landlock（文件系统隔离）
         {
             use landlock::{
