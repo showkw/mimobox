@@ -674,7 +674,7 @@ fn encode_command_payload(cmd: &[String]) -> Result<Vec<u8>, MicrovmError> {
     Ok(payload)
 }
 
-fn checked_slice<'a>(bytes: &'a [u8], offset: usize, len: usize) -> Result<&'a [u8], MicrovmError> {
+fn checked_slice(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], MicrovmError> {
     let end = offset
         .checked_add(len)
         .ok_or_else(|| MicrovmError::Backend("字节区间长度计算溢出".into()))?;

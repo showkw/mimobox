@@ -135,7 +135,7 @@ impl From<MicrovmError> for SandboxError {
 #[allow(dead_code)]
 enum BackendHandle {
     #[cfg(all(target_os = "linux", feature = "kvm"))]
-    Kvm(KvmBackend),
+    Kvm(Box<KvmBackend>),
     Unsupported,
 }
 
@@ -143,7 +143,10 @@ impl BackendHandle {
     fn create(base_config: SandboxConfig, config: MicrovmConfig) -> Result<Self, MicrovmError> {
         #[cfg(all(target_os = "linux", feature = "kvm"))]
         {
-            return Ok(Self::Kvm(KvmBackend::create_vm(base_config, config)?));
+            return Ok(Self::Kvm(Box::new(KvmBackend::create_vm(
+                base_config,
+                config,
+            )?)));
         }
 
         #[allow(unreachable_code)]
