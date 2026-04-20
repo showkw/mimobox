@@ -77,9 +77,7 @@ const EPOCH_TICK_INTERVAL_MS: u64 = 10;
 /// 因此 fuel 是超时的近似机制，配合 epoch_interruption 实现墙钟超时。
 fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
     match timeout_secs {
-        Some(secs) => (secs as u64)
-            .checked_mul(FUEL_PER_SECOND)
-            .unwrap_or(u64::MAX),
+        Some(secs) => secs.saturating_mul(FUEL_PER_SECOND),
         None => DEFAULT_FUEL_LIMIT,
     }
 }
@@ -199,22 +197,19 @@ fn get_cached_module(
     let cache_path = cache_dir.join(format!("{}.cwasm", hash));
 
     // 检查是否已有相同内容的缓存（文件内容相同但元数据不同）
-    match std::fs::read(&cache_path) {
-        Ok(cached) => {
-            match unsafe { Module::deserialize(engine, &cached) } {
-                Ok(module) => {
-                    // 更新映射文件
-                    let _ = std::fs::write(&map_file, &hash);
-                    log_info!("从缓存加载模块（内容匹配）: {:?}", wasm_path);
-                    return Ok(module);
-                }
-                Err(e) => {
-                    log_warn!("缓存反序列化失败，将重新编译: {}", e);
-                    let _ = std::fs::remove_file(&cache_path);
-                }
+    if let Ok(cached) = std::fs::read(&cache_path) {
+        match unsafe { Module::deserialize(engine, &cached) } {
+            Ok(module) => {
+                // 更新映射文件
+                let _ = std::fs::write(&map_file, &hash);
+                log_info!("从缓存加载模块（内容匹配）: {:?}", wasm_path);
+                return Ok(module);
+            }
+            Err(e) => {
+                log_warn!("缓存反序列化失败，将重新编译: {}", e);
+                let _ = std::fs::remove_file(&cache_path);
             }
         }
-        Err(_) => {}
     }
 
     // 编译模块
@@ -354,14 +349,14 @@ impl Sandbox for WasmSandbox {
         }
 
         // [MINOR-07] 预检查文件大小，防止超大文件导致编译时 OOM
-        if let Ok(meta) = std::fs::metadata(wasm_path) {
-            if meta.len() > MAX_WASM_FILE_SIZE {
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "Wasm 文件过大: {} bytes (上限 {} bytes)",
-                    meta.len(),
-                    MAX_WASM_FILE_SIZE
-                )));
-            }
+        if let Ok(meta) = std::fs::metadata(wasm_path)
+            && meta.len() > MAX_WASM_FILE_SIZE
+        {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Wasm 文件过大: {} bytes (上限 {} bytes)",
+                meta.len(),
+                MAX_WASM_FILE_SIZE
+            )));
         }
 
         // 1. 获取或编译模块（带缓存）
@@ -424,7 +419,7 @@ impl Sandbox for WasmSandbox {
         let epoch_deadline_ticks = self
             .config
             .timeout_secs
-            .map(|s| s.checked_mul(100).unwrap_or(u64::MAX)) // 每 10ms 一个 epoch tick
+            .map(|s| s.saturating_mul(100)) // 每 10ms 一个 epoch tick
             .unwrap_or(3000); // 默认 30s
         store.set_epoch_deadline(epoch_deadline_ticks);
 
@@ -546,7 +541,7 @@ impl Sandbox for WasmSandbox {
 
 /// 检查 Store 中的 fuel 是否已耗尽
 fn is_fuel_exhausted(store: &Store<StoreData>) -> bool {
-    store.get_fuel().map_or(false, |f| f == 0)
+    store.get_fuel().is_ok_and(|f| f == 0)
 }
 
 /// 检查错误是否为 epoch 中断（墙钟超时）
@@ -580,12 +575,11 @@ fn find_exit_code(error: &wasmtime::Error) -> Option<i32> {
         // 格式："Exited with i32 exit status N"
         let parts: Vec<&str> = err_str.split_whitespace().collect();
         for i in 0..parts.len() {
-            if parts[i] == "status" {
-                if i + 1 < parts.len() {
-                    if let Ok(code) = parts[i + 1].parse::<i32>() {
-                        return Some(code);
-                    }
-                }
+            if parts[i] == "status"
+                && i + 1 < parts.len()
+                && let Ok(code) = parts[i + 1].parse::<i32>()
+            {
+                return Some(code);
             }
         }
     }

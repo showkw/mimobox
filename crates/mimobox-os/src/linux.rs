@@ -118,53 +118,25 @@ impl LinuxSandbox {
         // SAFETY: setenv 在子进程中调用，参数为合法 C 字符串
         unsafe {
             libc::setenv(
-                b"PATH\0".as_ptr() as *const i8,
-                b"/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr() as *const i8,
+                c"PATH".as_ptr(),
+                c"/usr/bin:/bin:/usr/sbin:/sbin".as_ptr(),
                 1,
             );
-            libc::setenv(
-                b"HOME\0".as_ptr() as *const i8,
-                b"/tmp\0".as_ptr() as *const i8,
-                1,
-            );
-            libc::setenv(
-                b"TERM\0".as_ptr() as *const i8,
-                b"dumb\0".as_ptr() as *const i8,
-                1,
-            );
+            libc::setenv(c"HOME".as_ptr(), c"/tmp".as_ptr(), 1);
+            libc::setenv(c"TERM".as_ptr(), c"dumb".as_ptr(), 1);
             // 补齐常见 shell 依赖的身份/工作目录变量，避免在空环境下触发
             // bash/getpwuid/NSS/userdb 查找链，从而额外依赖 AF_UNIX/socket/timerfd。
-            libc::setenv(
-                b"USER\0".as_ptr() as *const i8,
-                b"sandbox\0".as_ptr() as *const i8,
-                1,
-            );
-            libc::setenv(
-                b"LOGNAME\0".as_ptr() as *const i8,
-                b"sandbox\0".as_ptr() as *const i8,
-                1,
-            );
-            libc::setenv(
-                b"SHELL\0".as_ptr() as *const i8,
-                b"/bin/sh\0".as_ptr() as *const i8,
-                1,
-            );
-            libc::setenv(
-                b"PWD\0".as_ptr() as *const i8,
-                b"/tmp\0".as_ptr() as *const i8,
-                1,
-            );
-            libc::setenv(
-                b"LANG\0".as_ptr() as *const i8,
-                b"C\0".as_ptr() as *const i8,
-                1,
-            );
+            libc::setenv(c"USER".as_ptr(), c"sandbox".as_ptr(), 1);
+            libc::setenv(c"LOGNAME".as_ptr(), c"sandbox".as_ptr(), 1);
+            libc::setenv(c"SHELL".as_ptr(), c"/bin/sh".as_ptr(), 1);
+            libc::setenv(c"PWD".as_ptr(), c"/tmp".as_ptr(), 1);
+            libc::setenv(c"LANG".as_ptr(), c"C".as_ptr(), 1);
         }
 
         // 0. 重定向 fd
         // FATAL-03 修复：/dev/null 打开失败视为致命错误，终止子进程
         // SAFETY: open 系统调用打开 /dev/null，路径为合法 C 字符串
-        let dev_null = unsafe { libc::open(b"/dev/null\0".as_ptr() as *const i8, libc::O_RDWR) };
+        let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
         if dev_null < 0 {
             unsafe {
                 write_error(2, "无法打开 /dev/null");
@@ -181,12 +153,12 @@ impl LinuxSandbox {
         }
 
         // 1. 设置内存限制（最早应用，防止后续操作消耗过多内存）
-        if let Some(limit_mb) = config.memory_limit_mb {
-            if let Err(e) = set_memory_limit(limit_mb) {
-                unsafe {
-                    write_error(2, &format!("内存限制设置失败: {e}"));
-                    libc::_exit(124);
-                }
+        if let Some(limit_mb) = config.memory_limit_mb
+            && let Err(e) = set_memory_limit(limit_mb)
+        {
+            unsafe {
+                write_error(2, &format!("内存限制设置失败: {e}"));
+                libc::_exit(124);
             }
         }
 

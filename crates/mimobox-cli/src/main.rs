@@ -184,6 +184,7 @@ enum CliError {
     UnsupportedOsBackend,
 
     #[error("当前构建未启用 Wasm 后端，请使用 `--features wasm` 重新编译")]
+    #[allow(dead_code)]
     WasmFeatureDisabled,
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

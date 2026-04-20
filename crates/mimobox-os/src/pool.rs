@@ -128,7 +128,9 @@ impl PoolState {
         self.recycle_count = self.recycle_count.saturating_add(1);
 
         match health_check_interval {
-            Some(interval) if interval > 0 => self.recycle_count % u64::from(interval) == 0,
+            Some(interval) if interval > 0 => {
+                self.recycle_count.is_multiple_of(u64::from(interval))
+            }
             _ => false,
         }
     }
