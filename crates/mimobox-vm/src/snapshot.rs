@@ -147,7 +147,7 @@ fn decode_paths(cursor: &mut SnapshotCursor<'_>) -> Result<Vec<PathBuf>, Microvm
     Ok(paths)
 }
 
-fn encode_path(out: &mut Vec<u8>, path: &PathBuf) -> Result<(), MicrovmError> {
+fn encode_path(out: &mut Vec<u8>, path: &std::path::Path) -> Result<(), MicrovmError> {
     let value = path.to_string_lossy();
     encode_bytes(out, value.as_bytes())
 }
