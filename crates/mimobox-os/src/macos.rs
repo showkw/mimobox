@@ -166,14 +166,10 @@ impl Sandbox for MacOsSandbox {
         let mut stderr_buf = Vec::new();
 
         if let Some(mut stdout) = child.stdout.take() {
-            if let Err(e) = stdout.read_to_end(&mut stdout_buf) {
-                tracing::warn!("读取 stdout 失败: {e}");
-            }
+            let _ = stdout.read_to_end(&mut stdout_buf);
         }
         if let Some(mut stderr) = child.stderr.take() {
-            if let Err(e) = stderr.read_to_end(&mut stderr_buf) {
-                tracing::warn!("读取 stderr 失败: {e}");
-            }
+            let _ = stderr.read_to_end(&mut stderr_buf);
         }
 
         // 获取退出码（非超时时 child 尚未 wait）
