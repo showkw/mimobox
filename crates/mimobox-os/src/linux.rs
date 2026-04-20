@@ -167,7 +167,7 @@ impl LinuxSandbox {
         // 注意：RLIMIT_NPROC 在 user namespace 中行为可能不同，
         // 如果后续接入 per-sandbox cgroup 生命周期，应改用 cgroup pids.max 以获得更可靠的限制。
         if config.allow_fork {
-            const MAX_NPROC: libc::rlim_t = 64;
+            const MAX_NPROC: libc::rlim_t = 256;
             let rlim = libc::rlimit {
                 rlim_cur: MAX_NPROC,
                 rlim_max: MAX_NPROC,
