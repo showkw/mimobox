@@ -16,4 +16,4 @@ pub use snapshot::MicrovmSnapshot;
 pub use vm::{MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-pub use kvm::{KvmBackend, KvmLifecycle, KvmTransport};
+pub use kvm::{KvmBackend, KvmExitReason, KvmLifecycle, KvmTransport};

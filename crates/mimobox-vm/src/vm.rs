@@ -28,7 +28,7 @@ impl Default for MicrovmConfig {
             vcpu_count: 1,
             memory_mb: 128,
             kernel_path: PathBuf::from("/var/lib/mimobox/vm/vmlinux"),
-            rootfs_path: PathBuf::from("/var/lib/mimobox/vm/rootfs.ext4"),
+            rootfs_path: PathBuf::from("/var/lib/mimobox/vm/rootfs.cpio.gz"),
         }
     }
 }
