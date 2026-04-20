@@ -606,8 +606,8 @@ mod tests {
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(
             stdout.contains("Permission denied")
-                || stdout.contains("exit_code=1")
-                || result.exit_code != Some(0),
+                || stdout.contains("Read-only")
+                || (stdout.contains("exit_code=") && !stdout.contains("exit_code=0")),
             "写入 /usr 应被拒绝, stdout: {stdout}, exit: {:?}",
             result.exit_code
         );
