@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mimobox-core",
+    "crates/mimobox-os",
+    "crates/mimobox-wasm",
+    "crates/mimobox-cli",
+    "crates/mimobox-vm",
+]
+
+# 默认排除 mimobox-wasm（需要 Rust >= 1.91 或 Linux 环境）
+# 使用 cargo build --workspace --features mimobox-cli/wasm 编译完整 workspace
+default-members = [
+    "crates/mimobox-core",
+    "crates/mimobox-os",
+    "crates/mimobox-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/user/mimobox"
+
+[workspace.dependencies]
+# 内部 crate
+mimobox-core = { path = "crates/mimobox-core" }
+mimobox-os = { path = "crates/mimobox-os" }
+mimobox-wasm = { path = "crates/mimobox-wasm" }
+
+# 外部依赖（统一版本）
+thiserror = "2"
+nix = { version = "0.30", features = ["process", "sched", "mount", "signal", "fs"] }
+libc = "0.2"
+landlock = "0.4"
+clap = { version = "4", features = ["derive"] }
+wasmtime = { version = "43", features = ["cranelift", "component-model", "async"] }
+wasmtime-wasi = { version = "43", features = ["p1"] }
+sha2 = "0.10"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shlex = "1"
+criterion = "0.5"
+kvm-ioctls = "0.19"
+vm-memory = "0.16"
+vmm-sys-util = "0.12"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+
+[patch.crates-io]
+kvm-ioctls = { path = "vendor/kvm-ioctls" }
+vm-memory = { path = "vendor/vm-memory" }
+vmm-sys-util = { path = "vendor/vmm-sys-util" }

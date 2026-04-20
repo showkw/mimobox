@@ -1,0 +1,26 @@
+[package]
+name = "mimobox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mimobox 命令行入口"
+
+[dependencies]
+mimobox-core.workspace = true
+mimobox-os.workspace = true
+mimobox-wasm = { workspace = true, optional = true }
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shlex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+wasm = ["dep:mimobox-wasm"]
+
+[lints]
+workspace = true

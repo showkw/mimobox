@@ -1,0 +1,29 @@
+[package]
+name = "mimobox-os"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mimobox OS 级沙箱后端（Linux/macOS/Windows）"
+
+[dependencies]
+mimobox-core.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+tracing.workspace = true
+
+# Linux 专属依赖
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+landlock = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "pool_bench"
+harness = false
+path = "benches/pool_bench.rs"
+
+[lints]
+workspace = true
