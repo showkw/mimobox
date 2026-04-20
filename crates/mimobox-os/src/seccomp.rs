@@ -329,7 +329,8 @@ fn essential_syscalls() -> Vec<u32> {
 ///
 /// 在 Essential 基础上增加进程创建相关系统调用，用于需要 shell 等会 fork 子进程的场景。
 /// 同时允许 ioctl（shell 启动时需要 TCGETS 等终端 ioctl）。
-/// 仍然排除 kill/tkill（不允许发送信号给其他进程）、prctl（防止修改安全属性）等。
+/// 仍然排除 setpgid/setsid（防止迁出 supervisor 进程组）、kill/tkill（不允许发送信号给其他进程）、
+/// prctl（防止修改安全属性）等。
 pub fn fork_allowed_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     let mut syscalls = essential_syscalls();
@@ -481,7 +482,6 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
             syscalls
         }
     };
-
     // 排序以优化 BPF 跳转
     let mut allowed = allowed;
     allowed.sort_unstable();
@@ -523,4 +523,39 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::essential_syscalls;
+    use super::fork_allowed_syscalls;
+    use super::syscall_nr::{SETPGID, SETSID};
+
+    #[test]
+    fn test_essential_profile_blocks_process_group_escape_syscalls() {
+        let syscalls = essential_syscalls();
+
+        assert!(
+            !syscalls.contains(&SETSID),
+            "Essential profile 不应允许 setsid"
+        );
+        assert!(
+            !syscalls.contains(&SETPGID),
+            "Essential profile 不应允许 setpgid"
+        );
+    }
+
+    #[test]
+    fn test_fork_allowed_profile_blocks_process_group_escape_syscalls() {
+        let syscalls = fork_allowed_syscalls();
+
+        assert!(
+            !syscalls.contains(&SETSID),
+            "允许 fork 的 profile 也不应允许 setsid"
+        );
+        assert!(
+            !syscalls.contains(&SETPGID),
+            "允许 fork 的 profile 也不应允许 setpgid"
+        );
+    }
 }
