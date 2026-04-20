@@ -8,3 +8,6 @@ pub mod errno {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Error(pub i32);
 }
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod eventfd;

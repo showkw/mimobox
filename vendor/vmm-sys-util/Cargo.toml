@@ -7,3 +7,6 @@ description = "离线构建用的最小 vmm-sys-util 兼容层"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
