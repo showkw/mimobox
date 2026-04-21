@@ -64,6 +64,10 @@ pub struct Config {
     pub fs_readwrite: Vec<PathBuf>,
     /// 是否允许 fork
     pub allow_fork: bool,
+    /// microVM vCPU 数量
+    pub vm_vcpu_count: u8,
+    /// microVM Guest 内存大小（MB）；若设置了 memory_limit_mb，则以较小值为准
+    pub vm_memory_mb: u32,
     /// microVM 内核镜像路径；未配置时使用后端默认路径
     pub kernel_path: Option<PathBuf>,
     /// microVM rootfs 路径；未配置时使用后端默认路径
@@ -90,6 +94,8 @@ impl Default for Config {
             ],
             fs_readwrite: vec!["/tmp".into()],
             allow_fork: false,
+            vm_vcpu_count: 1,
+            vm_memory_mb: 128,
             kernel_path: None,
             rootfs_path: None,
         }
@@ -120,16 +126,10 @@ impl Config {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn to_microvm_config(&self) -> Result<mimobox_vm::MicrovmConfig, SdkError> {
         let defaults = mimobox_vm::MicrovmConfig::default();
-        let memory_mb = match self.memory_limit_mb {
-            Some(memory_limit_mb) => u32::try_from(memory_limit_mb).map_err(|_| {
-                SdkError::Config(format!(
-                    "microVM guest memory 超出 u32 范围: {memory_limit_mb} MB"
-                ))
-            })?,
-            None => defaults.memory_mb,
-        };
+        let memory_mb = resolve_vm_memory_mb(self)?;
 
         Ok(mimobox_vm::MicrovmConfig {
+            vcpu_count: self.vm_vcpu_count,
             memory_mb,
             kernel_path: self
                 .kernel_path
@@ -139,7 +139,6 @@ impl Config {
                 .rootfs_path
                 .clone()
                 .unwrap_or_else(|| defaults.rootfs_path.clone()),
-            ..defaults
         })
     }
 }
@@ -167,6 +166,21 @@ fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfi
         (false, true) => SeccompProfile::NetworkWithFork,
         (false, false) => SeccompProfile::Network,
     }
+}
+
+#[cfg(feature = "vm")]
+fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
+    let requested_memory_mb = u64::from(config.vm_memory_mb);
+    let effective_memory_mb = match config.memory_limit_mb {
+        Some(memory_limit_mb) => requested_memory_mb.min(memory_limit_mb),
+        None => requested_memory_mb,
+    };
+
+    u32::try_from(effective_memory_mb).map_err(|_| {
+        SdkError::Config(format!(
+            "microVM guest memory 超出 u32 范围: {effective_memory_mb} MB"
+        ))
+    })
 }
 
 /// Config 构建器
@@ -216,6 +230,16 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn vm_vcpu_count(mut self, count: u8) -> Self {
+        self.inner.vm_vcpu_count = count;
+        self
+    }
+
+    pub fn vm_memory_mb(mut self, mb: u32) -> Self {
+        self.inner.vm_memory_mb = mb;
+        self
+    }
+
     pub fn kernel_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.kernel_path = Some(path.into());
         self
@@ -239,8 +263,18 @@ mod tests {
     fn default_config_keeps_microvm_artifact_paths_unset() {
         let config = Config::default();
 
+        assert_eq!(config.vm_vcpu_count, 1);
+        assert_eq!(config.vm_memory_mb, 128);
         assert_eq!(config.kernel_path, None);
         assert_eq!(config.rootfs_path, None);
+    }
+
+    #[test]
+    fn builder_can_override_microvm_resource_config() {
+        let config = Config::builder().vm_vcpu_count(4).vm_memory_mb(768).build();
+
+        assert_eq!(config.vm_vcpu_count, 4);
+        assert_eq!(config.vm_memory_mb, 768);
     }
 
     #[test]
@@ -313,14 +347,17 @@ mod tests {
 
     #[cfg(feature = "vm")]
     #[test]
-    fn microvm_config_applies_memory_limit_and_artifact_overrides() {
+    fn microvm_config_applies_resource_and_artifact_overrides() {
         let config = Config::builder()
-            .memory_limit_mb(768)
+            .vm_vcpu_count(4)
+            .vm_memory_mb(768)
+            .memory_limit_mb(1024)
             .kernel_path("/srv/mimobox/vmlinux")
             .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
             .build();
         let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
 
+        assert_eq!(microvm_config.vcpu_count, 4);
         assert_eq!(microvm_config.memory_mb, 768);
         assert_eq!(
             microvm_config.kernel_path,
@@ -330,5 +367,29 @@ mod tests {
             microvm_config.rootfs_path,
             PathBuf::from("/srv/mimobox/rootfs.cpio.gz")
         );
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_caps_vm_memory_with_memory_limit() {
+        let config = Config::builder()
+            .vm_memory_mb(768)
+            .memory_limit_mb(256)
+            .build();
+        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+
+        assert_eq!(microvm_config.memory_mb, 256);
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_ignores_out_of_range_memory_limit_when_vm_memory_is_lower() {
+        let config = Config::builder()
+            .vm_memory_mb(768)
+            .memory_limit_mb(u64::MAX)
+            .build();
+        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+
+        assert_eq!(microvm_config.memory_mb, 768);
     }
 }
