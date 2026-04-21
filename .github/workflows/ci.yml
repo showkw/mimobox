@@ -81,9 +81,16 @@ jobs:
 
   test-linux-kvm:
     runs-on: ubuntu-latest
+    env:
+      VM_ASSETS_DIR: ${{ github.workspace }}/vm-assets
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install KVM test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cpio zstd lz4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -107,20 +114,80 @@ jobs:
           sudo chmod 666 /dev/kvm
           echo "available=true" >> "$GITHUB_OUTPUT"
 
+      - name: Get kernel version
+        id: kernel-version
+        if: steps.kvm.outputs.available == 'true'
+        run: echo "version=$(uname -r)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vmlinux
+        id: cache-vmlinux
+        if: steps.kvm.outputs.available == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VM_ASSETS_DIR }}/vmlinux
+          key: vmlinux-${{ steps.kernel-version.outputs.version }}
+
       - name: Prepare KVM test assets
         id: kvm-assets
         if: steps.kvm.outputs.available == 'true'
+        continue-on-error: true
         run: |
-          mkdir -p "$HOME/mimobox-poc/vm-assets"
+          mkdir -p "${VM_ASSETS_DIR}"
+          kernel_release="${{ steps.kernel-version.outputs.version }}"
+          dbgsym_vmlinux="/usr/lib/debug/boot/vmlinux-${kernel_release}"
 
-          if [ -f "/var/lib/mimobox/vm/vmlinux" ] && [ -f "/var/lib/mimobox/vm/rootfs.cpio.gz" ]; then
-            ln -sf "/var/lib/mimobox/vm/vmlinux" "$HOME/mimobox-poc/vm-assets/vmlinux"
-            ln -sf "/var/lib/mimobox/vm/rootfs.cpio.gz" "$HOME/mimobox-poc/vm-assets/rootfs.cpio.gz"
-            echo "available=true" >> "$GITHUB_OUTPUT"
+          bash scripts/build-rootfs.sh
+          cp "crates/mimobox-vm/rootfs.cpio.gz" "${VM_ASSETS_DIR}/rootfs.cpio.gz"
+
+          if [ -f "${VM_ASSETS_DIR}/vmlinux" ]; then
+            echo "命中 vmlinux 缓存，跳过 dbgsym 下载"
           else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "缺少 KVM 测试镜像，跳过 cargo test -p mimobox-vm --features kvm"
+            if sudo apt-get install -y lsb-release ubuntu-dbgsym-keyring; then
+              source /etc/os-release
+
+              sudo tee /etc/apt/sources.list.d/ddebs.list >/dev/null <<EOF
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME} main restricted universe multiverse
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME}-updates main restricted universe multiverse
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME}-proposed main restricted universe multiverse
+          EOF
+
+              if sudo apt-get update; then
+                dbgsym_pkg=""
+                for candidate in \
+                  "linux-image-unsigned-${kernel_release}-dbgsym" \
+                  "linux-image-${kernel_release}-dbgsym"
+                do
+                  if apt-cache show "${candidate}" >/dev/null 2>&1; then
+                    dbgsym_pkg="${candidate}"
+                    break
+                  fi
+                done
+
+                if [ -n "${dbgsym_pkg}" ]; then
+                  if ! sudo apt-get install -y "${dbgsym_pkg}"; then
+                    echo "安装 ${dbgsym_pkg} 失败，后续回退到 extract-vmlinux.sh"
+                  fi
+                else
+                  echo "未找到 ${kernel_release} 对应的 dbgsym 包，后续回退到 extract-vmlinux.sh"
+                fi
+              else
+                echo "更新 ddebs 索引失败，后续回退到 extract-vmlinux.sh"
+              fi
+            else
+              echo "无法安装 ubuntu-dbgsym-keyring，后续回退到 extract-vmlinux.sh"
+            fi
+
+            if [ -f "${dbgsym_vmlinux}" ]; then
+              cp "${dbgsym_vmlinux}" "${VM_ASSETS_DIR}/vmlinux"
+              echo "使用 dbgsym vmlinux: ${dbgsym_vmlinux}"
+            else
+              echo "未找到 dbgsym vmlinux，回退到 scripts/extract-vmlinux.sh"
+              bash scripts/extract-vmlinux.sh "${VM_ASSETS_DIR}/vmlinux"
+            fi
           fi
+
+          ls -lh "${VM_ASSETS_DIR}"
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: Test KVM backend
         if: steps.kvm.outputs.available == 'true' && steps.kvm-assets.outputs.available == 'true'
@@ -129,6 +196,108 @@ jobs:
       - name: Skip KVM backend tests
         if: steps.kvm.outputs.available != 'true' || steps.kvm-assets.outputs.available != 'true'
         run: echo "KVM backend 测试已跳过"
+
+  test-e2e:
+    runs-on: ubuntu-latest
+    needs: [test-linux, test-wasm, test-linux-kvm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev cpio zstd lz4
+          if sysctl kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if sysctl user.max_user_namespaces >/dev/null 2>&1; then
+            sudo sysctl -w user.max_user_namespaces=65536
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Get kernel version
+        id: kernel-version-e2e
+        run: echo "version=$(uname -r)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vmlinux
+        id: cache-vmlinux-e2e
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vm-assets/vmlinux
+          key: vmlinux-${{ steps.kernel-version-e2e.outputs.version }}
+
+      - name: Prepare KVM assets
+        run: |
+          CACHE_VM_ASSETS_DIR="${{ github.workspace }}/vm-assets"
+          kernel_release="${{ steps.kernel-version-e2e.outputs.version }}"
+          cached_vmlinux="${CACHE_VM_ASSETS_DIR}/vmlinux"
+          dbgsym_vmlinux="/usr/lib/debug/boot/vmlinux-${kernel_release}"
+
+          mkdir -p "${CACHE_VM_ASSETS_DIR}"
+
+          if [ ! -f "${cached_vmlinux}" ]; then
+            if sudo apt-get install -y lsb-release ubuntu-dbgsym-keyring; then
+              source /etc/os-release
+
+              sudo tee /etc/apt/sources.list.d/ddebs.list >/dev/null <<EOF
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME} main restricted universe multiverse
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME}-updates main restricted universe multiverse
+          deb http://ddebs.ubuntu.com ${VERSION_CODENAME}-proposed main restricted universe multiverse
+          EOF
+
+              if sudo apt-get update; then
+                dbgsym_pkg=""
+                for candidate in \
+                  "linux-image-unsigned-${kernel_release}-dbgsym" \
+                  "linux-image-${kernel_release}-dbgsym"
+                do
+                  if apt-cache show "${candidate}" >/dev/null 2>&1; then
+                    dbgsym_pkg="${candidate}"
+                    break
+                  fi
+                done
+
+                if [ -n "${dbgsym_pkg}" ]; then
+                  if ! sudo apt-get install -y "${dbgsym_pkg}"; then
+                    echo "安装 ${dbgsym_pkg} 失败，后续回退到 extract-vmlinux.sh"
+                  fi
+                else
+                  echo "未找到 ${kernel_release} 对应的 dbgsym 包，后续回退到 extract-vmlinux.sh"
+                fi
+              else
+                echo "更新 ddebs 索引失败，后续回退到 extract-vmlinux.sh"
+              fi
+            else
+              echo "无法安装 ubuntu-dbgsym-keyring，后续回退到 extract-vmlinux.sh"
+            fi
+
+            if [ -f "${dbgsym_vmlinux}" ]; then
+              cp "${dbgsym_vmlinux}" "${cached_vmlinux}"
+              echo "使用 dbgsym vmlinux: ${dbgsym_vmlinux}"
+            else
+              bash scripts/extract-vmlinux.sh "${cached_vmlinux}" || true
+            fi
+          else
+            echo "命中 vmlinux 缓存，跳过 dbgsym 下载"
+          fi
+
+          bash scripts/build-rootfs.sh
+          cp "crates/mimobox-vm/rootfs.cpio.gz" "${CACHE_VM_ASSETS_DIR}/rootfs.cpio.gz"
+
+      - name: Run e2e tests
+        run: bash scripts/test-e2e.sh
+        env:
+          VM_ASSETS_DIR: ${{ github.workspace }}/vm-assets
 
   test-wasm:
     runs-on: ubuntu-latest
