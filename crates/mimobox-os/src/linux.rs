@@ -1,11 +1,13 @@
 use std::ffi::CString;
 use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
+use std::path::Path;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use nix::sched::CloneFlags;
 use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
@@ -26,6 +28,50 @@ fn create_pipe_cloexec() -> Result<(RawFd, RawFd), SandboxError> {
         )));
     }
     Ok((fds[0], fds[1]))
+}
+
+fn child_env_pairs() -> &'static [(&'static std::ffi::CStr, &'static std::ffi::CStr)] {
+    &[
+        (c"PATH", c"/usr/bin:/bin:/usr/sbin:/sbin"),
+        (c"HOME", c"/tmp"),
+        (c"TERM", c"dumb"),
+        (c"USER", c"sandbox"),
+        (c"LOGNAME", c"sandbox"),
+        (c"SHELL", c"/bin/sh"),
+        (c"PWD", c"/tmp"),
+        (c"LANG", c"C"),
+        (c"TMPDIR", c"/tmp"),
+    ]
+}
+
+fn command_log_summary(cmd: &[String]) -> String {
+    let Some(program) = cmd.first() else {
+        return "<empty>".to_string();
+    };
+
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("<command>");
+    format!("program={name}, argc={}", cmd.len())
+}
+
+unsafe fn reset_child_environment() -> Result<(), ()> {
+    // SECURITY: clearenv() 必须成功，失败时不能继续沿用父进程环境，
+    // 否则 LD_PRELOAD/BASH_ENV 等注入变量可能带入沙箱子进程。
+    if unsafe { libc::clearenv() } != 0 {
+        return Err(());
+    }
+
+    for (name, value) in child_env_pairs() {
+        // SECURITY: 每个 setenv 都必须成功，否则“最小环境”是不完整的，
+        // 子进程会在不满足安全假设的状态下继续执行。
+        if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
+            return Err(());
+        }
+    }
+
+    Ok(())
 }
 
 pub struct LinuxSandbox {
@@ -110,27 +156,12 @@ impl LinuxSandbox {
         }
 
         // IMPORTANT-04 修复：清理环境变量，防止预热池复用时信息泄漏
-        // SAFETY: clearenv() 清空所有环境变量，在子进程中执行不影响父进程
-        unsafe {
-            libc::clearenv();
-        }
-        // 设置最小必要环境变量（shell 等程序运行需要）
-        // SAFETY: setenv 在子进程中调用，参数为合法 C 字符串
-        unsafe {
-            libc::setenv(
-                c"PATH".as_ptr(),
-                c"/usr/bin:/bin:/usr/sbin:/sbin".as_ptr(),
-                1,
-            );
-            libc::setenv(c"HOME".as_ptr(), c"/tmp".as_ptr(), 1);
-            libc::setenv(c"TERM".as_ptr(), c"dumb".as_ptr(), 1);
-            // 补齐常见 shell 依赖的身份/工作目录变量，避免在空环境下触发
-            // bash/getpwuid/NSS/userdb 查找链，从而额外依赖 AF_UNIX/socket/timerfd。
-            libc::setenv(c"USER".as_ptr(), c"sandbox".as_ptr(), 1);
-            libc::setenv(c"LOGNAME".as_ptr(), c"sandbox".as_ptr(), 1);
-            libc::setenv(c"SHELL".as_ptr(), c"/bin/sh".as_ptr(), 1);
-            libc::setenv(c"PWD".as_ptr(), c"/tmp".as_ptr(), 1);
-            libc::setenv(c"LANG".as_ptr(), c"C".as_ptr(), 1);
+        // SAFETY: 仅在 fork 后子进程中重置环境，不影响父进程。
+        if unsafe { reset_child_environment() }.is_err() {
+            unsafe {
+                write_error(2, "环境变量初始化失败");
+                libc::_exit(119);
+            }
         }
 
         // 0. 重定向 fd
@@ -351,7 +382,8 @@ impl Sandbox for LinuxSandbox {
             return Err(SandboxError::ExecutionFailed("命令为空".into()));
         }
 
-        tracing::info!("执行命令: {} {}", cmd[0], cmd[1..].join(" "));
+        // SECURITY: 只记录可执行文件基名和参数个数，避免把 argv 中的 token/路径写入日志。
+        tracing::info!("执行命令: {}", command_log_summary(cmd));
         let start = Instant::now();
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
@@ -393,7 +425,7 @@ impl Sandbox for LinuxSandbox {
 
                 // 使用 WNOHANG 轮询实现超时
                 let (wait_result, timed_out) = if let Some(dur) = timeout {
-                    poll_with_timeout(child, dur, &start)?
+                    waitpid_with_timeout(child, dur)?
                 } else {
                     (
                         waitpid(child, None).map_err(|e| SandboxError::Syscall(e.to_string()))?,
@@ -708,50 +740,68 @@ mod tests {
         let result = sb.execute(&[]);
         assert!(result.is_err(), "空命令应返回错误");
     }
+
+    #[test]
+    fn test_child_env_pairs_is_minimal_allowlist() {
+        let names = child_env_pairs()
+            .iter()
+            .map(|(name, _)| name.to_str().expect("环境变量名应为 UTF-8"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "PATH", "HOME", "TERM", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "TMPDIR"
+            ],
+            "子进程环境变量应保持最小白名单"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| matches!(*name, "LD_PRELOAD" | "BASH_ENV" | "ENV")),
+            "危险环境变量不应进入白名单"
+        );
+    }
 }
 
 /// 使用 WNOHANG 轮询等待子进程，超时后发送 SIGKILL
 ///
 /// 返回 (WaitStatus, timed_out)
-fn poll_with_timeout(
+fn waitpid_with_timeout(
     child: nix::unistd::Pid,
     timeout: Duration,
-    start: &Instant,
 ) -> Result<(WaitStatus, bool), SandboxError> {
-    let deadline = *start + timeout;
-    let mut killed = false;
+    let (tx, rx) = mpsc::sync_channel(1);
+    let waiter = std::thread::spawn(move || {
+        let result = waitpid(child, None).map_err(|e| SandboxError::Syscall(e.to_string()));
+        let _ = tx.send(result);
+    });
 
-    loop {
-        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {
-                if Instant::now() >= deadline {
-                    if !killed {
-                        tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
-                        // Kill 整个进程组（负 PID），确保孙进程也被终止
-                        let pgid = child;
-                        let _ = nix::sys::signal::kill(
-                            nix::unistd::Pid::from_raw(-pgid.as_raw()),
-                            Signal::SIGKILL,
-                        );
-                        killed = true;
-                    }
-                    // IMPORTANT-05 修复：kill 后等待从 1ms 增加到 10ms，给内核足够时间清理
-                    std::thread::sleep(Duration::from_millis(10));
-                } else {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-            Ok(status) => {
-                return Ok((status, killed));
-            }
-            Err(e) => {
-                if e == nix::errno::Errno::ECHILD {
-                    let status =
-                        waitpid(child, None).map_err(|e| SandboxError::Syscall(e.to_string()))?;
-                    return Ok((status, killed));
-                }
-                return Err(SandboxError::Syscall(e.to_string()));
-            }
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            let _ = waiter.join();
+            Ok((result?, false))
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
+            // SECURITY: 以负 PID 发送 SIGKILL，确保整个沙箱进程组（含 re-exec 孙进程）被回收，
+            // 避免 supervisor 超时后留下孤儿子进程或 zombie 清理链。
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-child.as_raw()),
+                Signal::SIGKILL,
+            );
+
+            let status = rx.recv().map_err(|_| {
+                SandboxError::ExecutionFailed("waitpid 等待线程意外断开".to_string())
+            })??;
+            let _ = waiter.join();
+            Ok((status, true))
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = waiter.join();
+            Err(SandboxError::ExecutionFailed(
+                "waitpid 等待线程意外断开".to_string(),
+            ))
         }
     }
 }

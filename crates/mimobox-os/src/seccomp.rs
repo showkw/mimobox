@@ -340,10 +340,6 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
         VFORK,
         CLONE3,
         WAIT4,
-        // 子进程信号管理
-        RT_SIGQUEUEINFO,
-        RT_TGSIGQUEUEINFO,
-        TGKILL,
         // shell 运行需要 ioctl（终端 TCGETS/TCSETS 等）
         IOCTL,
         // Rocky/RHEL 9 的 NSS/systemd-userdb 查找链会在事件循环中使用 timerfd。
@@ -528,7 +524,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 mod tests {
     use super::essential_syscalls;
     use super::fork_allowed_syscalls;
-    use super::syscall_nr::{SETPGID, SETSID};
+    use super::syscall_nr::{RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID, TGKILL};
 
     #[test]
     fn test_essential_profile_blocks_process_group_escape_syscalls() {
@@ -555,6 +551,24 @@ mod tests {
         assert!(
             !syscalls.contains(&SETPGID),
             "允许 fork 的 profile 也不应允许 setpgid"
+        );
+    }
+
+    #[test]
+    fn test_fork_allowed_profile_blocks_signal_injection_syscalls() {
+        let syscalls = fork_allowed_syscalls();
+
+        assert!(
+            !syscalls.contains(&TGKILL),
+            "允许 fork 的 profile 不应允许 tgkill"
+        );
+        assert!(
+            !syscalls.contains(&RT_SIGQUEUEINFO),
+            "允许 fork 的 profile 不应允许 rt_sigqueueinfo"
+        );
+        assert!(
+            !syscalls.contains(&RT_TGSIGQUEUEINFO),
+            "允许 fork 的 profile 不应允许 rt_tgsigqueueinfo"
         );
     }
 }

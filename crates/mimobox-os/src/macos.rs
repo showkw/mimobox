@@ -17,8 +17,10 @@
 
 use std::collections::HashSet;
 use std::io::Read;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
@@ -55,10 +57,80 @@ fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Opt
     let stderr_text = String::from_utf8_lossy(stderr);
 
     if exit_code == Some(71) && stderr_text.contains("sandbox_apply: Operation not permitted") {
-        return Some(format!("Seatbelt 策略应用失败: {}", stderr_text.trim()));
+        // SECURITY: 不向上层暴露 sandbox-exec 原始 stderr，避免泄露策略文本或敏感路径。
+        return Some("Seatbelt 策略应用失败（底层路径与策略细节已隐藏）".to_string());
     }
 
     None
+}
+
+fn command_log_summary(cmd: &[String]) -> String {
+    let Some(program) = cmd.first() else {
+        return "<empty>".to_string();
+    };
+
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("<command>");
+    format!("program={name}, argc={}", cmd.len())
+}
+
+fn waitpid_raw(pid: libc::pid_t) -> std::io::Result<i32> {
+    let mut status = 0;
+    // SAFETY: pid 来自刚刚 spawn 的子进程，status 指向栈上有效内存。
+    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if ret < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(status)
+    }
+}
+
+fn wait_child_with_timeout(
+    pid: libc::pid_t,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, bool), SandboxError> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(waitpid_raw(pid));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(status) => {
+            let _ = waiter.join();
+            Ok((
+                std::process::ExitStatus::from_raw(
+                    status
+                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
+                ),
+                false,
+            ))
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
+            // SECURITY: sandbox-exec 允许 process-fork，超时必须回收整个进程组，
+            // 否则其派生进程会在 supervisor 返回后继续存活。
+            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let status = rx.recv().map_err(|_| {
+                SandboxError::ExecutionFailed("waitpid 等待线程意外断开".to_string())
+            })?;
+            let _ = waiter.join();
+            Ok((
+                std::process::ExitStatus::from_raw(
+                    status
+                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
+                ),
+                true,
+            ))
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = waiter.join();
+            Err(SandboxError::ExecutionFailed(
+                "waitpid 等待线程意外断开".to_string(),
+            ))
+        }
+    }
 }
 
 impl MacOsSandbox {
@@ -176,7 +248,8 @@ impl Sandbox for MacOsSandbox {
             return Err(SandboxError::ExecutionFailed("命令为空".into()));
         }
 
-        tracing::info!("执行命令: {} {}", cmd[0], cmd[1..].join(" "));
+        // SECURITY: 日志仅记录程序基名和参数个数，避免 argv 中的 token、URL、路径泄露。
+        tracing::info!("执行命令: {}", command_log_summary(cmd));
         let start = Instant::now();
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
@@ -188,38 +261,37 @@ impl Sandbox for MacOsSandbox {
         let mut args = vec!["-p".to_string(), policy, "--".to_string()];
         args.extend(cmd.iter().cloned());
 
-        let mut child = Command::new("sandbox-exec")
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| SandboxError::ExecutionFailed(format!("sandbox-exec 启动失败: {e}")))?;
+        let mut child = unsafe {
+            Command::new("sandbox-exec")
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .pre_exec(|| {
+                    // SAFETY: pre_exec 中只调用 async-signal-safe 的 setpgid(0, 0)，
+                    // 为超时路径建立独立进程组，避免只杀掉 sandbox-exec 自身。
+                    let ret = libc::setpgid(0, 0);
+                    if ret != 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .spawn()
+        }
+        .map_err(|e| SandboxError::ExecutionFailed(format!("sandbox-exec 启动失败: {e}")))?;
+        let pid = child.id() as libc::pid_t;
 
-        // 超时轮询等待
-        let timed_out = if let Some(dur) = timeout {
-            let deadline = start + dur;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_status)) => break false,
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", dur.as_secs_f64());
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break true;
-                        }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(e) => {
-                        return Err(SandboxError::ExecutionFailed(format!(
-                            "等待子进程状态失败: {e}"
-                        )));
-                    }
-                }
-            }
+        let (exit_status, timed_out) = if let Some(dur) = timeout {
+            wait_child_with_timeout(pid, dur)?
         } else {
-            false
+            (
+                std::process::ExitStatus::from_raw(
+                    waitpid_raw(pid)
+                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
+                ),
+                false,
+            )
         };
 
         let elapsed = start.elapsed();
@@ -235,33 +307,22 @@ impl Sandbox for MacOsSandbox {
             let _ = stderr.read_to_end(&mut stderr_buf);
         }
 
-        // 获取退出码（非超时时 child 尚未 wait）
-        let exit_status = if timed_out {
-            None
-        } else {
-            match child.wait() {
-                Ok(status) => status.code(),
-                Err(e) => {
-                    tracing::warn!("获取退出状态失败: {e}");
-                    None
-                }
-            }
-        };
+        let exit_code = exit_status.code();
 
-        if let Some(reason) = detect_seatbelt_backend_failure(exit_status, &stderr_buf) {
+        if let Some(reason) = detect_seatbelt_backend_failure(exit_code, &stderr_buf) {
             return Err(SandboxError::ExecutionFailed(reason));
         }
 
         tracing::info!(
             "子进程退出, code={:?}, elapsed={:.2}ms, timed_out={timed_out}",
-            exit_status,
+            exit_code,
             elapsed.as_secs_f64() * 1000.0,
         );
 
         Ok(SandboxResult {
             stdout: stdout_buf,
             stderr: stderr_buf,
-            exit_code: exit_status,
+            exit_code,
             elapsed,
             timed_out,
         })
@@ -352,6 +413,24 @@ mod tests {
     fn test_regular_exit_code_71_is_not_backend_failure() {
         let reason = detect_seatbelt_backend_failure(Some(71), b"child failed\n");
         assert!(reason.is_none(), "普通退出码 71 不应被误判");
+    }
+
+    #[test]
+    fn test_detect_seatbelt_backend_failure_redacts_sensitive_stderr() {
+        let stderr =
+            br#"sandbox-exec: sandbox_apply: Operation not permitted for /Users/alice/.ssh/id_rsa
+"#;
+        let reason =
+            detect_seatbelt_backend_failure(Some(71), stderr).expect("应识别为 Seatbelt 后端错误");
+
+        assert!(
+            !reason.contains("/Users/alice/.ssh/id_rsa"),
+            "错误消息不应泄露敏感路径: {reason}"
+        );
+        assert!(
+            reason.contains("Seatbelt 策略应用失败"),
+            "错误消息应保留高层语义: {reason}"
+        );
     }
 
     #[test]

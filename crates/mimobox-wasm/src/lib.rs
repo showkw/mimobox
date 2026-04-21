@@ -130,6 +130,18 @@ fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
     Some((size, mtime))
 }
 
+fn compile_module_from_bytes(
+    engine: &Engine,
+    wasm_path: &Path,
+    bytes: &[u8],
+) -> Result<Module, SandboxError> {
+    // SECURITY: 调用方在读取字节后立刻使用同一份不可变切片编译，
+    // 避免“先读取算哈希、再按路径重新打开编译”的 TOCTOU 竞态。
+    Module::from_binary(engine, bytes).map_err(|e| {
+        SandboxError::ExecutionFailed(format!("加载 Wasm 模块失败 ({:?}): {}", wasm_path, e))
+    })
+}
+
 /// 获取或编译模块（带磁盘缓存）
 ///
 /// 使用混合缓存策略：
@@ -148,13 +160,10 @@ fn get_cached_module(
     let fingerprint = match file_fingerprint(wasm_path) {
         Some(fp) => fp,
         None => {
-            // 无法获取文件元数据，降级为直接编译
-            return Module::from_file(engine, wasm_path).map_err(|e| {
-                SandboxError::ExecutionFailed(format!(
-                    "加载 Wasm 模块失败 ({:?}): {}",
-                    wasm_path, e
-                ))
-            });
+            // 无法获取元数据时也只读取一次文件，避免在读取与编译之间被路径替换。
+            let file_data = std::fs::read(wasm_path)
+                .map_err(|e| SandboxError::ExecutionFailed(format!("读取 Wasm 文件失败: {}", e)))?;
+            return compile_module_from_bytes(engine, wasm_path, &file_data);
         }
     };
 
@@ -213,9 +222,7 @@ fn get_cached_module(
     }
 
     // 编译模块
-    let module = Module::from_file(engine, wasm_path).map_err(|e| {
-        SandboxError::ExecutionFailed(format!("加载 Wasm 模块失败 ({:?}): {}", wasm_path, e))
-    })?;
+    let module = compile_module_from_bytes(engine, wasm_path, &file_data)?;
 
     // 序列化到缓存目录（原子写入：先写临时文件再 rename，避免并发读到不完整数据）
     if let Ok(serialized) = module.serialize() {
@@ -713,6 +720,7 @@ pub fn run_wasm_benchmark(
 mod tests {
     use super::*;
     use mimobox_core::Sandbox;
+    use wasmtime::{Instance, Store};
 
     fn test_config() -> SandboxConfig {
         SandboxConfig {
@@ -751,5 +759,41 @@ mod tests {
         let sb = WasmSandbox::new(test_config()).expect("创建失败");
         let result = sb.destroy();
         assert!(result.is_ok(), "销毁沙箱失败: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_compile_module_from_bytes_is_not_affected_by_path_swap() {
+        let engine = Engine::default();
+        let temp_dir = tempfile::tempdir().expect("创建临时目录失败");
+        let wasm_path = temp_dir.path().join("swap.wasm");
+        let module_a = wat::parse_str(
+            r#"
+                (module
+                  (func (export "main") (result i32)
+                    i32.const 1))
+            "#,
+        )
+        .expect("编译 module A WAT 失败");
+        let module_b = wat::parse_str(
+            r#"
+                (module
+                  (func (export "main") (result i32)
+                    i32.const 2))
+            "#,
+        )
+        .expect("编译 module B WAT 失败");
+
+        std::fs::write(&wasm_path, &module_a).expect("写入初始模块失败");
+        let module = compile_module_from_bytes(&engine, &wasm_path, &module_a)
+            .expect("应使用已读取字节编译");
+        std::fs::write(&wasm_path, &module_b).expect("覆盖模块失败");
+
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[]).expect("实例化已读取字节的模块失败");
+        let main = instance
+            .get_typed_func::<(), i32>(&mut store, "main")
+            .expect("获取 main 导出失败");
+
+        assert_eq!(main.call(&mut store, ()).expect("调用 main 失败"), 1);
     }
 }
