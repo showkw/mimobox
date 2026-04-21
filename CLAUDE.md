@@ -33,16 +33,19 @@ mimobox/
 ├── Cargo.toml
 ├── crates/
 │   ├── mimobox-core/   # Sandbox trait + Config + Result + Error
+│   ├── mimobox-sdk/    # 统一 SDK API（默认智能路由 + 高级完全可控）
 │   ├── mimobox-os/     # OS 级沙箱（Linux Landlock+Seccomp+NS / macOS Seatbelt）
 │   ├── mimobox-wasm/   # Wasm 沙箱（Wasmtime，feature "wasm"）
 │   ├── mimobox-vm/     # microVM 沙箱（KVM，feature "kvm"）
+│   │   └── guest/      # guest /init 与串口命令协议实现
 │   └── mimobox-cli/    # CLI 入口
-├── vendor/             # rust-vmm crate 兼容 shim（kvm-ioctls/vm-memory/vmm-sys-util）
+├── [已移除] vendor/    # 使用 crates.io 真实 rust-vmm crate
 ├── examples/           # 示例代码（wasm-tools/）
 ├── tests/              # 集成测试
 ├── wit/                # WIT 接口定义
 │   └── mimobox.wit
 ├── scripts/            # 构建/测试/运行脚本（必须通过脚本执行）
+│   └── build-rootfs.sh # KVM guest rootfs 构建脚本
 ├── docs/
 │   └── research/       # 技术调研报告
 ├── discuss/            # 讨论、评审、方案权衡
@@ -98,7 +101,7 @@ mimobox/
 
 | 优先级 | 方向 | 时间 |
 |--------|------|------|
-| **P0** | SDK crate + microVM vsock 真实通信 + 智能路由 + 持续性能优化 | 0-3 月 |
-| **P1** | 网络代理（域名白名单）+ 统一网络抽象 | 3-6 月 |
+| **P0** | microVM 串口协议完善（stdout/stderr 拆分、健壮性补强）+ 持续性能优化 | 0-3 月 |
+| **P1** | vsock 正式数据面 + 网络代理（域名白名单）+ 统一网络抽象 | 3-6 月 |
 | **P2** | MCP 协议集成 + 编排 API | 6-12 月 |
 | **P3** | Windows 后端 + 可选 SaaS + GPU | 12 月+ |
