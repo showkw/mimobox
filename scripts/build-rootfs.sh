@@ -9,6 +9,23 @@ CC_BIN="${CC:-gcc}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
+BUSYBOX_APPLETS=(
+    sh
+    echo
+    cat
+    ls
+    mkdir
+    rm
+    cp
+    mv
+    sleep
+    true
+    false
+    test
+    pwd
+    printf
+    timeout
+)
 
 log() {
     printf '[build-rootfs] %s\n' "$*"
@@ -86,7 +103,7 @@ build_rootfs_locally() {
     fi
     chmod 0755 "${busybox_path}"
 
-    for applet in sh echo cat ls mkdir rm cp mv sleep true false test pwd timeout; do
+    for applet in "${BUSYBOX_APPLETS[@]}"; do
         ln -sf busybox "${rootfs_dir}/bin/${applet}"
     done
 
@@ -126,6 +143,7 @@ build_rootfs_in_docker() {
         -e OUTPUT_NAME="${output_name}" \
         -e PRIMARY_BUSYBOX_URL="${PRIMARY_BUSYBOX_URL}" \
         -e FALLBACK_BUSYBOX_URL="${FALLBACK_BUSYBOX_URL}" \
+        -e BUSYBOX_APPLETS="${BUSYBOX_APPLETS[*]}" \
         -v "${ROOT_DIR}:/workspace" \
         -v "${output_dir}:/out" \
         "${DOCKER_IMAGE}" \
@@ -156,7 +174,7 @@ build_rootfs_in_docker() {
             fi
             chmod 0755 "${busybox_path}"
 
-            for applet in sh echo cat ls mkdir rm cp mv sleep true false test pwd timeout; do
+            for applet in ${BUSYBOX_APPLETS}; do
                 ln -sf busybox "${rootfs_dir}/bin/${applet}"
             done
 
