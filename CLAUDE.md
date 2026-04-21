@@ -72,7 +72,8 @@ mimobox/
 - macOS：当前设备（代码编辑、文档）
 - Linux 服务器：hermes（SSH 连接，沙箱开发和测试）
   - 连接：`ssh hermes`
-  - 工作目录：~/mimobox-poc
+  - 工作目录：~/mimobox-poc（符号链接 → /data/fast/coding/mimobox-poc）
+  - VM 测试资产：~/mimobox-codex-assets（符号链接 → /data/fast/coding/mimobox-codex-assets）
   - sudo 密码见 .env 文件
   - 所有沙箱测试必须在 Linux 服务器上执行
 
@@ -83,8 +84,8 @@ mimobox/
 | Phase 1（OS 级） | 冷启动 <10ms | P50: 3.51ms | ✅ |
 | Phase 2（Wasm 级） | 冷启动 <5ms | P50: 0.61ms | ✅ |
 | Phase 3（预热池） | 热获取 <100us | P99: 0.38us | ✅ |
-| Phase 4（microVM） | 冷启动 <200ms | P50: 65.78ms | ✅ |
-| Phase 4（microVM） | 快照恢复 <50ms | P50: 41.25ms | ✅ |
+| Phase 4（microVM） | 冷启动 <200ms | P50: 1.24s ❌ 未达标 | 🔄 |
+| Phase 4（microVM） | 快照恢复 <50ms | P50: 205ms ❌ 未达标 | 🔄 |
 
 ## 参考文档索引
 
