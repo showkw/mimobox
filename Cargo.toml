@@ -57,8 +57,3 @@ unwrap_used = "deny"
 opt-level = 3
 lto = true
 panic = "abort"
-
-[patch.crates-io]
-kvm-ioctls = { path = "vendor/kvm-ioctls" }
-vm-memory = { path = "vendor/vm-memory" }
-vmm-sys-util = { path = "vendor/vmm-sys-util" }
