@@ -19,7 +19,7 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn benchmark_config() -> MicrovmConfig {
     must(
-        microvm_config_from_vm_assets(256),
+        microvm_config_from_vm_assets(64),
         "加载 benchmark VM assets 配置失败",
     )
 }
