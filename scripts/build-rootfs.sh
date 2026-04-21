@@ -1,86 +1,203 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 基于脚本所在目录定位项目根目录，避免从任意工作目录执行时找不到仓库路径。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-OUTPUT="crates/mimobox-vm/rootfs.cpio.gz"
-BUILD_DIR="$(mktemp -d)"
-ROOTFS_DIR="${BUILD_DIR}/rootfs"
-BUSYBOX_PATH="${ROOTFS_DIR}/bin/busybox"
+OUTPUT="${OUTPUT:-crates/mimobox-vm/rootfs.cpio.gz}"
+CC_BIN="${CC:-gcc}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
 
 log() {
     printf '[build-rootfs] %s\n' "$*"
 }
 
-cleanup() {
-    rm -rf -- "${BUILD_DIR}"
+fail() {
+    printf '[build-rootfs][error] %s\n' "$*" >&2
+    exit 1
 }
 
-trap cleanup EXIT
-
-cd "${ROOT_DIR}"
-
-mkdir -p "${BUILD_DIR}"
-mkdir -p \
-    "${ROOTFS_DIR}/bin" \
-    "${ROOTFS_DIR}/sbin" \
-    "${ROOTFS_DIR}/etc" \
-    "${ROOTFS_DIR}/proc" \
-    "${ROOTFS_DIR}/sys" \
-    "${ROOTFS_DIR}/dev" \
-    "${ROOTFS_DIR}/tmp"
-
-if [[ ! -f "${BUSYBOX_PATH}" ]]; then
-    log "下载静态 BusyBox"
-    if ! curl -fSL -o "${BUSYBOX_PATH}" "${PRIMARY_BUSYBOX_URL}"; then
-        log "主 BusyBox URL 不可用，尝试备用 URL"
-        if ! curl -fSL -o "${BUSYBOX_PATH}" "${FALLBACK_BUSYBOX_URL}"; then
-            printf '[build-rootfs][error] BusyBox 下载失败，请手动放置静态 busybox 到 %s\n' "${BUSYBOX_PATH}" >&2
-            exit 1
-        fi
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        fail "缺少依赖命令: $1"
     fi
-fi
+}
 
-chmod +x "${BUSYBOX_PATH}"
+resolve_output_path() {
+    if [[ "${OUTPUT}" = /* ]]; then
+        printf '%s\n' "${OUTPUT}"
+        return
+    fi
+    printf '%s/%s\n' "${ROOT_DIR}" "${OUTPUT}"
+}
 
-for applet in sh echo cat ls mkdir rm cp mv sleep true false exit test pwd; do
-    ln -sf busybox "${ROOTFS_DIR}/bin/${applet}"
-done
+can_create_device_nodes() {
+    local probe_dir
+    probe_dir="$(mktemp -d)"
+    if mknod "${probe_dir}/console" c 5 1 >/dev/null 2>&1; then
+        rm -rf -- "${probe_dir}"
+        return 0
+    fi
+    rm -rf -- "${probe_dir}"
+    return 1
+}
 
-cat > "${ROOTFS_DIR}/etc/passwd" <<'EOF'
+build_rootfs_locally() {
+    local output_path="$1"
+    local build_dir rootfs_dir guest_init_bin busybox_path
+
+    build_dir="$(mktemp -d)"
+    rootfs_dir="${build_dir}/rootfs"
+    guest_init_bin="${build_dir}/init"
+    busybox_path="${rootfs_dir}/bin/busybox"
+
+    cleanup_local() {
+        rm -rf -- "${build_dir}"
+    }
+    trap cleanup_local RETURN
+
+    mkdir -p \
+        "${rootfs_dir}/bin" \
+        "${rootfs_dir}/sbin" \
+        "${rootfs_dir}/etc" \
+        "${rootfs_dir}/proc" \
+        "${rootfs_dir}/sys" \
+        "${rootfs_dir}/dev" \
+        "${rootfs_dir}/tmp" \
+        "${rootfs_dir}/root"
+
+    log "编译静态 guest init"
+    "${CC_BIN}" \
+        -O2 \
+        -Wall \
+        -Wextra \
+        -Werror \
+        -static \
+        -s \
+        -o "${guest_init_bin}" \
+        "${ROOT_DIR}/crates/mimobox-vm/guest/guest-init.c"
+
+    log "下载静态 BusyBox"
+    if ! curl -fSL -o "${busybox_path}" "${PRIMARY_BUSYBOX_URL}"; then
+        log "主 BusyBox URL 不可用，尝试备用 URL"
+        curl -fSL -o "${busybox_path}" "${FALLBACK_BUSYBOX_URL}"
+    fi
+    chmod 0755 "${busybox_path}"
+
+    for applet in sh echo cat ls mkdir rm cp mv sleep true false test pwd timeout; do
+        ln -sf busybox "${rootfs_dir}/bin/${applet}"
+    done
+
+    install -m 0755 "${guest_init_bin}" "${rootfs_dir}/init"
+
+    cat > "${rootfs_dir}/etc/passwd" <<'EOF'
 root:x:0:0:root:/root:/bin/sh
 EOF
 
-cat > "${ROOTFS_DIR}/etc/group" <<'EOF'
+    cat > "${rootfs_dir}/etc/group" <<'EOF'
 root:x:0:
 EOF
 
-cat > "${ROOTFS_DIR}/init" <<'EOF'
-#!/bin/sh
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
-echo "mimobox-kvm: init OK"
-exec sh
+    mknod -m 600 "${rootfs_dir}/dev/console" c 5 1
+    mknod -m 666 "${rootfs_dir}/dev/null" c 1 3
+
+    mkdir -p "$(dirname "${output_path}")"
+    (
+        cd "${rootfs_dir}"
+        find . -print0 | cpio --null -o -H newc --quiet | gzip -n > "${output_path}"
+    )
+}
+
+build_rootfs_in_docker() {
+    local output_path="$1"
+    local output_dir output_name
+
+    require_command docker
+    output_dir="$(dirname "${output_path}")"
+    output_name="$(basename "${output_path}")"
+    mkdir -p "${output_dir}"
+
+    log "使用 Docker fallback 构建 rootfs"
+    docker run --rm \
+        -e HOST_UID="$(id -u)" \
+        -e HOST_GID="$(id -g)" \
+        -e OUTPUT_NAME="${output_name}" \
+        -e PRIMARY_BUSYBOX_URL="${PRIMARY_BUSYBOX_URL}" \
+        -e FALLBACK_BUSYBOX_URL="${FALLBACK_BUSYBOX_URL}" \
+        -v "${ROOT_DIR}:/workspace" \
+        -v "${output_dir}:/out" \
+        "${DOCKER_IMAGE}" \
+        sh -eu -c '
+            apk add --no-cache build-base curl cpio gzip >/dev/null
+            build_dir="$(mktemp -d)"
+            rootfs_dir="${build_dir}/rootfs"
+            guest_init_bin="${build_dir}/init"
+            busybox_path="${rootfs_dir}/bin/busybox"
+            trap "rm -rf -- ${build_dir}" EXIT
+
+            mkdir -p \
+                "${rootfs_dir}/bin" \
+                "${rootfs_dir}/sbin" \
+                "${rootfs_dir}/etc" \
+                "${rootfs_dir}/proc" \
+                "${rootfs_dir}/sys" \
+                "${rootfs_dir}/dev" \
+                "${rootfs_dir}/tmp" \
+                "${rootfs_dir}/root"
+
+            gcc -O2 -Wall -Wextra -Werror -static -s \
+                -o "${guest_init_bin}" \
+                /workspace/crates/mimobox-vm/guest/guest-init.c
+
+            if ! curl -fSL -o "${busybox_path}" "${PRIMARY_BUSYBOX_URL}"; then
+                curl -fSL -o "${busybox_path}" "${FALLBACK_BUSYBOX_URL}"
+            fi
+            chmod 0755 "${busybox_path}"
+
+            for applet in sh echo cat ls mkdir rm cp mv sleep true false test pwd timeout; do
+                ln -sf busybox "${rootfs_dir}/bin/${applet}"
+            done
+
+            install -m 0755 "${guest_init_bin}" "${rootfs_dir}/init"
+            cat > "${rootfs_dir}/etc/passwd" <<'"'"'EOF'"'"'
+root:x:0:0:root:/root:/bin/sh
 EOF
+            cat > "${rootfs_dir}/etc/group" <<'"'"'EOF'"'"'
+root:x:0:
+EOF
+            mknod -m 600 "${rootfs_dir}/dev/console" c 5 1
+            mknod -m 666 "${rootfs_dir}/dev/null" c 1 3
 
-chmod +x "${ROOTFS_DIR}/init"
+            (
+                cd "${rootfs_dir}"
+                find . -print0 | cpio --null -o -H newc --quiet | gzip -n > "/out/${OUTPUT_NAME}"
+            )
+            chown "${HOST_UID}:${HOST_GID}" "/out/${OUTPUT_NAME}"
+        '
+}
 
-mkdir -p "$(dirname "${OUTPUT}")"
+if [[ "$(uname -s)" != "Linux" ]]; then
+    fail "scripts/build-rootfs.sh 仅支持在 Linux 上执行"
+fi
 
-# mimobox-vm 的 KVM backend 会把 rootfs 整体作为 initrd 读入内存，
-# 当前至少要求它是 gzip 压缩数据；这里使用 Linux 常见的 cpio newc + gzip，
-# 既满足现有校验，也和 rdinit=/init 的启动方式保持兼容。
-(
-    cd "${ROOTFS_DIR}"
-    find . | cpio -o -H newc | gzip > "${ROOT_DIR}/${OUTPUT}"
-)
+require_command "${CC_BIN}"
+require_command curl
+require_command cpio
+require_command gzip
 
-SIZE_BYTES="$(wc -c < "${ROOT_DIR}/${OUTPUT}" | tr -d '[:space:]')"
+OUTPUT_PATH="$(resolve_output_path)"
 
-log "rootfs 已生成: ${ROOT_DIR}/${OUTPUT}"
+cd "${ROOT_DIR}"
+
+if can_create_device_nodes && build_rootfs_locally "${OUTPUT_PATH}"; then
+    :
+else
+    log "本机构建不可用，回退到 Docker"
+    build_rootfs_in_docker "${OUTPUT_PATH}"
+fi
+
+SIZE_BYTES="$(wc -c < "${OUTPUT_PATH}" | tr -d '[:space:]')"
+log "rootfs 已生成: ${OUTPUT_PATH}"
 log "文件大小: ${SIZE_BYTES} bytes"

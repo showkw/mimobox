@@ -6,6 +6,7 @@ license.workspace = true
 description = "mimobox microVM 沙箱后端"
 
 [dependencies]
+libc.workspace = true
 mimobox-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -13,7 +14,7 @@ tracing.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
-vm-memory.workspace = true
+vm-memory = { workspace = true, features = ["backend-mmap"] }
 vmm-sys-util.workspace = true
 
 [features]
