@@ -78,10 +78,20 @@ fn test_kvm_vm_boots() {
         KvmBackend::create_vm(SandboxConfig::default(), e2e_config()).expect("创建 VM 必须成功");
 
     let exit_reason = backend.boot().expect("guest 启动必须成功");
-    assert!(matches!(
+    assert_eq!(
         exit_reason,
-        KvmExitReason::Hlt | KvmExitReason::Shutdown
-    ));
+        KvmExitReason::Io,
+        "guest init 进入命令循环后应保持运行，并等待下一条串口命令"
+    );
+    let serial = String::from_utf8_lossy(backend.serial_output());
+    assert!(
+        serial.contains("mimobox-kvm: init OK"),
+        "boot 串口输出必须来自 guest /init，而不是 host stub"
+    );
+    assert!(
+        serial.contains("READY"),
+        "guest init 准备好接收命令后必须打印 READY"
+    );
 
     backend.shutdown().expect("关闭 VM 必须成功");
 }
@@ -94,15 +104,33 @@ fn test_kvm_vm_executes() {
         .execute(&guest_cmd(&["/bin/echo", "hello"]))
         .expect("guest 命令执行必须成功");
 
-    assert_eq!(result.exit_code, Some(127));
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, b"hello\n");
+    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+    assert!(!result.timed_out, "echo 不应触发超时");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_timeout_marks_result() {
+    let base_config = SandboxConfig {
+        timeout_secs: Some(1),
+        ..SandboxConfig::default()
+    };
+    let mut sandbox = MicrovmSandbox::new_with_base(base_config, e2e_config())
+        .expect("创建带超时的 microVM 沙箱必须成功");
+
+    let result = sandbox
+        .execute(&guest_cmd(&["/bin/sh", "-lc", "while :; do :; done"]))
+        .expect("超时命令也必须返回结果结构");
+
     assert!(
-        result.stdout.is_empty(),
-        "未接入 guest agent 前不应返回 stdout"
+        result.timed_out,
+        "guest 长时间不返回协议响应时必须标记为超时"
     );
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("尚未实现"),
-        "应明确返回命令通道尚未实现"
-    );
+    assert_eq!(result.exit_code, None, "超时结果不应携带正常退出码");
+    assert!(result.stdout.is_empty(), "忙等命令不应产生 stdout");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
 }
