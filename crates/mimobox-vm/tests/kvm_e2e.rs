@@ -113,6 +113,43 @@ fn test_kvm_vm_executes() {
 }
 
 #[test]
+fn test_kvm_vm_executes_argument_with_newline() {
+    let mut sandbox = MicrovmSandbox::new(e2e_config()).expect("创建 microVM 沙箱必须成功");
+
+    let result = sandbox
+        .execute(&guest_cmd(&["/bin/printf", "%s", "hello\nworld"]))
+        .expect("包含换行参数的命令必须成功执行");
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, b"hello\nworld");
+    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+    assert!(!result.timed_out, "换行参数不应被误判为协议超时");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_exit_code_124_is_not_timeout() {
+    let base_config = SandboxConfig {
+        timeout_secs: Some(1),
+        ..SandboxConfig::default()
+    };
+    let mut sandbox = MicrovmSandbox::new_with_base(base_config, e2e_config())
+        .expect("创建带超时的 microVM 沙箱必须成功");
+
+    let result = sandbox
+        .execute(&guest_cmd(&["/bin/sh", "-lc", "exit 124"]))
+        .expect("退出码 124 的命令必须返回结果结构");
+
+    assert_eq!(result.exit_code, Some(124));
+    assert!(!result.timed_out, "用户命令合法返回 124 时不应被误判为超时");
+    assert!(result.stdout.is_empty(), "exit 124 不应产生 stdout");
+    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
 fn test_kvm_vm_timeout_marks_result() {
     let base_config = SandboxConfig {
         timeout_secs: Some(1),
