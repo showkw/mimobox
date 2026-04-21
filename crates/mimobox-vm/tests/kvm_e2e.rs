@@ -1,53 +1,15 @@
 #![cfg(all(target_os = "linux", feature = "kvm"))]
 
-use std::env;
 use std::path::PathBuf;
 
 use mimobox_core::{Sandbox, SandboxConfig};
-use mimobox_vm::{KvmBackend, KvmExitReason, MicrovmConfig, MicrovmSandbox};
-
-fn resolve_vm_assets_dir(
-    vm_assets_override: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(path) = vm_assets_override {
-        return path;
-    }
-
-    home_dir
-        .expect("必须存在 HOME 环境变量或设置 VM_ASSETS_DIR")
-        .join("mimobox-poc/vm-assets")
-}
-
-fn vm_assets_dir() -> PathBuf {
-    resolve_vm_assets_dir(
-        env::var_os("VM_ASSETS_DIR").map(PathBuf::from),
-        env::var_os("HOME").map(PathBuf::from),
-    )
-}
+use mimobox_vm::{
+    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmSandbox, microvm_config_from_vm_assets,
+    resolve_vm_assets_dir,
+};
 
 fn e2e_config() -> MicrovmConfig {
-    let assets = vm_assets_dir();
-    let kernel_path = assets.join("vmlinux");
-    let rootfs_path = assets.join("rootfs.cpio.gz");
-
-    assert!(
-        kernel_path.exists(),
-        "缺少测试内核镜像: {}",
-        kernel_path.display()
-    );
-    assert!(
-        rootfs_path.exists(),
-        "缺少测试 rootfs: {}",
-        rootfs_path.display()
-    );
-
-    MicrovmConfig {
-        vcpu_count: 1,
-        memory_mb: 256,
-        kernel_path,
-        rootfs_path,
-    }
+    microvm_config_from_vm_assets(256).expect("加载 e2e VM assets 配置必须成功")
 }
 
 fn guest_cmd(args: &[&str]) -> Vec<String> {
@@ -58,7 +20,8 @@ fn guest_cmd(args: &[&str]) -> Vec<String> {
 fn test_vm_assets_dir_prefers_env_override() {
     let override_dir = PathBuf::from("/tmp/mimobox-custom-vm-assets");
 
-    let actual = resolve_vm_assets_dir(Some(override_dir.clone()), None);
+    let actual =
+        resolve_vm_assets_dir(Some(override_dir.clone()), None).expect("环境变量覆盖必须成功");
 
     assert_eq!(actual, override_dir);
 }
@@ -67,7 +30,7 @@ fn test_vm_assets_dir_prefers_env_override() {
 fn test_vm_assets_dir_falls_back_to_home_default() {
     let home_dir = PathBuf::from("/tmp/mimobox-home");
 
-    let actual = resolve_vm_assets_dir(None, Some(home_dir.clone()));
+    let actual = resolve_vm_assets_dir(None, Some(home_dir.clone())).expect("默认回退必须成功");
 
     assert_eq!(actual, home_dir.join("mimobox-poc/vm-assets"));
 }
@@ -189,6 +152,33 @@ fn test_kvm_snapshot_restore() {
         .expect("恢复 VM 状态必须成功");
 
     assert_eq!(restored.serial_output(), serial_before.as_slice());
+
+    backend.shutdown().expect("关闭源 VM 必须成功");
+    restored.shutdown().expect("关闭恢复 VM 必须成功");
+}
+
+#[test]
+fn test_kvm_snapshot_restore_executes_command() {
+    let config = e2e_config();
+    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config.clone())
+        .expect("创建源 VM 必须成功");
+
+    backend.boot().expect("源 VM 启动必须成功");
+    let (memory, vcpu_state) = backend.snapshot_state().expect("导出快照必须成功");
+
+    let mut restored =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建恢复 VM 必须成功");
+    restored
+        .restore_state(&memory, &vcpu_state)
+        .expect("恢复 VM 状态必须成功");
+
+    let result = restored
+        .run_command(&guest_cmd(&["/bin/echo", "hello"]))
+        .expect("恢复后的 VM 必须能继续执行命令");
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, b"hello\n");
+    assert!(!result.timed_out, "恢复后的 echo 不应超时");
 
     backend.shutdown().expect("关闭源 VM 必须成功");
     restored.shutdown().expect("关闭恢复 VM 必须成功");

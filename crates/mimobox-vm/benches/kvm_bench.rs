@@ -6,7 +6,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_core::SandboxConfig;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use mimobox_vm::{KvmBackend, KvmExitReason, MicrovmConfig};
+use mimobox_vm::{KvmBackend, KvmExitReason, MicrovmConfig, microvm_config_from_vm_assets};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -18,14 +18,10 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn benchmark_config() -> MicrovmConfig {
-    let home = std::env::var("HOME").expect("必须存在 HOME 环境变量");
-
-    MicrovmConfig {
-        vcpu_count: 1,
-        memory_mb: 128,
-        kernel_path: format!("{home}/mimobox-poc/vm-assets/vmlinux").into(),
-        rootfs_path: format!("{home}/mimobox-poc/vm-assets/rootfs.cpio.gz").into(),
-    }
+    must(
+        microvm_config_from_vm_assets(256),
+        "加载 benchmark VM assets 配置失败",
+    )
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -46,9 +42,16 @@ fn boot_backend(backend: &mut KvmBackend) {
     let exit_reason = must(backend.boot(), "启动 guest 失败");
     assert_eq!(
         exit_reason,
-        KvmExitReason::Hlt,
-        "guest 启动退出原因必须为 HLT"
+        KvmExitReason::Io,
+        "guest init 应进入命令循环并等待串口命令"
     );
+
+    let serial = String::from_utf8_lossy(backend.serial_output());
+    assert!(
+        serial.contains("mimobox-kvm: init OK"),
+        "boot 串口输出必须来自 guest /init"
+    );
+    assert!(serial.contains("READY"), "guest init 必须打印 READY");
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]

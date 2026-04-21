@@ -121,15 +121,15 @@ mimobox/
 
 ## 4. 性能数据
 
-测试环境：`hermes` Rocky Linux 9.7，72 核 CPU，93GB RAM，release 模式。
+以下为 bench 完整生命周期测量（create + boot/restore + execute + shutdown），包含沙箱创建和销毁开销。测试环境：Intel Xeon E5-2686 v4 @ 2.30GHz, 93GB RAM。
 
 | 后端 | 指标 | 实测 |
 | --- | --- | --- |
 | OS 级 | 冷启动 P50 | `3.51ms` |
 | Wasm | 冷启动 P50 | `0.61ms` |
 | 预热池 | 热获取 P99 | `0.38us` |
-| microVM (KVM) | 冷启动 P50 | `65.78ms` |
-| microVM (KVM) | 快照恢复 P50 | `41.25ms` |
+| microVM (KVM) | 冷启动 P50 | `1.24s` |
+| microVM (KVM) | 快照恢复 P50 | `205ms` |
 
 这些是 README 当前维护的性能基线。只要基准结果变化，就应该同步更新这里。
 
