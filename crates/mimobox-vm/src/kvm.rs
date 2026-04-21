@@ -53,7 +53,6 @@ const SERIAL_READY_LINE: &str = "READY";
 const SERIAL_EXEC_PREFIX: &str = "EXEC:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
-const SERIAL_TIMEOUT_EXIT_CODE: i32 = 124;
 const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
 const I8042_PORT_B_REG: u16 = 0x61;
 const I8042_COMMAND_REG: u16 = 0x64;
@@ -902,10 +901,7 @@ impl KvmBackend {
         let mut line_buffer = Vec::new();
         let mut response = CommandResponse::default();
         let watchdog = self.start_watchdog(Duration::from_secs(
-            self.base_config
-                .timeout_secs
-                .unwrap_or(30)
-                .saturating_add(5),
+            self.base_config.timeout_secs.unwrap_or(30),
         ))?;
 
         loop {
@@ -1607,8 +1603,10 @@ fn encode_command_payload(
     timeout_secs: Option<u64>,
 ) -> Result<Vec<u8>, MicrovmError> {
     let command = build_guest_command(cmd, timeout_secs)?;
-    let frame = format!("{SERIAL_EXEC_PREFIX}{command}\n");
-    Ok(frame.into_bytes())
+    let mut frame = format!("{SERIAL_EXEC_PREFIX}{}:", command.len()).into_bytes();
+    frame.extend_from_slice(command.as_bytes());
+    frame.push(b'\n');
+    Ok(frame)
 }
 
 fn is_serial_port(port: u16) -> bool {
@@ -1634,18 +1632,11 @@ fn parse_guest_protocol_line(
         let exit_code = payload.parse::<i32>().map_err(|err| {
             MicrovmError::Backend(format!("guest EXIT 帧不是合法整数: {payload}: {err}"))
         })?;
-        let timed_out = exit_code == SERIAL_TIMEOUT_EXIT_CODE;
-        let stdout = if timed_out {
-            response.stdout.clear();
-            Vec::new()
-        } else {
-            std::mem::take(&mut response.stdout)
-        };
         return Ok(Some(GuestCommandResult {
-            stdout,
+            stdout: std::mem::take(&mut response.stdout),
             stderr: Vec::new(),
-            exit_code: if timed_out { None } else { Some(exit_code) },
-            timed_out,
+            exit_code: Some(exit_code),
+            timed_out: false,
         }));
     }
 
@@ -1714,20 +1705,13 @@ fn build_guest_command(cmd: &[String], timeout_secs: Option<u64>) -> Result<Stri
         return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
     }
 
-    let command = join_shell_command(cmd);
-    if let Some(timeout_secs) = timeout_secs {
-        if timeout_secs == 0 {
-            return Err(MicrovmError::InvalidConfig("timeout_secs 不能为 0".into()));
-        }
-        return Ok(format!(
-            "status=0; /bin/timeout -s KILL {timeout_secs} /bin/sh -lc {} || status=$?; \
-if [ \"$status\" -eq 124 ] || [ \"$status\" -eq 137 ] || [ \"$status\" -eq 143 ]; then exit 124; fi; \
-exit \"$status\"",
-            shell_escape(&command),
-        ));
+    if let Some(timeout_secs) = timeout_secs
+        && timeout_secs == 0
+    {
+        return Err(MicrovmError::InvalidConfig("timeout_secs 不能为 0".into()));
     }
 
-    Ok(command)
+    Ok(join_shell_command(cmd))
 }
 
 fn join_shell_command(cmd: &[String]) -> String {
@@ -1832,6 +1816,51 @@ fn handle_serial_read(
         *slot = serial_device.read(port)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CommandResponse, SERIAL_EXEC_PREFIX, build_guest_command, encode_command_payload,
+        parse_guest_protocol_line,
+    };
+
+    #[test]
+    fn test_encode_command_payload_uses_length_prefixed_frame() {
+        let command = vec![
+            "/bin/printf".to_string(),
+            "%s".to_string(),
+            "hello\nworld".to_string(),
+        ];
+
+        let payload = encode_command_payload(&command, Some(1)).expect("编码命令帧必须成功");
+        let command_line = build_guest_command(&command, Some(1)).expect("构建 shell 命令必须成功");
+        let header = format!("{SERIAL_EXEC_PREFIX}{}:", command_line.len());
+        let mut expected = header.into_bytes();
+        expected.extend_from_slice(command_line.as_bytes());
+        expected.push(b'\n');
+
+        assert_eq!(payload, expected);
+        assert!(
+            payload
+                .windows(b"hello\nworld".len())
+                .any(|window| window == b"hello\nworld"),
+            "长度前缀帧必须保留命令参数中的换行字节"
+        );
+    }
+
+    #[test]
+    fn test_exit_code_124_is_not_mapped_to_timeout() {
+        let mut response = CommandResponse::default();
+
+        let result = parse_guest_protocol_line("EXIT:124", &mut response)
+            .expect("解析 EXIT 帧必须成功")
+            .expect("EXIT 帧必须产生命令结果");
+
+        assert_eq!(result.exit_code, Some(124));
+        assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
+        assert!(result.stdout.is_empty(), "纯 EXIT 帧不应携带 stdout");
+    }
 }
 
 fn checked_slice(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], MicrovmError> {

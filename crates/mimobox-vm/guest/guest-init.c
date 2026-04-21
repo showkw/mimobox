@@ -100,9 +100,10 @@ static void update_uart_access(void) {
     }
 }
 
-static int read_serial_line(char *buffer, size_t capacity) {
-    size_t used = 0;
-    bool overflow = false;
+static int read_serial_byte(unsigned char *value) {
+    if (value == NULL) {
+        return -1;
+    }
 
     for (;;) {
         unsigned char lsr = inb(SERIAL_COM1_BASE + SERIAL_REG_LSR);
@@ -111,26 +112,91 @@ static int read_serial_line(char *buffer, size_t capacity) {
             continue;
         }
 
-        unsigned char value = inb(SERIAL_COM1_BASE + SERIAL_REG_RBR);
-        if (value == '\r') {
-            continue;
-        }
-
-        if (value == '\n') {
-            if (overflow) {
-                return -2;
-            }
-            buffer[used] = '\0';
-            return 0;
-        }
-
-        if (used + 1 >= capacity) {
-            overflow = true;
-            continue;
-        }
-
-        buffer[used++] = (char)value;
+        *value = inb(SERIAL_COM1_BASE + SERIAL_REG_RBR);
+        return 0;
     }
+}
+
+static int discard_serial_bytes(size_t length) {
+    unsigned char discarded = 0;
+    while (length > 0) {
+        if (read_serial_byte(&discarded) < 0) {
+            return -1;
+        }
+        length--;
+    }
+    return 0;
+}
+
+static int read_command_frame(char *buffer, size_t capacity) {
+    static const char prefix[] = "EXEC:";
+    size_t payload_len = 0;
+    unsigned char value = 0;
+    bool saw_digit = false;
+
+    if (capacity == 0) {
+        return -1;
+    }
+
+    for (size_t index = 0; index < sizeof(prefix) - 1; index++) {
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        if (value != (unsigned char)prefix[index]) {
+            return -3;
+        }
+    }
+
+    for (;;) {
+        unsigned char digit = 0;
+        if (read_serial_byte(&digit) < 0) {
+            return -1;
+        }
+        if (digit == ':') {
+            if (!saw_digit) {
+                return -3;
+            }
+            break;
+        }
+        if (digit < '0' || digit > '9') {
+            return -3;
+        }
+        saw_digit = true;
+        if (payload_len > (SIZE_MAX - (size_t)(digit - '0')) / 10) {
+            return -3;
+        }
+        payload_len = payload_len * 10 + (size_t)(digit - '0');
+    }
+
+    if (payload_len >= capacity) {
+        if (discard_serial_bytes(payload_len) < 0) {
+            return -1;
+        }
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        if (value != '\n') {
+            return -3;
+        }
+        return -2;
+    }
+
+    for (size_t index = 0; index < payload_len; index++) {
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        buffer[index] = (char)value;
+    }
+
+    if (read_serial_byte(&value) < 0) {
+        return -1;
+    }
+    if (value != '\n') {
+        return -3;
+    }
+
+    buffer[payload_len] = '\0';
+    return 0;
 }
 
 static void write_escaped_output(const unsigned char *data, size_t length) {
@@ -215,11 +281,20 @@ static int execute_command(const char *command_line) {
             (char *)command_line,
             NULL,
         };
+        int stdin_fd = -1;
 
         close(pipe_fds[0]);
         if (dup2(pipe_fds[1], STDOUT_FILENO) < 0 || dup2(pipe_fds[1], STDERR_FILENO) < 0) {
             dprintf(pipe_fds[1], "guest-init: dup2 failed: %s\n", strerror(errno));
             _exit(125);
+        }
+        stdin_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (stdin_fd < 0 || dup2(stdin_fd, STDIN_FILENO) < 0) {
+            dprintf(pipe_fds[1], "guest-init: redirect stdin failed: %s\n", strerror(errno));
+            _exit(125);
+        }
+        if (stdin_fd > STDERR_FILENO) {
+            close(stdin_fd);
         }
         if (pipe_fds[1] > STDERR_FILENO) {
             close(pipe_fds[1]);
@@ -278,25 +353,26 @@ int main(void) {
 
     char command_buffer[COMMAND_BUFFER_CAP];
     for (;;) {
-        int line_status = read_serial_line(command_buffer, sizeof(command_buffer));
+        int line_status = read_command_frame(command_buffer, sizeof(command_buffer));
         if (line_status == -2) {
-            static const unsigned char too_long[] = "command line too long";
+            static const unsigned char too_long[] = "command frame too long";
             write_escaped_output(too_long, sizeof(too_long) - 1);
             write_exit_code(126);
             continue;
         }
         if (line_status < 0) {
-            static const unsigned char read_failed[] = "serial read failed";
-            write_escaped_output(read_failed, sizeof(read_failed) - 1);
+            static const unsigned char read_failed[] = "serial command frame read failed";
+            static const unsigned char invalid_frame[] = "invalid command frame";
+            if (line_status == -3) {
+                write_escaped_output(invalid_frame, sizeof(invalid_frame) - 1);
+            } else {
+                write_escaped_output(read_failed, sizeof(read_failed) - 1);
+            }
             write_exit_code(125);
             continue;
         }
 
-        if (strncmp(command_buffer, "EXEC:", 5) != 0) {
-            continue;
-        }
-
-        int exit_code = execute_command(command_buffer + 5);
+        int exit_code = execute_command(command_buffer);
         write_exit_code(exit_code);
     }
 }
