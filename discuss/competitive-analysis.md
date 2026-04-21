@@ -1,168 +1,238 @@
 ---
-title: mimobox 竞品功能差异分析
+title: mimobox 竞品功能差异分析（Agent Sandbox 专项）
 date: 2026-04-21
 status: final
+scope: Agent Sandbox 赛道
 ---
 
-# mimobox 竞品功能差异分析
+# mimobox 竞品功能差异分析 — Agent Sandbox 专项
 
-## 1. 市场定位
+## 1. 赛道定义
 
-mimibox 定位为**自托管、跨平台、多层级隔离的 Agent Sandbox 运行时**，
-面向 AI Agent 代码执行场景，提供从 OS 级到 microVM 级的三层隔离选择。
+mimibox 定位为 **Agent Sandbox**：为 AI Agent 提供安全隔离的代码执行环境。
 
-核心差异化：**单一 binary 提供三种隔离层级，开发者按需选择安全/性能平衡点**。
+与通用沙箱/容器/VM 平台（Firecracker、gVisor、Kata、Docker）不同，
+Agent Sandbox 的核心需求是：
 
-## 2. 竞品全景
+| 需求 | 原因 |
+|------|------|
+| **极低冷启动** | Agent 对话式交互，每次工具调用需毫秒级响应 |
+| **多层隔离** | 不同信任等级的代码需要不同隔离强度 |
+| **自托管 + 离线** | 企业数据不出域、私有云部署、本地开发 |
+| **预热/快照** | Agent 高频调用，需要亚毫秒获取已就绪沙箱 |
+| **跨平台** | 开发者本地 macOS + 生产 Linux 统一体验 |
+| **默认安全** | 网络默认拒绝、文件系统默认只读、资源上限 |
 
-| 产品 | 隔离层级 | 语言 | 部署模式 | 目标场景 |
-|------|---------|------|---------|---------|
-| **mimibox** | OS + Wasm + microVM | Rust | 自托管 | Agent 代码执行 |
-| **Firecracker** | microVM | Rust | 自托管 | Serverless / Lambda |
-| **gVisor** | 应用内核 (Sentry) | Go | 自托管 | 容器安全加固 |
-| **E2B** | Firecracker microVM | Go/TS | SaaS | AI 代码执行 |
-| **Modal** | gVisor 容器 | Python | SaaS | ML/AI 工作负载 |
-| **Kata Containers** | 轻量 VM | Go | 自托管 | K8s 安全容器 |
-| **WasmEdge** | Wasm 沙箱 | C++ | 自托管 | Edge / Serverless |
-| **Docker/runc** | Namespace + cgroup | Go | 自托管 | 通用容器 |
-| **Anthropic SRT** | OS 级 | TS | 自托管 | Claude Agent 执行 |
+## 2. 竞品分层
 
-## 3. 性能对比
+### 直接竞品（Agent Sandbox 产品）
+
+| 产品 | 隔离层级 | 自托管 | 语言 | 定价模式 |
+|------|---------|--------|------|---------|
+| **mimibox** | OS + Wasm + microVM | ✅ | Rust | 开源免费 |
+| **Anthropic SRT** | OS 级 | ✅ | TypeScript | 开源免费（Beta） |
+| **E2B** | Firecracker microVM | ✅（开源） | Rust/Go/TS | SaaS + 开源 |
+| **OpenAI Codex Sandbox** | 容器 + gVisor / OS 级 | ❌ | Python/TS | 闭源 SaaS |
+| **Daytona** | 容器（Sysbox） | ✅（开源） | Go | SaaS + 开源 |
+| **Fly.io Sprites** | Firecracker microVM | ❌ | Rust/Go/Elixir | 闭源 SaaS |
+
+### 基础设施层（Agent Sandbox 的底层组件，非直接竞品）
+
+Firecracker、gVisor、Kata Containers、WasmEdge 等属于基础设施，
+E2B 和 Fly.io Sprites 就构建在 Firecracker 之上。
+
+## 3. Agent Sandbox 核心指标对比
 
 ### 3.1 冷启动延迟
 
-| 产品 | 冷启动 P50 | 测试条件 |
-|------|-----------|---------|
-| **mimobox OS 级** | **3.51ms** | Landlock+Seccomp+Namespace |
-| **mimobox Wasm 级** | **0.61ms** | Wasmtime v29, WASI P1 |
-| **mimobox microVM** | **65.78ms** | KVM, ELF 装载 |
-| Anthropic SRT | ~8ms | OS 级进程沙箱 |
-| Firecracker | ~125ms | 最小 microVM |
-| Docker/runc | ~100-500ms | 容器启动 |
-| gVisor (runsc) | ~1-3s | Sentry 初始化 |
-| E2B | ~500ms-1s | Firecracker + 初始化 |
-| Modal | ~100-300ms | gVisor + 镜像缓存 |
-| Kata Containers | ~1-2s | QEMU 轻量 VM |
+| 产品 | 冷启动 P50 | 机制 | 备注 |
+|------|-----------|------|------|
+| **mimibox Wasm** | **0.61ms** | Wasmtime v29 | Wasm 级最快 |
+| **mimibox OS** | **3.51ms** | Landlock+Seccomp+NS | OS 级最快 |
+| **Anthropic SRT** | **~0ms** | OS 原生（Seatbelt/bwrap） | 无独立进程启动 |
+| **Daytona** | **<90ms** | Docker 容器（Sysbox） | 容器共享内核 |
+| **E2B** | **~150ms** | Firecracker microVM | 需启动独立内核 |
+| **mimibox microVM** | **65.78ms** | KVM | VM 级最优 |
+| **Fly.io Sprites** | **1-12s（冷）/ ~300ms（恢复）** | Firecracker | 面向持久环境 |
+| **OpenAI Code Interpreter** | 秒级（未公开） | gVisor 容器 | Jupyter 内核启动 |
+| **Modal** | **~1-2s / ~0.11s（快照）** | gVisor 容器 | Python-first |
 
-### 3.2 热启动 / 快照恢复
+### 3.2 热启动 / 预热机制
 
-| 产品 | 热启动 / 恢复 | 机制 |
-|------|-------------|------|
-| **mimobox 预热池** | **0.38us (P99)** | 预创建沙箱池 |
-| **mimobox microVM 快照** | **41.25ms** | 内存 + vCPU 状态序列化 |
-| Firecracker 快照恢复 | <10ms | 内存快照 |
-| Docker | N/A | 无原生快照 |
-| gVisor | N/A | 无原生快照 |
-| E2B | ~100ms | Firecracker 快照 |
+| 产品 | 热获取 | 机制 |
+|------|--------|------|
+| **mimibox 预热池** | **0.38us (P99)** | 预创建沙箱池 |
+| **mimibox microVM 快照** | **41.25ms** | 内存 + vCPU 状态序列化 |
+| **Fly.io Sprites** | ~300ms | 检查点恢复 |
+| **Modal** | ~0.11s | gVisor checkpoint + 内存快照 |
+| **E2B** | Templates 预构建 | 预装环境的镜像模板 |
+| **Daytona** | Snapshots | 捕获完整配置环境 |
+| **Anthropic SRT** | 无 | OS 级无需预热 |
+| **OpenAI Code Interpreter** | 无 | 无预热机制 |
 
-### 3.3 内存开销
+### 3.3 单沙箱内存开销
 
-| 产品 | 单实例内存 |
-|------|-----------|
-| **mimobox OS 级** | ~0（子进程额外开销） |
-| **mimobox Wasm 级** | ~5-15MB |
-| **mimobox microVM** | ~5-30MB |
-| Firecracker | ~5MB |
-| Docker/runc | ~50MB |
-| gVisor | ~50-100MB |
-| E2B | ~50-100MB |
+| 产品 | 内存开销 | 备注 |
+|------|---------|------|
+| **Anthropic SRT** | ~0 | OS 原生机制，无额外进程 |
+| **mimibox OS** | ~0 | 子进程，无额外运行时 |
+| **mimibox Wasm** | ~5-15MB | Wasmtime 运行时 |
+| **E2B / Fly.io** | ~3-5MB | Firecracker VMM |
+| **mimibox microVM** | ~5-30MB | KVM VMM + guest |
+| **Daytona** | 容器级 | 共享宿主内核 |
+| **OpenAI Code Interpreter** | 容器级 | gVisor + Jupyter |
+| **Modal** | 128MB 起 | gVisor 容器 |
 
 ## 4. 安全模型对比
 
-| 安全机制 | mimobox | Firecracker | gVisor | E2B | Docker |
-|---------|---------|------------|--------|-----|-------|
-| 硬件级隔离 (VMX/SNP) | ✅ KVM | ✅ KVM | ⚠️ 可选 KVM | ✅ Firecracker | ❌ |
-| 系统调用过滤 | ✅ Seccomp-bpf | ✅ 极简 | ✅ Sentry 代理 | ✅ 继承 | ⚠️ 可选 |
-| 文件系统沙箱 | ✅ Landlock | ✅ VM 隔离 | ✅ Gofer 代理 | ✅ VM 隔离 | ⚠️ 可选 |
-| 网络隔离 | ✅ 默认拒绝 | ✅ 默认无网络 | ✅ 网络命名空间 | ✅ VM 隔离 | ❌ 默认允许 |
-| 内存限制 | ✅ cgroups/rlimit | ✅ VM 内存 | ✅ cgroups | ✅ VM 限制 | ✅ cgroups |
-| 进程数限制 | ✅ RLIMIT_NPROC=256 | ✅ VM 级 | ✅ cgroups | ✅ VM 级 | ✅ cgroups |
-| 超时强制 | ✅ SIGKILL+waitpid | ✅ VM 强杀 | ✅ 超时机制 | ✅ 超时机制 | ⚠️ 手动 |
-| 跨平台 | Linux+macOS+Win | 仅 Linux | 仅 Linux | 仅云端 | Linux+macOS+Win |
+| 安全机制 | mimibox | Anthropic SRT | E2B | OpenAI Codex | Daytona |
+|---------|---------|---------------|-----|-------------|---------|
+| 硬件级隔离 (VMX) | ✅ KVM | ❌ | ✅ Firecracker | ⚠️ gVisor | ❌ |
+| 系统调用过滤 | ✅ Seccomp-bpf | ⚠️ bwrap 有限 | ✅ 极简 | ✅ gVisor Sentry | ❌ 容器级 |
+| 文件系统沙箱 | ✅ Landlock | ✅ Seatbelt/bwrap | ✅ VM 隔离 | ✅ gVisor Gofer | ✅ Sysbox |
+| 网络默认拒绝 | ✅ | ✅ 代理+白名单 | ❌ 默认允许 | ✅ Agent 阶段禁止 | 可配置 |
+| 内存限制 | ✅ cgroups/rlimit | ✅ OS 级 | ✅ VM 内存 | ✅ 1-64GB 可选 | ✅ |
+| 进程数限制 | ✅ RLIMIT_NPROC=256 | ❌ | ✅ VM 级 | ✅ | ✅ |
+| 超时强制 | ✅ SIGKILL+waitpid | ✅ | ✅ | ✅ | ✅ 自动停止 |
 | Wasm 沙箱 | ✅ 原生 | ❌ | ❌ | ❌ | ❌ |
+| 跨平台 | Linux+macOS | macOS+Linux+WSL | 仅 Linux | 全平台（CLI） | Linux |
 
-## 5. 功能矩阵
+## 5. Agent 场景功能矩阵
 
-| 功能 | mimobox | Firecracker | E2B | Modal | gVisor | WasmEdge |
-|------|---------|------------|-----|-------|--------|----------|
-| **多隔离层级** | ✅ 3 级 | ❌ 仅 VM | ❌ 仅 VM | ❌ 仅容器 | ❌ 仅容器 | ❌ 仅 Wasm |
-| **WASI 支持** | ✅ WASI P1 | ❌ | ❌ | ❌ | ❌ | ✅ WASI |
-| **快照/恢复** | ✅ 原生 | ✅ 原生 | ✅ | ❌ | ❌ | ❌ |
-| **预热池** | ✅ 微秒级 | ❌ | ❌ | ⚠️ keep_warm | ❌ | ❌ |
-| **自托管** | ✅ | ✅ | ❌ SaaS | ❌ SaaS | ✅ | ✅ |
-| **离线运行** | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
-| **GPU 支持** | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| **编排/扩缩** | ❌ | ❌ | ✅ | ✅ | ✅ K8s | ❌ |
-| **镜像生态** | ❌ | ❌ | ✅ | ✅ | ✅ OCI | ✅ Wasm |
-| **CLI 集成** | ✅ | ❌ API only | ✅ SDK | ✅ SDK | ❌ | ✅ |
-| **Windows 支持** | 🔄 规划中 | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **macOS 支持** | ✅ Seatbelt | ❌ | ❌ | ❌ | ❌ | ✅ |
+| 功能 | mimibox | Anthropic SRT | E2B | OpenAI Codex | Daytona | Fly.io Sprites |
+|------|---------|---------------|-----|-------------|---------|----------------|
+| **多隔离层级** | ✅ 3 级 | ❌ 仅 OS | ❌ 仅 VM | ❌ 仅容器 | ❌ 仅容器 | ❌ 仅 VM |
+| **WASI/Wasm 支持** | ✅ WASI P1 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **预热池（微秒级）** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **快照/恢复** | ✅ 原生 | ❌ | ⚠️ Beta | ❌ | ✅ | ✅ 300ms |
+| **自托管** | ✅ | ✅ | ✅（需 KVM） | ❌ | ✅ | ❌ |
+| **离线运行** | ✅ | ✅ | ❌ | ❌ | ✅（自托管） | ❌ |
+| **数据不出域** | ✅ | ✅ | ⚠️ 需自部署 | ❌ | ✅（自托管） | ❌ |
+| **GPU 支持** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **网络代理** | ❌ | ✅ 域名白名单 | ✅ 默认允许 | ✅ 可配置 | ✅ 防火墙 | ✅ 隔离网络 |
+| **SDK/CLI** | ✅ CLI | ✅ npm + CLI | ✅ Python/JS | ✅ API + CLI | ✅ 多语言 SDK | ✅ JS/Go SDK |
+| **macOS 支持** | ✅ Seatbelt | ✅ Seatbelt | ❌ | ✅（CLI） | ❌ | ❌ |
+| **开源协议** | 待定 | 开源预览 | Apache 2.0 | 闭源 | Apache 2.0 | 闭源 |
 
-## 6. mimobox 核心优势
+## 6. mimibox 在 Agent Sandbox 赛道的差异化
 
-### 6.1 三层隔离，按需选择
+### 6.1 唯一提供三层隔离的 Agent Sandbox
 
-唯一同时提供 OS 级 + Wasm + microVM 三种隔离的产品。
-开发者根据场景选择：
-- **低延迟场景**（代码补全、实时推理）→ OS 级 3.51ms
-- **安全敏感场景**（不可信代码执行）→ Wasm 级 0.61ms
-- **强隔离场景**（多租户、恶意代码分析）→ KVM microVM 65.78ms
+竞品均为**单一隔离层级**：
 
-### 6.2 极致冷启动性能
+| 产品 | 唯一隔离层 |
+|------|----------|
+| Anthropic SRT | OS 级 |
+| E2B / Fly.io Sprites | microVM |
+| OpenAI Codex | 容器 + gVisor |
+| Daytona | 容器 |
 
-OS 级 3.51ms 和 Wasm 级 0.61ms 在所有竞品中处于领先位置：
-- 比 Anthropic SRT 快 2.3x（OS 级）
-- 比 Firecracker 快 107x（microVM 级）
-- 预热池热获取 0.38us P99，业界唯一微秒级
+mimibox 是唯一同时提供 OS + Wasm + microVM 三种的 Agent Sandbox。
+Agent 框架可根据任务信任等级**动态选择**：
 
-### 6.3 内存安全 + 零 GC
+```
+低延迟任务（代码补全、格式化）    → OS 级 3.51ms
+安全执行（用户代码、数据分析）    → Wasm 级 0.61ms
+强隔离（不可信代码、多租户）      → KVM microVM 65.78ms
+```
 
-Rust 实现，无 GC 暂停，适合：
-- AI Agent 对话式交互（延迟敏感）
-- 高并发沙箱调度（内存安全）
-- 嵌入式部署（无运行时依赖）
+### 6.2 Agent 场景极致性能
 
-### 6.4 自托管 + 离线运行
+Agent 工具调用是**高频、短时、延迟敏感**的操作：
 
-vs E2B/Modal（SaaS），mimibox 可：
-- 本地开发环境运行
-- 私有云/内网部署
-- 离线环境使用
-- 数据不出域
+| 场景 | mimibox | 最接近竞品 |
+|------|---------|-----------|
+| Wasm 代码执行 | **0.61ms** 冷启动 | Anthropic SRT ~0ms（OS 级，无 Wasm） |
+| OS 进程执行 | **3.51ms** 冷启动 | Anthropic SRT ~0ms（OS 级，无 Landlock/Seccomp） |
+| 预热池获取 | **0.38us P99** | 无竞品提供 |
+| microVM 执行 | **65.78ms** 冷启动 | E2B ~150ms（同为 Firecracker 架构） |
+| microVM 快照恢复 | **41.25ms** | Fly.io Sprites ~300ms |
 
-### 6.5 跨平台
+### 6.3 Rust 内存安全 + 零 GC
 
-Linux（完整） + macOS（Seatbelt） + Windows（规划中），
-覆盖开发者日常使用的所有平台。
+Agent 沙箱是**长驻运行、高并发调度**的基础设施组件：
 
-## 7. mimobox 当前短板
+- Anthropic SRT（TypeScript）→ V8 GC 暂停
+- E2B（Go）→ GC 暂停
+- Daytona（Go）→ GC 暂停
+- **mimibox（Rust）→ 零 GC，确定性的延迟**
 
-| 短板 | 影响 | 竞品对比 |
-|------|------|---------|
-| **无编排/扩缩层** | 无法直接用于生产集群 | K8s + Kata / E2B / Modal 有完整编排 |
-| **无 GPU 支持** | 无法执行 ML 推理/训练 | Modal 原生 GPU，E2B 支持 |
-| **无 OCI 镜像生态** | 不支持 Docker 镜像 | Docker/gVisor/Kata 都支持 |
-| **无 SaaS 服务** | 用户需自行部署 | E2B/Modal 开箱即用 |
-| **Windows 未完成** | 缺少 Windows 覆盖 | Docker 覆盖全平台 |
-| **社区/生态** | 早期项目，无第三方集成 | Firecracker/Kata 有 CNCF 生态 |
-| **无网络代理** | 沙箱内无法做有网络的任务 | E2B/Modal 支持受限网络 |
+### 6.4 真正的自托管 + 离线
 
-## 8. 适用场景推荐
+| 产品 | 自托管 | 离线 | 数据不出域 |
+|------|--------|------|----------|
+| **mimibox** | ✅ 单 binary | ✅ | ✅ |
+| Anthropic SRT | ✅ | ✅ | ✅ |
+| E2B | ⚠️ 需 KVM 集群 | ❌ | ⚠️ 需自部署 |
+| OpenAI Codex | ❌ | ❌ | ❌ |
+| Daytona | ✅ | ✅ | ✅ |
+| Fly.io Sprites | ❌ | ❌ | ❌ |
 
-| 场景 | 推荐选择 | 理由 |
-|------|---------|------|
-| AI Agent 代码执行 | **mimibox** | 三层隔离 + 极低延迟 + 自托管 |
-| Serverless 函数计算 | Firecracker / Kata | 成熟的编排生态 |
-| 容器安全加固 | gVisor / Kata | K8s 原生集成 |
-| ML/AI 训练推理 | Modal | GPU 原生支持 |
-| 快速原型/演示 | E2B | SaaS 开箱即用 |
-| Edge/IoT 沙箱 | mimobox / WasmEdge | Wasm 级轻量隔离 |
-| 多租户 SaaS | mimobox + 编排层 | microVM 强隔离 + 预热池 |
+## 7. mimobox 当前短板（Agent Sandbox 视角）
 
-## 9. 结论
+| 短板 | 影响与竞品差距 |
+|------|-------------|
+| **无网络代理** | Anthropic SRT 有域名白名单代理；E2B/Daytona 支持受限网络。Agent 执行需要网络的任务（API 调用、包安装）受限 |
+| **无 GPU 支持** | Modal 有全系列 GPU（T4~H200）。ML 推理场景无法覆盖 |
+| **无 SaaS 服务** | E2B/Daytona/Modal 开箱即用；mimibox 需用户自行部署 |
+| **无编排/扩缩** | Agent 框架需要批量调度沙箱；Daytona/E2B 有完整管理 API |
+| **Windows 未完成** | Anthropic SRT 通过 WSL2 覆盖；OpenAI Codex 全平台 |
+| **生态/集成** | E2B 集成 LangChain/CrewAI；Daytona 有 MCP 协议。mimobox 无第三方集成 |
 
-mimobox 在**冷启动性能**和**隔离层级灵活性**上具有明显技术优势，
-尤其是 0.61ms 的 Wasm 冷启动和 0.38us 的预热池热获取在业界领先。
+## 8. 竞品策略洞察
 
-当前的差距主要在**生态层**（编排、GPU、镜像、SaaS），
-这些属于产品化范畴而非技术瓶颈。核心 Sandbox 能力已经达到甚至超越了主要竞品的水平。
+### 8.1 Anthropic SRT — 最直接的参照
+
+Anthropic SRT 和 mimibox 最相似：都是本地 OS 级沙箱，都支持 macOS + Linux。
+
+**SRT 的优势：**
+- 域名白名单网络代理（Agent 需要访问特定 API）
+- Claude Code 内置集成，零配置
+- WSL2 覆盖 Windows
+
+**mimibox 的优势：**
+- 三层隔离 vs SRT 单层 OS
+- Wasm 沙箱（SRT 无）
+- microVM 强隔离（SRT 无）
+- 预热池 0.38us（SRT 无）
+- Rust 零 GC（SRT 是 TypeScript）
+- Landlock + Seccomp 比 bwrap 更细粒度
+
+### 8.2 E2B — 市场验证者
+
+E2B 证明了 Agent Sandbox 赛道的价值：15M+/月沙箱调用，88% Fortune 100 使用。
+但它有结构性限制：
+
+- 仅 Firecracker microVM，无轻量级选项
+- SaaS 模式，数据经 E2B 云端
+- 冷启动 ~150ms，不适合高频低延迟场景
+- 需 KVM 环境，本地开发受限
+
+### 8.3 Daytona — 转型 Agent Sandbox
+
+Daytona 2025 年从开发环境平台转向 AI Agent 沙箱，说明市场趋势确认。
+Sysbox 容器隔离 + <90ms 冷启动 + 开源自托管，定位与 mimibox 有重叠。
+但仅容器级隔离，无 Wasm/microVM 选项。
+
+## 9. mimobox 路线图建议（基于竞品差距）
+
+| 优先级 | 方向 | 竞品参照 | 预期影响 |
+|--------|------|---------|---------|
+| **P0** | 网络代理（域名白名单/黑名单） | Anthropic SRT | Agent 可执行需要网络的任务 |
+| **P0** | Agent 框架 SDK（Python/TS） | E2B SDK | LangChain/CrewAI 集成 |
+| **P1** | 编排 API（批量创建/调度/回收） | Daytona API | 生产级 Agent 调度 |
+| **P1** | Windows 支持（AppContainer） | Anthropic SRT WSL2 | 全平台覆盖 |
+| **P2** | GPU 直通（microVM 级） | Modal | ML 推理场景 |
+| **P2** | OCI 镜像支持 | Docker/Kata | 现有镜像生态兼容 |
+
+## 10. 结论
+
+mimibox 在 Agent Sandbox 赛道的核心优势：
+
+1. **唯一三层隔离** — 竞品均为单层，mimibox 让 Agent 按需选择安全/性能平衡点
+2. **极致性能** — Wasm 0.61ms 冷启动、预热池 0.38us P99，无竞品接近
+3. **Rust + 零 GC** — 适合 Agent 高频调用的确定性延迟需求
+4. **真自托管** — 单 binary，无外部依赖，数据不出域
+
+关键差距在**生态层**（网络代理、SDK、编排），属于产品化范畴。
+核心 Sandbox 引擎能力已达到或超过直接竞品水平。
