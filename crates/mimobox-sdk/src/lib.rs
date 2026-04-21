@@ -97,6 +97,14 @@ impl Sandbox {
         Ok(result.into())
     }
 
+    /// 返回当前实例实际使用的隔离层级。
+    ///
+    /// 当 `execute()` 成功执行至少一次后，该值应为非 `None`，可用于上层查询
+    /// Auto 路由后的真实后端。
+    pub fn active_isolation(&self) -> Option<IsolationLevel> {
+        self.active_isolation
+    }
+
     /// 销毁沙箱，释放资源
     pub fn destroy(self) -> Result<(), SdkError> {
         match self.inner {
