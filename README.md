@@ -52,10 +52,17 @@ mimobox/
 │   ├── mimobox-vm/       # microVM 沙箱（KVM）
 │   └── mimobox-cli/      # CLI 入口
 ├── scripts/              # 构建/测试/运行脚本
-│   ├── build-rootfs.sh
-│   ├── extract-vmlinux.sh
+│   ├── setup.sh          # 初始化 Rust 工具链
+│   ├── build-rootfs.sh   # KVM rootfs 构建
+│   ├── extract-vmlinux.sh # 提取 vmlinux
 │   ├── extract-vmlinux.py
-│   └── test-e2e.sh
+│   ├── test.sh           # 运行测试
+│   ├── test-e2e.sh       # 跨后端 e2e 验证
+│   ├── check.sh          # cargo check / clippy / fmt
+│   └── bench.sh          # criterion 基准
+├── vendor/               # rust-vmm crate 兼容 shim
+├── examples/             # 示例代码
+├── tests/                # 集成测试
 ├── docs/
 │   └── research/         # 技术调研报告
 ├── discuss/              # 讨论、评审、方案权衡
@@ -74,9 +81,11 @@ mimobox/
 | microVM (KVM) | 冷启动 | 65.78ms | 69.52ms | <200ms |
 | microVM (KVM) | 快照恢复 | 41.25ms | 42.07ms | <50ms |
 
+> **注**：microVM 性能数据基于 `emulate_guest_command` 硬编码 stub（仅实现 echo/true），替换为 vsock 真实通信后需重新基线。详见 `discuss/product-strategy-review.md`。
+
 与 Agent Sandbox 竞品对比：
 
-| 指标 | mimibox | Anthropic SRT | E2B | Daytona |
+| 指标 | mimobox | Anthropic SRT | E2B | Daytona |
 | --- | --- | --- | --- | --- |
 | Wasm 冷启动 | **0.61ms** | — | — | — |
 | OS 冷启动 | **3.51ms** | ~0ms | — | — |
@@ -110,7 +119,7 @@ scripts/test-e2e.sh                               # 跨后端 e2e 验证（6 个
 scripts/build-rootfs.sh                           # KVM rootfs 构建（仅 Linux）
 scripts/extract-vmlinux.sh <output_path>          # 提取 vmlinux（仅 Linux）
 scripts/check.sh                                  # cargo check / clippy / fmt --check
-scripts/bench.sh                                  # 运行 criterion 基准
+scripts/bench.sh                                  # 运行 criterion 基准（默认 mimobox-os，可传 mimobox-vm 跑 KVM）
 ```
 
 ## 6. 文档与状态
@@ -125,7 +134,7 @@ scripts/bench.sh                                  # 运行 criterion 基准
 
 ### CI 状态
 
-9 个 job 全绿：`check`、`release-check`、`test-linux`、`test-linux-kvm`（3 个 e2e）、`test-e2e`（6 个跨后端）、`test-wasm`、`test-macos`、`clippy`、`fmt`。
+9 个 job 全绿：`check`、`release-check`、`test-linux`、`test-linux-kvm`、`test-e2e`、`test-wasm`、`test-macos`、`clippy`、`fmt`。`test-linux-kvm` 运行 `cargo test -p mimobox-vm --features kvm`，`test-e2e` 通过 `scripts/test-e2e.sh` 执行 6 个跨后端验证用例。
 
 ### 路线图
 

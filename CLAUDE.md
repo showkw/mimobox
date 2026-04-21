@@ -34,9 +34,12 @@ mimobox/
 ├── crates/
 │   ├── mimobox-core/   # Sandbox trait + Config + Result + Error
 │   ├── mimobox-os/     # OS 级沙箱（Linux Landlock+Seccomp+NS / macOS Seatbelt）
-│   ├── mimibox-wasm/   # Wasm 沙箱（Wasmtime，feature "wasm"）
+│   ├── mimobox-wasm/   # Wasm 沙箱（Wasmtime，feature "wasm"）
 │   ├── mimobox-vm/     # microVM 沙箱（KVM，feature "kvm"）
 │   └── mimobox-cli/    # CLI 入口
+├── vendor/             # rust-vmm crate 兼容 shim（kvm-ioctls/vm-memory/vmm-sys-util）
+├── examples/           # 示例代码（wasm-tools/）
+├── tests/              # 集成测试
 ├── wit/                # WIT 接口定义
 │   └── mimobox.wit
 ├── scripts/            # 构建/测试/运行脚本（必须通过脚本执行）
