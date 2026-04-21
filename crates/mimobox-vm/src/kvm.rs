@@ -571,6 +571,20 @@ impl KvmBackend {
         &self.serial_buffer
     }
 
+    /// 返回 guest 是否已经进入 READY 状态。
+    pub fn is_guest_ready(&self) -> bool {
+        self.lifecycle == KvmLifecycle::Ready && self.guest_ready
+    }
+
+    /// 清理池化复用时不应泄漏到下一次借出的宿主侧状态。
+    pub fn clear_pool_artifacts(&mut self) {
+        self.serial_buffer.clear();
+        self.last_command_payload.clear();
+        self.last_exit_reason = None;
+        self.last_io_detail = None;
+        self.recent_io_details.clear();
+    }
+
     /// 初始化 vCPU 启动寄存器并进入真实 `KVM_RUN` 循环。
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
