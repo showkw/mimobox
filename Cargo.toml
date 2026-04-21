@@ -6,6 +6,7 @@ members = [
     "crates/mimobox-wasm",
     "crates/mimobox-cli",
     "crates/mimobox-vm",
+    "crates/mimobox-sdk",
 ]
 
 # 默认排除 mimobox-wasm（需要 Rust >= 1.91 或 Linux 环境）
@@ -14,6 +15,7 @@ default-members = [
     "crates/mimobox-core",
     "crates/mimobox-os",
     "crates/mimobox-cli",
+    "crates/mimobox-sdk",
 ]
 
 [workspace.package]
