@@ -1358,6 +1358,7 @@ dependencies = [
  "libc",
  "mimobox-core",
  "mimobox-os",
+ "mimobox-vm",
  "mimobox-wasm",
  "serde",
  "serde_json",
