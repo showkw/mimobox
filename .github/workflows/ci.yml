@@ -79,6 +79,12 @@ jobs:
       - name: Test Linux Crates
         run: cargo test --features mimobox-cli/wasm
 
+      - name: Test mimobox-sdk with os feature
+        run: cargo test -p mimobox-sdk --features os
+
+      - name: Check mimobox-sdk with os and vm features
+        run: cargo check -p mimobox-sdk --features os,vm
+
   test-linux-kvm:
     runs-on: ubuntu-latest
     env:
@@ -336,6 +342,9 @@ jobs:
 
       - name: Test macOS Crates
         run: cargo test
+
+      - name: Test mimobox-sdk on macOS
+        run: cargo test -p mimobox-sdk
 
   clippy:
     runs-on: ubuntu-latest
