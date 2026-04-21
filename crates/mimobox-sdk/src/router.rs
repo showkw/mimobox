@@ -29,8 +29,14 @@ pub(crate) fn resolve_isolation(
             }
         }
         IsolationLevel::MicroVm => {
-            // microVM 后端尚未集成到 SDK
-            Err(SdkError::BackendUnavailable("microvm"))
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            {
+                Ok(IsolationLevel::MicroVm)
+            }
+            #[cfg(not(all(feature = "vm", target_os = "linux")))]
+            {
+                Err(SdkError::BackendUnavailable("microvm"))
+            }
         }
     }
 }
@@ -49,8 +55,12 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
         }
     }
 
-    // 不可信代码 → 需要 microVM（尚未集成），fallback 到 OS 级并记录警告
+    // 不可信代码优先走 microVM；若当前构建或平台不支持，则 fallback 到 OS 级。
     if trust_level == TrustLevel::Untrusted {
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        return Ok(IsolationLevel::MicroVm);
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
         tracing::warn!(
             "Untrusted 代码建议使用 microVM 隔离，当前 fallback 到 OS 级（隔离强度较低）"
         );
@@ -89,10 +99,32 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_warns_about_isolation() {
+    fn untrusted_prefers_microvm_when_available() {
         let result = auto_route(TrustLevel::Untrusted, "python script.py");
-        // 不论结果如何，不应 panic
-        assert!(result.is_ok() || result.is_err());
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+
+        #[cfg(all(not(all(feature = "vm", target_os = "linux")), feature = "os"))]
+        assert_eq!(result.unwrap(), IsolationLevel::Os);
+
+        #[cfg(not(any(all(feature = "vm", target_os = "linux"), feature = "os")))]
+        assert!(matches!(result, Err(SdkError::BackendUnavailable("os"))));
+    }
+
+    #[test]
+    fn explicit_microvm_selection_reflects_backend_availability() {
+        let config = Config::builder().isolation(IsolationLevel::MicroVm).build();
+        let result = resolve_isolation(&config, "python script.py");
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        assert!(matches!(
+            result,
+            Err(SdkError::BackendUnavailable("microvm"))
+        ));
     }
 
     #[test]

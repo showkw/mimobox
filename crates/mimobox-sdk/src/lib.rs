@@ -40,6 +40,8 @@ enum SandboxInner {
     Os(mimobox_os::LinuxSandbox),
     #[cfg(all(feature = "os", target_os = "macos"))]
     OsMac(mimobox_os::MacOsSandbox),
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    MicroVm(mimobox_vm::MicrovmSandbox),
     #[cfg(feature = "wasm")]
     Wasm(mimobox_wasm::WasmSandbox),
 }
@@ -60,6 +62,8 @@ macro_rules! dispatch_execute {
             SandboxInner::Os($binding) => $expr,
             #[cfg(all(feature = "os", target_os = "macos"))]
             SandboxInner::OsMac($binding) => $expr,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm($binding) => $expr,
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm($binding) => $expr,
         }
@@ -155,9 +159,21 @@ fn create_inner(config: &Config, isolation: IsolationLevel) -> Result<SandboxInn
                 Err(SdkError::BackendUnavailable("wasm"))
             }
         }
-        IsolationLevel::Auto | IsolationLevel::MicroVm => {
-            Err(SdkError::BackendUnavailable("请求的后端"))
+        IsolationLevel::MicroVm => {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            {
+                let microvm_config = config.to_microvm_config()?;
+                let sandbox =
+                    mimobox_vm::MicrovmSandbox::new_with_base(sandbox_config, microvm_config)
+                        .map_err(|error| SdkError::CreateFailed(error.to_string()))?;
+                Ok(SandboxInner::MicroVm(sandbox))
+            }
+            #[cfg(not(all(feature = "vm", target_os = "linux")))]
+            {
+                Err(SdkError::BackendUnavailable("microvm"))
+            }
         }
+        IsolationLevel::Auto => Err(SdkError::BackendUnavailable("auto")),
     }
 }
 
@@ -167,6 +183,8 @@ fn destroy_inner(inner: SandboxInner) -> Result<(), SdkError> {
         SandboxInner::Os(sandbox) => sandbox.destroy(),
         #[cfg(all(feature = "os", target_os = "macos"))]
         SandboxInner::OsMac(sandbox) => sandbox.destroy(),
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        SandboxInner::MicroVm(sandbox) => sandbox.destroy(),
         #[cfg(feature = "wasm")]
         SandboxInner::Wasm(sandbox) => sandbox.destroy(),
     };
@@ -197,6 +215,8 @@ fn has_os_backend(sandbox: &Sandbox) -> bool {
         Some(SandboxInner::Os(_)) => true,
         #[cfg(all(feature = "os", target_os = "macos"))]
         Some(SandboxInner::OsMac(_)) => true,
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        Some(SandboxInner::MicroVm(_)) => false,
         #[cfg(feature = "wasm")]
         Some(SandboxInner::Wasm(_)) => false,
         None => false,
@@ -213,6 +233,8 @@ fn has_wasm_backend(sandbox: &Sandbox) -> bool {
         Some(SandboxInner::Os(_)) => false,
         #[cfg(all(feature = "os", target_os = "macos"))]
         Some(SandboxInner::OsMac(_)) => false,
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        Some(SandboxInner::MicroVm(_)) => false,
         None => false,
     }
 }
