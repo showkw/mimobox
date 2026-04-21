@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use mimobox_core::SandboxConfig;
+use mimobox_core::{SandboxConfig, SeccompProfile};
 
 /// 隔离层级选择
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,16 +95,27 @@ impl Config {
 
     /// 转换为 mimibox-core 的 SandboxConfig
     pub(crate) fn to_sandbox_config(&self) -> SandboxConfig {
+        let deny_network = resolve_deny_network(&self.network);
+
         SandboxConfig {
             fs_readonly: self.fs_readonly.clone(),
             fs_readwrite: self.fs_readwrite.clone(),
-            // 域名级白名单/黑名单尚未实现，当前统一回退到“拒绝所有网络”。
-            deny_network: true,
+            deny_network,
             memory_limit_mb: self.memory_limit_mb,
             timeout_secs: self.timeout.map(round_up_timeout_secs),
-            seccomp_profile: mimobox_core::SeccompProfile::Essential,
+            seccomp_profile: resolve_seccomp_profile(deny_network, self.allow_fork),
             allow_fork: self.allow_fork,
         }
+    }
+}
+
+fn resolve_deny_network(network: &NetworkPolicy) -> bool {
+    match network {
+        NetworkPolicy::DenyAll => true,
+        // allow-list 语义尚未实现，在底层沙箱仍按“拒绝全部网络”处理。
+        NetworkPolicy::AllowDomains(_) => true,
+        // deny-list 目前无法下沉到域名级过滤，按“允许网络”保留调用方意图。
+        NetworkPolicy::DenyDomains(_) => false,
     }
 }
 
@@ -112,6 +123,15 @@ fn round_up_timeout_secs(timeout: Duration) -> u64 {
     let millis = timeout.as_millis();
     let seconds = millis.div_ceil(1_000);
     u64::try_from(seconds).unwrap_or(u64::MAX)
+}
+
+fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfile {
+    match (deny_network, allow_fork) {
+        (true, true) => SeccompProfile::EssentialWithFork,
+        (true, false) => SeccompProfile::Essential,
+        (false, true) => SeccompProfile::NetworkWithFork,
+        (false, false) => SeccompProfile::Network,
+    }
 }
 
 /// Config 构建器
@@ -177,6 +197,21 @@ mod tests {
             .build();
 
         assert!(config.to_sandbox_config().deny_network);
+    }
+
+    #[test]
+    fn deny_domains_preserves_allow_network_intent_for_cli_mapping() {
+        let config = Config::builder()
+            .network(NetworkPolicy::DenyDomains(Vec::new()))
+            .allow_fork(true)
+            .build();
+        let sandbox_config = config.to_sandbox_config();
+
+        assert!(!sandbox_config.deny_network);
+        assert!(matches!(
+            sandbox_config.seccomp_profile,
+            SeccompProfile::NetworkWithFork
+        ));
     }
 
     #[test]

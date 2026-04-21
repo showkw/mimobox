@@ -1390,6 +1390,7 @@ dependencies = [
  "libc",
  "mimobox-core",
  "mimobox-os",
+ "mimobox-sdk",
  "mimobox-vm",
  "mimobox-wasm",
  "serde",

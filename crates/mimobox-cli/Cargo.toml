@@ -8,6 +8,7 @@ description = "mimobox 命令行入口"
 [dependencies]
 mimobox-core.workspace = true
 mimobox-os.workspace = true
+mimobox-sdk.workspace = true
 mimobox-wasm = { workspace = true, optional = true }
 clap.workspace = true
 libc.workspace = true

@@ -7,7 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
@@ -17,6 +17,10 @@ use mimobox_os::LinuxSandbox;
 use mimobox_os::MacOsSandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use mimobox_os::run_pool_benchmark;
+use mimobox_sdk::{
+    Config as SdkConfig, ExecuteResult as SdkExecuteResult, NetworkPolicy as SdkNetworkPolicy,
+    Sandbox as SdkSandbox,
+};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
 #[cfg(feature = "wasm")]
@@ -53,9 +57,11 @@ enum CliCommand {
     Version,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum, Default)]
 #[serde(rename_all = "kebab-case")]
 enum Backend {
+    #[default]
+    Auto,
     Os,
     Wasm,
     Kvm,
@@ -72,7 +78,7 @@ enum BenchTarget {
 #[derive(Debug, Args)]
 struct RunArgs {
     /// 选择后端
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
     backend: Backend,
 
     /// 待执行命令，使用 shell 风格字符串，例如："/bin/echo hello"
@@ -171,6 +177,12 @@ struct VersionResponse {
     version: &'static str,
     enabled_features: Vec<&'static str>,
     target_os: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunExecutionMode {
+    Sdk,
+    Direct,
 }
 
 #[derive(Debug, Error)]
@@ -358,20 +370,34 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     );
 
     let argv = parse_command(&args.command)?;
-    let config = build_sandbox_config(
-        args.memory,
-        args.timeout,
-        args.deny_network,
-        args.allow_fork,
-    );
-    let memory_mb = config.memory_limit_mb;
-    let timeout_secs = config.timeout_secs;
-    let deny_network = config.deny_network;
-    let allow_fork = config.allow_fork;
-    let result = match args.backend {
-        Backend::Os => execute_os_backend(config, &argv)?,
-        Backend::Wasm => execute_wasm_backend(config, &argv)?,
-        Backend::Kvm => execute_kvm_backend(config, &argv, &args)?,
+    let memory_mb = Some(args.memory.unwrap_or(DEFAULT_MEMORY_MB));
+    let timeout_secs = normalize_timeout(args.timeout);
+    let deny_network = args.deny_network;
+    let allow_fork = args.allow_fork;
+
+    let result = match resolve_run_execution_mode(args.backend) {
+        RunExecutionMode::Sdk => handle_run_via_sdk(
+            &args.command,
+            args.memory,
+            args.timeout,
+            args.deny_network,
+            args.allow_fork,
+        )?,
+        RunExecutionMode::Direct => {
+            let config = build_sandbox_config(
+                args.memory,
+                args.timeout,
+                args.deny_network,
+                args.allow_fork,
+            );
+
+            match args.backend {
+                Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
+                Backend::Os => execute_os_backend(config, &argv)?,
+                Backend::Wasm => execute_wasm_backend(config, &argv)?,
+                Backend::Kvm => execute_kvm_backend(config, &argv, &args)?,
+            }
+        }
     };
 
     Ok(RunResponse {
@@ -388,6 +414,13 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
         deny_network,
         allow_fork,
     })
+}
+
+fn resolve_run_execution_mode(backend: Backend) -> RunExecutionMode {
+    match backend {
+        Backend::Auto => RunExecutionMode::Sdk,
+        Backend::Os | Backend::Wasm | Backend::Kvm => RunExecutionMode::Direct,
+    }
 }
 
 fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
@@ -467,6 +500,29 @@ fn build_sandbox_config(
     }
 }
 
+fn build_sdk_config(
+    memory: Option<u64>,
+    timeout: Option<u64>,
+    deny_network: bool,
+    allow_fork: bool,
+) -> SdkConfig {
+    SdkConfig {
+        memory_limit_mb: Some(memory.unwrap_or(DEFAULT_MEMORY_MB)),
+        timeout: normalize_timeout(timeout).map(Duration::from_secs),
+        network: build_sdk_network_policy(deny_network),
+        allow_fork,
+        ..SdkConfig::default()
+    }
+}
+
+fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
+    if deny_network {
+        SdkNetworkPolicy::DenyAll
+    } else {
+        SdkNetworkPolicy::DenyDomains(Vec::new())
+    }
+}
+
 fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
     match timeout {
         Some(0) => None,
@@ -491,6 +547,55 @@ fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
         return Err(CliError::EmptyCommand);
     }
     Ok(argv)
+}
+
+fn handle_run_via_sdk(
+    command: &str,
+    memory: Option<u64>,
+    timeout: Option<u64>,
+    deny_network: bool,
+    allow_fork: bool,
+) -> Result<SandboxResult, CliError> {
+    let config = build_sdk_config(memory, timeout, deny_network, allow_fork);
+    info!(
+        memory_mb = config.memory_limit_mb,
+        timeout_secs = config.timeout.as_ref().map(Duration::as_secs),
+        deny_network,
+        allow_fork,
+        "使用 SDK 智能路由执行命令"
+    );
+
+    let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
+    let execute_result = sandbox.execute(command);
+
+    match execute_result {
+        Ok(result) => {
+            sandbox.destroy().map_err(map_sdk_error)?;
+            Ok(sdk_result_into_sandbox_result(result))
+        }
+        Err(error) => {
+            if let Err(destroy_error) = sandbox.destroy() {
+                warn!(message = %destroy_error, "SDK 执行失败后销毁沙箱也失败");
+            }
+            Err(map_sdk_error(error))
+        }
+    }
+}
+
+fn sdk_result_into_sandbox_result(result: SdkExecuteResult) -> SandboxResult {
+    SandboxResult {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        elapsed: result.elapsed,
+        timed_out: result.timed_out,
+    }
+}
+
+fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
+    CliError::Sandbox(SandboxError::ExecutionFailed(format!(
+        "SDK 智能路由失败: {error}"
+    )))
 }
 
 fn emit_success_json(response: &CommandResponse) -> Result<(), CliError> {
@@ -836,6 +941,53 @@ mod tests {
             }
             _ => panic!("应解析为 run 子命令"),
         }
+    }
+
+    #[test]
+    fn run_subcommand_defaults_to_auto_backend() {
+        let cli = Cli::try_parse_from(["mimobox", "run", "--command", "/bin/echo hello"])
+            .expect("未显式指定 backend 时应默认走 auto");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.backend, Backend::Auto);
+                assert_eq!(args.command, "/bin/echo hello");
+            }
+            _ => panic!("应解析为 run 子命令"),
+        }
+    }
+
+    #[test]
+    fn auto_backend_routes_to_sdk_executor() {
+        assert_eq!(
+            resolve_run_execution_mode(Backend::Auto),
+            RunExecutionMode::Sdk
+        );
+        assert_eq!(
+            resolve_run_execution_mode(Backend::Os),
+            RunExecutionMode::Direct
+        );
+        assert_eq!(
+            resolve_run_execution_mode(Backend::Wasm),
+            RunExecutionMode::Direct
+        );
+        assert_eq!(
+            resolve_run_execution_mode(Backend::Kvm),
+            RunExecutionMode::Direct
+        );
+    }
+
+    #[test]
+    fn sdk_config_maps_cli_flags() {
+        let config = build_sdk_config(Some(256), Some(10), true, true);
+
+        assert_eq!(config.memory_limit_mb, Some(256));
+        assert_eq!(config.timeout, Some(std::time::Duration::from_secs(10)));
+        assert!(matches!(
+            config.network,
+            mimobox_sdk::NetworkPolicy::DenyAll
+        ));
+        assert!(config.allow_fork);
     }
 
     #[test]
