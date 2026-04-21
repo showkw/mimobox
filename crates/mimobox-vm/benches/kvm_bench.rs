@@ -6,7 +6,10 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_core::SandboxConfig;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use mimobox_vm::{KvmBackend, KvmExitReason, MicrovmConfig, microvm_config_from_vm_assets};
+use mimobox_vm::{
+    KvmBackend, KvmExitReason, MicrovmConfig, VmPool, VmPoolConfig,
+    microvm_config_from_vm_assets,
+};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -157,11 +160,44 @@ fn bench_command_execution(c: &mut Criterion) {
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+fn bench_pool_hot_path(c: &mut Criterion) {
+    use std::time::Duration;
+
+    let config = benchmark_config();
+    let pool_config = VmPoolConfig {
+        min_size: 1,
+        max_size: 4,
+        max_idle_duration: Duration::from_secs(60),
+        health_check_interval: None,
+    };
+    let pool = must(VmPool::new(config, pool_config), "创建预热池失败");
+    let command = guest_cmd(&["/bin/echo", "hello"]);
+
+    c.bench_function("bench_pool_hot_path", |b| {
+        b.iter_custom(|iters| {
+            let total_start = Instant::now();
+
+            for _ in 0..iters {
+                let mut pooled = must(pool.acquire(), "从预热池获取 VM 失败");
+                let result =
+                    must(pooled.execute(black_box(command.as_slice())), "预热池命令执行失败");
+                assert_eq!(result.exit_code, Some(0), "预热池 echo 命令必须成功");
+                black_box(result);
+                drop(pooled);
+            }
+
+            total_start.elapsed()
+        });
+    });
+}
+
+#[cfg(all(target_os = "linux", feature = "kvm"))]
 criterion_group!(
     kvm_benches,
     bench_cold_start,
     bench_snapshot_restore,
-    bench_command_execution
+    bench_command_execution,
+    bench_pool_hot_path
 );
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 criterion_main!(kvm_benches);
