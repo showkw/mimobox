@@ -98,13 +98,20 @@ impl Config {
         SandboxConfig {
             fs_readonly: self.fs_readonly.clone(),
             fs_readwrite: self.fs_readwrite.clone(),
-            deny_network: !matches!(self.network, NetworkPolicy::AllowDomains(_)),
+            // 域名级白名单/黑名单尚未实现，当前统一回退到“拒绝所有网络”。
+            deny_network: true,
             memory_limit_mb: self.memory_limit_mb,
-            timeout_secs: self.timeout.map(|d| d.as_secs()),
+            timeout_secs: self.timeout.map(round_up_timeout_secs),
             seccomp_profile: mimobox_core::SeccompProfile::Essential,
             allow_fork: self.allow_fork,
         }
     }
+}
+
+fn round_up_timeout_secs(timeout: Duration) -> u64 {
+    let millis = timeout.as_millis();
+    let seconds = millis.div_ceil(1_000);
+    u64::try_from(seconds).unwrap_or(u64::MAX)
 }
 
 /// Config 构建器
@@ -156,5 +163,30 @@ impl ConfigBuilder {
 
     pub fn build(self) -> Config {
         self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_domains_still_denies_network_until_whitelist_is_implemented() {
+        let config = Config::builder()
+            .network(NetworkPolicy::AllowDomains(vec!["example.com".to_string()]))
+            .build();
+
+        assert!(config.to_sandbox_config().deny_network);
+    }
+
+    #[test]
+    fn timeout_rounds_up_instead_of_truncating_subsecond_precision() {
+        let config = Config::builder()
+            .timeout(Duration::from_millis(1_500))
+            .build();
+        assert_eq!(config.to_sandbox_config().timeout_secs, Some(2));
+
+        let config = Config::builder().timeout(Duration::from_millis(1)).build();
+        assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
     }
 }

@@ -23,9 +23,7 @@ pub enum SdkError {
 impl From<mimobox_core::SandboxError> for SdkError {
     fn from(err: mimobox_core::SandboxError) -> Self {
         match err {
-            mimobox_core::SandboxError::ExecutionFailed(msg) => {
-                SdkError::ExecutionFailed(msg)
-            }
+            mimobox_core::SandboxError::ExecutionFailed(msg) => SdkError::ExecutionFailed(msg),
             other => SdkError::CreateFailed(other.to_string()),
         }
     }

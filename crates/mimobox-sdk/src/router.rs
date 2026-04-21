@@ -2,18 +2,31 @@ use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
 
 /// 智能路由器：根据命令内容和信任级别自动选择最优隔离层级
-pub(crate) fn resolve_isolation(config: &Config, command: &str) -> Result<IsolationLevel, SdkError> {
+pub(crate) fn resolve_isolation(
+    config: &Config,
+    command: &str,
+) -> Result<IsolationLevel, SdkError> {
     match config.isolation {
         IsolationLevel::Auto => auto_route(config.trust_level, command),
         IsolationLevel::Os => {
             #[cfg(not(feature = "os"))]
-            return Err(SdkError::BackendUnavailable("os"));
-            Ok(IsolationLevel::Os)
+            {
+                Err(SdkError::BackendUnavailable("os"))
+            }
+            #[cfg(feature = "os")]
+            {
+                Ok(IsolationLevel::Os)
+            }
         }
         IsolationLevel::Wasm => {
             #[cfg(not(feature = "wasm"))]
-            return Err(SdkError::BackendUnavailable("wasm"));
-            Ok(IsolationLevel::Wasm)
+            {
+                Err(SdkError::BackendUnavailable("wasm"))
+            }
+            #[cfg(feature = "wasm")]
+            {
+                Ok(IsolationLevel::Wasm)
+            }
         }
         IsolationLevel::MicroVm => {
             // microVM 后端尚未集成到 SDK
@@ -52,9 +65,7 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
 }
 
 fn is_wasm_command(command: &str) -> bool {
-    command.ends_with(".wasm")
-        || command.ends_with(".wat")
-        || command.ends_with(".wast")
+    command.ends_with(".wasm") || command.ends_with(".wat") || command.ends_with(".wast")
 }
 
 #[cfg(test)]
@@ -63,14 +74,15 @@ mod tests {
 
     #[test]
     fn wasm_file_routes_to_wasm() {
-        let config = Config::default();
         let result = auto_route(TrustLevel::Trusted, "app.wasm");
-        assert!(matches!(result, Ok(IsolationLevel::Wasm) | Ok(IsolationLevel::Os)));
+        assert!(matches!(
+            result,
+            Ok(IsolationLevel::Wasm) | Ok(IsolationLevel::Os)
+        ));
     }
 
     #[test]
     fn shell_command_routes_to_os() {
-        let config = Config::default();
         let result = auto_route(TrustLevel::Trusted, "/bin/echo hello");
         #[cfg(feature = "os")]
         assert_eq!(result.unwrap(), IsolationLevel::Os);

@@ -2,10 +2,13 @@
 
 use std::fs;
 
-use kvm_ioctls::{Kvm, VcpuFd, VmFd};
+#[cfg(target_arch = "x86_64")]
+use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
+use kvm_bindings::kvm_userspace_memory_region;
+use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use mimobox_core::SandboxConfig;
 use tracing::{debug, info};
-use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError};
@@ -13,7 +16,10 @@ use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError};
 const ZERO_PAGE_ADDR: u64 = 0x7_000;
 const CMDLINE_ADDR: u64 = 0x20_000;
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
+#[cfg(target_arch = "x86_64")]
+const BOOT_STACK_POINTER: u64 = 0x8_000;
 const DEFAULT_CMDLINE: &str = "console=ttyS0 panic=-1 rdinit=/init";
+const SERIAL_PORT_COM1: u16 = 0x3f8;
 const ZERO_PAGE_LEN: usize = 4096;
 const PT_LOAD: u32 = 1;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -31,7 +37,6 @@ const ZERO_PAGE_EXT_CMD_LINE_PTR: usize = 0x0c8;
 const ZERO_PAGE_E820_TABLE: usize = 0x2d0;
 const E820_ENTRY_SIZE: usize = 20;
 const E820_RAM: u32 = 1;
-const SERIAL_BOOT_BANNER: &[u8] = b"mimobox guest booted\n";
 
 /// 命令通道类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,12 +67,6 @@ pub enum KvmExitReason {
 struct LoadedKernel {
     entry_point: u64,
     high_watermark: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyntheticVmExit<'a> {
-    SerialWrite(&'a [u8]),
-    Hlt,
 }
 
 /// Linux KVM 后端基础实现。
@@ -148,6 +147,7 @@ impl KvmBackend {
             serial_buffer: Vec::new(),
             last_exit_reason: None,
         };
+        backend.register_guest_memory()?;
         backend.load_kernel()?;
         backend.load_initrd()?;
         backend.write_boot_params()?;
@@ -156,22 +156,91 @@ impl KvmBackend {
         Ok(backend)
     }
 
+    fn register_guest_memory(&self) -> Result<(), MicrovmError> {
+        let host_addr = self
+            .guest_memory
+            .get_host_address(GuestAddress(0))
+            .map_err(to_backend_error)? as u64;
+        let memory_size = u64::try_from(self.guest_memory.len())
+            .map_err(|_| MicrovmError::Backend("guest memory 长度无法转换为 u64".into()))?;
+        let memory_region = kvm_userspace_memory_region {
+            slot: 0,
+            guest_phys_addr: 0,
+            memory_size,
+            userspace_addr: host_addr,
+            flags: 0,
+        };
+
+        // SAFETY: `userspace_addr` 来自 `GuestMemoryMmap` 当前持有的连续映射，
+        // `guest_memory` 生命周期覆盖整个 `KvmBackend`，且当前仅注册一个不重叠的 slot 0。
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(memory_region)
+                .map_err(to_backend_error)?;
+        }
+        Ok(())
+    }
+
+    fn configure_boot_vcpus(&self) -> Result<(), MicrovmError> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let supported_cpuid = self
+                .kvm
+                .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
+                .map_err(to_backend_error)?;
+
+            for vcpu in &self.vcpus {
+                vcpu.set_cpuid2(&supported_cpuid)
+                    .map_err(to_backend_error)?;
+
+                let mut sregs = vcpu.get_sregs().map_err(to_backend_error)?;
+                sregs.cs.base = 0;
+                sregs.cs.selector = 0;
+                sregs.ds.base = 0;
+                sregs.ds.selector = 0;
+                sregs.es.base = 0;
+                sregs.es.selector = 0;
+                sregs.fs.base = 0;
+                sregs.fs.selector = 0;
+                sregs.gs.base = 0;
+                sregs.gs.selector = 0;
+                sregs.ss.base = 0;
+                sregs.ss.selector = 0;
+                vcpu.set_sregs(&sregs).map_err(to_backend_error)?;
+
+                let mut regs = vcpu.get_regs().map_err(to_backend_error)?;
+                regs.rip = self.loaded_kernel.entry_point;
+                regs.rsp = BOOT_STACK_POINTER;
+                regs.rsi = self.boot_params_addr;
+                regs.rflags = 0x2;
+                vcpu.set_regs(&regs).map_err(to_backend_error)?;
+            }
+
+            return Ok(());
+        }
+
+        #[allow(unreachable_code)]
+        Err(MicrovmError::Backend(
+            "当前 KVM bring-up 仅支持 x86_64".into(),
+        ))
+    }
+
     /// 返回累积的串口输出。
     pub fn serial_output(&self) -> &[u8] {
         &self.serial_buffer
     }
 
-    /// 启动 guest，直到 `KVM_EXIT_HLT`。
+    /// 初始化 vCPU 启动寄存器并进入真实 `KVM_RUN` 循环。
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
         }
 
         self.lifecycle = KvmLifecycle::Running;
-        let exit_reason = self.run_vcpu_loop(&[
-            SyntheticVmExit::SerialWrite(SERIAL_BOOT_BANNER),
-            SyntheticVmExit::Hlt,
-        ]);
+        let exit_reason = (|| {
+            self.configure_boot_vcpus()?;
+            self.run_vcpu_loop()
+        })();
         self.lifecycle = KvmLifecycle::Ready;
         let exit_reason = exit_reason?;
         self.guest_booted = true;
@@ -343,7 +412,7 @@ impl KvmBackend {
         self.write_guest_bytes(ROOTFS_METADATA_ADDR, metadata.as_bytes())
     }
 
-    /// 通过串口协议封装命令，驱动一次模拟 `KVM_RUN` 循环并返回结果。
+    /// 保持 `Sandbox` trait 返回结构兼容；正式 guest 命令通道尚未接入。
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
@@ -356,22 +425,18 @@ impl KvmBackend {
             let _ = self.boot()?;
         }
 
-        self.lifecycle = KvmLifecycle::Running;
         let payload = encode_command_payload(cmd)?;
         self.command_event.write(1).map_err(to_backend_error)?;
         self.last_command_payload = payload;
 
-        let result = emulate_guest_command(cmd);
-        if !result.stdout.is_empty() {
-            self.run_vcpu_loop(&[
-                SyntheticVmExit::SerialWrite(&result.stdout),
-                SyntheticVmExit::Hlt,
-            ])?;
-        } else {
-            self.run_vcpu_loop(&[SyntheticVmExit::Hlt])?;
-        }
-        self.lifecycle = KvmLifecycle::Ready;
-        Ok(result)
+        Ok(GuestCommandResult {
+            stdout: Vec::new(),
+            stderr: "guest 命令通道尚未实现，当前仅接通真实 KVM 启动链路\n"
+                .as_bytes()
+                .to_vec(),
+            exit_code: Some(127),
+            timed_out: false,
+        })
     }
 
     /// 导出快照所需的内存和 vCPU 状态。
@@ -398,27 +463,50 @@ impl KvmBackend {
         Ok(())
     }
 
-    fn run_vcpu_loop(
-        &mut self,
-        exits: &[SyntheticVmExit<'_>],
-    ) -> Result<KvmExitReason, MicrovmError> {
-        for exit in exits {
-            match exit {
-                SyntheticVmExit::SerialWrite(bytes) => {
-                    self.serial_buffer.extend_from_slice(bytes);
+    fn run_vcpu_loop(&mut self) -> Result<KvmExitReason, MicrovmError> {
+        let vcpu = self
+            .vcpus
+            .first_mut()
+            .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
+
+        loop {
+            match vcpu.run().map_err(to_backend_error)? {
+                VcpuExit::IoOut(port, data) if port == SERIAL_PORT_COM1 => {
+                    self.serial_buffer.extend_from_slice(data);
                     self.last_exit_reason = Some(KvmExitReason::Io);
                 }
-                SyntheticVmExit::Hlt => {
+                VcpuExit::MmioWrite(addr, data) => {
+                    debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
+                    self.last_exit_reason = Some(KvmExitReason::Io);
+                }
+                VcpuExit::Hlt => {
                     self.last_exit_reason = Some(KvmExitReason::Hlt);
                     return Ok(KvmExitReason::Hlt);
                 }
+                VcpuExit::Shutdown => {
+                    self.last_exit_reason = Some(KvmExitReason::Shutdown);
+                    return Ok(KvmExitReason::Shutdown);
+                }
+                VcpuExit::InternalError => {
+                    self.last_exit_reason = Some(KvmExitReason::InternalError);
+                    return Err(MicrovmError::Backend(
+                        "vCPU 进入 KVM_EXIT_INTERNAL_ERROR".into(),
+                    ));
+                }
+                VcpuExit::IoOut(port, _) => {
+                    self.last_exit_reason = Some(KvmExitReason::InternalError);
+                    return Err(MicrovmError::Backend(format!(
+                        "未处理的 PIO 写退出: port={port:#x}"
+                    )));
+                }
+                other => {
+                    self.last_exit_reason = Some(KvmExitReason::InternalError);
+                    return Err(MicrovmError::Backend(format!(
+                        "未处理的 vCPU 退出: {other:?}"
+                    )));
+                }
             }
         }
-
-        self.last_exit_reason = Some(KvmExitReason::InternalError);
-        Err(MicrovmError::Backend(
-            "vCPU 退出循环在未遇到 HLT 的情况下结束".into(),
-        ))
     }
 
     fn write_guest_bytes(&self, guest_addr: u64, bytes: &[u8]) -> Result<(), MicrovmError> {
@@ -465,39 +553,6 @@ impl KvmBackend {
     #[allow(dead_code)]
     fn _kvm(&self) -> &Kvm {
         &self.kvm
-    }
-}
-
-fn emulate_guest_command(cmd: &[String]) -> GuestCommandResult {
-    match cmd.first().map(String::as_str) {
-        Some("/bin/echo" | "echo") => {
-            let mut line = cmd[1..].join(" ");
-            line.push('\n');
-            GuestCommandResult {
-                stdout: line.into_bytes(),
-                stderr: Vec::new(),
-                exit_code: Some(0),
-                timed_out: false,
-            }
-        }
-        Some("/bin/true" | "true") => GuestCommandResult {
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            exit_code: Some(0),
-            timed_out: false,
-        },
-        Some(other) => GuestCommandResult {
-            stdout: Vec::new(),
-            stderr: format!("guest 命令尚未实现: {other}\n").into_bytes(),
-            exit_code: Some(127),
-            timed_out: false,
-        },
-        None => GuestCommandResult {
-            stdout: Vec::new(),
-            stderr: "命令为空\n".as_bytes().to_vec(),
-            exit_code: Some(127),
-            timed_out: false,
-        },
     }
 }
 
