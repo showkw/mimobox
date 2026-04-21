@@ -1392,6 +1392,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimobox-sdk"
+version = "0.1.0"
+dependencies = [
+ "mimobox-core",
+ "mimobox-os",
+ "mimobox-wasm",
+ "shlex",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "mimobox-vm"
 version = "0.1.0"
 dependencies = [

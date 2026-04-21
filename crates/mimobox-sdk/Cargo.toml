@@ -1,0 +1,22 @@
+[package]
+name = "mimobox-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mimobox SDK — 统一 Agent Sandbox API，默认智能路由 + 高级完全可控"
+
+[dependencies]
+mimobox-core.workspace = true
+mimobox-os = { workspace = true, optional = true }
+mimobox-wasm = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+shlex.workspace = true
+
+[features]
+default = ["os"]
+os = ["dep:mimobox-os"]
+wasm = ["dep:mimobox-wasm"]
+
+[lints]
+workspace = true
