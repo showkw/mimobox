@@ -1,11 +1,14 @@
 # mimobox
 
-Rust 实现的多后端 Agent Sandbox，提供统一 `Sandbox` trait，并支持三种隔离层级：OS 级、Wasm、microVM（KVM）。
+Rust 实现的跨平台 Agent Sandbox，为 AI Agent 提供安全隔离的代码执行环境。
+
+**默认智能路由，高级用户完全可控。** 零配置即可安全执行代码，SDK 同时暴露完整三层配置供精细控制。
 
 ## 版本记录表
 
 | 版本 | 日期 | 变更摘要 | 变更类型 | 责任人 |
 | --- | --- | --- | --- | --- |
+| v1.3 | 2026-04-21 | 更新产品定位：默认智能路由 + 高级完全可控 | 更新 | — |
 | v1.2 | 2026-04-21 | 按当前 workspace、CLI、脚本和 CI 状态重写 README | 更新 | Codex |
 | v1.1 | 2026-04-21 | 同步文档与代码现状，补充 `mimobox-vm`/KVM、性能与 CI 信息 | 更新 | Codex |
 | v1.0 | 2026-04-20 | 重写根目录 README，补齐架构、API、性能、脚本与安全模型说明 | 新增 | Codex |
@@ -31,7 +34,7 @@ Rust 实现的多后端 Agent Sandbox，提供统一 `Sandbox` trait，并支持
 
 ## 1. 项目简介
 
-`mimobox` 面向需要安全执行不可信命令、脚本或 Wasm 工具的场景。当前仓库已经按 Cargo workspace 拆分为五个 crate：
+`mimobox` 面向 AI Agent 安全执行代码的场景，追求极致性能和跨平台支持。当前仓库已经按 Cargo workspace 拆分为五个 crate：
 
 - `mimobox-core`：统一 trait、配置、结果和错误类型
 - `mimobox-os`：OS 级沙箱，覆盖 Linux + macOS

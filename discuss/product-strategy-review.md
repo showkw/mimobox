@@ -91,7 +91,7 @@ let sandbox = Sandbox::with_config(Config::builder()
 
 ## 4. 路线图
 
-### P0（0-3 月）：SDK + microVM 真实通信
+### P0（0-3 月）：SDK + microVM 真实通信 + 持续性能优化
 
 | 任务 | 理由 |
 |------|------|
@@ -99,6 +99,7 @@ let sandbox = Sandbox::with_config(Config::builder()
 | **Python/TypeScript 绑定** | Agent 开发者主要用 Python/TS，Rust-only 无法覆盖 |
 | **microVM vsock/串口通信** | `emulate_guest_command` 硬编码必须替换为真实通信 |
 | **智能路由第一版** | 基于文件类型 + 信任级别自动选层 |
+| **持续性能优化** | 追求每层冷启动、热获取、内存开销的业界最优 |
 
 验收标准：Agent 框架开发者在 5 分钟内完成 `cargo add mimibox` 到执行第一个沙箱命令。
 

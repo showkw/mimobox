@@ -2,16 +2,17 @@
 
 ## 项目简介
 
-mimobox 是一个用 Rust 实现的跨平台 Agent Sandbox，为 AI Agent 提供安全隔离的代码执行环境。追求极致性能和跨平台支持。
+mimobox 是一个用 Rust 实现的跨平台 Agent Sandbox，为 AI Agent 提供安全隔离的代码执行环境。
+
+核心定位：**默认智能路由，高级用户完全可控。** 零配置即可安全执行代码，同时 SDK 暴露完整三层配置供精细控制。
 
 ## 项目目标
 
-- 用 Rust 实现跨平台（Linux/macOS/Windows）Agent Sandbox
-- 极致性能：冷启动 <10ms，热获取 <1ms
-- 安全隔离：Landlock + Seccomp + Namespaces (Linux)，Seatbelt (macOS)，AppContainer (Windows)
-- 支持 OS 级进程沙箱、Wasm 沙箱、microVM 沙箱三种隔离层级
-- 统一的 Sandbox trait 抽象，按需选择隔离策略
-- 预热池机制实现微秒级沙箱获取
+- **极致性能**：持续优化冷启动、热获取、内存开销，追求每个层级都做到业界最优
+- **跨平台**：Linux（三层全开）+ macOS（OS+Wasm）+ Windows（规划中），开发者本地开发与生产部署统一体验
+- **三层隔离**：OS 级（Landlock+Seccomp+Namespaces）、Wasm（Wasmtime）、microVM（KVM），按需选择安全/性能平衡点
+- **默认智能路由 + 高级完全可控**：零配置自动选择最优层级，SDK 暴露完整配置供精细控制
+- **自托管 + 离线运行**：单 binary，无外部依赖，数据不出域
 
 ## 技术栈
 
@@ -30,17 +31,20 @@ mimobox/
 ├── AGENTS.md           # Agent 角色定义
 ├── .env                # 环境变量（敏感信息，已 gitignore）
 ├── Cargo.toml
-├── src/
-│   ├── main.rs         # CLI 入口
-│   ├── sandbox.rs      # Sandbox trait 定义
-│   ├── linux_backend.rs # Linux 后端实现
-│   ├── wasm_backend.rs  # Wasm 后端实现（feature "wasm"）
-│   └── pool.rs          # 预热池
+├── crates/
+│   ├── mimobox-core/   # Sandbox trait + Config + Result + Error
+│   ├── mimobox-os/     # OS 级沙箱（Linux Landlock+Seccomp+NS / macOS Seatbelt）
+│   ├── mimibox-wasm/   # Wasm 沙箱（Wasmtime，feature "wasm"）
+│   ├── mimobox-vm/     # microVM 沙箱（KVM，feature "kvm"）
+│   └── mimobox-cli/    # CLI 入口
 ├── wit/                # WIT 接口定义
 │   └── mimobox.wit
 ├── scripts/            # 构建/测试/运行脚本（必须通过脚本执行）
 ├── docs/
-│   └── research/       # 技术调研报告（13 份）
+│   └── research/       # 技术调研报告
+├── discuss/            # 讨论、评审、方案权衡
+│   ├── competitive-analysis.md     # Agent Sandbox 竞品分析
+│   └── product-strategy-review.md  # 产品战略评审记录
 └── logs/               # 日志目录
 ```
 
@@ -84,4 +88,14 @@ mimobox/
 - `docs/research/10-code-review-round2.md` — 第二轮代码审查报告
 - `docs/research/11-wasmtime-api-research.md` — Wasmtime API 技术调研
 - `docs/research/12-wit-interface-design.md` — WIT 接口设计文档
-- `docs/research/01~07` — 分领域深度研究
+- `discuss/competitive-analysis.md` — Agent Sandbox 竞品功能差异分析
+- `discuss/product-strategy-review.md` — 三层隔离架构战略评审记录
+
+## 路线图
+
+| 优先级 | 方向 | 时间 |
+|--------|------|------|
+| **P0** | SDK crate + microVM vsock 真实通信 + 智能路由 + 持续性能优化 | 0-3 月 |
+| **P1** | 网络代理（域名白名单）+ 统一网络抽象 | 3-6 月 |
+| **P2** | MCP 协议集成 + 编排 API | 6-12 月 |
+| **P3** | Windows 后端 + 可选 SaaS + GPU | 12 月+ |
