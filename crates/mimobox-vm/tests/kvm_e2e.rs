@@ -6,9 +6,24 @@ use std::path::PathBuf;
 use mimobox_core::{Sandbox, SandboxConfig};
 use mimobox_vm::{KvmBackend, KvmExitReason, MicrovmConfig, MicrovmSandbox};
 
+fn resolve_vm_assets_dir(
+    vm_assets_override: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = vm_assets_override {
+        return path;
+    }
+
+    home_dir
+        .expect("必须存在 HOME 环境变量或设置 VM_ASSETS_DIR")
+        .join("mimobox-poc/vm-assets")
+}
+
 fn vm_assets_dir() -> PathBuf {
-    let home = env::var("HOME").expect("必须存在 HOME 环境变量");
-    PathBuf::from(home).join("mimobox-poc/vm-assets")
+    resolve_vm_assets_dir(
+        env::var_os("VM_ASSETS_DIR").map(PathBuf::from),
+        env::var_os("HOME").map(PathBuf::from),
+    )
 }
 
 fn e2e_config() -> MicrovmConfig {
@@ -37,6 +52,24 @@ fn e2e_config() -> MicrovmConfig {
 
 fn guest_cmd(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_string()).collect()
+}
+
+#[test]
+fn test_vm_assets_dir_prefers_env_override() {
+    let override_dir = PathBuf::from("/tmp/mimobox-custom-vm-assets");
+
+    let actual = resolve_vm_assets_dir(Some(override_dir.clone()), None);
+
+    assert_eq!(actual, override_dir);
+}
+
+#[test]
+fn test_vm_assets_dir_falls_back_to_home_default() {
+    let home_dir = PathBuf::from("/tmp/mimobox-home");
+
+    let actual = resolve_vm_assets_dir(None, Some(home_dir.clone()));
+
+    assert_eq!(actual, home_dir.join("mimobox-poc/vm-assets"));
 }
 
 #[test]
