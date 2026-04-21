@@ -3,6 +3,8 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe};
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +17,8 @@ use mimobox_os::LinuxSandbox;
 use mimobox_os::MacOsSandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use mimobox_os::run_pool_benchmark;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
 #[cfg(feature = "wasm")]
 use mimobox_wasm::WasmSandbox;
 use serde::Serialize;
@@ -54,6 +58,7 @@ enum CliCommand {
 enum Backend {
     Os,
     Wasm,
+    Kvm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -89,6 +94,18 @@ struct RunArgs {
     /// 是否允许子进程 fork/clone
     #[arg(long, default_value_t = false)]
     allow_fork: bool,
+
+    /// KVM 内核镜像路径
+    #[arg(long)]
+    kernel: Option<String>,
+
+    /// KVM rootfs 路径
+    #[arg(long)]
+    rootfs: Option<String>,
+
+    /// KVM vCPU 数量
+    #[arg(long, default_value_t = 1)]
+    vcpu_count: u8,
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +204,12 @@ enum CliError {
     #[allow(dead_code)]
     WasmFeatureDisabled,
 
+    #[error(
+        "当前构建未启用 KVM 后端，或当前平台不支持，请在 Linux 上使用 `--features kvm` 重新编译"
+    )]
+    #[allow(dead_code)]
+    KvmFeatureDisabled,
+
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[error("当前平台不支持预热池基准")]
     BenchUnsupported,
@@ -211,6 +234,7 @@ impl CliError {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::UnsupportedOsBackend => "unsupported_os_backend",
             Self::WasmFeatureDisabled => "wasm_feature_disabled",
+            Self::KvmFeatureDisabled => "kvm_feature_disabled",
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::BenchUnsupported => "bench_unsupported",
             Self::Benchmark(_) => "benchmark_error",
@@ -327,6 +351,9 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
         timeout_secs = ?normalize_timeout(args.timeout),
         deny_network = args.deny_network,
         allow_fork = args.allow_fork,
+        kernel = args.kernel.as_deref().unwrap_or("default"),
+        rootfs = args.rootfs.as_deref().unwrap_or("default"),
+        vcpu_count = args.vcpu_count,
         "准备执行 run 子命令"
     );
 
@@ -344,6 +371,7 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     let result = match args.backend {
         Backend::Os => execute_os_backend(config, &argv)?,
         Backend::Wasm => execute_wasm_backend(config, &argv)?,
+        Backend::Kvm => execute_kvm_backend(config, &argv, &args)?,
     };
 
     Ok(RunResponse {
@@ -410,6 +438,9 @@ fn handle_version() -> VersionResponse {
     let mut enabled_features = Vec::new();
     if cfg!(feature = "wasm") {
         enabled_features.push("wasm");
+    }
+    if cfg!(feature = "kvm") {
+        enabled_features.push("kvm");
     }
 
     VersionResponse {
@@ -524,6 +555,54 @@ fn execute_wasm_backend(
     Err(CliError::WasmFeatureDisabled)
 }
 
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn execute_kvm_backend(
+    config: SandboxConfig,
+    argv: &[String],
+    args: &RunArgs,
+) -> Result<SandboxResult, CliError> {
+    info!("使用 KVM microVM 后端执行命令");
+
+    let memory_limit_mb = config.memory_limit_mb.unwrap_or(DEFAULT_MEMORY_MB);
+    let memory_mb = u32::try_from(memory_limit_mb).map_err(|_| {
+        CliError::Sandbox(SandboxError::ExecutionFailed(format!(
+            "KVM guest memory 超出 u32 范围: {memory_limit_mb} MB"
+        )))
+    })?;
+
+    let mut microvm_config = MicrovmConfig {
+        vcpu_count: args.vcpu_count,
+        memory_mb,
+        ..MicrovmConfig::default()
+    };
+
+    if let Some(kernel) = args.kernel.as_ref() {
+        microvm_config.kernel_path = PathBuf::from(kernel);
+    }
+
+    if let Some(rootfs) = args.rootfs.as_ref() {
+        microvm_config.rootfs_path = PathBuf::from(rootfs);
+    }
+
+    microvm_config
+        .validate()
+        .map_err(|error| CliError::Sandbox(error.into()))?;
+
+    execute_with_sandbox_specific(config, argv, move |sandbox_config| {
+        MicrovmSandbox::new_with_base(sandbox_config, microvm_config)
+            .map_err(|error| CliError::Sandbox(error.into()))
+    })
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn execute_kvm_backend(
+    _config: SandboxConfig,
+    _argv: &[String],
+    _args: &RunArgs,
+) -> Result<SandboxResult, CliError> {
+    Err(CliError::KvmFeatureDisabled)
+}
+
 fn execute_with_sandbox<S>(
     config: SandboxConfig,
     argv: &[String],
@@ -531,7 +610,21 @@ fn execute_with_sandbox<S>(
 where
     S: Sandbox,
 {
-    let mut sandbox = S::new(config)?;
+    execute_with_sandbox_specific(config, argv, |sandbox_config| {
+        S::new(sandbox_config).map_err(Into::into)
+    })
+}
+
+fn execute_with_sandbox_specific<S, F>(
+    config: SandboxConfig,
+    argv: &[String],
+    build_sandbox: F,
+) -> Result<SandboxResult, CliError>
+where
+    S: Sandbox,
+    F: FnOnce(SandboxConfig) -> Result<S, CliError>,
+{
+    let mut sandbox = build_sandbox(config)?;
     let execute_result = sandbox.execute(argv);
 
     match execute_result {
@@ -746,6 +839,58 @@ mod tests {
     }
 
     #[test]
+    fn run_subcommand_parses_kvm_specific_flags() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "run",
+            "--backend",
+            "kvm",
+            "--command",
+            "/bin/echo hello",
+            "--kernel",
+            "/tmp/vmlinux",
+            "--rootfs",
+            "/tmp/rootfs.cpio.gz",
+            "--vcpu-count",
+            "2",
+        ])
+        .expect("kvm run 子命令应解析成功");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.backend, Backend::Kvm);
+                assert_eq!(args.kernel.as_deref(), Some("/tmp/vmlinux"));
+                assert_eq!(args.rootfs.as_deref(), Some("/tmp/rootfs.cpio.gz"));
+                assert_eq!(args.vcpu_count, 2);
+            }
+            _ => panic!("应解析为 run 子命令"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_uses_kvm_defaults() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "run",
+            "--backend",
+            "kvm",
+            "--command",
+            "/bin/echo hello",
+        ])
+        .expect("最小 kvm run 子命令应解析成功");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.backend, Backend::Kvm);
+                assert_eq!(args.kernel, None);
+                assert_eq!(args.rootfs, None);
+                assert_eq!(args.vcpu_count, 1);
+            }
+            _ => panic!("应解析为 run 子命令"),
+        }
+    }
+
+    #[test]
     fn bench_subcommand_parses_target() {
         let cli = Cli::try_parse_from(["mimobox", "bench", "--target", "hot-acquire"])
             .expect("bench 子命令应解析成功");
@@ -781,18 +926,21 @@ mod tests {
     }
 
     #[test]
-    fn vm_backend_is_not_accepted() {
-        let error = Cli::try_parse_from([
+    fn kvm_backend_is_accepted() {
+        let cli = Cli::try_parse_from([
             "mimobox",
             "run",
             "--backend",
-            "vm",
+            "kvm",
             "--command",
             "/bin/echo hello",
         ])
-        .expect_err("run 子命令不应接受 vm 后端");
+        .expect("run 子命令应接受 kvm 后端");
 
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        match cli.command {
+            CliCommand::Run(args) => assert_eq!(args.backend, Backend::Kvm),
+            _ => panic!("应解析为 run 子命令"),
+        }
     }
 
     #[test]
