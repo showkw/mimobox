@@ -3,10 +3,12 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Once,
     atomic::{AtomicBool, Ordering},
     mpsc,
+    Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -32,6 +34,7 @@ const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const KVM_RUNTIME_STATE_MAGIC_V2: &[u8; 8] = b"KVMSNAP2";
 const KVM_RUNTIME_STATE_MAGIC_V3: &[u8; 8] = b"KVMSNAP3";
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
+static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
 #[cfg(target_arch = "x86_64")]
 const BOOT_STACK_POINTER: u64 = 0x8_000;
 #[cfg(target_arch = "x86_64")]
@@ -144,6 +147,62 @@ const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;
 const KERNEL_MIN_ALIGNMENT_BYTES: u32 = 0x0100_0000;
 const EBDA_START: u64 = 0x0009_fc00;
 const HIMEM_START: u64 = 0x0010_0000;
+
+/// 缓存冷启动阶段重复读取的内核与 rootfs 字节，避免每次创建 VM 都访问磁盘。
+#[derive(Debug, Default)]
+struct AssetCache {
+    kernel: Option<(PathBuf, u64, Arc<[u8]>)>,
+    rootfs: Option<(PathBuf, u64, Arc<[u8]>)>,
+}
+
+impl AssetCache {
+    fn global() -> &'static Mutex<AssetCache> {
+        ASSET_CACHE.get_or_init(|| Mutex::new(AssetCache::default()))
+    }
+
+    fn load(
+        path: &Path,
+        slot: &mut Option<(PathBuf, u64, Arc<[u8]>)>,
+    ) -> Result<Arc<[u8]>, MicrovmError> {
+        let metadata = fs::metadata(path)
+            .map_err(|err| MicrovmError::Backend(format!("读取资源元数据失败: {}: {err}", path.display())))?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        if let Some((cached_path, cached_mtime, cached_bytes)) = slot
+            && cached_path.as_path() == path
+            && *cached_mtime == mtime
+        {
+            return Ok(Arc::clone(cached_bytes));
+        }
+
+        let bytes: Arc<[u8]> = fs::read(path)
+            .map_err(|err| MicrovmError::Backend(format!("读取资源文件失败: {}: {err}", path.display())))?
+            .into();
+        *slot = Some((path.to_path_buf(), mtime, Arc::clone(&bytes)));
+        Ok(bytes)
+    }
+
+    fn get_kernel(path: &Path) -> Result<Arc<[u8]>, MicrovmError> {
+        let mut cache = match Self::global().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Self::load(path, &mut cache.kernel)
+    }
+
+    fn get_rootfs(path: &Path) -> Result<Arc<[u8]>, MicrovmError> {
+        let mut cache = match Self::global().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Self::load(path, &mut cache.rootfs)
+    }
+}
 
 /// 命令通道类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,8 +466,8 @@ pub struct KvmBackend {
     vm_fd: VmFd,
     vcpus: Vec<VcpuFd>,
     guest_memory: GuestMemoryMmap,
-    kernel_bytes: Vec<u8>,
-    rootfs_bytes: Vec<u8>,
+    kernel_bytes: Arc<[u8]>,
+    rootfs_bytes: Arc<[u8]>,
     transport: KvmTransport,
     lifecycle: KvmLifecycle,
     last_command_payload: Vec<u8>,
@@ -461,8 +520,8 @@ impl KvmBackend {
             GuestMemoryMmap::from_ranges(&[(GuestAddress(0), config.memory_bytes()?)])
                 .map_err(to_backend_error)?;
 
-        let kernel_bytes = fs::read(&config.kernel_path)?;
-        let rootfs_bytes = fs::read(&config.rootfs_path)?;
+        let kernel_bytes = AssetCache::get_kernel(config.kernel_path.as_path())?;
+        let rootfs_bytes = AssetCache::get_rootfs(config.rootfs_path.as_path())?;
         validate_initrd_image(&rootfs_bytes)?;
 
         let mut vcpus = Vec::with_capacity(usize::from(config.vcpu_count));
@@ -958,6 +1017,7 @@ impl KvmBackend {
         let last_exit_reason = &mut self.last_exit_reason;
         let last_io_detail = &mut self.last_io_detail;
         let recent_io_details = &mut self.recent_io_details;
+        let should_track_io_detail = response.is_some();
         let vcpu = self
             .vcpus
             .first_mut()
@@ -975,11 +1035,13 @@ impl KvmBackend {
 
         match exit {
             VcpuExit::IoOut(port, data) if is_serial_port(port) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("serial out port={port:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("serial out port={port:#x} size={}", data.len()),
+                    );
+                }
                 let action = handle_serial_write(
                     serial_device,
                     serial_buffer,
@@ -996,32 +1058,38 @@ impl KvmBackend {
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
             }
             VcpuExit::IoIn(port, data) if is_serial_port(port) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("serial in port={port:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("serial in port={port:#x} size={}", data.len()),
+                    );
+                }
                 handle_serial_read(serial_device, port, data)?;
                 *last_exit_reason = Some(KvmExitReason::Io);
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
             }
             VcpuExit::MmioRead(addr, data) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("mmio read addr={addr:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("mmio read addr={addr:#x} size={}", data.len()),
+                    );
+                }
                 data.fill(0);
                 debug!(addr, size = data.len(), "guest 触发 MMIO 读退出");
                 *last_exit_reason = Some(KvmExitReason::Io);
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
             }
             VcpuExit::MmioWrite(addr, data) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("mmio write addr={addr:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("mmio write addr={addr:#x} size={}", data.len()),
+                    );
+                }
                 debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
                 *last_exit_reason = Some(KvmExitReason::Io);
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
@@ -1041,11 +1109,13 @@ impl KvmBackend {
                 ))
             }
             VcpuExit::IoOut(port, data) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("pio out port={port:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("pio out port={port:#x} size={}", data.len()),
+                    );
+                }
                 if port == PCI_CONFIG_ADDRESS_REG {
                     debug!(port, size = data.len(), "忽略 PCI 配置地址写");
                     *last_exit_reason = Some(KvmExitReason::Io);
@@ -1060,11 +1130,13 @@ impl KvmBackend {
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
             }
             VcpuExit::IoIn(port, data) => {
-                push_io_detail(
-                    last_io_detail,
-                    recent_io_details,
-                    format!("pio in port={port:#x} size={}", data.len()),
-                );
+                if should_track_io_detail {
+                    push_io_detail(
+                        last_io_detail,
+                        recent_io_details,
+                        format!("pio in port={port:#x} size={}", data.len()),
+                    );
+                }
                 match port {
                     I8042_PORT_B_REG if data.len() == 1 => data[0] = I8042_PORT_B_PIT_TICK,
                     I8042_COMMAND_REG if data.len() == 1 => data[0] = 0,
@@ -1114,7 +1186,7 @@ impl KvmBackend {
     }
 
     fn zero_guest_range(&self, guest_addr: u64, len: usize) -> Result<(), MicrovmError> {
-        const ZEROES: [u8; 4096] = [0; 4096];
+        const ZEROES: [u8; 65536] = [0; 65536];
         let mut written = 0usize;
         while written < len {
             let chunk = ZEROES.len().min(len - written);
