@@ -18,8 +18,8 @@ use mimobox_os::MacOsSandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use mimobox_os::run_pool_benchmark;
 use mimobox_sdk::{
-    Config as SdkConfig, ExecuteResult as SdkExecuteResult, NetworkPolicy as SdkNetworkPolicy,
-    Sandbox as SdkSandbox,
+    Config as SdkConfig, ExecuteResult as SdkExecuteResult, IsolationLevel as SdkIsolationLevel,
+    NetworkPolicy as SdkNetworkPolicy, Sandbox as SdkSandbox,
 };
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
@@ -149,6 +149,7 @@ enum CommandResponse {
 #[derive(Debug, Serialize)]
 struct RunResponse {
     backend: Backend,
+    requested_backend: Backend,
     requested_command: String,
     argv: Vec<String>,
     exit_code: Option<i32>,
@@ -205,6 +206,9 @@ enum CliError {
     #[error("IO 错误: {0}")]
     Io(#[from] io::Error),
 
+    #[error("SDK 执行失败: {0}")]
+    Sdk(String),
+
     #[error("沙箱执行失败: {0}")]
     Sandbox(#[from] SandboxError),
 
@@ -242,6 +246,7 @@ impl CliError {
             Self::Logging(_) => "logging_init_error",
             Self::Json(_) => "json_error",
             Self::Io(_) => "io_error",
+            Self::Sdk(_) => "sdk_error",
             Self::Sandbox(_) => "sandbox_error",
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::UnsupportedOsBackend => "unsupported_os_backend",
@@ -255,9 +260,27 @@ impl CliError {
     }
 }
 
+impl From<mimobox_sdk::SdkError> for CliError {
+    fn from(error: mimobox_sdk::SdkError) -> Self {
+        match error {
+            mimobox_sdk::SdkError::BackendUnavailable("wasm") => Self::WasmFeatureDisabled,
+            mimobox_sdk::SdkError::BackendUnavailable("microvm") => Self::KvmFeatureDisabled,
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            mimobox_sdk::SdkError::BackendUnavailable("os") => Self::UnsupportedOsBackend,
+            other => Self::Sdk(other.to_string()),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SharedFileWriter {
     file: Arc<Mutex<File>>,
+}
+
+#[derive(Debug)]
+struct RunExecution {
+    backend: Backend,
+    result: SandboxResult,
 }
 
 fn main() -> ExitCode {
@@ -375,7 +398,8 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     let deny_network = args.deny_network;
     let allow_fork = args.allow_fork;
 
-    let result = match resolve_run_execution_mode(args.backend) {
+    let requested_backend = args.backend;
+    let execution = match resolve_run_execution_mode(args.backend) {
         RunExecutionMode::Sdk => handle_run_via_sdk(
             &args.command,
             args.memory,
@@ -393,22 +417,32 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
 
             match args.backend {
                 Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
-                Backend::Os => execute_os_backend(config, &argv)?,
-                Backend::Wasm => execute_wasm_backend(config, &argv)?,
-                Backend::Kvm => execute_kvm_backend(config, &argv, &args)?,
+                Backend::Os => RunExecution {
+                    backend: Backend::Os,
+                    result: execute_os_backend(config, &argv)?,
+                },
+                Backend::Wasm => RunExecution {
+                    backend: Backend::Wasm,
+                    result: execute_wasm_backend(config, &argv)?,
+                },
+                Backend::Kvm => RunExecution {
+                    backend: Backend::Kvm,
+                    result: execute_kvm_backend(config, &argv, &args)?,
+                },
             }
         }
     };
 
     Ok(RunResponse {
-        backend: args.backend,
+        backend: execution.backend,
+        requested_backend,
         requested_command: args.command,
         argv,
-        exit_code: result.exit_code,
-        timed_out: result.timed_out,
-        elapsed_ms: result.elapsed.as_secs_f64() * 1000.0,
-        stdout: String::from_utf8_lossy(&result.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&result.stderr).to_string(),
+        exit_code: execution.result.exit_code,
+        timed_out: execution.result.timed_out,
+        elapsed_ms: execution.result.elapsed.as_secs_f64() * 1000.0,
+        stdout: String::from_utf8_lossy(&execution.result.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&execution.result.stderr).to_string(),
         memory_mb,
         timeout_secs,
         deny_network,
@@ -555,7 +589,7 @@ fn handle_run_via_sdk(
     timeout: Option<u64>,
     deny_network: bool,
     allow_fork: bool,
-) -> Result<SandboxResult, CliError> {
+) -> Result<RunExecution, CliError> {
     let config = build_sdk_config(memory, timeout, deny_network, allow_fork);
     info!(
         memory_mb = config.memory_limit_mb,
@@ -565,19 +599,65 @@ fn handle_run_via_sdk(
         "使用 SDK 智能路由执行命令"
     );
 
-    let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
+    let mut sandbox = SdkSandbox::with_config(config).map_err(|error| {
+        let cli_error = map_sdk_error(error);
+        error!(code = cli_error.code(), message = %cli_error, "SDK 沙箱初始化失败");
+        cli_error
+    })?;
+
     let execute_result = sandbox.execute(command);
 
     match execute_result {
         Ok(result) => {
-            sandbox.destroy().map_err(map_sdk_error)?;
-            Ok(sdk_result_into_sandbox_result(result))
+            let backend = sandbox
+                .active_isolation()
+                .and_then(backend_from_sdk_isolation)
+                .ok_or_else(|| {
+                    let error = CliError::Sdk("SDK 执行成功但未记录实际后端".to_string());
+                    error!(
+                        code = error.code(),
+                        message = %error,
+                        "SDK 执行成功后无法解析实际后端"
+                    );
+                    error
+                })?;
+
+            sandbox.destroy().map_err(|error| {
+                let cli_error = map_sdk_error(error);
+                error!(
+                    code = cli_error.code(),
+                    message = %cli_error,
+                    backend = ?backend,
+                    "SDK 执行成功后销毁沙箱失败"
+                );
+                cli_error
+            })?;
+
+            info!(backend = ?backend, "SDK 执行成功并完成沙箱销毁");
+            Ok(RunExecution {
+                backend,
+                result: sdk_result_into_sandbox_result(result),
+            })
         }
         Err(error) => {
+            let cli_error = map_sdk_error(error);
+            error!(
+                code = cli_error.code(),
+                message = %cli_error,
+                "SDK 执行命令失败"
+            );
+
             if let Err(destroy_error) = sandbox.destroy() {
-                warn!(message = %destroy_error, "SDK 执行失败后销毁沙箱也失败");
+                let destroy_cli_error = map_sdk_error(destroy_error);
+                error!(
+                    code = destroy_cli_error.code(),
+                    message = %destroy_cli_error,
+                    "SDK 执行失败后销毁沙箱也失败"
+                );
+            } else {
+                warn!("SDK 执行失败后已完成沙箱销毁");
             }
-            Err(map_sdk_error(error))
+            Err(cli_error)
         }
     }
 }
@@ -593,9 +673,16 @@ fn sdk_result_into_sandbox_result(result: SdkExecuteResult) -> SandboxResult {
 }
 
 fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
-    CliError::Sandbox(SandboxError::ExecutionFailed(format!(
-        "SDK 智能路由失败: {error}"
-    )))
+    error.into()
+}
+
+fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option<Backend> {
+    match isolation {
+        SdkIsolationLevel::Auto => None,
+        SdkIsolationLevel::Os => Some(Backend::Os),
+        SdkIsolationLevel::Wasm => Some(Backend::Wasm),
+        SdkIsolationLevel::MicroVm => Some(Backend::Kvm),
+    }
 }
 
 fn emit_success_json(response: &CommandResponse) -> Result<(), CliError> {
@@ -1114,5 +1201,58 @@ mod tests {
         let error = parse_command("/bin/sh -c 'echo").expect_err("未闭合引号应返回错误");
 
         assert_eq!(error.code(), "command_parse_error");
+    }
+
+    #[test]
+    fn sdk_config_error_is_preserved_in_cli_error() {
+        let error = handle_run_via_sdk("/bin/sh -c 'echo", Some(128), Some(5), true, false)
+            .expect_err("SDK 配置错误应映射为 CLI 错误");
+
+        assert_eq!(error.code(), "sdk_error");
+        assert!(error.to_string().contains("配置错误"));
+        assert!(error.to_string().contains("shell 风格引号不匹配"));
+    }
+
+    #[test]
+    fn sdk_backend_unavailable_maps_to_feature_specific_cli_error() {
+        let error = map_sdk_error(mimobox_sdk::SdkError::BackendUnavailable("wasm"));
+
+        assert_eq!(error.code(), "wasm_feature_disabled");
+    }
+
+    #[test]
+    fn auto_backend_run_response_reports_resolved_backend() {
+        let response = handle_run(RunArgs {
+            backend: Backend::Auto,
+            command: "/bin/echo hello".to_string(),
+            memory: Some(128),
+            timeout: Some(5),
+            deny_network: true,
+            allow_fork: false,
+            kernel: None,
+            rootfs: None,
+            vcpu_count: 1,
+        })
+        .expect("auto 路由执行应成功");
+
+        assert_eq!(response.backend, Backend::Os);
+        assert_eq!(response.requested_backend, Backend::Auto);
+    }
+
+    #[test]
+    fn sdk_isolation_maps_to_cli_backend() {
+        assert_eq!(
+            backend_from_sdk_isolation(SdkIsolationLevel::Os),
+            Some(Backend::Os)
+        );
+        assert_eq!(
+            backend_from_sdk_isolation(SdkIsolationLevel::Wasm),
+            Some(Backend::Wasm)
+        );
+        assert_eq!(
+            backend_from_sdk_isolation(SdkIsolationLevel::MicroVm),
+            Some(Backend::Kvm)
+        );
+        assert_eq!(backend_from_sdk_isolation(SdkIsolationLevel::Auto), None);
     }
 }
