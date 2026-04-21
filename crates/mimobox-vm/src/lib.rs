@@ -8,12 +8,17 @@
 
 mod snapshot;
 mod vm;
+mod vm_assets;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 mod kvm;
 
 pub use snapshot::MicrovmSnapshot;
 pub use vm::{GuestCommandResult, MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState};
+pub use vm_assets::{
+    microvm_config_from_assets_dir, microvm_config_from_vm_assets, resolve_vm_assets_dir,
+    vm_assets_dir,
+};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 pub use kvm::{KvmBackend, KvmExitReason, KvmLifecycle, KvmTransport};

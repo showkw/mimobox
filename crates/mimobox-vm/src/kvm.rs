@@ -14,8 +14,10 @@ use std::time::Duration;
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
 use kvm_bindings::{
-    KVM_PIT_SPEAKER_DUMMY, Msrs, kvm_fpu, kvm_lapic_state, kvm_msr_entry, kvm_pit_config,
-    kvm_segment, kvm_sregs, kvm_userspace_memory_region,
+    KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, KVM_PIT_SPEAKER_DUMMY, Msrs,
+    kvm_clock_data, kvm_fpu, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_msr_entry,
+    kvm_pit_config, kvm_pit_state2, kvm_regs, kvm_segment, kvm_sregs, kvm_userspace_memory_region,
+    kvm_vcpu_events, kvm_xcrs, kvm_xsave,
 };
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use mimobox_core::SandboxConfig;
@@ -27,6 +29,8 @@ use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError};
 const ZERO_PAGE_ADDR: u64 = 0x7_000;
 const CMDLINE_ADDR: u64 = 0x20_000;
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
+const KVM_RUNTIME_STATE_MAGIC_V2: &[u8; 8] = b"KVMSNAP2";
+const KVM_RUNTIME_STATE_MAGIC_V3: &[u8; 8] = b"KVMSNAP3";
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 #[cfg(target_arch = "x86_64")]
 const BOOT_STACK_POINTER: u64 = 0x8_000;
@@ -822,6 +826,7 @@ impl KvmBackend {
     /// 从快照恢复 guest memory 和 vCPU 状态。
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
         self.restore_guest_memory(memory)?;
+        self.configure_boot_vcpus()?;
         restore_runtime_state(self, vcpu_state)?;
         self.lifecycle = KvmLifecycle::Ready;
         Ok(())
@@ -1431,8 +1436,10 @@ fn encode_runtime_state(backend: &KvmBackend) -> Result<Vec<u8>, MicrovmError> {
         .copied()
         .collect::<Vec<_>>();
 
-    state.extend_from_slice(b"KVMSNAP2");
+    state.extend_from_slice(KVM_RUNTIME_STATE_MAGIC_V3);
     encode_vcpu_ids(&mut state, &backend.vcpus)?;
+    encode_vm_state(&mut state, backend)?;
+    encode_vcpu_states(&mut state, &backend.vcpus)?;
     state.push(u8::from(backend.guest_booted));
     state.push(u8::from(backend.guest_ready));
     state.push(exit_reason_to_u8(backend.last_exit_reason));
@@ -1450,13 +1457,30 @@ fn encode_runtime_state(backend: &KvmBackend) -> Result<Vec<u8>, MicrovmError> {
 
 fn restore_runtime_state(backend: &mut KvmBackend, state: &[u8]) -> Result<(), MicrovmError> {
     let mut cursor = ByteCursor::new(state);
-    if cursor.read_exact(8)? != b"KVMSNAP2" {
-        return Err(MicrovmError::SnapshotFormat(
-            "KVM 运行时快照 magic 不匹配".into(),
-        ));
+    let magic = cursor.read_exact(8)?;
+    if magic == KVM_RUNTIME_STATE_MAGIC_V2 {
+        return restore_runtime_state_v2(backend, &mut cursor);
     }
+    if magic == KVM_RUNTIME_STATE_MAGIC_V3 {
+        return restore_runtime_state_v3(backend, &mut cursor);
+    }
+    Err(MicrovmError::SnapshotFormat(
+        "KVM 运行时快照 magic 不匹配".into(),
+    ))
+}
 
-    restore_vcpu_ids(&backend.vcpus, &mut cursor)?;
+fn restore_runtime_state_v2(
+    backend: &mut KvmBackend,
+    cursor: &mut ByteCursor<'_>,
+) -> Result<(), MicrovmError> {
+    restore_vcpu_ids(&backend.vcpus, cursor)?;
+    restore_runtime_tail(backend, cursor)
+}
+
+fn restore_runtime_tail(
+    backend: &mut KvmBackend,
+    cursor: &mut ByteCursor<'_>,
+) -> Result<(), MicrovmError> {
     backend.guest_booted = cursor.read_u8()? != 0;
     backend.guest_ready = cursor.read_u8()? != 0;
     backend.last_exit_reason = exit_reason_from_u8(cursor.read_u8()?)?;
@@ -1480,6 +1504,16 @@ fn restore_runtime_state(backend: &mut KvmBackend, state: &[u8]) -> Result<(), M
         ));
     }
     Ok(())
+}
+
+fn restore_runtime_state_v3(
+    backend: &mut KvmBackend,
+    cursor: &mut ByteCursor<'_>,
+) -> Result<(), MicrovmError> {
+    restore_vcpu_ids(&backend.vcpus, cursor)?;
+    restore_vm_state(backend, cursor)?;
+    restore_vcpu_states(&backend.vcpus, cursor)?;
+    restore_runtime_tail(backend, cursor)
 }
 
 fn encode_vcpu_ids(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {
@@ -1512,6 +1546,211 @@ fn restore_vcpu_ids(vcpus: &[VcpuFd], cursor: &mut ByteCursor<'_>) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn encode_vm_state(out: &mut Vec<u8>, backend: &KvmBackend) -> Result<(), MicrovmError> {
+    let clock = backend.vm_fd.get_clock().map_err(to_backend_error)?;
+    append_pod(out, &clock);
+
+    let pit = backend.vm_fd.get_pit2().map_err(to_backend_error)?;
+    append_pod(out, &pit);
+
+    for chip_id in [
+        KVM_IRQCHIP_PIC_MASTER,
+        KVM_IRQCHIP_PIC_SLAVE,
+        KVM_IRQCHIP_IOAPIC,
+    ] {
+        let mut irqchip = kvm_irqchip {
+            chip_id,
+            ..Default::default()
+        };
+        backend
+            .vm_fd
+            .get_irqchip(&mut irqchip)
+            .map_err(to_backend_error)?;
+        append_pod(out, &irqchip);
+    }
+
+    Ok(())
+}
+
+fn restore_vm_state(
+    backend: &mut KvmBackend,
+    cursor: &mut ByteCursor<'_>,
+) -> Result<(), MicrovmError> {
+    let clock: kvm_clock_data = read_pod(cursor)?;
+    backend
+        .vm_fd
+        .set_clock(&clock)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 KVM 时钟失败: {err}")))?;
+
+    let pit_state: kvm_pit_state2 = read_pod(cursor)?;
+    backend
+        .vm_fd
+        .set_pit2(&pit_state)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 PIT 状态失败: {err}")))?;
+
+    for expected_chip_id in [
+        KVM_IRQCHIP_PIC_MASTER,
+        KVM_IRQCHIP_PIC_SLAVE,
+        KVM_IRQCHIP_IOAPIC,
+    ] {
+        let irqchip: kvm_irqchip = read_pod(cursor)?;
+        if irqchip.chip_id != expected_chip_id {
+            return Err(MicrovmError::SnapshotFormat(format!(
+                "irqchip ID 不匹配: 快照为 {}，期望 {expected_chip_id}",
+                irqchip.chip_id
+            )));
+        }
+        backend.vm_fd.set_irqchip(&irqchip).map_err(|err| {
+            MicrovmError::Backend(format!("恢复 irqchip({expected_chip_id}) 状态失败: {err}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn encode_vcpu_states(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {
+    for vcpu in vcpus {
+        encode_vcpu_state(out, vcpu)?;
+    }
+    Ok(())
+}
+
+fn encode_vcpu_state(out: &mut Vec<u8>, vcpu: &VcpuFd) -> Result<(), MicrovmError> {
+    append_pod(out, &vcpu.get_regs().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_sregs().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_fpu().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_lapic().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_mp_state().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_xsave().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_xcrs().map_err(to_backend_error)?);
+    append_pod(out, &vcpu.get_vcpu_events().map_err(to_backend_error)?);
+    append_msr_entries(out, &snapshot_vcpu_msrs(vcpu)?)?;
+    Ok(())
+}
+
+fn restore_vcpu_states(vcpus: &[VcpuFd], cursor: &mut ByteCursor<'_>) -> Result<(), MicrovmError> {
+    for vcpu in vcpus {
+        restore_vcpu_state(vcpu, cursor)?;
+    }
+    Ok(())
+}
+
+fn restore_vcpu_state(vcpu: &VcpuFd, cursor: &mut ByteCursor<'_>) -> Result<(), MicrovmError> {
+    let regs: kvm_regs = read_pod(cursor)?;
+    let sregs: kvm_sregs = read_pod(cursor)?;
+    let fpu: kvm_fpu = read_pod(cursor)?;
+    let lapic: kvm_lapic_state = read_pod(cursor)?;
+    let mp_state: kvm_mp_state = read_pod(cursor)?;
+    let xsave: kvm_xsave = read_pod(cursor)?;
+    let xcrs: kvm_xcrs = read_pod(cursor)?;
+    let vcpu_events: kvm_vcpu_events = read_pod(cursor)?;
+    let msr_entries = read_msr_entries(cursor)?;
+
+    vcpu.set_sregs(&sregs)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 sregs 失败: {err}")))?;
+    vcpu.set_regs(&regs)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 regs 失败: {err}")))?;
+    vcpu.set_fpu(&fpu)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 fpu 失败: {err}")))?;
+    vcpu.set_lapic(&lapic)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 lapic 失败: {err}")))?;
+    vcpu.set_mp_state(mp_state)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 mp_state 失败: {err}")))?;
+    vcpu.set_xsave(&xsave)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 xsave 失败: {err}")))?;
+    vcpu.set_xcrs(&xcrs)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 xcrs 失败: {err}")))?;
+    vcpu.set_vcpu_events(&vcpu_events)
+        .map_err(|err| MicrovmError::Backend(format!("恢复 vcpu_events 失败: {err}")))?;
+    restore_vcpu_msrs(vcpu, &msr_entries)?;
+    Ok(())
+}
+
+fn snapshot_vcpu_msrs(vcpu: &VcpuFd) -> Result<Vec<kvm_msr_entry>, MicrovmError> {
+    let template = tracked_msr_entries_template();
+    let mut msrs = Msrs::from_entries(&template).map_err(to_backend_error)?;
+    let read = vcpu.get_msrs(&mut msrs).map_err(to_backend_error)?;
+    if read != template.len() {
+        return Err(MicrovmError::Backend(format!(
+            "快照 MSR 仅读取 {read}/{} 项",
+            template.len()
+        )));
+    }
+    Ok(msrs.as_slice().to_vec())
+}
+
+fn restore_vcpu_msrs(vcpu: &VcpuFd, entries: &[kvm_msr_entry]) -> Result<(), MicrovmError> {
+    let msrs = Msrs::from_entries(entries).map_err(to_backend_error)?;
+    let written = vcpu.set_msrs(&msrs).map_err(to_backend_error)?;
+    if written != entries.len() {
+        return Err(MicrovmError::Backend(format!(
+            "恢复 MSR 仅写入 {written}/{} 项",
+            entries.len()
+        )));
+    }
+    Ok(())
+}
+
+fn tracked_msr_entries_template() -> [kvm_msr_entry; 11] {
+    [
+        kvm_msr_entry {
+            index: MSR_IA32_SYSENTER_CS,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_IA32_SYSENTER_ESP,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_IA32_SYSENTER_EIP,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_STAR,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_CSTAR,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_KERNEL_GS_BASE,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_SYSCALL_MASK,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_LSTAR,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_IA32_TSC,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_IA32_MISC_ENABLE,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_MTRR_DEF_TYPE,
+            data: 0,
+            ..Default::default()
+        },
+    ]
 }
 
 fn validate_initrd_image(bytes: &[u8]) -> Result<(), MicrovmError> {
@@ -1573,6 +1812,49 @@ fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), MicrovmError> {
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     Ok(())
+}
+
+fn append_msr_entries(out: &mut Vec<u8>, entries: &[kvm_msr_entry]) -> Result<(), MicrovmError> {
+    let len = u32_from_len(entries.len(), "MSR 条目数量超过 u32 上限")?;
+    out.extend_from_slice(&len.to_le_bytes());
+    for entry in entries {
+        append_pod(out, entry);
+    }
+    Ok(())
+}
+
+fn read_msr_entries(cursor: &mut ByteCursor<'_>) -> Result<Vec<kvm_msr_entry>, MicrovmError> {
+    let len = usize::try_from(cursor.read_u32()?)
+        .map_err(|_| MicrovmError::SnapshotFormat("MSR 条目数量无法转换为 usize".into()))?;
+    let mut entries = Vec::with_capacity(len);
+    for _ in 0..len {
+        entries.push(read_pod(cursor)?);
+    }
+    Ok(entries)
+}
+
+fn append_pod<T>(out: &mut Vec<u8>, value: &T) {
+    // SAFETY: KVM 绑定结构是可按字节复制的内核 ABI 数据。当前快照仅用于同架构、
+    // 同进程版本的 restore，直接保存原始字节不会引入别名或生命周期问题。
+    let bytes = unsafe {
+        std::slice::from_raw_parts((value as *const T).cast::<u8>(), mem::size_of::<T>())
+    };
+    out.extend_from_slice(bytes);
+}
+
+fn read_pod<T: Default>(cursor: &mut ByteCursor<'_>) -> Result<T, MicrovmError> {
+    let bytes = cursor.read_exact(mem::size_of::<T>())?;
+    let mut value = T::default();
+    // SAFETY: `value` 先以 `Default` 零初始化，再用等长字节覆盖。源字节来自同一 ABI
+    // 的 `append_pod` 序列化结果，因此布局和大小匹配。
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            (&mut value as *mut T).cast::<u8>(),
+            bytes.len(),
+        );
+    }
+    Ok(value)
 }
 
 fn exit_reason_to_u8(reason: Option<KvmExitReason>) -> u8 {
@@ -1818,51 +2100,6 @@ fn handle_serial_read(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        CommandResponse, SERIAL_EXEC_PREFIX, build_guest_command, encode_command_payload,
-        parse_guest_protocol_line,
-    };
-
-    #[test]
-    fn test_encode_command_payload_uses_length_prefixed_frame() {
-        let command = vec![
-            "/bin/printf".to_string(),
-            "%s".to_string(),
-            "hello\nworld".to_string(),
-        ];
-
-        let payload = encode_command_payload(&command, Some(1)).expect("编码命令帧必须成功");
-        let command_line = build_guest_command(&command, Some(1)).expect("构建 shell 命令必须成功");
-        let header = format!("{SERIAL_EXEC_PREFIX}{}:", command_line.len());
-        let mut expected = header.into_bytes();
-        expected.extend_from_slice(command_line.as_bytes());
-        expected.push(b'\n');
-
-        assert_eq!(payload, expected);
-        assert!(
-            payload
-                .windows(b"hello\nworld".len())
-                .any(|window| window == b"hello\nworld"),
-            "长度前缀帧必须保留命令参数中的换行字节"
-        );
-    }
-
-    #[test]
-    fn test_exit_code_124_is_not_mapped_to_timeout() {
-        let mut response = CommandResponse::default();
-
-        let result = parse_guest_protocol_line("EXIT:124", &mut response)
-            .expect("解析 EXIT 帧必须成功")
-            .expect("EXIT 帧必须产生命令结果");
-
-        assert_eq!(result.exit_code, Some(124));
-        assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
-        assert!(result.stdout.is_empty(), "纯 EXIT 帧不应携带 stdout");
-    }
-}
-
 fn checked_slice(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], MicrovmError> {
     let end = offset
         .checked_add(len)
@@ -1981,5 +2218,50 @@ impl<'a> ByteCursor<'a> {
 
     fn is_eof(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CommandResponse, SERIAL_EXEC_PREFIX, build_guest_command, encode_command_payload,
+        parse_guest_protocol_line,
+    };
+
+    #[test]
+    fn test_encode_command_payload_uses_length_prefixed_frame() {
+        let command = vec![
+            "/bin/printf".to_string(),
+            "%s".to_string(),
+            "hello\nworld".to_string(),
+        ];
+
+        let payload = encode_command_payload(&command, Some(1)).expect("编码命令帧必须成功");
+        let command_line = build_guest_command(&command, Some(1)).expect("构建 shell 命令必须成功");
+        let header = format!("{SERIAL_EXEC_PREFIX}{}:", command_line.len());
+        let mut expected = header.into_bytes();
+        expected.extend_from_slice(command_line.as_bytes());
+        expected.push(b'\n');
+
+        assert_eq!(payload, expected);
+        assert!(
+            payload
+                .windows(b"hello\nworld".len())
+                .any(|window| window == b"hello\nworld"),
+            "长度前缀帧必须保留命令参数中的换行字节"
+        );
+    }
+
+    #[test]
+    fn test_exit_code_124_is_not_mapped_to_timeout() {
+        let mut response = CommandResponse::default();
+
+        let result = parse_guest_protocol_line("EXIT:124", &mut response)
+            .expect("解析 EXIT 帧必须成功")
+            .expect("EXIT 帧必须产生命令结果");
+
+        assert_eq!(result.exit_code, Some(124));
+        assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
+        assert!(result.stdout.is_empty(), "纯 EXIT 帧不应携带 stdout");
     }
 }
