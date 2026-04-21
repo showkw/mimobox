@@ -11,6 +11,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 vm-memory.workspace = true
 vmm-sys-util.workspace = true
