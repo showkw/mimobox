@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(feature = "vm")]
+use crate::error::SdkError;
 use mimobox_core::{SandboxConfig, SeccompProfile};
 
 /// 隔离层级选择
@@ -62,6 +64,10 @@ pub struct Config {
     pub fs_readwrite: Vec<PathBuf>,
     /// 是否允许 fork
     pub allow_fork: bool,
+    /// microVM 内核镜像路径；未配置时使用后端默认路径
+    pub kernel_path: Option<PathBuf>,
+    /// microVM rootfs 路径；未配置时使用后端默认路径
+    pub rootfs_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -84,6 +90,8 @@ impl Default for Config {
             ],
             fs_readwrite: vec!["/tmp".into()],
             allow_fork: false,
+            kernel_path: None,
+            rootfs_path: None,
         }
     }
 }
@@ -106,6 +114,33 @@ impl Config {
             seccomp_profile: resolve_seccomp_profile(deny_network, self.allow_fork),
             allow_fork: self.allow_fork,
         }
+    }
+
+    #[cfg(feature = "vm")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn to_microvm_config(&self) -> Result<mimobox_vm::MicrovmConfig, SdkError> {
+        let defaults = mimobox_vm::MicrovmConfig::default();
+        let memory_mb = match self.memory_limit_mb {
+            Some(memory_limit_mb) => u32::try_from(memory_limit_mb).map_err(|_| {
+                SdkError::Config(format!(
+                    "microVM guest memory 超出 u32 范围: {memory_limit_mb} MB"
+                ))
+            })?,
+            None => defaults.memory_mb,
+        };
+
+        Ok(mimobox_vm::MicrovmConfig {
+            memory_mb,
+            kernel_path: self
+                .kernel_path
+                .clone()
+                .unwrap_or_else(|| defaults.kernel_path.clone()),
+            rootfs_path: self
+                .rootfs_path
+                .clone()
+                .unwrap_or_else(|| defaults.rootfs_path.clone()),
+            ..defaults
+        })
     }
 }
 
@@ -181,6 +216,16 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn kernel_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner.kernel_path = Some(path.into());
+        self
+    }
+
+    pub fn rootfs_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner.rootfs_path = Some(path.into());
+        self
+    }
+
     pub fn build(self) -> Config {
         self.inner
     }
@@ -189,6 +234,31 @@ impl ConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_config_keeps_microvm_artifact_paths_unset() {
+        let config = Config::default();
+
+        assert_eq!(config.kernel_path, None);
+        assert_eq!(config.rootfs_path, None);
+    }
+
+    #[test]
+    fn builder_can_override_microvm_artifact_paths() {
+        let config = Config::builder()
+            .kernel_path("/opt/mimobox/vmlinux")
+            .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
+            .build();
+
+        assert_eq!(
+            config.kernel_path,
+            Some(PathBuf::from("/opt/mimobox/vmlinux"))
+        );
+        assert_eq!(
+            config.rootfs_path,
+            Some(PathBuf::from("/opt/mimobox/rootfs.cpio.gz"))
+        );
+    }
 
     #[test]
     fn allow_domains_still_denies_network_until_whitelist_is_implemented() {
@@ -223,5 +293,42 @@ mod tests {
 
         let config = Config::builder().timeout(Duration::from_millis(1)).build();
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_uses_default_artifact_paths_when_not_overridden() {
+        let config = Config::default();
+        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+
+        assert_eq!(
+            microvm_config.kernel_path,
+            PathBuf::from("/var/lib/mimobox/vm/vmlinux")
+        );
+        assert_eq!(
+            microvm_config.rootfs_path,
+            PathBuf::from("/var/lib/mimobox/vm/rootfs.cpio.gz")
+        );
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_applies_memory_limit_and_artifact_overrides() {
+        let config = Config::builder()
+            .memory_limit_mb(768)
+            .kernel_path("/srv/mimobox/vmlinux")
+            .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
+            .build();
+        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+
+        assert_eq!(microvm_config.memory_mb, 768);
+        assert_eq!(
+            microvm_config.kernel_path,
+            PathBuf::from("/srv/mimobox/vmlinux")
+        );
+        assert_eq!(
+            microvm_config.rootfs_path,
+            PathBuf::from("/srv/mimobox/rootfs.cpio.gz")
+        );
     }
 }
