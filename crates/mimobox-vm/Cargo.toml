@@ -20,7 +20,13 @@ default = []
 kvm = []
 
 [dev-dependencies]
+criterion = "0.5"
 tempfile = "3"
+
+[[bench]]
+name = "kvm_bench"
+harness = false
+path = "benches/kvm_bench.rs"
 
 [lints]
 workspace = true

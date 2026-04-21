@@ -1395,6 +1395,7 @@ dependencies = [
 name = "mimobox-vm"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "kvm-ioctls",
  "mimobox-core",
  "tempfile",
