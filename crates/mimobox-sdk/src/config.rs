@@ -4,9 +4,10 @@ use std::time::Duration;
 use mimobox_core::SandboxConfig;
 
 /// 隔离层级选择
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationLevel {
     /// 自动选择：根据命令类型和信任级别智能路由
+    #[default]
     Auto,
     /// OS 级：Landlock + Seccomp + Namespaces（Linux）/ Seatbelt（macOS）
     Os,
@@ -16,33 +17,23 @@ pub enum IsolationLevel {
     MicroVm,
 }
 
-impl Default for IsolationLevel {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 /// 信任级别
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustLevel {
     /// 受信代码：自身编写或已审计的代码
     Trusted,
     /// 半信代码：第三方库或未经完整审计的代码
+    #[default]
     SemiTrusted,
     /// 不信代码：用户提交、网络下载等不可信代码
     Untrusted,
 }
 
-impl Default for TrustLevel {
-    fn default() -> Self {
-        Self::SemiTrusted
-    }
-}
-
 /// 网络策略
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum NetworkPolicy {
     /// 默认拒绝所有网络访问
+    #[default]
     DenyAll,
     /// 仅允许指定域名（未来实现，当前等价于 DenyAll）
     #[allow(dead_code)]
@@ -50,12 +41,6 @@ pub enum NetworkPolicy {
     /// 拒绝指定域名，允许其余（未来实现）
     #[allow(dead_code)]
     DenyDomains(Vec<String>),
-}
-
-impl Default for NetworkPolicy {
-    fn default() -> Self {
-        Self::DenyAll
-    }
 }
 
 /// SDK 级配置
