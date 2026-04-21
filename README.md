@@ -128,8 +128,9 @@ mimobox/
 | OS 级 | 冷启动 P50 | <10ms | `3.51ms` | ✅ |
 | Wasm | 冷启动 P50 | <5ms | `0.61ms` | ✅ |
 | 预热池 | 热获取 P99 | <100us | `0.38us` | ✅ |
-| microVM (KVM) | 冷启动 P50 | <200ms | `1.24s` | 🔄 优化中 |
-| microVM (KVM) | 快照恢复 P50 | <50ms | `205ms` | 🔄 优化中 |
+| microVM (KVM) | 冷启动 P50 | <200ms | `328ms` | 🔄 优化中 |
+| microVM (KVM) | 快照恢复 P50 | <50ms | `83ms` | 🔄 优化中 |
+| microVM (KVM) | 命令执行 P50 | — | `765us` | ✅ |
 
 这些是 README 当前维护的性能基线。只要基准结果变化，就应该同步更新这里。
 
