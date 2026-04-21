@@ -29,6 +29,7 @@ repository = "https://github.com/user/mimobox"
 mimobox-core = { path = "crates/mimobox-core" }
 mimobox-os = { path = "crates/mimobox-os" }
 mimobox-wasm = { path = "crates/mimobox-wasm" }
+mimobox-sdk = { path = "crates/mimobox-sdk" }
 
 # 外部依赖（统一版本）
 thiserror = "2"
