@@ -5,10 +5,9 @@ use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Once,
+    Arc, Mutex, Once, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
-    Mutex, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -164,8 +163,9 @@ impl AssetCache {
         path: &Path,
         slot: &mut Option<(PathBuf, u64, Arc<[u8]>)>,
     ) -> Result<Arc<[u8]>, MicrovmError> {
-        let metadata = fs::metadata(path)
-            .map_err(|err| MicrovmError::Backend(format!("读取资源元数据失败: {}: {err}", path.display())))?;
+        let metadata = fs::metadata(path).map_err(|err| {
+            MicrovmError::Backend(format!("读取资源元数据失败: {}: {err}", path.display()))
+        })?;
         let mtime = metadata
             .modified()
             .ok()
@@ -181,7 +181,9 @@ impl AssetCache {
         }
 
         let bytes: Arc<[u8]> = fs::read(path)
-            .map_err(|err| MicrovmError::Backend(format!("读取资源文件失败: {}: {err}", path.display())))?
+            .map_err(|err| {
+                MicrovmError::Backend(format!("读取资源文件失败: {}: {err}", path.display()))
+            })?
             .into();
         *slot = Some((path.to_path_buf(), mtime, Arc::clone(&bytes)));
         Ok(bytes)

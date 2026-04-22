@@ -141,8 +141,12 @@ impl Sandbox {
     }
 
     /// 使用完整配置创建沙箱
+    #[allow(unused_mut)]
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
-        let mut sandbox = Self::new_uninitialized(config);
+        let sandbox = Self::new_uninitialized(config);
+
+        #[cfg(feature = "vm")]
+        let mut sandbox = sandbox;
 
         #[cfg(feature = "vm")]
         {

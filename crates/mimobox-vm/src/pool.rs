@@ -11,9 +11,9 @@ use thiserror::Error;
 use crate::{GuestCommandResult, MicrovmConfig, MicrovmError};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use mimobox_core::SandboxConfig;
-#[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use mimobox_core::SandboxConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmPoolConfig {
