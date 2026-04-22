@@ -7,7 +7,8 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mimobox_core::SandboxConfig;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_vm::{
-    KvmBackend, KvmExitReason, MicrovmConfig, VmPool, VmPoolConfig, microvm_config_from_vm_assets,
+    KvmBackend, KvmExitReason, MicrovmConfig, RestorePool, RestorePoolConfig, VmPool, VmPoolConfig,
+    microvm_config_from_vm_assets,
 };
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -104,7 +105,10 @@ fn bench_snapshot_restore(c: &mut Criterion) {
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let mut backend = create_backend(&config);
+                let mut backend = must(
+                    KvmBackend::create_vm_for_restore(SandboxConfig::default(), config.clone()),
+                    "创建 restore 用 KVM 后端失败",
+                );
                 must(
                     backend.restore_state(memory.as_slice(), vcpu_state.as_slice()),
                     "恢复快照失败",
@@ -118,6 +122,48 @@ fn bench_snapshot_restore(c: &mut Criterion) {
                 black_box(result);
 
                 must(backend.shutdown(), "关闭恢复 VM 失败");
+            }
+
+            total_start.elapsed()
+        });
+    });
+}
+
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn bench_restore_pool(c: &mut Criterion) {
+    let config = benchmark_config();
+    let command = guest_cmd(&["/bin/echo", "hello"]);
+    let (memory, vcpu_state) = build_booted_snapshot(&config);
+    let pool = must(
+        RestorePool::new(
+            SandboxConfig::default(),
+            config,
+            RestorePoolConfig {
+                min_size: 1,
+                max_size: 4,
+            },
+        ),
+        "创建 restore pool 失败",
+    );
+
+    c.bench_function("bench_restore_pool", |b| {
+        b.iter_custom(|iters| {
+            let total_start = Instant::now();
+
+            for _ in 0..iters {
+                let mut restored = must(
+                    pool.restore(memory.as_slice(), vcpu_state.as_slice()),
+                    "从 restore pool 恢复 VM 失败",
+                );
+
+                let result = must(
+                    restored.execute(black_box(command.as_slice())),
+                    "restore pool 命令执行失败",
+                );
+                assert_eq!(result.exit_code, Some(0), "restore pool echo 命令必须成功");
+                black_box(result);
+
+                drop(restored);
             }
 
             total_start.elapsed()
@@ -197,6 +243,7 @@ criterion_group!(
     kvm_benches,
     bench_cold_start,
     bench_snapshot_restore,
+    bench_restore_pool,
     bench_command_execution,
     bench_pool_hot_path
 );
