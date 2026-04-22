@@ -1254,7 +1254,7 @@ impl KvmBackend {
         }
 
         self.lifecycle = KvmLifecycle::Running;
-        let exit_reason = (|| {
+        let exit_reason: Result<KvmExitReason, MicrovmError> = (|| {
             if !self.guest_booted {
                 #[cfg(any(debug_assertions, feature = "boot-profile"))]
                 let vcpu_config_started_at = Instant::now();
@@ -1654,32 +1654,24 @@ impl KvmBackend {
         let should_track_io_detail = response.is_some();
         let measure_restore_resume = self.pending_restore_profile.is_some();
         let restore_resume_started_at = measure_restore_resume.then(Instant::now);
-        let exit = match self
-            .vcpus
-            .first_mut()
-            .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?
-            .run()
-        {
-            Ok(exit) => {
-                if let Some(started_at) = restore_resume_started_at {
-                    self.finish_restore_resume_profile(started_at.elapsed());
-                }
-                exit
-            }
+        let run_result = {
+            let vcpu = self
+                .vcpus
+                .first_mut()
+                .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
+            vcpu.run()
+        };
+        if let Some(started_at) = restore_resume_started_at {
+            self.finish_restore_resume_profile(started_at.elapsed());
+        }
+        let exit = match run_result {
+            Ok(exit) => exit,
             Err(err) if watchdog.timed_out() => {
-                if let Some(started_at) = restore_resume_started_at {
-                    self.finish_restore_resume_profile(started_at.elapsed());
-                }
                 return Err(MicrovmError::Backend(format!(
                     "KVM_RUN 被 watchdog 中断: {err}"
                 )));
             }
-            Err(err) => {
-                if let Some(started_at) = restore_resume_started_at {
-                    self.finish_restore_resume_profile(started_at.elapsed());
-                }
-                return Err(to_backend_error(err));
-            }
+            Err(err) => return Err(to_backend_error(err)),
         };
 
         let serial_device = &mut self.serial_device;
