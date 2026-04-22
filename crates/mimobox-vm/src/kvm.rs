@@ -12,9 +12,7 @@ use std::sync::{
     mpsc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-#[cfg(any(debug_assertions, feature = "boot-profile"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
@@ -333,6 +331,97 @@ struct BootProfile {
     host_logged: bool,
     guest_extension_logged: bool,
     capture_guest_boot_lines: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct CreateVmProfile {
+    kvm_fd_open: Duration,
+    kvm_create_vm: Duration,
+    vm_arch_setup: Duration,
+    guest_memory_mmap: Duration,
+    kernel_asset_read: Duration,
+    rootfs_asset_read: Duration,
+    kernel_elf_load: Duration,
+    rootfs_write: Duration,
+    kvm_set_user_memory_region: Duration,
+    vcpu_creation: Duration,
+    vcpu_register_config: Duration,
+    cpuid_config: Duration,
+    boot_params: Duration,
+    create_vm_total: Duration,
+    boot_wait: Duration,
+}
+
+impl CreateVmProfile {
+    fn profiled_create_vm_total(&self) -> Duration {
+        self.kvm_fd_open
+            + self.kvm_create_vm
+            + self.vm_arch_setup
+            + self.guest_memory_mmap
+            + self.kernel_asset_read
+            + self.rootfs_asset_read
+            + self.kernel_elf_load
+            + self.rootfs_write
+            + self.kvm_set_user_memory_region
+            + self.vcpu_creation
+            + self.boot_params
+    }
+
+    fn create_vm_misc(&self) -> Duration {
+        self.create_vm_total
+            .checked_sub(self.profiled_create_vm_total())
+            .unwrap_or_default()
+    }
+
+    fn cold_start_total(&self) -> Duration {
+        self.create_vm_total + self.cpuid_config + self.vcpu_register_config + self.boot_wait
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RestoreProfile {
+    kvm_fd_open: Duration,
+    kvm_create_vm: Duration,
+    vm_arch_setup: Duration,
+    guest_memory_mmap: Duration,
+    kvm_set_user_memory_region: Duration,
+    vcpu_creation: Duration,
+    cpuid_config: Duration,
+    memory_state_write: Duration,
+    vcpu_state_restore: Duration,
+    device_state_restore: Duration,
+    resume_kvm_run: Option<Duration>,
+}
+
+impl RestoreProfile {
+    fn total_without_resume(&self) -> Duration {
+        self.kvm_fd_open
+            + self.kvm_create_vm
+            + self.vm_arch_setup
+            + self.guest_memory_mmap
+            + self.kvm_set_user_memory_region
+            + self.vcpu_creation
+            + self.cpuid_config
+            + self.memory_state_write
+            + self.vcpu_state_restore
+            + self.device_state_restore
+    }
+
+    fn total_with_resume(&self) -> Duration {
+        self.total_without_resume() + self.resume_kvm_run.unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct VcpuSetupProfile {
+    cpuid_config: Duration,
+    register_config: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RuntimeRestoreProfile {
+    vcpu_state_restore: Duration,
+    device_state_restore: Duration,
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
@@ -695,8 +784,16 @@ pub struct KvmBackend {
     last_exit_reason: Option<KvmExitReason>,
     last_io_detail: Option<String>,
     recent_io_details: VecDeque<String>,
+    create_vm_profile: Option<CreateVmProfile>,
+    pending_restore_profile: Option<RestoreProfile>,
     #[cfg(any(debug_assertions, feature = "boot-profile"))]
     boot_profile: BootProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendCreateMode {
+    ColdStart,
+    SnapshotRestore,
 }
 
 impl KvmBackend {
@@ -705,8 +802,26 @@ impl KvmBackend {
         base_config: SandboxConfig,
         config: MicrovmConfig,
     ) -> Result<Self, MicrovmError> {
+        Self::create_vm_with_mode(base_config, config, BackendCreateMode::ColdStart)
+    }
+
+    pub(crate) fn create_vm_for_restore(
+        base_config: SandboxConfig,
+        config: MicrovmConfig,
+    ) -> Result<Self, MicrovmError> {
+        Self::create_vm_with_mode(base_config, config, BackendCreateMode::SnapshotRestore)
+    }
+
+    fn create_vm_with_mode(
+        base_config: SandboxConfig,
+        config: MicrovmConfig,
+        mode: BackendCreateMode,
+    ) -> Result<Self, MicrovmError> {
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         let mut boot_profile = BootProfile::start();
+        let create_started_at = Instant::now();
+        let mut create_vm_profile = CreateVmProfile::default();
+        let mut restore_profile = RestoreProfile::default();
 
         config.validate()?;
         info!(
@@ -715,14 +830,23 @@ impl KvmBackend {
             "创建 KVM microVM"
         );
 
+        let kvm_open_started_at = Instant::now();
         let kvm = Kvm::new().map_err(to_backend_error)?;
+        let kvm_open_elapsed = kvm_open_started_at.elapsed();
+        create_vm_profile.kvm_fd_open = kvm_open_elapsed;
+        restore_profile.kvm_fd_open = kvm_open_elapsed;
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         boot_profile.mark_kvm_open();
 
+        let vm_create_started_at = Instant::now();
         let vm_fd = kvm.create_vm().map_err(to_backend_error)?;
+        let vm_create_elapsed = vm_create_started_at.elapsed();
+        create_vm_profile.kvm_create_vm = vm_create_elapsed;
+        restore_profile.kvm_create_vm = vm_create_elapsed;
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         boot_profile.mark_vm_create();
 
+        let vm_arch_setup_started_at = Instant::now();
         #[cfg(target_arch = "x86_64")]
         {
             vm_fd.create_irq_chip().map_err(to_backend_error)?;
@@ -738,34 +862,52 @@ impl KvmBackend {
                 .set_tss_address(KVM_TSS_ADDR)
                 .map_err(to_backend_error)?;
         }
+        let vm_arch_setup_elapsed = vm_arch_setup_started_at.elapsed();
+        create_vm_profile.vm_arch_setup = vm_arch_setup_elapsed;
+        restore_profile.vm_arch_setup = vm_arch_setup_elapsed;
 
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
         let memory_alloc_started_at = Instant::now();
         let guest_memory =
             GuestMemoryMmap::from_ranges(&[(GuestAddress(0), config.memory_bytes()?)])
                 .map_err(to_backend_error)?;
+        let guest_memory_mmap_elapsed = memory_alloc_started_at.elapsed();
+        create_vm_profile.guest_memory_mmap = guest_memory_mmap_elapsed;
+        restore_profile.guest_memory_mmap = guest_memory_mmap_elapsed;
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         boot_profile.add_memory_alloc_duration(memory_alloc_started_at);
 
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let kernel_asset_started_at = Instant::now();
-        let kernel_bytes = AssetCache::get_kernel(config.kernel_path.as_path())?;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        boot_profile.add_kernel_load_duration(kernel_asset_started_at);
+        let (kernel_bytes, rootfs_bytes) = match mode {
+            BackendCreateMode::ColdStart => {
+                let kernel_asset_started_at = Instant::now();
+                let kernel_bytes = AssetCache::get_kernel(config.kernel_path.as_path())?;
+                let kernel_asset_elapsed = kernel_asset_started_at.elapsed();
+                create_vm_profile.kernel_asset_read = kernel_asset_elapsed;
+                #[cfg(any(debug_assertions, feature = "boot-profile"))]
+                boot_profile.add_kernel_load_duration(kernel_asset_started_at);
 
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let rootfs_asset_started_at = Instant::now();
-        let rootfs_bytes = AssetCache::get_rootfs(config.rootfs_path.as_path())?;
-        validate_initrd_image(&rootfs_bytes)?;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        boot_profile.add_rootfs_load_duration(rootfs_asset_started_at);
+                let rootfs_asset_started_at = Instant::now();
+                let rootfs_bytes = AssetCache::get_rootfs(config.rootfs_path.as_path())?;
+                validate_initrd_image(&rootfs_bytes)?;
+                let rootfs_asset_elapsed = rootfs_asset_started_at.elapsed();
+                create_vm_profile.rootfs_asset_read = rootfs_asset_elapsed;
+                #[cfg(any(debug_assertions, feature = "boot-profile"))]
+                boot_profile.add_rootfs_load_duration(rootfs_asset_started_at);
+                (kernel_bytes, rootfs_bytes)
+            }
+            BackendCreateMode::SnapshotRestore => (
+                Arc::<[u8]>::from(Vec::<u8>::new()),
+                Arc::<[u8]>::from(Vec::<u8>::new()),
+            ),
+        };
         let mut vcpus = Vec::with_capacity(usize::from(config.vcpu_count));
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
         let vcpu_create_started_at = Instant::now();
         for vcpu_index in 0..u64::from(config.vcpu_count) {
             let vcpu = vm_fd.create_vcpu(vcpu_index).map_err(to_backend_error)?;
             vcpus.push(vcpu);
         }
+        let vcpu_creation_elapsed = vcpu_create_started_at.elapsed();
+        create_vm_profile.vcpu_creation = vcpu_creation_elapsed;
+        restore_profile.vcpu_creation = vcpu_creation_elapsed;
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         boot_profile.add_vcpu_create_duration(vcpu_create_started_at);
 
@@ -795,12 +937,16 @@ impl KvmBackend {
             last_exit_reason: None,
             last_io_detail: None,
             recent_io_details: VecDeque::with_capacity(16),
+            create_vm_profile: None,
+            pending_restore_profile: None,
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
             boot_profile,
         };
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
         let memory_register_started_at = Instant::now();
         backend.register_guest_memory()?;
+        let memory_register_elapsed = memory_register_started_at.elapsed();
+        create_vm_profile.kvm_set_user_memory_region = memory_register_elapsed;
+        restore_profile.kvm_set_user_memory_region = memory_register_elapsed;
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         {
             backend
@@ -809,36 +955,43 @@ impl KvmBackend {
             backend.boot_profile.mark_memory_setup();
         }
 
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let kernel_load_started_at = Instant::now();
-        backend.load_kernel()?;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        {
+        if mode == BackendCreateMode::ColdStart {
+            let kernel_load_started_at = Instant::now();
+            backend.load_kernel()?;
+            create_vm_profile.kernel_elf_load = kernel_load_started_at.elapsed();
+            #[cfg(any(debug_assertions, feature = "boot-profile"))]
+            {
+                backend
+                    .boot_profile
+                    .add_kernel_load_duration(kernel_load_started_at);
+                backend.boot_profile.mark_kernel_load();
+            }
+
+            let rootfs_load_started_at = Instant::now();
+            backend.load_initrd()?;
+            create_vm_profile.rootfs_write = rootfs_load_started_at.elapsed();
+            #[cfg(any(debug_assertions, feature = "boot-profile"))]
+            {
+                backend
+                    .boot_profile
+                    .add_rootfs_load_duration(rootfs_load_started_at);
+                backend.boot_profile.mark_rootfs_load();
+            }
+
+            let boot_params_started_at = Instant::now();
+            backend.write_boot_params()?;
+            backend.load_rootfs_metadata()?;
+            create_vm_profile.boot_params = boot_params_started_at.elapsed();
+            #[cfg(any(debug_assertions, feature = "boot-profile"))]
             backend
                 .boot_profile
-                .add_kernel_load_duration(kernel_load_started_at);
-            backend.boot_profile.mark_kernel_load();
-        }
+                .add_boot_params_duration(boot_params_started_at);
 
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let rootfs_load_started_at = Instant::now();
-        backend.load_initrd()?;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        {
-            backend
-                .boot_profile
-                .add_rootfs_load_duration(rootfs_load_started_at);
-            backend.boot_profile.mark_rootfs_load();
+            create_vm_profile.create_vm_total = create_started_at.elapsed();
+            backend.create_vm_profile = Some(create_vm_profile);
+        } else {
+            backend.pending_restore_profile = Some(restore_profile);
         }
-
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let boot_params_started_at = Instant::now();
-        backend.write_boot_params()?;
-        backend.load_rootfs_metadata()?;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        backend
-            .boot_profile
-            .add_boot_params_duration(boot_params_started_at);
 
         backend.lifecycle = KvmLifecycle::Ready;
         Ok(backend)
@@ -914,29 +1067,64 @@ impl KvmBackend {
         }
     }
 
-    fn configure_boot_vcpus(&self) -> Result<(), MicrovmError> {
+    #[cfg(target_arch = "x86_64")]
+    fn apply_boot_cpuid_to_vcpus(&self) -> Result<(), MicrovmError> {
+        let supported_cpuid = self.build_boot_cpuid()?;
+        for vcpu in &self.vcpus {
+            vcpu.set_cpuid2(&supported_cpuid)
+                .map_err(to_backend_error)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn configure_boot_vcpu_registers(&self) -> Result<(), MicrovmError> {
+        for (vcpu_index, vcpu) in self.vcpus.iter().enumerate() {
+            configure_linux_boot_sregs(&self.guest_memory, vcpu)?;
+            configure_boot_fpu(vcpu)?;
+            configure_boot_msrs(vcpu, vcpu_index == 0)?;
+            configure_lapic(vcpu)?;
+
+            let mut regs = vcpu.get_regs().map_err(to_backend_error)?;
+            regs.rip = self.loaded_kernel.entry_point;
+            regs.rsp = BOOT_STACK_POINTER;
+            regs.rbp = BOOT_STACK_POINTER;
+            regs.rsi = self.boot_params_addr;
+            regs.rflags = 0x2;
+            vcpu.set_regs(&regs).map_err(to_backend_error)?;
+        }
+        Ok(())
+    }
+
+    fn configure_boot_vcpus(&self) -> Result<VcpuSetupProfile, MicrovmError> {
         #[cfg(target_arch = "x86_64")]
         {
-            let supported_cpuid = self.build_boot_cpuid()?;
+            let cpuid_started_at = Instant::now();
+            self.apply_boot_cpuid_to_vcpus()?;
+            let cpuid_config = cpuid_started_at.elapsed();
 
-            for (vcpu_index, vcpu) in self.vcpus.iter().enumerate() {
-                vcpu.set_cpuid2(&supported_cpuid)
-                    .map_err(to_backend_error)?;
-                configure_linux_boot_sregs(&self.guest_memory, vcpu)?;
-                configure_boot_fpu(vcpu)?;
-                configure_boot_msrs(vcpu, vcpu_index == 0)?;
-                configure_lapic(vcpu)?;
+            let register_started_at = Instant::now();
+            self.configure_boot_vcpu_registers()?;
+            let register_config = register_started_at.elapsed();
 
-                let mut regs = vcpu.get_regs().map_err(to_backend_error)?;
-                regs.rip = self.loaded_kernel.entry_point;
-                regs.rsp = BOOT_STACK_POINTER;
-                regs.rbp = BOOT_STACK_POINTER;
-                regs.rsi = self.boot_params_addr;
-                regs.rflags = 0x2;
-                vcpu.set_regs(&regs).map_err(to_backend_error)?;
-            }
+            return Ok(VcpuSetupProfile {
+                cpuid_config,
+                register_config,
+            });
+        }
 
-            return Ok(());
+        #[allow(unreachable_code)]
+        Err(MicrovmError::Backend(
+            "当前 KVM bring-up 仅支持 x86_64".into(),
+        ))
+    }
+
+    fn prepare_restored_vcpus(&self) -> Result<Duration, MicrovmError> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let cpuid_started_at = Instant::now();
+            self.apply_boot_cpuid_to_vcpus()?;
+            return Ok(cpuid_started_at.elapsed());
         }
 
         #[allow(unreachable_code)]
@@ -964,6 +1152,98 @@ impl KvmBackend {
         self.recent_io_details.clear();
     }
 
+    fn emit_create_vm_profile(&mut self) {
+        let Some(profile) = self.create_vm_profile.take() else {
+            return;
+        };
+
+        eprintln!(
+            "[mimobox-vm][create_vm] total={:?} cold_start_total={:?} boot_wait={:?}",
+            profile.create_vm_total,
+            profile.cold_start_total(),
+            profile.boot_wait,
+        );
+        eprintln!(
+            "[mimobox-vm][create_vm] 1.kvm_fd_open={:?} 2.kvm_create_vm={:?} arch_setup={:?}",
+            profile.kvm_fd_open, profile.kvm_create_vm, profile.vm_arch_setup,
+        );
+        eprintln!(
+            "[mimobox-vm][create_vm] 3.guest_memory_mmap={:?} 4.kernel_elf_load={:?} 5.rootfs_write={:?}",
+            profile.guest_memory_mmap, profile.kernel_elf_load, profile.rootfs_write,
+        );
+        eprintln!(
+            "[mimobox-vm][create_vm] 6.kvm_set_user_memory_region={:?} 7.vcpu_creation={:?}",
+            profile.kvm_set_user_memory_region, profile.vcpu_creation,
+        );
+        eprintln!(
+            "[mimobox-vm][create_vm] 8.vcpu_register_config={:?} 9.cpuid_config={:?} 10.boot_params={:?}",
+            profile.vcpu_register_config, profile.cpuid_config, profile.boot_params,
+        );
+        eprintln!(
+            "[mimobox-vm][create_vm] asset_read: kernel={:?} rootfs={:?} create_vm_misc={:?}",
+            profile.kernel_asset_read,
+            profile.rootfs_asset_read,
+            profile.create_vm_misc(),
+        );
+    }
+
+    fn take_or_seed_restore_profile(&mut self) -> RestoreProfile {
+        if let Some(profile) = self.pending_restore_profile.take() {
+            return profile;
+        }
+
+        let mut profile = RestoreProfile::default();
+        if let Some(create_vm_profile) = self.create_vm_profile.take() {
+            profile.kvm_fd_open = create_vm_profile.kvm_fd_open;
+            profile.kvm_create_vm = create_vm_profile.kvm_create_vm;
+            profile.vm_arch_setup = create_vm_profile.vm_arch_setup;
+            profile.guest_memory_mmap = create_vm_profile.guest_memory_mmap;
+            profile.kvm_set_user_memory_region = create_vm_profile.kvm_set_user_memory_region;
+            profile.vcpu_creation = create_vm_profile.vcpu_creation;
+        }
+        profile
+    }
+
+    fn emit_restore_profile_without_resume(&self, profile: &RestoreProfile) {
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] total_without_resume={:?}",
+            profile.total_without_resume(),
+        );
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] kvm_fd_open={:?} 1.kvm_create_vm={:?} arch_setup={:?}",
+            profile.kvm_fd_open, profile.kvm_create_vm, profile.vm_arch_setup,
+        );
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] 2.guest_memory_mmap={:?} kvm_set_user_memory_region={:?} vcpu_creation={:?}",
+            profile.guest_memory_mmap, profile.kvm_set_user_memory_region, profile.vcpu_creation,
+        );
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] 3.memory_state_write={:?} cpuid_config={:?}",
+            profile.memory_state_write, profile.cpuid_config,
+        );
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] 4.vcpu_state_restore={:?} 5.device_state_restore={:?}",
+            profile.vcpu_state_restore, profile.device_state_restore,
+        );
+        eprintln!("[mimobox-vm][snapshot-restore] 6.resume_kvm_run=待首个 KVM_RUN 实测");
+    }
+
+    fn finish_restore_resume_profile(&mut self, resume_kvm_run: Duration) {
+        let Some(mut profile) = self.pending_restore_profile.take() else {
+            return;
+        };
+        if profile.resume_kvm_run.is_some() {
+            self.pending_restore_profile = Some(profile);
+            return;
+        }
+        profile.resume_kvm_run = Some(resume_kvm_run);
+        eprintln!(
+            "[mimobox-vm][snapshot-restore] 6.resume_kvm_run={:?} total_with_resume={:?}",
+            resume_kvm_run,
+            profile.total_with_resume(),
+        );
+    }
+
     /// 初始化 vCPU 启动寄存器并进入真实 `KVM_RUN` 循环。
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
@@ -978,7 +1258,11 @@ impl KvmBackend {
             if !self.guest_booted {
                 #[cfg(any(debug_assertions, feature = "boot-profile"))]
                 let vcpu_config_started_at = Instant::now();
-                self.configure_boot_vcpus()?;
+                let vcpu_setup = self.configure_boot_vcpus()?;
+                if let Some(profile) = self.create_vm_profile.as_mut() {
+                    profile.vcpu_register_config = vcpu_setup.register_config;
+                    profile.cpuid_config = vcpu_setup.cpuid_config;
+                }
                 #[cfg(any(debug_assertions, feature = "boot-profile"))]
                 {
                     self.boot_profile
@@ -986,14 +1270,22 @@ impl KvmBackend {
                     self.boot_profile.mark_vcpu_setup();
                 }
             }
+            let boot_wait_started_at = Instant::now();
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
             self.boot_profile.mark_boot_start();
-            self.run_until_boot_ready()
+            let exit_reason = self.run_until_boot_ready()?;
+            if let Some(profile) = self.create_vm_profile.as_mut() {
+                profile.boot_wait = boot_wait_started_at.elapsed();
+            }
+            Ok(exit_reason)
         })();
         self.lifecycle = KvmLifecycle::Ready;
         let exit_reason = exit_reason?;
         self.guest_booted = true;
         self.guest_ready = exit_reason == KvmExitReason::Io;
+        if self.guest_ready {
+            self.emit_create_vm_profile();
+        }
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         if self.guest_ready {
             log_boot_profile(&mut self.boot_profile);
@@ -1236,10 +1528,20 @@ impl KvmBackend {
 
     /// 从快照恢复 guest memory 和 vCPU 状态。
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
+        let mut restore_profile = self.take_or_seed_restore_profile();
+
+        let restore_memory_started_at = Instant::now();
         self.restore_guest_memory(memory)?;
-        self.configure_boot_vcpus()?;
-        restore_runtime_state(self, vcpu_state)?;
+        restore_profile.memory_state_write = restore_memory_started_at.elapsed();
+
+        restore_profile.cpuid_config = self.prepare_restored_vcpus()?;
+
+        let runtime_restore_profile = restore_runtime_state(self, vcpu_state)?;
+        restore_profile.vcpu_state_restore = runtime_restore_profile.vcpu_state_restore;
+        restore_profile.device_state_restore = runtime_restore_profile.device_state_restore;
         self.lifecycle = KvmLifecycle::Ready;
+        self.emit_restore_profile_without_resume(&restore_profile);
+        self.pending_restore_profile = Some(restore_profile);
         Ok(())
     }
 
@@ -1349,29 +1651,45 @@ impl KvmBackend {
         response: Option<&mut CommandResponse>,
         watchdog: &VcpuRunWatchdog,
     ) -> Result<RunLoopOutcome, MicrovmError> {
+        let should_track_io_detail = response.is_some();
+        let measure_restore_resume = self.pending_restore_profile.is_some();
+        let restore_resume_started_at = measure_restore_resume.then(Instant::now);
+        let exit = match self
+            .vcpus
+            .first_mut()
+            .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?
+            .run()
+        {
+            Ok(exit) => {
+                if let Some(started_at) = restore_resume_started_at {
+                    self.finish_restore_resume_profile(started_at.elapsed());
+                }
+                exit
+            }
+            Err(err) if watchdog.timed_out() => {
+                if let Some(started_at) = restore_resume_started_at {
+                    self.finish_restore_resume_profile(started_at.elapsed());
+                }
+                return Err(MicrovmError::Backend(format!(
+                    "KVM_RUN 被 watchdog 中断: {err}"
+                )));
+            }
+            Err(err) => {
+                if let Some(started_at) = restore_resume_started_at {
+                    self.finish_restore_resume_profile(started_at.elapsed());
+                }
+                return Err(to_backend_error(err));
+            }
+        };
+
         let serial_device = &mut self.serial_device;
         let serial_buffer = &mut self.serial_buffer;
         let guest_ready = &mut self.guest_ready;
         let last_exit_reason = &mut self.last_exit_reason;
         let last_io_detail = &mut self.last_io_detail;
         let recent_io_details = &mut self.recent_io_details;
-        let should_track_io_detail = response.is_some();
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         let boot_profile = &mut self.boot_profile;
-        let vcpu = self
-            .vcpus
-            .first_mut()
-            .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
-
-        let exit = match vcpu.run() {
-            Ok(exit) => exit,
-            Err(err) if watchdog.timed_out() => {
-                return Err(MicrovmError::Backend(format!(
-                    "KVM_RUN 被 watchdog 中断: {err}"
-                )));
-            }
-            Err(err) => return Err(to_backend_error(err)),
-        };
 
         match exit {
             VcpuExit::IoOut(port, data) if is_serial_port(port) => {
@@ -2013,7 +2331,10 @@ fn encode_runtime_state(backend: &KvmBackend) -> Result<Vec<u8>, MicrovmError> {
     Ok(state)
 }
 
-fn restore_runtime_state(backend: &mut KvmBackend, state: &[u8]) -> Result<(), MicrovmError> {
+fn restore_runtime_state(
+    backend: &mut KvmBackend,
+    state: &[u8],
+) -> Result<RuntimeRestoreProfile, MicrovmError> {
     let mut cursor = ByteCursor::new(state);
     let magic = cursor.read_exact(8)?;
     if magic == KVM_RUNTIME_STATE_MAGIC_V2 {
@@ -2030,9 +2351,14 @@ fn restore_runtime_state(backend: &mut KvmBackend, state: &[u8]) -> Result<(), M
 fn restore_runtime_state_v2(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
-) -> Result<(), MicrovmError> {
+) -> Result<RuntimeRestoreProfile, MicrovmError> {
     restore_vcpu_ids(&backend.vcpus, cursor)?;
-    restore_runtime_tail(backend, cursor)
+    let device_state_started_at = Instant::now();
+    restore_runtime_tail(backend, cursor)?;
+    Ok(RuntimeRestoreProfile {
+        vcpu_state_restore: Duration::ZERO,
+        device_state_restore: device_state_started_at.elapsed(),
+    })
 }
 
 fn restore_runtime_tail(
@@ -2067,11 +2393,24 @@ fn restore_runtime_tail(
 fn restore_runtime_state_v3(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
-) -> Result<(), MicrovmError> {
+) -> Result<RuntimeRestoreProfile, MicrovmError> {
     restore_vcpu_ids(&backend.vcpus, cursor)?;
+    let device_state_started_at = Instant::now();
     restore_vm_state(backend, cursor)?;
+    let mut device_state_restore = device_state_started_at.elapsed();
+
+    let vcpu_state_started_at = Instant::now();
     restore_vcpu_states(&backend.vcpus, cursor)?;
-    restore_runtime_tail(backend, cursor)
+    let vcpu_state_restore = vcpu_state_started_at.elapsed();
+
+    let runtime_tail_started_at = Instant::now();
+    restore_runtime_tail(backend, cursor)?;
+    device_state_restore += runtime_tail_started_at.elapsed();
+
+    Ok(RuntimeRestoreProfile {
+        vcpu_state_restore,
+        device_state_restore,
+    })
 }
 
 fn encode_vcpu_ids(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {

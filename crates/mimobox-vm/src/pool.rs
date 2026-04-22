@@ -299,11 +299,15 @@ impl VmPool {
     }
 
     pub fn acquire(&self) -> Result<PooledVm, PoolError> {
+        let acquire_started_at = Instant::now();
+        let expired_cleanup_started_at = Instant::now();
         let expired = self.inner.take_expired_idle()?;
+        let expired_idle_cleanup = expired_cleanup_started_at.elapsed();
         for entry in expired {
             destroy_idle_entry(entry, "空闲超时");
         }
 
+        let state_checkout_started_at = Instant::now();
         let reused = {
             let mut state = self.inner.lock_state()?;
             if let Some(entry) = state.idle.pop_back() {
@@ -316,7 +320,10 @@ impl VmPool {
                 None
             }
         };
+        let state_checkout = state_checkout_started_at.elapsed();
 
+        let backend_prepare_started_at = Instant::now();
+        let reused_hit = reused.is_some();
         let backend = match reused {
             Some(backend) => backend,
             None => match create_backend(&self.inner.config) {
@@ -327,6 +334,16 @@ impl VmPool {
                 }
             },
         };
+        let backend_prepare = backend_prepare_started_at.elapsed();
+
+        eprintln!(
+            "[mimobox-vm][pool.acquire] expired_idle_cleanup={:?} state_checkout={:?} backend_prepare={:?} reused={} total={:?}",
+            expired_idle_cleanup,
+            state_checkout,
+            backend_prepare,
+            reused_hit,
+            acquire_started_at.elapsed(),
+        );
 
         Ok(PooledVm {
             backend: Some(backend),
@@ -391,18 +408,30 @@ pub struct PooledVm {
 
 impl PooledVm {
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
-        match self.backend.as_mut() {
+        let execute_started_at = Instant::now();
+        let result = match self.backend.as_mut() {
             Some(backend) => execute_backend(backend, cmd),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
-        }
+        };
+        eprintln!(
+            "[mimobox-vm][pool.execute] total={:?} success={}",
+            execute_started_at.elapsed(),
+            result.is_ok(),
+        );
+        result
     }
 }
 
 impl Drop for PooledVm {
     fn drop(&mut self) {
+        let drop_started_at = Instant::now();
         if let Some(backend) = self.backend.take() {
             self.pool.recycle(backend);
         }
+        eprintln!(
+            "[mimobox-vm][pool.drop] total={:?}",
+            drop_started_at.elapsed(),
+        );
     }
 }
 
