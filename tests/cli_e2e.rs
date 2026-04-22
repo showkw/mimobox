@@ -154,6 +154,9 @@ fn invalid_command_returns_error() {
         // 使用 echo 而非 printf：printf 使用的 syscall 被 seccomp 过滤器拒绝（SIGSYS），
         // 而 /bin/echo 已验证在沙箱白名单中可正常执行
         "/bin/sh -c 'echo fail >&2; exit 7'",
+        // 允许 fork：/bin/sh -c 需要 fork 子进程执行命令，
+        // SeccompProfile::Essential 默认阻止 fork/clone，必须显式放开
+        "--allow-fork",
     ]);
     let response = parse_run_response(output);
 
