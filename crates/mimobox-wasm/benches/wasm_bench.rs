@@ -256,7 +256,9 @@ fn bench_hot_execute(c: &mut Criterion, module: &BenchModule, config: &SandboxCo
 fn main() {
     // SAFETY: set_var 在单线程启动阶段调用，不存在数据竞争。
     // 仅设置一个自定义环境变量用于抑制 benchmark 期间的日志输出。
-    unsafe { std::env::set_var("MIMOBOX_WASM_QUIET", "1"); }
+    unsafe {
+        std::env::set_var("MIMOBOX_WASM_QUIET", "1");
+    }
 
     let module = must(build_noop_module(), "创建 benchmark Wasm 模块失败");
     let config = benchmark_config();

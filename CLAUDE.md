@@ -81,12 +81,12 @@ mimobox/
 
 | 阶段 | 目标 | 实际 | 状态 |
 |------|------|------|------|
-| Phase 1（OS 级） | 冷启动 <10ms | P50: 3.51ms | ✅ |
-| Phase 2（Wasm 级） | 冷启动 <5ms | P50: 0.61ms | ✅ |
-| Phase 3（预热池） | 热获取 <100us | P99: 0.38us | ✅ |
-| Phase 4（microVM） | 冷启动 <250ms | P50: 252ms | ✅ |
-| Phase 4（microVM） | 快照恢复 <50ms | P50: 70ms | 🔄 |
-| Phase 4（microVM） | 预热池热路径 <1ms | P50: 788us | ✅ |
+| Phase 1（OS 级） | 冷启动 <10ms | P50: 8.24ms | ✅ |
+| Phase 2（Wasm 级） | 冷启动 <5ms | P50: 1.01ms（清缓存） | ✅ |
+| Phase 3（预热池） | 热获取 <100us | P50: 0.19us (acquire only) | ✅ |
+| Phase 4（microVM） | 冷启动 <250ms | P50: 253ms | ❌ 未达标 |
+| Phase 4（microVM） | 快照恢复 <50ms | P50: 69ms (非池化) / 28ms (池化 restore-to-ready) | ✅ (池化) |
+| Phase 4（microVM） | 预热池热路径 <1ms | P50: 773us | ✅ |
 
 ## 参考文档索引
 
