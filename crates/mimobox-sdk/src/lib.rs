@@ -12,6 +12,8 @@ pub use error::SdkError;
 
 use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
+#[cfg(feature = "vm")]
+use std::sync::Arc;
 
 /// 沙箱执行结果
 pub struct ExecuteResult {
@@ -34,6 +36,62 @@ impl From<SandboxResult> for ExecuteResult {
     }
 }
 
+trait ExecuteForSdk {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError>;
+}
+
+#[cfg(all(feature = "os", target_os = "linux"))]
+impl ExecuteForSdk for mimobox_os::LinuxSandbox {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        CoreSandbox::execute(self, args)
+            .map(ExecuteResult::from)
+            .map_err(SdkError::from)
+    }
+}
+
+#[cfg(all(feature = "os", target_os = "macos"))]
+impl ExecuteForSdk for mimobox_os::MacOsSandbox {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        CoreSandbox::execute(self, args)
+            .map(ExecuteResult::from)
+            .map_err(SdkError::from)
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        CoreSandbox::execute(self, args)
+            .map(ExecuteResult::from)
+            .map_err(SdkError::from)
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl ExecuteForSdk for mimobox_vm::PooledVm {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        let start = std::time::Instant::now();
+        self.execute(args)
+            .map(|result| ExecuteResult {
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                timed_out: result.timed_out,
+                elapsed: start.elapsed(),
+            })
+            .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        CoreSandbox::execute(self, args)
+            .map(ExecuteResult::from)
+            .map_err(SdkError::from)
+    }
+}
+
 /// 后端实例枚举
 enum SandboxInner {
     #[cfg(all(feature = "os", target_os = "linux"))]
@@ -42,6 +100,8 @@ enum SandboxInner {
     OsMac(mimobox_os::MacOsSandbox),
     #[cfg(all(feature = "vm", target_os = "linux"))]
     MicroVm(mimobox_vm::MicrovmSandbox),
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    PooledMicroVm(mimobox_vm::PooledVm),
     #[cfg(feature = "wasm")]
     Wasm(mimobox_wasm::WasmSandbox),
 }
@@ -53,6 +113,8 @@ pub struct Sandbox {
     config: Config,
     inner: Option<SandboxInner>,
     active_isolation: Option<IsolationLevel>,
+    #[cfg(feature = "vm")]
+    vm_pool: Option<Arc<mimobox_vm::VmPool>>,
 }
 
 macro_rules! dispatch_execute {
@@ -64,6 +126,8 @@ macro_rules! dispatch_execute {
             SandboxInner::OsMac($binding) => $expr,
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::MicroVm($binding) => $expr,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm($binding) => $expr,
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm($binding) => $expr,
         }
@@ -78,11 +142,28 @@ impl Sandbox {
 
     /// 使用完整配置创建沙箱
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
-        Ok(Self {
-            config,
-            inner: None,
-            active_isolation: None,
-        })
+        let mut sandbox = Self::new_uninitialized(config);
+
+        #[cfg(feature = "vm")]
+        {
+            sandbox.vm_pool = initialize_default_vm_pool(&sandbox.config)?;
+        }
+
+        Ok(sandbox)
+    }
+
+    /// 使用显式 microVM 预热池配置创建沙箱。
+    #[cfg(feature = "vm")]
+    pub fn with_pool(
+        config: Config,
+        pool_config: mimobox_vm::VmPoolConfig,
+    ) -> Result<Self, SdkError> {
+        let mut sandbox = Self::new_uninitialized(config);
+        let microvm_config = sandbox.config.to_microvm_config()?;
+        let pool = mimobox_vm::VmPool::new(microvm_config, pool_config)
+            .map_err(|error| SdkError::CreateFailed(error.to_string()))?;
+        sandbox.vm_pool = Some(Arc::new(pool));
+        Ok(sandbox)
     }
 
     /// 在沙箱中执行命令
@@ -93,8 +174,7 @@ impl Sandbox {
             .inner
             .as_mut()
             .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
-        let result = dispatch_execute!(inner, s, s.execute(&args))?;
-        Ok(result.into())
+        dispatch_execute!(inner, s, s.execute_for_sdk(&args))
     }
 
     /// 返回当前实例实际使用的隔离层级。
@@ -124,85 +204,145 @@ impl Sandbox {
             destroy_inner(inner)?;
         }
 
-        self.inner = Some(create_inner(&self.config, isolation)?);
+        self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
         Ok(())
     }
-}
 
-fn create_inner(config: &Config, isolation: IsolationLevel) -> Result<SandboxInner, SdkError> {
-    let sandbox_config = config.to_sandbox_config();
+    fn new_uninitialized(config: Config) -> Self {
+        Self {
+            config,
+            inner: None,
+            active_isolation: None,
+            #[cfg(feature = "vm")]
+            vm_pool: None,
+        }
+    }
 
-    match isolation {
-        IsolationLevel::Os => {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            {
-                Ok(SandboxInner::Os(mimobox_os::LinuxSandbox::new(
-                    sandbox_config,
-                )?))
+    fn create_inner(&self, isolation: IsolationLevel) -> Result<SandboxInner, SdkError> {
+        let sandbox_config = self.config.to_sandbox_config();
+
+        match isolation {
+            IsolationLevel::Os => {
+                #[cfg(all(feature = "os", target_os = "linux"))]
+                {
+                    Ok(SandboxInner::Os(mimobox_os::LinuxSandbox::new(
+                        sandbox_config,
+                    )?))
+                }
+                #[cfg(all(feature = "os", target_os = "macos"))]
+                {
+                    Ok(SandboxInner::OsMac(mimobox_os::MacOsSandbox::new(
+                        sandbox_config,
+                    )?))
+                }
+                #[cfg(not(any(
+                    all(feature = "os", target_os = "linux"),
+                    all(feature = "os", target_os = "macos")
+                )))]
+                {
+                    Err(SdkError::BackendUnavailable("os"))
+                }
             }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            {
-                Ok(SandboxInner::OsMac(mimobox_os::MacOsSandbox::new(
-                    sandbox_config,
-                )?))
+            IsolationLevel::Wasm => {
+                #[cfg(feature = "wasm")]
+                {
+                    Ok(SandboxInner::Wasm(mimobox_wasm::WasmSandbox::new(
+                        sandbox_config,
+                    )?))
+                }
+                #[cfg(not(feature = "wasm"))]
+                {
+                    Err(SdkError::BackendUnavailable("wasm"))
+                }
             }
-            #[cfg(not(any(
-                all(feature = "os", target_os = "linux"),
-                all(feature = "os", target_os = "macos")
-            )))]
-            {
-                Err(SdkError::BackendUnavailable("os"))
-            }
-        }
-        IsolationLevel::Wasm => {
-            #[cfg(feature = "wasm")]
-            {
-                Ok(SandboxInner::Wasm(mimobox_wasm::WasmSandbox::new(
-                    sandbox_config,
-                )?))
-            }
-            #[cfg(not(feature = "wasm"))]
-            {
-                Err(SdkError::BackendUnavailable("wasm"))
-            }
-        }
-        IsolationLevel::MicroVm => {
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            {
-                let microvm_config = config.to_microvm_config()?;
-                let sandbox =
-                    mimobox_vm::MicrovmSandbox::new_with_base(sandbox_config, microvm_config)
+            IsolationLevel::MicroVm => {
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                {
+                    if let Some(pool) = &self.vm_pool {
+                        let pooled = pool
+                            .acquire()
+                            .map_err(|error| SdkError::CreateFailed(error.to_string()))?;
+                        Ok(SandboxInner::PooledMicroVm(pooled))
+                    } else {
+                        let microvm_config = self.config.to_microvm_config()?;
+                        let sandbox = mimobox_vm::MicrovmSandbox::new_with_base(
+                            sandbox_config,
+                            microvm_config,
+                        )
                         .map_err(|error| SdkError::CreateFailed(error.to_string()))?;
-                Ok(SandboxInner::MicroVm(sandbox))
+                        Ok(SandboxInner::MicroVm(sandbox))
+                    }
+                }
+                #[cfg(not(all(feature = "vm", target_os = "linux")))]
+                {
+                    Err(SdkError::BackendUnavailable("microvm"))
+                }
             }
-            #[cfg(not(all(feature = "vm", target_os = "linux")))]
-            {
-                Err(SdkError::BackendUnavailable("microvm"))
-            }
+            IsolationLevel::Auto => Err(SdkError::BackendUnavailable("auto")),
         }
-        IsolationLevel::Auto => Err(SdkError::BackendUnavailable("auto")),
     }
 }
 
 fn destroy_inner(inner: SandboxInner) -> Result<(), SdkError> {
-    let result = match inner {
+    match inner {
         #[cfg(all(feature = "os", target_os = "linux"))]
-        SandboxInner::Os(sandbox) => sandbox.destroy(),
+        SandboxInner::Os(sandbox) => sandbox
+            .destroy()
+            .map_err(|err| SdkError::DestroyFailed(err.to_string())),
         #[cfg(all(feature = "os", target_os = "macos"))]
-        SandboxInner::OsMac(sandbox) => sandbox.destroy(),
+        SandboxInner::OsMac(sandbox) => sandbox
+            .destroy()
+            .map_err(|err| SdkError::DestroyFailed(err.to_string())),
         #[cfg(all(feature = "vm", target_os = "linux"))]
-        SandboxInner::MicroVm(sandbox) => sandbox.destroy(),
+        SandboxInner::MicroVm(sandbox) => sandbox
+            .destroy()
+            .map_err(|err| SdkError::DestroyFailed(err.to_string())),
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        SandboxInner::PooledMicroVm(pooled) => {
+            drop(pooled);
+            Ok(())
+        }
         #[cfg(feature = "wasm")]
-        SandboxInner::Wasm(sandbox) => sandbox.destroy(),
-    };
-
-    result.map_err(|err| SdkError::DestroyFailed(err.to_string()))
+        SandboxInner::Wasm(sandbox) => sandbox
+            .destroy()
+            .map_err(|err| SdkError::DestroyFailed(err.to_string())),
+    }
 }
 
 fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
     shlex::split(command)
         .ok_or_else(|| SdkError::Config("命令解析失败：shell 风格引号不匹配".to_string()))
+}
+
+#[cfg(feature = "vm")]
+fn should_prepare_vm_pool(config: &Config) -> bool {
+    matches!(resolve_isolation(config, ""), Ok(IsolationLevel::MicroVm))
+}
+
+#[cfg(feature = "vm")]
+fn initialize_default_vm_pool(
+    config: &Config,
+) -> Result<Option<Arc<mimobox_vm::VmPool>>, SdkError> {
+    if !should_prepare_vm_pool(config) {
+        return Ok(None);
+    }
+
+    let microvm_config = config.to_microvm_config()?;
+    let pool_config = mimobox_vm::VmPoolConfig {
+        min_size: 1,
+        max_size: 4,
+        max_idle_duration: std::time::Duration::from_secs(60),
+        health_check_interval: None,
+    };
+
+    match mimobox_vm::VmPool::new(microvm_config, pool_config) {
+        Ok(pool) => Ok(Some(Arc::new(pool))),
+        Err(error) => {
+            tracing::warn!("初始化 microVM 预热池失败，回退到冷启动路径: {error}");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +355,11 @@ fn active_isolation(sandbox: &Sandbox) -> Option<IsolationLevel> {
     sandbox.active_isolation
 }
 
+#[cfg(all(test, feature = "vm"))]
+fn vm_pool_is_initialized(sandbox: &Sandbox) -> bool {
+    sandbox.vm_pool.is_some()
+}
+
 #[cfg(test)]
 #[cfg(feature = "wasm")]
 fn has_os_backend(sandbox: &Sandbox) -> bool {
@@ -225,6 +370,8 @@ fn has_os_backend(sandbox: &Sandbox) -> bool {
         Some(SandboxInner::OsMac(_)) => true,
         #[cfg(all(feature = "vm", target_os = "linux"))]
         Some(SandboxInner::MicroVm(_)) => false,
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        Some(SandboxInner::PooledMicroVm(_)) => false,
         #[cfg(feature = "wasm")]
         Some(SandboxInner::Wasm(_)) => false,
         None => false,
@@ -243,6 +390,8 @@ fn has_wasm_backend(sandbox: &Sandbox) -> bool {
         Some(SandboxInner::OsMac(_)) => false,
         #[cfg(all(feature = "vm", target_os = "linux"))]
         Some(SandboxInner::MicroVm(_)) => false,
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        Some(SandboxInner::PooledMicroVm(_)) => false,
         None => false,
     }
 }
@@ -262,6 +411,38 @@ mod tests {
 
         assert!(!inner_is_initialized(&sandbox));
         assert_eq!(active_isolation(&sandbox), None);
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn default_auto_config_does_not_prepare_vm_pool() {
+        let sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+
+        assert!(!vm_pool_is_initialized(&sandbox));
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn explicit_microvm_config_marks_pool_as_eligible_on_supported_builds() {
+        let config = Config::builder().isolation(IsolationLevel::MicroVm).build();
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        assert!(should_prepare_vm_pool(&config));
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        assert!(!should_prepare_vm_pool(&config));
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn auto_untrusted_config_marks_pool_as_eligible_on_supported_builds() {
+        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        assert!(should_prepare_vm_pool(&config));
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        assert!(!should_prepare_vm_pool(&config));
     }
 
     #[test]
