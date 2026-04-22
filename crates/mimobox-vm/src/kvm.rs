@@ -77,6 +77,7 @@ use self::state::*;
 
 pub(crate) const ZERO_PAGE_ADDR: u64 = 0x7_000;
 pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
+#[cfg(test)]
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
@@ -531,6 +532,7 @@ impl KvmBackend {
 
             let boot_params_started_at = Instant::now();
             backend.write_boot_params()?;
+            #[cfg(test)]
             backend.load_rootfs_metadata()?;
             create_vm_profile.boot_params = boot_params_started_at.elapsed();
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
@@ -922,6 +924,7 @@ impl KvmBackend {
     }
 
     /// 将 rootfs 元信息写入 guest memory，便于测试验证 guest 布局。
+    #[cfg(test)]
     fn load_rootfs_metadata(&mut self) -> Result<(), MicrovmError> {
         let metadata = format!(
             "rootfs={};size={};initrd={:#x};cmdline={:#x};transport={:?}",

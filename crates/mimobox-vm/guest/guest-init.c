@@ -31,7 +31,11 @@
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
 static const char *const INIT_OK_LINE = "mimobox-kvm: init OK\n";
+/* BOOT_PROFILE 由构建脚本通过 -DBOOT_PROFILE 显式启用，默认不定义。 */
+#ifdef BOOT_PROFILE
+/* 仅在显式启用 BOOT_PROFILE 时输出 boot profile，避免 release 冷启动额外串口开销。 */
 static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
+#endif
 static const int OUTPUT_STREAM_STDOUT = STDOUT_FILENO;
 static const int OUTPUT_STREAM_STDERR = STDERR_FILENO;
 
@@ -63,6 +67,7 @@ static void write_console_bytes(const void *buffer, size_t length) {
     }
 }
 
+#ifdef BOOT_PROFILE
 static uint64_t monotonic_now_ns(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
@@ -87,6 +92,7 @@ static void write_boot_time(const char *stage, uint64_t timestamp_ns) {
         write_console_bytes(buffer, (size_t)written);
     }
 }
+#endif
 
 static void mount_if_needed(
     const char *source,
@@ -446,12 +452,14 @@ static int execute_command(const char *command_line) {
 }
 
 int main(void) {
+#ifdef BOOT_PROFILE
     uint64_t init_entry_ns = monotonic_now_ns();
     uint64_t mounts_done_ns = 0;
     uint64_t uart_access_done_ns = 0;
     uint64_t init_ok_ns = 0;
     uint64_t ready_ns = 0;
     uint64_t command_loop_ns = 0;
+#endif
 
     if (setup_console() < 0) {
         _exit(125);
@@ -459,25 +467,32 @@ int main(void) {
 
     signal(SIGPIPE, SIG_IGN);
     mount_if_needed("proc", "/proc", "proc", 0);
-    mount_if_needed("sysfs", "/sys", "sysfs", 0);
     mount_if_needed("devtmpfs", "/dev", "devtmpfs", 0);
+#ifdef BOOT_PROFILE
     mounts_done_ns = monotonic_now_ns();
+#endif
     update_uart_access();
+#ifdef BOOT_PROFILE
     uart_access_done_ns = monotonic_now_ns();
 
     write_boot_time("init_entry", init_entry_ns);
     write_boot_time("mounts_done", mounts_done_ns);
     write_boot_time("uart_access_done", uart_access_done_ns);
+#endif
 
     write_console_line(INIT_OK_LINE);
+#ifdef BOOT_PROFILE
     init_ok_ns = monotonic_now_ns();
     write_boot_time("init_ok", init_ok_ns);
 
     ready_ns = monotonic_now_ns();
     write_boot_time("ready", ready_ns);
+#endif
     write_console_line(READY_LINE);
+#ifdef BOOT_PROFILE
     command_loop_ns = monotonic_now_ns();
     write_boot_time("command_loop", command_loop_ns);
+#endif
 
     char command_buffer[COMMAND_BUFFER_CAP];
     for (;;) {
