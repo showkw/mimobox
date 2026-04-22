@@ -1,5 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "kvm"))]
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::__cpuid_count;
 use std::collections::VecDeque;
 use std::fs;
 use std::mem;
@@ -20,6 +22,8 @@ use kvm_bindings::{
     kvm_pit_config, kvm_pit_state2, kvm_regs, kvm_segment, kvm_sregs, kvm_userspace_memory_region,
     kvm_vcpu_events, kvm_xcrs, kvm_xsave,
 };
+#[cfg(target_arch = "x86_64")]
+use kvm_ioctls::Cap;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use mimobox_core::SandboxConfig;
 use tracing::{debug, info};
@@ -52,7 +56,7 @@ const BOOT_GDT_MAX: usize = 4;
 const KVM_IDENTITY_MAP_ADDR: u64 = 0xfffb_c000;
 #[cfg(target_arch = "x86_64")]
 const KVM_TSS_ADDR: usize = 0xfffb_d000;
-const DEFAULT_CMDLINE: &str = "console=ttyS0 i8042.nokbd reboot=t panic=1 pci=off rdinit=/init";
+const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off reboot=t panic=1 pci=off rdinit=/init";
 const SERIAL_PORT_COM1: u16 = 0x3f8;
 const SERIAL_PORT_LAST: u16 = SERIAL_PORT_COM1 + 7;
 const SERIAL_READY_LINE: &str = "READY";
@@ -98,7 +102,15 @@ const MSR_IA32_SYSENTER_EIP: u32 = 0x176;
 #[cfg(target_arch = "x86_64")]
 const MSR_IA32_TSC: u32 = 0x10;
 #[cfg(target_arch = "x86_64")]
+const MSR_IA32_APICBASE: u32 = 0x1b;
+#[cfg(target_arch = "x86_64")]
 const MSR_IA32_MISC_ENABLE: u32 = 0x1a0;
+#[cfg(target_arch = "x86_64")]
+const MSR_IA32_APICBASE_BSP: u64 = 1 << 8;
+#[cfg(target_arch = "x86_64")]
+const MSR_IA32_APICBASE_ENABLE: u64 = 1 << 11;
+#[cfg(target_arch = "x86_64")]
+const MSR_IA32_APICBASE_BASE: u64 = 0xfee0_0000;
 #[cfg(target_arch = "x86_64")]
 const MSR_IA32_MISC_ENABLE_FAST_STRING: u64 = 1;
 #[cfg(target_arch = "x86_64")]
@@ -114,6 +126,12 @@ const MSR_SYSCALL_MASK: u32 = 0xc000_0084;
 #[cfg(target_arch = "x86_64")]
 const MSR_KERNEL_GS_BASE: u32 = 0xc000_0102;
 #[cfg(target_arch = "x86_64")]
+const APIC_SPIV_REG_OFFSET: usize = 0x0f0;
+#[cfg(target_arch = "x86_64")]
+const APIC_SPIV_VECTOR_MASK: i32 = 0x00ff;
+#[cfg(target_arch = "x86_64")]
+const APIC_SPIV_SW_ENABLE: i32 = 0x0100;
+#[cfg(target_arch = "x86_64")]
 const APIC_LVT0_REG_OFFSET: usize = 0x350;
 #[cfg(target_arch = "x86_64")]
 const APIC_LVT1_REG_OFFSET: usize = 0x360;
@@ -121,6 +139,12 @@ const APIC_LVT1_REG_OFFSET: usize = 0x360;
 const APIC_MODE_EXTINT: i32 = 0x7;
 #[cfg(target_arch = "x86_64")]
 const APIC_MODE_NMI: i32 = 0x4;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF1_FUNCTION: u32 = 0x1;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF1_EDX_APIC: u32 = 1 << 9;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF1_ECX_TSC_DEADLINE: u32 = 1 << 24;
 const ZERO_PAGE_LEN: usize = 4096;
 const PT_LOAD: u32 = 1;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -596,17 +620,18 @@ impl KvmBackend {
     fn configure_boot_vcpus(&self) -> Result<(), MicrovmError> {
         #[cfg(target_arch = "x86_64")]
         {
-            let supported_cpuid = self
+            let mut supported_cpuid = self
                 .kvm
                 .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
                 .map_err(to_backend_error)?;
+            apply_host_passthrough_cpuid(&self.kvm, supported_cpuid.as_mut_slice());
 
-            for vcpu in &self.vcpus {
+            for (vcpu_index, vcpu) in self.vcpus.iter().enumerate() {
                 vcpu.set_cpuid2(&supported_cpuid)
                     .map_err(to_backend_error)?;
                 configure_linux_boot_sregs(&self.guest_memory, vcpu)?;
                 configure_boot_fpu(vcpu)?;
-                configure_boot_msrs(vcpu)?;
+                configure_boot_msrs(vcpu, vcpu_index == 0)?;
                 configure_lapic(vcpu)?;
 
                 let mut regs = vcpu.get_regs().map_err(to_backend_error)?;
@@ -1250,7 +1275,44 @@ fn configure_boot_fpu(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn configure_boot_msrs(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
+fn apply_host_passthrough_cpuid(kvm: &Kvm, entries: &mut [kvm_bindings::kvm_cpuid_entry2]) {
+    let (host_leaf1_ecx, host_leaf1_edx) = host_passthrough_cpuid_bits(kvm);
+
+    for entry in entries {
+        if entry.function != CPUID_LEAF1_FUNCTION || entry.index != 0 {
+            continue;
+        }
+
+        // 这里保留 KVM 过滤后的可用特性集合，只把对冷启动最关键的
+        // TSC deadline/APIC 位显式对齐到宿主机能力，避免 guest 回落到更慢的校准路径。
+        entry.ecx |= host_leaf1_ecx;
+        entry.edx |= host_leaf1_edx;
+        return;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn host_passthrough_cpuid_bits(kvm: &Kvm) -> (u32, u32) {
+    // SAFETY: `cpuid` 仅查询宿主机的只读 CPU 特性叶子，不涉及内存别名或未初始化数据。
+    let host_leaf1 = unsafe { __cpuid_count(CPUID_LEAF1_FUNCTION, 0) };
+    let tsc_deadline = if kvm.check_extension(Cap::TscDeadlineTimer) {
+        host_leaf1.ecx & CPUID_LEAF1_ECX_TSC_DEADLINE
+    } else {
+        0
+    };
+    let apic = host_leaf1.edx & CPUID_LEAF1_EDX_APIC;
+    (tsc_deadline, apic)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn configure_boot_msrs(vcpu: &VcpuFd, is_bootstrap_processor: bool) -> Result<(), MicrovmError> {
+    let apicbase = MSR_IA32_APICBASE_BASE
+        | MSR_IA32_APICBASE_ENABLE
+        | if is_bootstrap_processor {
+            MSR_IA32_APICBASE_BSP
+        } else {
+            0
+        };
     let entries = [
         kvm_msr_entry {
             index: MSR_IA32_SYSENTER_CS,
@@ -1298,6 +1360,11 @@ fn configure_boot_msrs(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
             ..Default::default()
         },
         kvm_msr_entry {
+            index: MSR_IA32_APICBASE,
+            data: apicbase,
+            ..Default::default()
+        },
+        kvm_msr_entry {
             index: MSR_IA32_MISC_ENABLE,
             data: MSR_IA32_MISC_ENABLE_FAST_STRING,
             ..Default::default()
@@ -1322,6 +1389,16 @@ fn configure_boot_msrs(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
 #[cfg(target_arch = "x86_64")]
 fn configure_lapic(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
     let mut klapic = vcpu.get_lapic().map_err(to_backend_error)?;
+    let spiv = get_klapic_reg(&klapic, APIC_SPIV_REG_OFFSET)?;
+    let vector = match spiv & APIC_SPIV_VECTOR_MASK {
+        0 => APIC_SPIV_VECTOR_MASK,
+        value => value,
+    };
+    set_klapic_reg(
+        &mut klapic,
+        APIC_SPIV_REG_OFFSET,
+        (spiv & !(APIC_SPIV_VECTOR_MASK | APIC_SPIV_SW_ENABLE)) | vector | APIC_SPIV_SW_ENABLE,
+    )?;
     set_klapic_delivery_mode(&mut klapic, APIC_LVT0_REG_OFFSET, APIC_MODE_EXTINT)?;
     set_klapic_delivery_mode(&mut klapic, APIC_LVT1_REG_OFFSET, APIC_MODE_NMI)?;
     vcpu.set_lapic(&klapic).map_err(to_backend_error)
@@ -1781,7 +1858,7 @@ fn restore_vcpu_msrs(vcpu: &VcpuFd, entries: &[kvm_msr_entry]) -> Result<(), Mic
     Ok(())
 }
 
-fn tracked_msr_entries_template() -> [kvm_msr_entry; 11] {
+fn tracked_msr_entries_template() -> [kvm_msr_entry; 12] {
     [
         kvm_msr_entry {
             index: MSR_IA32_SYSENTER_CS,
@@ -1825,6 +1902,11 @@ fn tracked_msr_entries_template() -> [kvm_msr_entry; 11] {
         },
         kvm_msr_entry {
             index: MSR_IA32_TSC,
+            data: 0,
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_IA32_APICBASE,
             data: 0,
             ..Default::default()
         },
@@ -2312,9 +2394,11 @@ impl<'a> ByteCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandResponse, SERIAL_EXEC_PREFIX, build_guest_command, encode_command_payload,
-        parse_guest_protocol_line,
+        CommandResponse, DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, build_guest_command,
+        encode_command_payload, parse_guest_protocol_line,
     };
+    #[cfg(target_arch = "x86_64")]
+    use super::{MSR_IA32_APICBASE, tracked_msr_entries_template};
 
     #[test]
     fn test_encode_command_payload_uses_length_prefixed_frame() {
@@ -2351,5 +2435,34 @@ mod tests {
         assert_eq!(result.exit_code, Some(124));
         assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
         assert!(result.stdout.is_empty(), "纯 EXIT 帧不应携带 stdout");
+    }
+
+    #[test]
+    fn test_default_cmdline_contains_boot_latency_toggles() {
+        for token in [
+            "pci=off",
+            "8250.nr_uarts=1",
+            "no_timer_check",
+            "fastboot",
+            "quiet",
+            "rcupdate.rcu_expedited=1",
+            "mitigations=off",
+        ] {
+            assert!(
+                DEFAULT_CMDLINE.split_whitespace().any(|item| item == token),
+                "默认 cmdline 必须包含 {token}"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_tracked_msrs_include_apicbase() {
+        assert!(
+            tracked_msr_entries_template()
+                .iter()
+                .any(|entry| entry.index == MSR_IA32_APICBASE),
+            "快照/恢复需要跟踪 APICBASE MSR"
+        );
     }
 }
