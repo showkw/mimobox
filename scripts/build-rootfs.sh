@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-OUTPUT="${OUTPUT:-crates/mimobox-vm/rootfs.cpio.gz}"
+DEFAULT_VM_ASSETS_SUBDIR="mimobox-poc/vm-assets"
+OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -43,11 +44,22 @@ require_command() {
 }
 
 resolve_output_path() {
-    if [[ "${OUTPUT}" = /* ]]; then
-        printf '%s\n' "${OUTPUT}"
+    local output_path="${OUTPUT}"
+
+    if [[ -z "${output_path}" ]]; then
+        if [[ -n "${VM_ASSETS_DIR:-}" ]]; then
+            output_path="${VM_ASSETS_DIR}/rootfs.cpio.gz"
+        else
+            [[ -n "${HOME:-}" ]] || fail "未设置 OUTPUT 时，必须存在 HOME 环境变量或设置 VM_ASSETS_DIR"
+            output_path="${HOME}/${DEFAULT_VM_ASSETS_SUBDIR}/rootfs.cpio.gz"
+        fi
+    fi
+
+    if [[ "${output_path}" = /* ]]; then
+        printf '%s\n' "${output_path}"
         return
     fi
-    printf '%s/%s\n' "${ROOT_DIR}" "${OUTPUT}"
+    printf '%s/%s\n' "${ROOT_DIR}" "${output_path}"
 }
 
 can_create_device_nodes() {

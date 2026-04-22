@@ -143,7 +143,6 @@ jobs:
           dbgsym_vmlinux="/usr/lib/debug/boot/vmlinux-${kernel_release}"
 
           bash scripts/build-rootfs.sh
-          cp "crates/mimobox-vm/rootfs.cpio.gz" "${VM_ASSETS_DIR}/rootfs.cpio.gz"
 
           if [ -f "${VM_ASSETS_DIR}/vmlinux" ]; then
             echo "命中 vmlinux 缓存，跳过 dbgsym 下载"
@@ -297,8 +296,7 @@ jobs:
             echo "命中 vmlinux 缓存，跳过 dbgsym 下载"
           fi
 
-          bash scripts/build-rootfs.sh
-          cp "crates/mimobox-vm/rootfs.cpio.gz" "${CACHE_VM_ASSETS_DIR}/rootfs.cpio.gz"
+          VM_ASSETS_DIR="${CACHE_VM_ASSETS_DIR}" bash scripts/build-rootfs.sh
 
       - name: Run e2e tests
         run: bash scripts/test-e2e.sh
