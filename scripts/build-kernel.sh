@@ -241,7 +241,7 @@ resolve_build_dir() {
     printf '%s/.mimobox-build-%s\n' "${source_dir}" "${TARGET_ARCH}"
 }
 
-write_miniconfig() {
+generate_miniconfig() {
     local config_path="$1"
 
     cat > "${config_path}" <<'EOF'
@@ -253,6 +253,11 @@ CONFIG_EMBEDDED=y
 CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
 CONFIG_LOCALVERSION=""
 # CONFIG_LOCALVERSION_AUTO is not set
+
+# x86_64 guest /init 依赖的基本执行环境
+CONFIG_64BIT=y
+CONFIG_MMU=y
+CONFIG_X86_IOPL_IOPERM=y
 
 # 启动路径与时钟
 CONFIG_HYPERVISOR_GUEST=y
@@ -291,13 +296,14 @@ CONFIG_TMPFS=y
 # CONFIG_SECURITYFS is not set
 # CONFIG_DEBUG_FS is not set
 
-# 仅保留 ELF 与 shell script 执行能力
+# 仅保留 guest /init 执行 /bin/sh 所需格式支持
 CONFIG_BINFMT_ELF=y
 CONFIG_BINFMT_SCRIPT=y
 # CONFIG_COREDUMP is not set
 # CONFIG_ELF_CORE is not set
 
-# 裁掉当前 guest 不需要的内核接口
+# fork/clone/wait 不是独立 Kconfig 符号，这里保留 guest /init 命令循环
+# 需要的进程、信号、定时器与事件通知基础设施。
 # CONFIG_SYSVIPC is not set
 # CONFIG_POSIX_MQUEUE is not set
 # CONFIG_AUDIT is not set
@@ -309,10 +315,11 @@ CONFIG_BINFMT_SCRIPT=y
 # CONFIG_FHANDLE is not set
 # CONFIG_AIO is not set
 # CONFIG_IO_URING is not set
-# CONFIG_FUTEX is not set
-# CONFIG_EPOLL is not set
-# CONFIG_SIGNALFD is not set
-# CONFIG_TIMERFD is not set
+CONFIG_POSIX_TIMERS=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
 CONFIG_EVENTFD=y
 
 # 当前 microVM 只走串口与 initramfs，不需要网络栈
@@ -415,7 +422,7 @@ generate_kernel_config() {
     local make_jobs="$4"
 
     mkdir -p "${build_dir}"
-    write_miniconfig "${miniconfig_path}"
+    generate_miniconfig "${miniconfig_path}"
 
     log "生成最小化 guest 内核配置"
     make -C "${source_dir}" \
