@@ -15,12 +15,13 @@ tracing.workspace = true
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 virtio-queue = { version = "0.16", optional = true }
+vhost = { version = "0.13", features = ["vhost-kern", "vhost-vsock"], optional = true }
 vm-memory = { workspace = true, features = ["backend-mmap"] }
 vmm-sys-util.workspace = true
 
 [features]
 default = []
-kvm = ["virtio-queue"]
+kvm = ["virtio-queue", "vhost"]
 boot-profile = []
 
 [dev-dependencies]
