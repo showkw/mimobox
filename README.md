@@ -262,6 +262,7 @@ scripts/test.sh
 scripts/test-e2e.sh
 scripts/bench.sh
 scripts/build-rootfs.sh
+scripts/build-kernel.sh
 scripts/extract-vmlinux.sh <output_path>
 ```
 
@@ -272,6 +273,7 @@ scripts/extract-vmlinux.sh <output_path>
 - `scripts/test-e2e.sh`：跨后端 e2e 验证
 - `scripts/bench.sh [crate-name] [bench-name|all]`：运行 criterion 基准
 - `scripts/build-rootfs.sh`：构建 KVM rootfs，默认输出到 `crates/mimobox-vm/rootfs.cpio.gz`
+- `scripts/build-kernel.sh`：构建极简 KVM guest `vmlinux`，默认输出到 `crates/mimobox-vm/vmlinux`
 - `scripts/extract-vmlinux.sh`：提取可用于 KVM 测试的 `vmlinux`
 
 ## 9. 文档与 CI 状态
