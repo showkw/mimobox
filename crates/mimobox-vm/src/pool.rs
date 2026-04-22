@@ -299,14 +299,18 @@ impl VmPool {
     }
 
     pub fn acquire(&self) -> Result<PooledVm, PoolError> {
+        #[cfg(feature = "boot-profile")]
         let acquire_started_at = Instant::now();
+        #[cfg(feature = "boot-profile")]
         let expired_cleanup_started_at = Instant::now();
         let expired = self.inner.take_expired_idle()?;
+        #[cfg(feature = "boot-profile")]
         let expired_idle_cleanup = expired_cleanup_started_at.elapsed();
         for entry in expired {
             destroy_idle_entry(entry, "空闲超时");
         }
 
+        #[cfg(feature = "boot-profile")]
         let state_checkout_started_at = Instant::now();
         let reused = {
             let mut state = self.inner.lock_state()?;
@@ -320,9 +324,12 @@ impl VmPool {
                 None
             }
         };
+        #[cfg(feature = "boot-profile")]
         let state_checkout = state_checkout_started_at.elapsed();
 
+        #[cfg(feature = "boot-profile")]
         let backend_prepare_started_at = Instant::now();
+        #[cfg(feature = "boot-profile")]
         let reused_hit = reused.is_some();
         let backend = match reused {
             Some(backend) => backend,
@@ -334,8 +341,10 @@ impl VmPool {
                 }
             },
         };
+        #[cfg(feature = "boot-profile")]
         let backend_prepare = backend_prepare_started_at.elapsed();
 
+        #[cfg(feature = "boot-profile")]
         eprintln!(
             "[mimobox-vm][pool.acquire] expired_idle_cleanup={:?} state_checkout={:?} backend_prepare={:?} reused={} total={:?}",
             expired_idle_cleanup,
@@ -408,11 +417,13 @@ pub struct PooledVm {
 
 impl PooledVm {
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        #[cfg(feature = "boot-profile")]
         let execute_started_at = Instant::now();
         let result = match self.backend.as_mut() {
             Some(backend) => execute_backend(backend, cmd),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         };
+        #[cfg(feature = "boot-profile")]
         eprintln!(
             "[mimobox-vm][pool.execute] total={:?} success={}",
             execute_started_at.elapsed(),
@@ -424,10 +435,12 @@ impl PooledVm {
 
 impl Drop for PooledVm {
     fn drop(&mut self) {
+        #[cfg(feature = "boot-profile")]
         let drop_started_at = Instant::now();
         if let Some(backend) = self.backend.take() {
             self.pool.recycle(backend);
         }
+        #[cfg(feature = "boot-profile")]
         eprintln!(
             "[mimobox-vm][pool.drop] total={:?}",
             drop_started_at.elapsed(),
