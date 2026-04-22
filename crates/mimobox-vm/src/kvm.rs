@@ -18,9 +18,9 @@ use std::time::Duration;
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
 use kvm_bindings::{
     KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, KVM_PIT_SPEAKER_DUMMY, Msrs,
-    kvm_clock_data, kvm_fpu, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_msr_entry,
-    kvm_pit_config, kvm_pit_state2, kvm_regs, kvm_segment, kvm_sregs, kvm_userspace_memory_region,
-    kvm_vcpu_events, kvm_xcrs, kvm_xsave,
+    kvm_clock_data, kvm_cpuid_entry2, kvm_fpu, kvm_irqchip, kvm_lapic_state, kvm_mp_state,
+    kvm_msr_entry, kvm_pit_config, kvm_pit_state2, kvm_regs, kvm_segment, kvm_sregs,
+    kvm_userspace_memory_region, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
 };
 #[cfg(target_arch = "x86_64")]
 use kvm_ioctls::Cap;
@@ -56,7 +56,7 @@ const BOOT_GDT_MAX: usize = 4;
 const KVM_IDENTITY_MAP_ADDR: u64 = 0xfffb_c000;
 #[cfg(target_arch = "x86_64")]
 const KVM_TSS_ADDR: usize = 0xfffb_d000;
-const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off reboot=t panic=1 pci=off rdinit=/init";
+const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init";
 const SERIAL_PORT_COM1: u16 = 0x3f8;
 const SERIAL_PORT_LAST: u16 = SERIAL_PORT_COM1 + 7;
 const SERIAL_READY_LINE: &str = "READY";
@@ -64,10 +64,18 @@ const SERIAL_EXEC_PREFIX: &str = "EXEC:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
 const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
+const PIC_MASTER_COMMAND_REG: u16 = 0x20;
+const PIC_MASTER_DATA_REG: u16 = 0x21;
+const PIT_CHANNEL0_DATA_REG: u16 = 0x40;
+const PIT_MODE_COMMAND_REG: u16 = 0x43;
 const I8042_PORT_B_REG: u16 = 0x61;
 const I8042_COMMAND_REG: u16 = 0x64;
 const I8042_PORT_B_PIT_TICK: u8 = 0x20;
 const I8042_RESET_CMD: u8 = 0xfe;
+const RTC_INDEX_REG: u16 = 0x70;
+const RTC_DATA_REG: u16 = 0x71;
+const PIC_SLAVE_COMMAND_REG: u16 = 0xa0;
+const PIC_SLAVE_DATA_REG: u16 = 0xa1;
 const PCI_CONFIG_ADDRESS_REG: u16 = 0xcf8;
 const PCI_CONFIG_DATA_REG_START: u16 = 0xcfc;
 const PCI_CONFIG_DATA_REG_END: u16 = 0xcff;
@@ -139,6 +147,12 @@ const APIC_LVT1_REG_OFFSET: usize = 0x360;
 const APIC_MODE_EXTINT: i32 = 0x7;
 #[cfg(target_arch = "x86_64")]
 const APIC_MODE_NMI: i32 = 0x4;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF_KVM_SIGNATURE: u32 = 0x4000_0000;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF_KVM_FEATURES: u32 = 0x4000_0001;
+#[cfg(target_arch = "x86_64")]
+const CPUID_LEAF_TIMING_INFO: u32 = 0x4000_0010;
 #[cfg(target_arch = "x86_64")]
 const CPUID_LEAF1_FUNCTION: u32 = 0x1;
 #[cfg(target_arch = "x86_64")]
@@ -617,14 +631,55 @@ impl KvmBackend {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn build_boot_cpuid(&self) -> Result<kvm_bindings::CpuId, MicrovmError> {
+        let supported_cpuid = self
+            .kvm
+            .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
+            .map_err(to_backend_error)?;
+        let mut entries = supported_cpuid.as_slice().to_vec();
+        apply_host_passthrough_cpuid(&self.kvm, &mut entries);
+
+        if let Some(tsc_khz) = self.boot_tsc_khz() {
+            // 当前稳定可获取的是 TSC 频率；LAPIC 频率缺少统一可靠的宿主查询接口，
+            // 先保守置 0，优先让 guest 命中 TSC 快路径。
+            if !inject_hypervisor_timing_cpuid(&mut entries, tsc_khz, 0) {
+                debug!(
+                    entry_count = entries.len(),
+                    tsc_khz, "CPUID 条目已满，跳过注入 timing leaf"
+                );
+            }
+        }
+
+        entries.sort_by_key(|entry| (entry.function, entry.index));
+        kvm_bindings::CpuId::from_entries(&entries).map_err(to_backend_error)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn boot_tsc_khz(&self) -> Option<u32> {
+        if !self.kvm.check_extension(Cap::GetTscKhz) {
+            return None;
+        }
+
+        let vcpu = match self.vcpus.first() {
+            Some(vcpu) => vcpu,
+            None => return None,
+        };
+
+        match vcpu.get_tsc_khz() {
+            Ok(0) => None,
+            Ok(tsc_khz) => Some(tsc_khz),
+            Err(err) => {
+                debug!(error = %err, "读取 vCPU TSC 频率失败，跳过 timing leaf");
+                None
+            }
+        }
+    }
+
     fn configure_boot_vcpus(&self) -> Result<(), MicrovmError> {
         #[cfg(target_arch = "x86_64")]
         {
-            let mut supported_cpuid = self
-                .kvm
-                .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
-                .map_err(to_backend_error)?;
-            apply_host_passthrough_cpuid(&self.kvm, supported_cpuid.as_mut_slice());
+            let supported_cpuid = self.build_boot_cpuid()?;
 
             for (vcpu_index, vcpu) in self.vcpus.iter().enumerate() {
                 vcpu.set_cpuid2(&supported_cpuid)
@@ -1143,6 +1198,10 @@ impl KvmBackend {
                         format!("pio out port={port:#x} size={}", data.len()),
                     );
                 }
+                if !*guest_ready && is_boot_legacy_pio_port(port) {
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                }
                 if port == PCI_CONFIG_ADDRESS_REG {
                     debug!(port, size = data.len(), "忽略 PCI 配置地址写");
                     *last_exit_reason = Some(KvmExitReason::Io);
@@ -1163,6 +1222,10 @@ impl KvmBackend {
                         recent_io_details,
                         format!("pio in port={port:#x} size={}", data.len()),
                     );
+                }
+                if !*guest_ready && emulate_boot_legacy_pio_read(port, data) {
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
                 }
                 match port {
                     I8042_PORT_B_REG if data.len() == 1 => data[0] = I8042_PORT_B_PIT_TICK,
@@ -1275,7 +1338,60 @@ fn configure_boot_fpu(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn apply_host_passthrough_cpuid(kvm: &Kvm, entries: &mut [kvm_bindings::kvm_cpuid_entry2]) {
+fn inject_hypervisor_timing_cpuid(
+    entries: &mut Vec<kvm_cpuid_entry2>,
+    tsc_khz: u32,
+    lapic_khz: u32,
+) -> bool {
+    let has_signature = entries
+        .iter()
+        .any(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0);
+    let has_timing = entries
+        .iter()
+        .any(|entry| entry.function == CPUID_LEAF_TIMING_INFO && entry.index == 0);
+    let missing_entries = usize::from(!has_signature) + usize::from(!has_timing);
+    if entries.len() + missing_entries > KVM_MAX_CPUID_ENTRIES {
+        return false;
+    }
+
+    if let Some(signature) = entries
+        .iter_mut()
+        .find(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0)
+    {
+        signature.eax = signature.eax.max(CPUID_LEAF_TIMING_INFO);
+    } else {
+        entries.push(kvm_cpuid_entry2 {
+            function: CPUID_LEAF_KVM_SIGNATURE,
+            index: 0,
+            eax: CPUID_LEAF_TIMING_INFO.max(CPUID_LEAF_KVM_FEATURES),
+            ebx: 0x4b4d_564b,
+            ecx: 0x564b_4d56,
+            edx: 0x0000_004d,
+            ..Default::default()
+        });
+    }
+
+    let timing_leaf = kvm_cpuid_entry2 {
+        function: CPUID_LEAF_TIMING_INFO,
+        index: 0,
+        eax: tsc_khz,
+        ebx: lapic_khz,
+        ..Default::default()
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry.function == CPUID_LEAF_TIMING_INFO && entry.index == 0)
+    {
+        *entry = timing_leaf;
+    } else {
+        entries.push(timing_leaf);
+    }
+
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
+fn apply_host_passthrough_cpuid(kvm: &Kvm, entries: &mut [kvm_cpuid_entry2]) {
     let (host_leaf1_ecx, host_leaf1_edx) = host_passthrough_cpuid_bits(kvm);
 
     for entry in entries {
@@ -2065,6 +2181,27 @@ fn is_serial_port(port: u16) -> bool {
     (SERIAL_PORT_COM1..=SERIAL_PORT_LAST).contains(&port)
 }
 
+fn is_boot_legacy_pio_port(port: u16) -> bool {
+    matches!(
+        port,
+        PIC_MASTER_COMMAND_REG | PIC_MASTER_DATA_REG | PIT_CHANNEL0_DATA_REG
+            ..=PIT_MODE_COMMAND_REG
+                | RTC_INDEX_REG
+                | RTC_DATA_REG
+                | PIC_SLAVE_COMMAND_REG
+                | PIC_SLAVE_DATA_REG
+    )
+}
+
+fn emulate_boot_legacy_pio_read(port: u16, data: &mut [u8]) -> bool {
+    if !is_boot_legacy_pio_port(port) {
+        return false;
+    }
+
+    data.fill(0);
+    true
+}
+
 fn take_serial_line(line_buffer: &mut Vec<u8>) -> String {
     let line = String::from_utf8_lossy(line_buffer).into_owned();
     line_buffer.clear();
@@ -2393,12 +2530,17 @@ impl<'a> ByteCursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "x86_64")]
+    use super::{
+        CPUID_LEAF_KVM_FEATURES, CPUID_LEAF_KVM_SIGNATURE, CPUID_LEAF_TIMING_INFO,
+        MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
+    };
     use super::{
         CommandResponse, DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, build_guest_command,
         encode_command_payload, parse_guest_protocol_line,
     };
     #[cfg(target_arch = "x86_64")]
-    use super::{MSR_IA32_APICBASE, tracked_msr_entries_template};
+    use kvm_bindings::kvm_cpuid_entry2;
 
     #[test]
     fn test_encode_command_payload_uses_length_prefixed_frame() {
@@ -2447,12 +2589,75 @@ mod tests {
             "quiet",
             "rcupdate.rcu_expedited=1",
             "mitigations=off",
+            "tsc=reliable",
+            "nokaslr",
+            "nomodule",
         ] {
             assert!(
                 DEFAULT_CMDLINE.split_whitespace().any(|item| item == token),
                 "默认 cmdline 必须包含 {token}"
             );
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_inject_hypervisor_timing_cpuid_updates_signature_and_adds_timing_leaf() {
+        let mut entries = vec![
+            kvm_cpuid_entry2 {
+                function: CPUID_LEAF_KVM_SIGNATURE,
+                index: 0,
+                eax: CPUID_LEAF_KVM_FEATURES,
+                ebx: 1,
+                ecx: 2,
+                edx: 3,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x1,
+                index: 0,
+                ..Default::default()
+            },
+        ];
+
+        assert!(inject_hypervisor_timing_cpuid(&mut entries, 2_900_000, 0));
+
+        let signature = entries
+            .iter()
+            .find(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0)
+            .expect("必须保留 hypervisor 签名叶");
+        assert_eq!(signature.eax, CPUID_LEAF_TIMING_INFO);
+        assert_eq!(signature.ebx, 1);
+        assert_eq!(signature.ecx, 2);
+        assert_eq!(signature.edx, 3);
+
+        let timing = entries
+            .iter()
+            .find(|entry| entry.function == CPUID_LEAF_TIMING_INFO && entry.index == 0)
+            .expect("必须注入 timing leaf");
+        assert_eq!(timing.eax, 2_900_000);
+        assert_eq!(timing.ebx, 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_inject_hypervisor_timing_cpuid_adds_missing_signature_leaf() {
+        let mut entries = vec![kvm_cpuid_entry2 {
+            function: 0x1,
+            index: 0,
+            ..Default::default()
+        }];
+
+        assert!(inject_hypervisor_timing_cpuid(&mut entries, 1_234_567, 0));
+
+        let signature = entries
+            .iter()
+            .find(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0)
+            .expect("缺失签名叶时必须自动补齐");
+        assert_eq!(signature.eax, CPUID_LEAF_TIMING_INFO);
+        assert_eq!(signature.ebx, 0x4b4d_564b);
+        assert_eq!(signature.ecx, 0x564b_4d56);
+        assert_eq!(signature.edx, 0x0000_004d);
     }
 
     #[cfg(target_arch = "x86_64")]
