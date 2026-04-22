@@ -157,6 +157,26 @@ impl BackendHandle {
         }
     }
 
+    fn create_for_restore(
+        base_config: SandboxConfig,
+        config: MicrovmConfig,
+    ) -> Result<Self, MicrovmError> {
+        #[cfg(all(target_os = "linux", feature = "kvm"))]
+        {
+            return Ok(Self::Kvm(Box::new(KvmBackend::create_vm_for_restore(
+                base_config,
+                config,
+            )?)));
+        }
+
+        #[allow(unreachable_code)]
+        {
+            let _ = base_config;
+            let _ = config;
+            Err(MicrovmError::UnsupportedPlatform)
+        }
+    }
+
     fn run_command(&mut self, _cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -262,7 +282,14 @@ impl MicrovmSandbox {
 
     pub(crate) fn from_snapshot(snapshot: MicrovmSnapshot) -> Result<Self, MicrovmError> {
         let (sandbox_config, microvm_config, memory, vcpu_state) = snapshot.into_parts();
-        let mut sandbox = Self::new_with_base(sandbox_config, microvm_config)?;
+        let backend =
+            BackendHandle::create_for_restore(sandbox_config.clone(), microvm_config.clone())?;
+        let mut sandbox = Self {
+            base_config: sandbox_config,
+            microvm_config,
+            state: MicrovmState::Ready,
+            backend,
+        };
         sandbox.backend.restore_parts(&memory, &vcpu_state)?;
         sandbox.state = MicrovmState::Ready;
         Ok(sandbox)
