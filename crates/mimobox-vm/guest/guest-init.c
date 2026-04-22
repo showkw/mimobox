@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -13,6 +14,7 @@
 #include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SERIAL_COM1_BASE 0x3f8
@@ -28,6 +30,7 @@
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
 static const char *const INIT_OK_LINE = "mimobox-kvm: init OK\n";
+static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
 
 static void write_console_line(const char *message) {
     const unsigned char *cursor = (const unsigned char *)message;
@@ -54,6 +57,31 @@ static void write_console_bytes(const void *buffer, size_t length) {
         outb(*cursor, SERIAL_COM1_BASE + SERIAL_REG_THR);
         cursor++;
         length--;
+    }
+}
+
+static uint64_t monotonic_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+        dprintf(STDERR_FILENO, "guest-init: clock_gettime failed: %s\n", strerror(errno));
+        return 0;
+    }
+
+    return ((uint64_t)ts.tv_sec * 1000000000ull) + (uint64_t)ts.tv_nsec;
+}
+
+static void write_boot_time(const char *stage, uint64_t timestamp_ns) {
+    char buffer[96];
+    int written = snprintf(
+        buffer,
+        sizeof(buffer),
+        "%s%s:%" PRIu64 "\n",
+        BOOT_TIME_PREFIX,
+        stage,
+        timestamp_ns
+    );
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
     }
 }
 
@@ -338,6 +366,13 @@ static int execute_command(const char *command_line) {
 }
 
 int main(void) {
+    uint64_t init_entry_ns = monotonic_now_ns();
+    uint64_t mounts_done_ns = 0;
+    uint64_t uart_access_done_ns = 0;
+    uint64_t init_ok_ns = 0;
+    uint64_t ready_ns = 0;
+    uint64_t command_loop_ns = 0;
+
     if (setup_console() < 0) {
         _exit(125);
     }
@@ -346,10 +381,23 @@ int main(void) {
     mount_if_needed("proc", "/proc", "proc", 0);
     mount_if_needed("sysfs", "/sys", "sysfs", 0);
     mount_if_needed("devtmpfs", "/dev", "devtmpfs", 0);
+    mounts_done_ns = monotonic_now_ns();
     update_uart_access();
+    uart_access_done_ns = monotonic_now_ns();
+
+    write_boot_time("init_entry", init_entry_ns);
+    write_boot_time("mounts_done", mounts_done_ns);
+    write_boot_time("uart_access_done", uart_access_done_ns);
 
     write_console_line(INIT_OK_LINE);
+    init_ok_ns = monotonic_now_ns();
+    write_boot_time("init_ok", init_ok_ns);
+
+    ready_ns = monotonic_now_ns();
+    write_boot_time("ready", ready_ns);
     write_console_line(READY_LINE);
+    command_loop_ns = monotonic_now_ns();
+    write_boot_time("command_loop", command_loop_ns);
 
     char command_buffer[COMMAND_BUFFER_CAP];
     for (;;) {
