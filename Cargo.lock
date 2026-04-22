@@ -1449,6 +1449,7 @@ name = "mimobox-wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "libc",
  "mimobox-core",
  "sha2",

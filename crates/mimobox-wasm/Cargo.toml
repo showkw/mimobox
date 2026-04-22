@@ -19,8 +19,13 @@ default = []
 wasm = []
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = "3"
 wat = "1"
+
+[[bench]]
+name = "wasm_bench"
+harness = false
 
 [lints]
 workspace = true
