@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_VM_ASSETS_SUBDIR="mimobox-poc/vm-assets"
 OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
+ENABLE_BOOT_PROFILE="${ENABLE_BOOT_PROFILE:-}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
@@ -35,6 +36,16 @@ log() {
 fail() {
     printf '[build-rootfs][error] %s\n' "$*" >&2
     exit 1
+}
+
+should_enable_boot_profile() {
+    case "${ENABLE_BOOT_PROFILE}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+    esac
+
+    return 1
 }
 
 require_command() {
@@ -105,6 +116,7 @@ build_rootfs_locally() {
         -Werror \
         -static \
         -s \
+        "${GUEST_INIT_CFLAGS[@]}" \
         -o "${guest_init_bin}" \
         "${ROOT_DIR}/crates/mimobox-vm/guest/guest-init.c"
 
@@ -153,6 +165,7 @@ build_rootfs_in_docker() {
         -e HOST_UID="$(id -u)" \
         -e HOST_GID="$(id -g)" \
         -e OUTPUT_NAME="${output_name}" \
+        -e GUEST_INIT_CFLAGS="${GUEST_INIT_CFLAGS[*]}" \
         -e PRIMARY_BUSYBOX_URL="${PRIMARY_BUSYBOX_URL}" \
         -e FALLBACK_BUSYBOX_URL="${FALLBACK_BUSYBOX_URL}" \
         -e BUSYBOX_APPLETS="${BUSYBOX_APPLETS[*]}" \
@@ -177,7 +190,11 @@ build_rootfs_in_docker() {
                 "${rootfs_dir}/tmp" \
                 "${rootfs_dir}/root"
 
-            gcc -O2 -Wall -Wextra -Werror -static -s \
+            if [ -n "${GUEST_INIT_CFLAGS}" ]; then
+                echo "[build-rootfs] 启用 guest boot profile 串口时间戳输出"
+            fi
+
+            gcc -O2 -Wall -Wextra -Werror -static -s ${GUEST_INIT_CFLAGS} \
                 -o "${guest_init_bin}" \
                 /workspace/crates/mimobox-vm/guest/guest-init.c
 
@@ -218,6 +235,12 @@ require_command cpio
 require_command gzip
 
 OUTPUT_PATH="$(resolve_output_path)"
+GUEST_INIT_CFLAGS=()
+
+if should_enable_boot_profile; then
+    GUEST_INIT_CFLAGS+=("-DBOOT_PROFILE")
+    log "启用 guest boot profile 串口时间戳输出"
+fi
 
 cd "${ROOT_DIR}"
 
