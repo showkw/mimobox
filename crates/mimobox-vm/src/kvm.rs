@@ -25,7 +25,7 @@ use kvm_bindings::{
 use kvm_ioctls::Cap;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use mimobox_core::SandboxConfig;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError};
@@ -62,12 +62,12 @@ use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
     CommandResponse, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG, I8042_RESET_CMD,
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SerialDevice,
-    VsockMmioAction, VsockMmioDevice, activate_vhost_backend, emulate_boot_legacy_pio_read,
-    encode_command_payload, handle_serial_read, handle_serial_write, is_boot_legacy_pio_port,
-    is_serial_port, preview_serial_output,
+    VsockCommandChannel, VsockMmioAction, VsockMmioDevice, activate_vhost_backend,
+    build_guest_command, emulate_boot_legacy_pio_read, encode_command_payload, handle_serial_read,
+    handle_serial_write, is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
-use self::devices::{SERIAL_EXEC_PREFIX, build_guest_command, parse_serial_line};
+use self::devices::{SERIAL_EXEC_PREFIX, parse_serial_line};
 pub(crate) use self::profile::RestoreProfile;
 #[cfg(all(any(debug_assertions, feature = "boot-profile"), test))]
 use self::profile::parse_guest_boot_time_line;
@@ -81,6 +81,7 @@ pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 #[cfg(test)]
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
+const VSOCK_ACCEPT_TIMEOUT_SECS: u64 = 10;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
 const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init virtio_mmio.device=512@0xd0000000:5";
 /// vsock MMIO 设备在 guest 物理地址空间中的基地址
@@ -269,6 +270,8 @@ pub struct KvmBackend {
     serial_device: SerialDevice,
     /// vsock virtio MMIO 设备模拟器（None 表示 vsock 未启用）
     vsock_device: Option<VsockMmioDevice>,
+    /// host 侧 vsock 命令通道；建立后优先替代串口命令协议。
+    vsock_channel: Option<VsockCommandChannel>,
     serial_buffer: Vec<u8>,
     last_exit_reason: Option<KvmExitReason>,
     last_io_detail: Option<String>,
@@ -333,6 +336,7 @@ impl KvmBackend {
             guest_ready: false,
             serial_device: SerialDevice::default(),
             vsock_device: None,
+            vsock_channel: None,
             serial_buffer: Vec::new(),
             last_exit_reason: None,
             last_io_detail: None,
@@ -496,6 +500,7 @@ impl KvmBackend {
             guest_ready: false,
             serial_device: SerialDevice::default(),
             vsock_device: Some(VsockMmioDevice::new(3, VSOCK_MMIO_BASE, VSOCK_GSI)),
+            vsock_channel: None,
             serial_buffer: Vec::new(),
             last_exit_reason: None,
             last_io_detail: None,
@@ -603,6 +608,11 @@ impl KvmBackend {
         self.last_exit_reason = None;
         self.last_io_detail = None;
         self.recent_io_details.clear();
+    }
+
+    fn drop_vsock_channel(&mut self) {
+        self.vsock_channel = None;
+        self.transport = KvmTransport::Serial;
     }
 
     fn emit_create_vm_profile(&mut self) {
@@ -948,7 +958,7 @@ impl KvmBackend {
         self.write_guest_bytes(ROOTFS_METADATA_ADDR, metadata.as_bytes())
     }
 
-    /// 通过 guest-init 串口协议执行命令。
+    /// 优先通过 guest-init vsock 协议执行命令，失败时回退到串口协议。
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
@@ -958,13 +968,24 @@ impl KvmBackend {
         }
 
         self.ensure_guest_ready()?;
+        self.ensure_vsock_channel_connected()?;
 
-        let payload = encode_command_payload(cmd, self.base_config.timeout_secs)?;
-        self.serial_device.queue_input(&payload);
-        self.last_command_payload = payload;
+        let guest_command = build_guest_command(cmd, self.base_config.timeout_secs)?;
+        self.last_command_payload = guest_command.as_bytes().to_vec();
 
         self.lifecycle = KvmLifecycle::Running;
-        let result = self.run_until_command_result();
+        let result = if self.vsock_channel.is_some() {
+            match self.run_command_over_vsock(guest_command.as_bytes()) {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    warn!(error = %err, "vsock 命令通道执行失败，回退串口协议");
+                    self.drop_vsock_channel();
+                    self.run_command_over_serial(cmd)
+                }
+            }
+        } else {
+            self.run_command_over_serial(cmd)
+        };
         // watchdog 超时会把实例标记为 Destroyed，不能再被后续代码误写回 Ready。
         if self.lifecycle != KvmLifecycle::Destroyed {
             self.lifecycle = KvmLifecycle::Ready;
@@ -974,6 +995,28 @@ impl KvmBackend {
             self.boot_profile.close_guest_capture();
         }
         result
+    }
+
+    fn run_command_over_vsock(&mut self, cmd: &[u8]) -> Result<GuestCommandResult, MicrovmError> {
+        let channel = self
+            .vsock_channel
+            .as_ref()
+            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道不可用".into()))?;
+        channel.send_command(cmd)?;
+        let result = channel.recv_result()?;
+        self.transport = KvmTransport::Vsock;
+        Ok(result)
+    }
+
+    fn run_command_over_serial(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<GuestCommandResult, MicrovmError> {
+        let payload = encode_command_payload(cmd, self.base_config.timeout_secs)?;
+        self.serial_device.queue_input(&payload);
+        self.last_command_payload = payload;
+        self.transport = KvmTransport::Serial;
+        self.run_until_command_result()
     }
 
     /// 导出快照所需的内存和 vCPU 状态。
@@ -1006,8 +1049,10 @@ impl KvmBackend {
     pub fn shutdown(&mut self) -> Result<(), MicrovmError> {
         self.last_command_payload.clear();
         self.serial_device = SerialDevice::default();
+        self.vsock_channel = None;
         self.guest_booted = false;
         self.guest_ready = false;
+        self.transport = KvmTransport::Serial;
         self.lifecycle = KvmLifecycle::Destroyed;
         Ok(())
     }
@@ -1029,6 +1074,62 @@ impl KvmBackend {
             )));
         }
         Ok(())
+    }
+
+    fn ensure_vsock_channel_connected(&mut self) -> Result<(), MicrovmError> {
+        let Some(channel) = self.vsock_channel.as_ref() else {
+            return Ok(());
+        };
+        if channel.is_connected() {
+            self.transport = KvmTransport::Vsock;
+            return Ok(());
+        }
+
+        let mut line_buffer = Vec::new();
+        let watchdog = self.start_watchdog(Duration::from_secs(VSOCK_ACCEPT_TIMEOUT_SECS))?;
+
+        loop {
+            let accept_result = match self.vsock_channel.as_mut() {
+                Some(channel) => channel.accept_connection(Duration::ZERO),
+                None => return Ok(()),
+            };
+            match accept_result {
+                Ok(()) => {
+                    self.transport = KvmTransport::Vsock;
+                    return Ok(());
+                }
+                Err(MicrovmError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(err) => {
+                    warn!(error = %err, "建立 guest vsock 连接失败，回退串口协议");
+                    self.drop_vsock_channel();
+                    return Ok(());
+                }
+            }
+
+            match self.run_vcpu_step(&mut line_buffer, None, &watchdog) {
+                Ok(RunLoopOutcome::Exit(KvmExitReason::Io | KvmExitReason::Hlt)) => {}
+                Ok(RunLoopOutcome::Exit(exit_reason)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "等待 vsock 连接期间 guest 异常退出: {exit_reason:?}"
+                    )));
+                }
+                Ok(RunLoopOutcome::CommandDone(_)) => {
+                    return Err(MicrovmError::Backend(
+                        "vsock 连接握手阶段不应收到命令完成事件".into(),
+                    ));
+                }
+                Err(err) if watchdog.timed_out() => {
+                    warn!(error = %err, "等待 guest vsock 连接超时，回退串口协议");
+                    self.drop_vsock_channel();
+                    return Ok(());
+                }
+                Err(err) => {
+                    warn!(error = %err, "推进 guest 进入 vsock 命令循环失败，回退串口协议");
+                    self.drop_vsock_channel();
+                    return Ok(());
+                }
+            }
+        }
     }
 
     fn start_watchdog(&mut self, timeout: Duration) -> Result<VcpuRunWatchdog, MicrovmError> {
@@ -1142,6 +1243,7 @@ impl KvmBackend {
             let last_io_detail = &mut self.last_io_detail;
             let recent_io_details = &mut self.recent_io_details;
             let vsock_device = &mut self.vsock_device;
+            let vsock_channel = &mut self.vsock_channel;
             let guest_memory = &self.guest_memory;
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
             let boot_profile = &mut self.boot_profile;
@@ -1241,13 +1343,30 @@ impl KvmBackend {
                             let offset = addr - base;
                             let action = vsock.mmio_write(offset, data);
                             if action == VsockMmioAction::Activated {
-                                debug!(addr, "vsock 设备已激活（guest driver 设置 DRIVER_OK），开始激活 vhost 后端");
+                                debug!(
+                                    addr,
+                                    "vsock 设备已激活（guest driver 设置 DRIVER_OK），开始激活 vhost 后端"
+                                );
                                 let queues = vsock.queues();
                                 let cid = vsock.guest_cid();
                                 let features = vsock.acked_features();
                                 match activate_vhost_backend(queues, cid, features, guest_memory) {
                                     Ok(()) => {
                                         info!(guest_cid = cid, "vhost-vsock 后端激活成功");
+                                        if vsock_channel.is_none() {
+                                            match VsockCommandChannel::new() {
+                                                Ok(channel) => {
+                                                    *vsock_channel = Some(channel);
+                                                }
+                                                Err(err) => {
+                                                    warn!(
+                                                        guest_cid = cid,
+                                                        error = %err,
+                                                        "创建 host vsock 命令通道失败，继续回退串口"
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                     Err(err) => {
                                         // vhost 激活失败不阻断 guest 运行，降级为 MMIO 数据面模拟

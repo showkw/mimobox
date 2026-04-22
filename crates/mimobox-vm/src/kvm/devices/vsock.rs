@@ -351,10 +351,7 @@ impl VsockMmioDevice {
                 let val = read_u32_from_slice(data) as u64;
                 match self.driver_features_select {
                     0 => self.driver_features = (self.driver_features & !0xFFFF_FFFF) | val,
-                    1 => {
-                        self.driver_features =
-                            (self.driver_features & 0xFFFF_FFFF) | (val << 32)
-                    }
+                    1 => self.driver_features = (self.driver_features & 0xFFFF_FFFF) | (val << 32),
                     _ => {}
                 }
                 VsockMmioAction::None
@@ -564,14 +561,10 @@ pub(in crate::kvm) fn activate_vhost_backend(
     // 6. 配置每个 virtqueue (rx=0, tx=1, event=2)
     for (queue_index, queue) in queues.iter().enumerate() {
         if !queue.ready {
-            return Err(format!(
-                "queue {queue_index} 未就绪，无法激活 vhost 后端"
-            ));
+            return Err(format!("queue {queue_index} 未就绪，无法激活 vhost 后端"));
         }
         if queue.size == 0 {
-            return Err(format!(
-                "queue {queue_index} 大小为 0，无法激活 vhost 后端"
-            ));
+            return Err(format!("queue {queue_index} 大小为 0，无法激活 vhost 后端"));
         }
 
         // VHOST_SET_VRING_NUM: 设置队列描述符数量

@@ -6,17 +6,20 @@ use super::*;
 
 mod serial;
 mod vsock;
+mod vsock_channel;
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) use self::serial::SERIAL_BOOT_TIME_PREFIX;
+#[cfg(test)]
+pub(in crate::kvm) use self::serial::SERIAL_EXEC_PREFIX;
 pub(in crate::kvm) use self::serial::{
     CommandResponse, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG, I8042_RESET_CMD,
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SERIAL_READY_LINE,
-    SerialDevice, encode_command_payload, parse_serial_line, preview_serial_output,
+    SerialDevice, build_guest_command, encode_command_payload, parse_serial_line,
+    preview_serial_output,
 };
 pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
-#[cfg(test)]
-pub(in crate::kvm) use self::serial::{SERIAL_EXEC_PREFIX, build_guest_command};
+pub(in crate::kvm) use self::vsock_channel::VsockCommandChannel;
 
 use self::serial::{
     PIC_MASTER_COMMAND_REG, PIC_MASTER_DATA_REG, PIC_SLAVE_COMMAND_REG, PIC_SLAVE_DATA_REG,
