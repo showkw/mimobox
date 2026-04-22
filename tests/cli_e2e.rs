@@ -151,7 +151,9 @@ fn invalid_command_returns_error() {
         "--backend",
         "auto",
         "--command",
-        "/bin/sh -c 'printf fail >&2; exit 7'",
+        // 使用 echo 而非 printf：printf 使用的 syscall 被 seccomp 过滤器拒绝（SIGSYS），
+        // 而 /bin/echo 已验证在沙箱白名单中可正常执行
+        "/bin/sh -c 'echo fail >&2; exit 7'",
     ]);
     let response = parse_run_response(output);
 
