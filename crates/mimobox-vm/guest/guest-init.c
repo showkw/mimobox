@@ -13,10 +13,28 @@
 #include <string.h>
 #include <sys/io.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+/* Alpine musl 没有 linux/vm_sockets.h，手动定义 AF_VSOCK 和 sockaddr_vm。
+ * 定义与 Linux 内核 include/uapi/linux/vm_sockets.h 一致。 */
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
+
+struct sockaddr_vm {
+    unsigned short svm_family;
+    unsigned short svm_reserved1;
+    unsigned int svm_port;
+    unsigned int svm_cid;
+    unsigned char svm_zero[sizeof(struct sockaddr) -
+                           sizeof(sa_family_t) -
+                           sizeof(unsigned short) -
+                           sizeof(unsigned int) -
+                           sizeof(unsigned int)];
+};
 
 #define SERIAL_COM1_BASE 0x3f8
 #define SERIAL_REG_RBR 0
@@ -27,6 +45,9 @@
 
 #define COMMAND_BUFFER_CAP 4096
 #define OUTPUT_BUFFER_CAP 1024
+#define VSOCK_HOST_CID 2
+#define VSOCK_HOST_PORT 1024
+#define VSOCK_OUTPUT_CAP 65536
 
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
@@ -301,6 +322,312 @@ static void close_fd_if_open(int *fd) {
     *fd = -1;
 }
 
+/* ===== vsock 数据面辅助函数 ===== */
+
+/* 从 fd 读取精确 n 字节 */
+static int read_exact(int fd, void *buf, size_t n) {
+    unsigned char *p = (unsigned char *)buf;
+    size_t remaining = n;
+    while (remaining > 0) {
+        ssize_t r = read(fd, p, remaining);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (r == 0) {
+            return -1; /* 对端关闭 */
+        }
+        p += r;
+        remaining -= (size_t)r;
+    }
+    return 0;
+}
+
+/* 向 fd 写入精确 n 字节 */
+static int write_exact(int fd, const void *buf, size_t n) {
+    const unsigned char *p = (const unsigned char *)buf;
+    size_t remaining = n;
+    while (remaining > 0) {
+        ssize_t w = write(fd, p, remaining);
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (w == 0) {
+            return -1;
+        }
+        p += w;
+        remaining -= (size_t)w;
+    }
+    return 0;
+}
+
+/* 尝试通过 AF_VSOCK 连接 host，成功返回 fd，失败返回 -1 */
+static int connect_to_host_vsock(void) {
+    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_vm addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.svm_family = AF_VSOCK;
+    addr.svm_cid = VSOCK_HOST_CID;
+    addr.svm_port = VSOCK_HOST_PORT;
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* vsock 命令帧读取：4 字节大端长度前缀 + payload，返回 payload 长度，失败返回负数 */
+static int read_vsock_command(int fd, char *buffer, size_t capacity) {
+    unsigned char len_buf[4];
+    uint32_t payload_len = 0;
+
+    if (read_exact(fd, len_buf, 4) < 0) {
+        return -1;
+    }
+    payload_len = ((uint32_t)len_buf[0] << 24) |
+                  ((uint32_t)len_buf[1] << 16) |
+                  ((uint32_t)len_buf[2] << 8)  |
+                  ((uint32_t)len_buf[3]);
+    if (payload_len == 0) {
+        return -1;
+    }
+    if (payload_len >= capacity) {
+        return -2; /* 命令过长 */
+    }
+    if (read_exact(fd, buffer, payload_len) < 0) {
+        return -1;
+    }
+    buffer[payload_len] = '\0';
+    return (int)payload_len;
+}
+
+/* vsock 输出收集缓冲区 */
+typedef struct {
+    unsigned char data[VSOCK_OUTPUT_CAP];
+    size_t len;
+} output_buffer_t;
+
+static void output_buffer_init(output_buffer_t *buf) {
+    buf->len = 0;
+}
+
+static void output_buffer_append(output_buffer_t *buf, const unsigned char *data, size_t len) {
+    size_t available = sizeof(buf->data) - buf->len;
+    if (len > available) {
+        len = available;
+    }
+    if (len > 0) {
+        memcpy(buf->data + buf->len, data, len);
+        buf->len += len;
+    }
+}
+
+/* 将命令执行结果通过 vsock 二进制帧发送：
+ * 4字节 stdout_len (大端) + stdout_data +
+ * 4字节 stderr_len (大端) + stderr_data +
+ * 1字节 exit_code */
+static void send_vsock_result(int fd, const unsigned char *stdout_data, size_t stdout_len,
+                              const unsigned char *stderr_data, size_t stderr_len,
+                              int exit_code) {
+    unsigned char len_buf[4];
+
+    /* stdout 长度（大端） */
+    len_buf[0] = (unsigned char)((stdout_len >> 24) & 0xff);
+    len_buf[1] = (unsigned char)((stdout_len >> 16) & 0xff);
+    len_buf[2] = (unsigned char)((stdout_len >> 8) & 0xff);
+    len_buf[3] = (unsigned char)(stdout_len & 0xff);
+    write_exact(fd, len_buf, 4);
+    if (stdout_len > 0) {
+        write_exact(fd, stdout_data, stdout_len);
+    }
+
+    /* stderr 长度（大端） */
+    len_buf[0] = (unsigned char)((stderr_len >> 24) & 0xff);
+    len_buf[1] = (unsigned char)((stderr_len >> 16) & 0xff);
+    len_buf[2] = (unsigned char)((stderr_len >> 8) & 0xff);
+    len_buf[3] = (unsigned char)(stderr_len & 0xff);
+    write_exact(fd, len_buf, 4);
+    if (stderr_len > 0) {
+        write_exact(fd, stderr_data, stderr_len);
+    }
+
+    /* exit code（1 字节） */
+    unsigned char ec = (unsigned char)(exit_code & 0xff);
+    write_exact(fd, &ec, 1);
+}
+
+/* 从子进程管道收集输出到缓冲区（由 poll 驱动，非阻塞式单次读取） */
+static int collect_child_output(int source_fd, output_buffer_t *out) {
+    unsigned char tmp[OUTPUT_BUFFER_CAP];
+
+    for (;;) {
+        ssize_t r = read(source_fd, tmp, sizeof(tmp));
+        if (r == 0) {
+            return 1; /* EOF */
+        }
+        if (r > 0) {
+            output_buffer_append(out, tmp, (size_t)r);
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+}
+
+/* vsock 路径的命令执行：收集原始 stdout/stderr 到缓冲区 */
+static int execute_command_vsock(const char *command_line,
+                                 output_buffer_t *stdout_buf,
+                                 output_buffer_t *stderr_buf) {
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+
+    output_buffer_init(stdout_buf);
+    output_buffer_init(stderr_buf);
+
+    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
+        return 125;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
+        return 125;
+    }
+
+    if (pid == 0) {
+        /* 子进程：与 execute_command 相同的 execve 逻辑 */
+        static char *const envp[] = {
+            "HOME=/root",
+            "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            "SHELL=/bin/sh",
+            "TERM=dumb",
+            NULL,
+        };
+        char *const argv[] = {
+            (char *)SHELL_PATH,
+            "-lc",
+            (char *)command_line,
+            NULL,
+        };
+        int stdin_fd = -1;
+
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stderr_pipe[0]);
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 ||
+            dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+            _exit(125);
+        }
+        stdin_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (stdin_fd < 0 || dup2(stdin_fd, STDIN_FILENO) < 0) {
+            _exit(125);
+        }
+        if (stdin_fd > STDERR_FILENO) {
+            close(stdin_fd);
+        }
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[1]);
+
+        execve(SHELL_PATH, argv, envp);
+        _exit(127);
+    }
+
+    close_fd_if_open(&stdout_pipe[1]);
+    close_fd_if_open(&stderr_pipe[1]);
+
+    struct pollfd poll_fds[2] = {
+        { .fd = stdout_pipe[0], .events = POLLIN | POLLHUP, .revents = 0 },
+        { .fd = stderr_pipe[0], .events = POLLIN | POLLHUP, .revents = 0 },
+    };
+
+    while (poll_fds[0].fd >= 0 || poll_fds[1].fd >= 0) {
+        int poll_status = poll(poll_fds, 2, -1);
+        if (poll_status < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close_fd_if_open(&poll_fds[0].fd);
+            close_fd_if_open(&poll_fds[1].fd);
+            return 125;
+        }
+
+        for (size_t index = 0; index < 2; index++) {
+            if (poll_fds[index].fd < 0 || poll_fds[index].revents == 0) {
+                continue;
+            }
+            if ((poll_fds[index].revents & (POLLIN | POLLHUP)) == 0) {
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+
+            output_buffer_t *target = (index == 0) ? stdout_buf : stderr_buf;
+            int collect_status = collect_child_output(poll_fds[index].fd, target);
+            if (collect_status < 0) {
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+            if (collect_status > 0) {
+                close_fd_if_open(&poll_fds[index].fd);
+            }
+        }
+    }
+    close_fd_if_open(&poll_fds[0].fd);
+    close_fd_if_open(&poll_fds[1].fd);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        return 125;
+    }
+
+    return child_exit_code_from_status(status);
+}
+
+/* vsock 命令循环：从 vsock socket 读取命令，执行，返回二进制结果 */
+static void vsock_command_loop(int vsock_fd) {
+    char command_buffer[COMMAND_BUFFER_CAP];
+
+    for (;;) {
+        int read_status = read_vsock_command(vsock_fd, command_buffer, sizeof(command_buffer));
+        if (read_status < 0) {
+            /* vsock 连接断开或读取失败，退出循环 */
+            break;
+        }
+
+        output_buffer_t stdout_buf;
+        output_buffer_t stderr_buf;
+        int exit_code = execute_command_vsock(command_buffer, &stdout_buf, &stderr_buf);
+        send_vsock_result(vsock_fd,
+                          stdout_buf.data, stdout_buf.len,
+                          stderr_buf.data, stderr_buf.len,
+                          exit_code);
+    }
+}
+
+/* ===== 串口数据面函数 ===== */
+
 static int forward_child_output(int stream_fd, int source_fd) {
     unsigned char buffer[OUTPUT_BUFFER_CAP];
 
@@ -493,6 +820,14 @@ int main(void) {
     command_loop_ns = monotonic_now_ns();
     write_boot_time("command_loop", command_loop_ns);
 #endif
+
+    /* 优先尝试通过 vsock 连接 host，成功则进入 vsock 命令循环 */
+    int vsock_fd = connect_to_host_vsock();
+    if (vsock_fd >= 0) {
+        vsock_command_loop(vsock_fd);
+        close(vsock_fd);
+        /* vsock 循环退出（连接断开），回退到串口命令循环 */
+    }
 
     char command_buffer[COMMAND_BUFFER_CAP];
     for (;;) {
