@@ -7,8 +7,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mimobox_core::SandboxConfig;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_vm::{
-    KvmBackend, KvmExitReason, MicrovmConfig, VmPool, VmPoolConfig,
-    microvm_config_from_vm_assets,
+    KvmBackend, KvmExitReason, MicrovmConfig, VmPool, VmPoolConfig, microvm_config_from_vm_assets,
 };
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -179,8 +178,10 @@ fn bench_pool_hot_path(c: &mut Criterion) {
 
             for _ in 0..iters {
                 let mut pooled = must(pool.acquire(), "从预热池获取 VM 失败");
-                let result =
-                    must(pooled.execute(black_box(command.as_slice())), "预热池命令执行失败");
+                let result = must(
+                    pooled.execute(black_box(command.as_slice())),
+                    "预热池命令执行失败",
+                );
                 assert_eq!(result.exit_code, Some(0), "预热池 echo 命令必须成功");
                 black_box(result);
                 drop(pooled);

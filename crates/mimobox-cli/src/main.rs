@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -283,6 +284,11 @@ struct RunExecution {
     result: SandboxResult,
 }
 
+thread_local! {
+    /// 在需要捕获进程级 stderr 时，临时关闭终端日志，避免日志污染兜底输出。
+    static STDERR_LOGGING_ENABLED: Cell<bool> = const { Cell::new(true) };
+}
+
 fn main() -> ExitCode {
     if let Err(error) = init_tracing() {
         if let Err(print_error) = emit_error_json(&error) {
@@ -363,7 +369,7 @@ fn init_tracing() -> Result<(), CliError> {
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .with_writer(io::stderr)
+        .with_writer(ConditionalStderrWriter)
         .with_target(true);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -399,39 +405,42 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     let allow_fork = args.allow_fork;
 
     let requested_backend = args.backend;
-    let execution = match resolve_run_execution_mode(args.backend) {
-        RunExecutionMode::Sdk => handle_run_via_sdk(
-            &args.command,
-            args.memory,
-            args.timeout,
-            args.deny_network,
-            args.allow_fork,
-        )?,
-        RunExecutionMode::Direct => {
-            let config = build_sandbox_config(
+    let (execution, fallback_stderr) =
+        capture_stderr_bytes(|| match resolve_run_execution_mode(args.backend) {
+            RunExecutionMode::Sdk => handle_run_via_sdk(
+                &args.command,
                 args.memory,
                 args.timeout,
                 args.deny_network,
                 args.allow_fork,
-            );
+            ),
+            RunExecutionMode::Direct => {
+                let config = build_sandbox_config(
+                    args.memory,
+                    args.timeout,
+                    args.deny_network,
+                    args.allow_fork,
+                );
 
-            match args.backend {
-                Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
-                Backend::Os => RunExecution {
-                    backend: Backend::Os,
-                    result: execute_os_backend(config, &argv)?,
-                },
-                Backend::Wasm => RunExecution {
-                    backend: Backend::Wasm,
-                    result: execute_wasm_backend(config, &argv)?,
-                },
-                Backend::Kvm => RunExecution {
-                    backend: Backend::Kvm,
-                    result: execute_kvm_backend(config, &argv, &args)?,
-                },
+                match args.backend {
+                    Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
+                    Backend::Os => Ok(RunExecution {
+                        backend: Backend::Os,
+                        result: execute_os_backend(config, &argv)?,
+                    }),
+                    Backend::Wasm => Ok(RunExecution {
+                        backend: Backend::Wasm,
+                        result: execute_wasm_backend(config, &argv)?,
+                    }),
+                    Backend::Kvm => Ok(RunExecution {
+                        backend: Backend::Kvm,
+                        result: execute_kvm_backend(config, &argv, &args)?,
+                    }),
+                }
             }
-        }
-    };
+        })?;
+    let mut execution = execution?;
+    apply_stderr_fallback(&mut execution.result.stderr, fallback_stderr);
 
     Ok(RunResponse {
         backend: execution.backend,
@@ -676,6 +685,13 @@ fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
     error.into()
 }
 
+fn apply_stderr_fallback(stderr: &mut Vec<u8>, fallback: Vec<u8>) {
+    // 优先使用后端显式返回的 stderr；只有后端遗漏时才使用进程级兜底捕获。
+    if stderr.is_empty() && !fallback.is_empty() {
+        *stderr = fallback;
+    }
+}
+
 fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option<Backend> {
     match isolation {
         SdkIsolationLevel::Auto => None,
@@ -838,9 +854,14 @@ fn capture_benchmark_output<F>(run: F) -> Result<String, CliError>
 where
     F: FnOnce() -> Result<(), CliError>,
 {
-    let mut capture = StdoutCapture::start()?;
-    run()?;
-    capture.finish()
+    let (result, output) = capture_fd_output(libc::STDOUT_FILENO, run)?;
+    result?;
+    String::from_utf8(output).map_err(|error| {
+        CliError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("stdout 捕获结果不是有效 UTF-8: {error}"),
+        ))
+    })
 }
 
 #[cfg(not(unix))]
@@ -852,15 +873,48 @@ where
 }
 
 #[cfg(unix)]
-struct StdoutCapture {
-    saved_stdout: Option<OwnedFd>,
+fn capture_stderr_bytes<F, T>(run: F) -> Result<(T, Vec<u8>), CliError>
+where
+    F: FnOnce() -> T,
+{
+    capture_fd_output(libc::STDERR_FILENO, run)
+}
+
+#[cfg(not(unix))]
+fn capture_stderr_bytes<F, T>(run: F) -> Result<(T, Vec<u8>), CliError>
+where
+    F: FnOnce() -> T,
+{
+    Ok((run(), Vec::new()))
+}
+
+#[cfg(unix)]
+fn capture_fd_output<F, T>(target_fd: libc::c_int, run: F) -> Result<(T, Vec<u8>), CliError>
+where
+    F: FnOnce() -> T,
+{
+    let mut capture = FdCapture::start(target_fd)?;
+    let outcome = if target_fd == libc::STDERR_FILENO {
+        let _guard = StderrLoggingGuard::suspend();
+        run()
+    } else {
+        run()
+    };
+    let output = capture.finish()?;
+    Ok((outcome, output))
+}
+
+#[cfg(unix)]
+struct FdCapture {
+    target_fd: libc::c_int,
+    saved_fd: Option<OwnedFd>,
     read_file: Option<File>,
 }
 
 #[cfg(unix)]
-impl StdoutCapture {
-    fn start() -> Result<Self, CliError> {
-        io::stdout().flush()?;
+impl FdCapture {
+    fn start(target_fd: libc::c_int) -> Result<Self, CliError> {
+        flush_standard_fd(target_fd)?;
 
         let mut pipe_fds = [-1; 2];
         // SAFETY: `pipe_fds` 指向两个有效的 `c_int` 槽位，`pipe` 会在成功时写入读写端。
@@ -874,58 +928,68 @@ impl StdoutCapture {
         // SAFETY: `pipe` 成功后返回的 fd 所有权转移到 `OwnedFd`，且只接管一次。
         let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
 
-        // SAFETY: `dup` 复制当前 stdout fd，返回一个新的独立 fd。
-        let saved_stdout_raw = unsafe { libc::dup(libc::STDOUT_FILENO) };
-        if saved_stdout_raw < 0 {
+        // SAFETY: `dup` 复制当前目标 fd，返回一个新的独立 fd。
+        let saved_fd_raw = unsafe { libc::dup(target_fd) };
+        if saved_fd_raw < 0 {
             return Err(CliError::Io(io::Error::last_os_error()));
         }
         // SAFETY: `dup` 成功返回的新 fd 在此转交给 `OwnedFd` 独占管理。
-        let saved_stdout = unsafe { OwnedFd::from_raw_fd(saved_stdout_raw) };
+        let saved_fd = unsafe { OwnedFd::from_raw_fd(saved_fd_raw) };
 
-        // SAFETY: 将 stdout 重定向到管道写端。两个 fd 都是当前进程中有效的打开文件描述符。
-        let dup_result = unsafe { libc::dup2(write_fd.as_raw_fd(), libc::STDOUT_FILENO) };
+        // SAFETY: 将目标 fd 重定向到管道写端。两个 fd 都是当前进程中有效的打开文件描述符。
+        let dup_result = unsafe { libc::dup2(write_fd.as_raw_fd(), target_fd) };
         if dup_result < 0 {
             return Err(CliError::Io(io::Error::last_os_error()));
         }
 
         Ok(Self {
-            saved_stdout: Some(saved_stdout),
+            target_fd,
+            saved_fd: Some(saved_fd),
             read_file: Some(read_file),
         })
     }
 
-    fn finish(&mut self) -> Result<String, CliError> {
-        self.restore_stdout()?;
+    fn finish(&mut self) -> Result<Vec<u8>, CliError> {
+        self.restore()?;
 
-        let mut output = String::new();
+        let mut output = Vec::new();
         if let Some(read_file) = self.read_file.as_mut() {
-            read_file.read_to_string(&mut output)?;
+            read_file.read_to_end(&mut output)?;
         }
         Ok(output)
     }
 
-    fn restore_stdout(&mut self) -> Result<(), CliError> {
-        io::stdout().flush()?;
+    fn restore(&mut self) -> Result<(), CliError> {
+        flush_standard_fd(self.target_fd)?;
 
-        if let Some(saved_stdout) = self.saved_stdout.as_ref() {
-            // SAFETY: `saved_stdout` 是前面通过 `dup` 复制出的合法 stdout fd，可安全恢复到标准输出。
-            let restore_result =
-                unsafe { libc::dup2(saved_stdout.as_raw_fd(), libc::STDOUT_FILENO) };
+        if let Some(saved_fd) = self.saved_fd.as_ref() {
+            // SAFETY: `saved_fd` 是前面通过 `dup` 复制出的合法 fd，可安全恢复到原始标准流。
+            let restore_result = unsafe { libc::dup2(saved_fd.as_raw_fd(), self.target_fd) };
             if restore_result < 0 {
                 return Err(CliError::Io(io::Error::last_os_error()));
             }
         }
 
-        self.saved_stdout = None;
+        self.saved_fd = None;
         Ok(())
     }
 }
 
 #[cfg(unix)]
-impl Drop for StdoutCapture {
+impl Drop for FdCapture {
     fn drop(&mut self) {
-        let _ = self.restore_stdout();
+        let _ = self.restore();
     }
+}
+
+#[cfg(unix)]
+fn flush_standard_fd(target_fd: libc::c_int) -> Result<(), CliError> {
+    match target_fd {
+        libc::STDOUT_FILENO => io::stdout().flush()?,
+        libc::STDERR_FILENO => io::stderr().flush()?,
+        _ => {}
+    }
+    Ok(())
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -942,6 +1006,30 @@ struct SharedFileGuard {
     file: Arc<Mutex<File>>,
 }
 
+#[derive(Clone, Copy)]
+struct ConditionalStderrWriter;
+
+struct ConditionalStderrGuard {
+    muted: bool,
+}
+
+struct StderrLoggingGuard {
+    previous: bool,
+}
+
+impl StderrLoggingGuard {
+    fn suspend() -> Self {
+        let previous = STDERR_LOGGING_ENABLED.with(|flag| flag.replace(false));
+        Self { previous }
+    }
+}
+
+impl Drop for StderrLoggingGuard {
+    fn drop(&mut self) {
+        STDERR_LOGGING_ENABLED.with(|flag| flag.set(self.previous));
+    }
+}
+
 impl<'a> MakeWriter<'a> for SharedFileWriter {
     type Writer = SharedFileGuard;
 
@@ -949,6 +1037,15 @@ impl<'a> MakeWriter<'a> for SharedFileWriter {
         SharedFileGuard {
             file: Arc::clone(&self.file),
         }
+    }
+}
+
+impl<'a> MakeWriter<'a> for ConditionalStderrWriter {
+    type Writer = ConditionalStderrGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        let muted = STDERR_LOGGING_ENABLED.with(|flag| !flag.get());
+        ConditionalStderrGuard { muted }
     }
 }
 
@@ -967,6 +1064,24 @@ impl Write for SharedFileGuard {
             .lock()
             .map_err(|_| io::Error::other("日志文件锁已中毒"))?;
         file.flush()
+    }
+}
+
+impl Write for ConditionalStderrGuard {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.muted {
+            Ok(buf.len())
+        } else {
+            io::stderr().write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.muted {
+            Ok(())
+        } else {
+            io::stderr().flush()
+        }
     }
 }
 
@@ -1254,5 +1369,28 @@ mod tests {
             Some(Backend::Kvm)
         );
         assert_eq!(backend_from_sdk_isolation(SdkIsolationLevel::Auto), None);
+    }
+
+    #[test]
+    fn stderr_fallback_only_fills_missing_value() {
+        let mut stderr = Vec::new();
+        apply_stderr_fallback(&mut stderr, b"fail".to_vec());
+        assert_eq!(stderr, b"fail");
+
+        apply_stderr_fallback(&mut stderr, b"fallback".to_vec());
+        assert_eq!(stderr, b"fail");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stderr_bytes_reads_process_stderr() {
+        let (value, stderr) = capture_stderr_bytes(|| {
+            eprint!("fail");
+            7
+        })
+        .expect("stderr 捕获应成功");
+
+        assert_eq!(value, 7);
+        assert_eq!(stderr, b"fail");
     }
 }
