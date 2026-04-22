@@ -1661,176 +1661,182 @@ impl KvmBackend {
                 .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
             vcpu.run()
         };
+        let outcome = (|| -> Result<RunLoopOutcome, MicrovmError> {
+            let exit = match run_result {
+                Ok(exit) => exit,
+                Err(err) if watchdog.timed_out() => {
+                    return Err(MicrovmError::Backend(format!(
+                        "KVM_RUN 被 watchdog 中断: {err}"
+                    )));
+                }
+                Err(err) => return Err(to_backend_error(err)),
+            };
+
+            let serial_device = &mut self.serial_device;
+            let serial_buffer = &mut self.serial_buffer;
+            let guest_ready = &mut self.guest_ready;
+            let last_exit_reason = &mut self.last_exit_reason;
+            let last_io_detail = &mut self.last_io_detail;
+            let recent_io_details = &mut self.recent_io_details;
+            #[cfg(any(debug_assertions, feature = "boot-profile"))]
+            let boot_profile = &mut self.boot_profile;
+
+            match exit {
+                VcpuExit::IoOut(port, data) if is_serial_port(port) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("serial out port={port:#x} size={}", data.len()),
+                        );
+                    }
+                    #[cfg(any(debug_assertions, feature = "boot-profile"))]
+                    let action = handle_serial_write(
+                        serial_device,
+                        serial_buffer,
+                        guest_ready,
+                        boot_profile,
+                        port,
+                        data,
+                        line_buffer,
+                        response,
+                    )?;
+                    #[cfg(not(any(debug_assertions, feature = "boot-profile")))]
+                    let action = handle_serial_write(
+                        serial_device,
+                        serial_buffer,
+                        guest_ready,
+                        port,
+                        data,
+                        line_buffer,
+                        response,
+                    )?;
+                    if let Some(result) = action {
+                        return Ok(RunLoopOutcome::CommandDone(result));
+                    }
+                    #[cfg(any(debug_assertions, feature = "boot-profile"))]
+                    if boot_profile.host_logged
+                        && !boot_profile.guest_extension_logged
+                        && boot_profile.guest_command_loop_recorded()
+                    {
+                        log_guest_boot_profile_extension(boot_profile);
+                    }
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                VcpuExit::IoIn(port, data) if is_serial_port(port) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("serial in port={port:#x} size={}", data.len()),
+                        );
+                    }
+                    handle_serial_read(serial_device, port, data)?;
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                VcpuExit::MmioRead(addr, data) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("mmio read addr={addr:#x} size={}", data.len()),
+                        );
+                    }
+                    data.fill(0);
+                    debug!(addr, size = data.len(), "guest 触发 MMIO 读退出");
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                VcpuExit::MmioWrite(addr, data) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("mmio write addr={addr:#x} size={}", data.len()),
+                        );
+                    }
+                    debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                VcpuExit::Hlt => {
+                    *last_exit_reason = Some(KvmExitReason::Hlt);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Hlt))
+                }
+                VcpuExit::Shutdown => {
+                    *last_exit_reason = Some(KvmExitReason::Shutdown);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Shutdown))
+                }
+                VcpuExit::InternalError => {
+                    *last_exit_reason = Some(KvmExitReason::InternalError);
+                    Err(MicrovmError::Backend(
+                        "vCPU 进入 KVM_EXIT_INTERNAL_ERROR".into(),
+                    ))
+                }
+                VcpuExit::IoOut(port, data) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("pio out port={port:#x} size={}", data.len()),
+                        );
+                    }
+                    if !*guest_ready && is_boot_legacy_pio_port(port) {
+                        *last_exit_reason = Some(KvmExitReason::Io);
+                        return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                    }
+                    if port == PCI_CONFIG_ADDRESS_REG {
+                        debug!(port, size = data.len(), "忽略 PCI 配置地址写");
+                        *last_exit_reason = Some(KvmExitReason::Io);
+                        return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                    }
+                    if port == I8042_COMMAND_REG
+                        && data.len() == 1
+                        && data[0] == I8042_RESET_CMD
+                    {
+                        *last_exit_reason = Some(KvmExitReason::Shutdown);
+                        return Ok(RunLoopOutcome::Exit(KvmExitReason::Shutdown));
+                    }
+                    debug!(port, size = data.len(), "忽略非串口 PIO 写退出");
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                VcpuExit::IoIn(port, data) => {
+                    if should_track_io_detail {
+                        push_io_detail(
+                            last_io_detail,
+                            recent_io_details,
+                            format!("pio in port={port:#x} size={}", data.len()),
+                        );
+                    }
+                    if !*guest_ready && emulate_boot_legacy_pio_read(port, data) {
+                        *last_exit_reason = Some(KvmExitReason::Io);
+                        return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                    }
+                    match port {
+                        I8042_PORT_B_REG if data.len() == 1 => data[0] = I8042_PORT_B_PIT_TICK,
+                        I8042_COMMAND_REG if data.len() == 1 => data[0] = 0,
+                        PCI_CONFIG_DATA_REG_START..=PCI_CONFIG_DATA_REG_END => data.fill(0xff),
+                        _ => data.fill(0),
+                    }
+                    debug!(port, size = data.len(), "响应非串口 PIO 读退出");
+                    *last_exit_reason = Some(KvmExitReason::Io);
+                    Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
+                }
+                other => {
+                    *last_exit_reason = Some(KvmExitReason::InternalError);
+                    Err(MicrovmError::Backend(format!(
+                        "未处理的 vCPU 退出: {other:?}"
+                    )))
+                }
+            }
+        })();
         if let Some(started_at) = restore_resume_started_at {
             self.finish_restore_resume_profile(started_at.elapsed());
         }
-        let exit = match run_result {
-            Ok(exit) => exit,
-            Err(err) if watchdog.timed_out() => {
-                return Err(MicrovmError::Backend(format!(
-                    "KVM_RUN 被 watchdog 中断: {err}"
-                )));
-            }
-            Err(err) => return Err(to_backend_error(err)),
-        };
-
-        let serial_device = &mut self.serial_device;
-        let serial_buffer = &mut self.serial_buffer;
-        let guest_ready = &mut self.guest_ready;
-        let last_exit_reason = &mut self.last_exit_reason;
-        let last_io_detail = &mut self.last_io_detail;
-        let recent_io_details = &mut self.recent_io_details;
-        #[cfg(any(debug_assertions, feature = "boot-profile"))]
-        let boot_profile = &mut self.boot_profile;
-
-        match exit {
-            VcpuExit::IoOut(port, data) if is_serial_port(port) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("serial out port={port:#x} size={}", data.len()),
-                    );
-                }
-                #[cfg(any(debug_assertions, feature = "boot-profile"))]
-                let action = handle_serial_write(
-                    serial_device,
-                    serial_buffer,
-                    guest_ready,
-                    boot_profile,
-                    port,
-                    data,
-                    line_buffer,
-                    response,
-                )?;
-                #[cfg(not(any(debug_assertions, feature = "boot-profile")))]
-                let action = handle_serial_write(
-                    serial_device,
-                    serial_buffer,
-                    guest_ready,
-                    port,
-                    data,
-                    line_buffer,
-                    response,
-                )?;
-                if let Some(result) = action {
-                    return Ok(RunLoopOutcome::CommandDone(result));
-                }
-                #[cfg(any(debug_assertions, feature = "boot-profile"))]
-                if boot_profile.host_logged
-                    && !boot_profile.guest_extension_logged
-                    && boot_profile.guest_command_loop_recorded()
-                {
-                    log_guest_boot_profile_extension(boot_profile);
-                }
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            VcpuExit::IoIn(port, data) if is_serial_port(port) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("serial in port={port:#x} size={}", data.len()),
-                    );
-                }
-                handle_serial_read(serial_device, port, data)?;
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            VcpuExit::MmioRead(addr, data) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("mmio read addr={addr:#x} size={}", data.len()),
-                    );
-                }
-                data.fill(0);
-                debug!(addr, size = data.len(), "guest 触发 MMIO 读退出");
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            VcpuExit::MmioWrite(addr, data) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("mmio write addr={addr:#x} size={}", data.len()),
-                    );
-                }
-                debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            VcpuExit::Hlt => {
-                *last_exit_reason = Some(KvmExitReason::Hlt);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Hlt))
-            }
-            VcpuExit::Shutdown => {
-                *last_exit_reason = Some(KvmExitReason::Shutdown);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Shutdown))
-            }
-            VcpuExit::InternalError => {
-                *last_exit_reason = Some(KvmExitReason::InternalError);
-                Err(MicrovmError::Backend(
-                    "vCPU 进入 KVM_EXIT_INTERNAL_ERROR".into(),
-                ))
-            }
-            VcpuExit::IoOut(port, data) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("pio out port={port:#x} size={}", data.len()),
-                    );
-                }
-                if !*guest_ready && is_boot_legacy_pio_port(port) {
-                    *last_exit_reason = Some(KvmExitReason::Io);
-                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
-                }
-                if port == PCI_CONFIG_ADDRESS_REG {
-                    debug!(port, size = data.len(), "忽略 PCI 配置地址写");
-                    *last_exit_reason = Some(KvmExitReason::Io);
-                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
-                }
-                if port == I8042_COMMAND_REG && data.len() == 1 && data[0] == I8042_RESET_CMD {
-                    *last_exit_reason = Some(KvmExitReason::Shutdown);
-                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Shutdown));
-                }
-                debug!(port, size = data.len(), "忽略非串口 PIO 写退出");
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            VcpuExit::IoIn(port, data) => {
-                if should_track_io_detail {
-                    push_io_detail(
-                        last_io_detail,
-                        recent_io_details,
-                        format!("pio in port={port:#x} size={}", data.len()),
-                    );
-                }
-                if !*guest_ready && emulate_boot_legacy_pio_read(port, data) {
-                    *last_exit_reason = Some(KvmExitReason::Io);
-                    return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
-                }
-                match port {
-                    I8042_PORT_B_REG if data.len() == 1 => data[0] = I8042_PORT_B_PIT_TICK,
-                    I8042_COMMAND_REG if data.len() == 1 => data[0] = 0,
-                    PCI_CONFIG_DATA_REG_START..=PCI_CONFIG_DATA_REG_END => data.fill(0xff),
-                    _ => data.fill(0),
-                }
-                debug!(port, size = data.len(), "响应非串口 PIO 读退出");
-                *last_exit_reason = Some(KvmExitReason::Io);
-                Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
-            }
-            other => {
-                *last_exit_reason = Some(KvmExitReason::InternalError);
-                Err(MicrovmError::Backend(format!(
-                    "未处理的 vCPU 退出: {other:?}"
-                )))
-            }
-        }
+        outcome
     }
 
     fn dump_guest_memory(&self) -> Result<Vec<u8>, MicrovmError> {
