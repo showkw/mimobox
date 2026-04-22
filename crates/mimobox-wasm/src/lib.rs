@@ -35,15 +35,23 @@ struct StoreData {
 }
 
 /// 日志宏
+fn wasm_logging_enabled() -> bool {
+    std::env::var_os("MIMOBOX_WASM_QUIET").is_none()
+}
+
 macro_rules! log_info {
     ($($arg:tt)*) => {
-        eprintln!("[mimobox:wasm:info] {}", format!($($arg)*))
+        if wasm_logging_enabled() {
+            eprintln!("[mimobox:wasm:info] {}", format!($($arg)*))
+        }
     };
 }
 
 macro_rules! log_warn {
     ($($arg:tt)*) => {
-        eprintln!("[mimobox:wasm:warn] {}", format!($($arg)*))
+        if wasm_logging_enabled() {
+            eprintln!("[mimobox:wasm:warn] {}", format!($($arg)*))
+        }
     };
 }
 

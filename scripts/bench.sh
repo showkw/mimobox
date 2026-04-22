@@ -28,6 +28,17 @@ mkdir -p "${CRITERION_DIR}"
 cd "${ROOT_DIR}"
 
 CMD=(cargo bench -p "${CRATE_NAME}")
+
+# mimobox-vm 的 microVM benchmark 需要 kvm feature
+if [[ "${CRATE_NAME}" == "mimobox-vm" ]]; then
+    CMD+=(--features kvm)
+fi
+
+# mimobox-wasm 的 benchmark 需要 wasm feature
+if [[ "${CRATE_NAME}" == "mimobox-wasm" ]]; then
+    CMD+=(--features wasm)
+fi
+
 if [[ "${BENCH_NAME}" != "all" ]]; then
     CMD+=(--bench "${BENCH_NAME}")
 fi
