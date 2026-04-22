@@ -98,6 +98,18 @@ fn run_cli(args: &[&str]) -> Output {
     output
 }
 
+/// 运行 CLI 并接受任意退出码（用于测试沙箱命令非零退出码传播）。
+fn run_cli_allow_nonzero(args: &[&str]) -> Output {
+    match Command::new(cli_binary_path())
+        .args(args)
+        .current_dir(workspace_root())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => panic!("执行 mimobox-cli 子进程失败: {error}"),
+    }
+}
+
 fn parse_run_response(output: Output) -> RunResponseEnvelope {
     match serde_json::from_slice(&output.stdout) {
         Ok(response) => response,
@@ -146,18 +158,22 @@ fn explicit_os_backend() {
 
 #[test]
 fn invalid_command_returns_error() {
-    let output = run_cli(&[
+    let output = run_cli_allow_nonzero(&[
         "run",
         "--backend",
         "auto",
         "--command",
-        // 使用 echo 而非 printf：printf 使用的 syscall 被 seccomp 过滤器拒绝（SIGSYS），
-        // 而 /bin/echo 已验证在沙箱白名单中可正常执行
         "/bin/sh -c 'echo fail >&2; exit 7'",
-        // 允许 fork：/bin/sh -c 需要 fork 子进程执行命令，
-        // SeccompProfile::Essential 默认阻止 fork/clone，必须显式放开
         "--allow-fork",
     ]);
+
+    // CLI 进程应传播沙箱命令的退出码
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "CLI 进程退出码应等于沙箱命令退出码 7"
+    );
+
     let response = parse_run_response(output);
 
     assert!(response.ok, "非零退出命令仍应返回成功 JSON 包装");

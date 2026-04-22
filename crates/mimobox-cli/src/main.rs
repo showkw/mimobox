@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -318,7 +318,8 @@ fn main() -> ExitCode {
 
 fn run_with_panic_guard() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Some(exit_code)) => process::exit(exit_code),
+        Ok(None) => ExitCode::SUCCESS,
         Err(error) => {
             error!(code = error.code(), message = %error, "CLI 执行失败");
             if let Err(print_error) = emit_error_json(&error) {
@@ -332,7 +333,7 @@ fn run_with_panic_guard() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), CliError> {
+fn run() -> Result<Option<i32>, CliError> {
     info!("mimobox CLI 启动");
 
     let cli = Cli::try_parse().map_err(|error| CliError::Args(error.to_string()))?;
@@ -344,9 +345,10 @@ fn run() -> Result<(), CliError> {
         CliCommand::Version => CommandResponse::Version(handle_version()),
     };
 
+    let exit_code = success_exit_code(&response);
     emit_success_json(&response)?;
     info!("CLI 执行完成");
-    Ok(())
+    Ok(exit_code)
 }
 
 fn init_tracing() -> Result<(), CliError> {
@@ -698,6 +700,13 @@ fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option<Backend> {
         SdkIsolationLevel::Os => Some(Backend::Os),
         SdkIsolationLevel::Wasm => Some(Backend::Wasm),
         SdkIsolationLevel::MicroVm => Some(Backend::Kvm),
+    }
+}
+
+fn success_exit_code(response: &CommandResponse) -> Option<i32> {
+    match response {
+        CommandResponse::Run(run) => run.exit_code.filter(|code| *code != 0),
+        CommandResponse::Bench(_) | CommandResponse::Version(_) => None,
     }
 }
 
@@ -1379,6 +1388,50 @@ mod tests {
 
         apply_stderr_fallback(&mut stderr, b"fallback".to_vec());
         assert_eq!(stderr, b"fail");
+    }
+
+    #[test]
+    fn success_exit_code_ignores_zero_and_non_run_response() {
+        let version_response = CommandResponse::Version(handle_version());
+        assert_eq!(success_exit_code(&version_response), None);
+
+        let zero_exit_response = CommandResponse::Run(RunResponse {
+            backend: Backend::Os,
+            requested_backend: Backend::Os,
+            requested_command: "/bin/true".to_string(),
+            argv: vec!["/bin/true".to_string()],
+            exit_code: Some(0),
+            timed_out: false,
+            elapsed_ms: 1.0,
+            stdout: String::new(),
+            stderr: String::new(),
+            memory_mb: Some(64),
+            timeout_secs: Some(30),
+            deny_network: false,
+            allow_fork: false,
+        });
+        assert_eq!(success_exit_code(&zero_exit_response), None);
+    }
+
+    #[test]
+    fn success_exit_code_propagates_non_zero_run_exit_code() {
+        let response = CommandResponse::Run(RunResponse {
+            backend: Backend::Os,
+            requested_backend: Backend::Os,
+            requested_command: "/bin/false".to_string(),
+            argv: vec!["/bin/false".to_string()],
+            exit_code: Some(7),
+            timed_out: false,
+            elapsed_ms: 1.0,
+            stdout: String::new(),
+            stderr: String::new(),
+            memory_mb: Some(64),
+            timeout_secs: Some(30),
+            deny_network: false,
+            allow_fork: false,
+        });
+
+        assert_eq!(success_exit_code(&response), Some(7));
     }
 
     #[cfg(unix)]

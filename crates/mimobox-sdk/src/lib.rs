@@ -14,6 +14,7 @@ use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
+use tracing::warn;
 
 /// 沙箱执行结果
 pub struct ExecuteResult {
@@ -190,11 +191,8 @@ impl Sandbox {
     }
 
     /// 销毁沙箱，释放资源
-    pub fn destroy(self) -> Result<(), SdkError> {
-        match self.inner {
-            Some(inner) => destroy_inner(inner),
-            None => Ok(()),
-        }
+    pub fn destroy(mut self) -> Result<(), SdkError> {
+        self.destroy_inner()
     }
 
     fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
@@ -204,8 +202,8 @@ impl Sandbox {
             return Ok(());
         }
 
-        if let Some(inner) = self.inner.take() {
-            destroy_inner(inner)?;
+        if self.inner.is_some() {
+            self.destroy_inner()?;
         }
 
         self.inner = Some(self.create_inner(isolation)?);
@@ -286,9 +284,27 @@ impl Sandbox {
             IsolationLevel::Auto => Err(SdkError::BackendUnavailable("auto")),
         }
     }
+
+    fn destroy_inner(&mut self) -> Result<(), SdkError> {
+        let inner = self.inner.take();
+        self.active_isolation = None;
+
+        match inner {
+            Some(inner) => destroy_backend_inner(inner),
+            None => Ok(()),
+        }
+    }
 }
 
-fn destroy_inner(inner: SandboxInner) -> Result<(), SdkError> {
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        if let Err(error) = self.destroy_inner() {
+            warn!(message = %error, "Sandbox drop 自动清理失败");
+        }
+    }
+}
+
+fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
     match inner {
         #[cfg(all(feature = "os", target_os = "linux"))]
         SandboxInner::Os(sandbox) => sandbox
