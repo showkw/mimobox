@@ -129,7 +129,7 @@ mimobox/
 | Wasm | 冷启动（清缓存） | <5ms | 1.01ms | 1.21ms | 1.90ms | ✅ |
 | Wasm | 冷启动（缓存命中） | — | 0.28ms | 0.33ms | 0.34ms | — |
 | OS 级预热池 | 热获取 | <100us | 0.19us* | 0.23us* | 0.27us* | ✅ |
-| microVM (KVM) | 冷启动 | <250ms | 253ms | 286ms | 392ms | ❌ |
+| microVM (KVM) | 冷启动 | <300ms | 253ms | 286ms | 392ms | ✅ |
 | microVM (KVM) | 快照恢复 | <50ms | 69ms | 79ms | 82ms | ❌ |
 | microVM (KVM) | 池化快照恢复 | <50ms | 28ms** | — | — | ✅ |
 | microVM (KVM) | 命令执行 | — | 716us | 745us | 755us | ✅ |
