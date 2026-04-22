@@ -6,9 +6,14 @@
 //! 与 host vhost-vsock 后端之间的桥接。
 //!
 //! Phase 1 只实现寄存器模拟和状态跟踪，不直接操作 vhost 后端。
-//! Phase 2 将集成 vhost-vsock 完成数据面通信。
+//! Phase 2 集成 vhost-vsock 后端：当 guest driver 设置 DRIVER_OK 后，通过 activate_vhost_backend()
+//! 将 virtqueue 配置传递给内核 vhost 子系统，由内核线程直接处理数据面。
 
 use tracing::debug;
+use vhost::vhost_kern::vsock::Vsock as VhostKernVsock;
+use vhost::vsock::VhostVsock;
+use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 // ============================================================================
 // virtio MMIO 寄存器偏移（virtio MMIO spec v2）
@@ -134,7 +139,7 @@ pub(in crate::kvm) enum VsockMmioAction {
 
 /// virtio 队列配置（描述符表、可用环、已用环地址）
 #[derive(Debug, Clone, Copy, Default)]
-struct VirtQueueConfig {
+pub(in crate::kvm) struct VirtQueueConfig {
     /// 描述符表地址
     desc_addr: u64,
     /// 可用环地址
@@ -237,6 +242,16 @@ impl VsockMmioDevice {
     /// 返回 guest 的 Context ID
     pub(in crate::kvm) fn guest_cid(&self) -> u64 {
         self.guest_cid
+    }
+
+    /// 返回所有队列配置的引用
+    pub(in crate::kvm) fn queues(&self) -> &[VirtQueueConfig; NUM_QUEUES] {
+        &self.queues
+    }
+
+    /// 返回 guest 已确认的 features 位图
+    pub(in crate::kvm) fn acked_features(&self) -> u64 {
+        self.acked_features
     }
 
     /// 处理 guest 对 vsock MMIO 寄存器的读操作
@@ -488,6 +503,114 @@ impl VsockMmioDevice {
     fn selected_queue_mut(&mut self) -> Option<&mut VirtQueueConfig> {
         self.queues.get_mut(self.queue_select as usize)
     }
+}
+
+// ============================================================================
+// vhost-vsock 后端激活
+// ============================================================================
+
+/// 激活 vhost-vsock 后端
+///
+/// 当 guest driver 设置 DRIVER_OK 后调用此函数，将 virtqueue 配置传递给
+/// 内核 vhost 子系统。激活后数据面由内核线程直接处理，VMM 不再介入。
+///
+/// # 参数
+/// - `queues`: 三个 virtqueue 的配置（rx=0, tx=1, event=2）
+/// - `guest_cid`: guest 的 Context ID
+/// - `acked_features`: guest 已确认的 features 位图
+/// - `guest_memory`: guest 内存布局
+///
+/// # 错误
+/// - /dev/vhost-vsock 不存在或没有权限
+/// - ioctl 调用失败（特性协商、内存表、virtqueue 配置等）
+pub(in crate::kvm) fn activate_vhost_backend(
+    queues: &[VirtQueueConfig; NUM_QUEUES],
+    guest_cid: u64,
+    acked_features: u64,
+    guest_memory: &GuestMemoryMmap,
+) -> Result<(), String> {
+    // 1. 打开 /dev/vhost-vsock 并创建 vhost 后端句柄
+    let vsock = VhostKernVsock::new(guest_memory)
+        .map_err(|e| format!("打开 /dev/vhost-vsock 失败: {e}"))?;
+
+    // 2. 设置 owner（必须首先调用）
+    vsock
+        .set_owner()
+        .map_err(|e| format!("VHOST_SET_OWNER 失败: {e}"))?;
+
+    // 3. 设置 guest CID
+    vsock
+        .set_guest_cid(guest_cid)
+        .map_err(|e| format!("VHOST_VSOCK_SET_GUEST_CID({guest_cid}) 失败: {e}"))?;
+
+    // 4. 设置协商的特性
+    vsock
+        .set_features(acked_features)
+        .map_err(|e| format!("VHOST_SET_FEATURES({acked_features:#x}) 失败: {e}"))?;
+
+    // 5. 设置 guest memory 布局
+    // 通过 GuestMemory trait 遍历所有 region，转换为 vhost 需要的内存表
+    let mem_regions: Vec<VhostUserMemoryRegionInfo> = guest_memory
+        .iter()
+        .map(|region| {
+            VhostUserMemoryRegionInfo::from_guest_region(region)
+                .map_err(|e| format!("转换 guest memory region 失败: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    vsock
+        .set_mem_table(&mem_regions)
+        .map_err(|e| format!("VHOST_SET_MEM_TABLE 失败: {e}"))?;
+
+    // 6. 配置每个 virtqueue (rx=0, tx=1, event=2)
+    for (queue_index, queue) in queues.iter().enumerate() {
+        if !queue.ready {
+            return Err(format!(
+                "queue {queue_index} 未就绪，无法激活 vhost 后端"
+            ));
+        }
+        if queue.size == 0 {
+            return Err(format!(
+                "queue {queue_index} 大小为 0，无法激活 vhost 后端"
+            ));
+        }
+
+        // VHOST_SET_VRING_NUM: 设置队列描述符数量
+        vsock
+            .set_vring_num(queue_index, queue.size)
+            .map_err(|e| format!("VHOST_SET_VRING_NUM(queue={queue_index}) 失败: {e}"))?;
+
+        // VHOST_SET_VRING_ADDR: 设置描述符表、可用环、已用环地址
+        let config = VringConfigData {
+            queue_max_size: QUEUE_SIZE_MAX,
+            queue_size: queue.size,
+            flags: 0,
+            desc_table_addr: queue.desc_addr,
+            used_ring_addr: queue.used_addr,
+            avail_ring_addr: queue.avail_addr,
+            log_addr: None,
+        };
+        vsock
+            .set_vring_addr(queue_index, &config)
+            .map_err(|e| format!("VHOST_SET_VRING_ADDR(queue={queue_index}) 失败: {e}"))?;
+
+        // VHOST_SET_VRING_BASE: 设置可用环起始索引
+        vsock
+            .set_vring_base(queue_index, 0)
+            .map_err(|e| format!("VHOST_SET_VRING_BASE(queue={queue_index}) 失败: {e}"))?;
+    }
+
+    // 7. 启动 vhost 数据面
+    vsock
+        .start()
+        .map_err(|e| format!("VHOST_VSOCK_SET_RUNNING(true) 失败: {e}"))?;
+
+    debug!(
+        guest_cid,
+        acked_features,
+        ?queues,
+        "vhost-vsock 后端激活成功"
+    );
+    Ok(())
 }
 
 // ============================================================================

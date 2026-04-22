@@ -14,7 +14,7 @@ pub(in crate::kvm) use self::serial::{
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SERIAL_READY_LINE,
     SerialDevice, encode_command_payload, parse_serial_line, preview_serial_output,
 };
-pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice};
+pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
 #[cfg(test)]
 pub(in crate::kvm) use self::serial::{SERIAL_EXEC_PREFIX, build_guest_command};
 

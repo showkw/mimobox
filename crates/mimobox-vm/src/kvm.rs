@@ -62,9 +62,9 @@ use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
     CommandResponse, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG, I8042_RESET_CMD,
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SerialDevice,
-    VsockMmioAction, VsockMmioDevice, emulate_boot_legacy_pio_read, encode_command_payload,
-    handle_serial_read, handle_serial_write, is_boot_legacy_pio_port, is_serial_port,
-    preview_serial_output,
+    VsockMmioAction, VsockMmioDevice, activate_vhost_backend, emulate_boot_legacy_pio_read,
+    encode_command_payload, handle_serial_read, handle_serial_write, is_boot_legacy_pio_port,
+    is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
 use self::devices::{SERIAL_EXEC_PREFIX, build_guest_command, parse_serial_line};
@@ -1142,6 +1142,7 @@ impl KvmBackend {
             let last_io_detail = &mut self.last_io_detail;
             let recent_io_details = &mut self.recent_io_details;
             let vsock_device = &mut self.vsock_device;
+            let guest_memory = &self.guest_memory;
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
             let boot_profile = &mut self.boot_profile;
 
@@ -1240,7 +1241,23 @@ impl KvmBackend {
                             let offset = addr - base;
                             let action = vsock.mmio_write(offset, data);
                             if action == VsockMmioAction::Activated {
-                                debug!(addr, "vsock 设备已激活（guest driver 设置 DRIVER_OK）");
+                                debug!(addr, "vsock 设备已激活（guest driver 设置 DRIVER_OK），开始激活 vhost 后端");
+                                let queues = vsock.queues();
+                                let cid = vsock.guest_cid();
+                                let features = vsock.acked_features();
+                                match activate_vhost_backend(queues, cid, features, guest_memory) {
+                                    Ok(()) => {
+                                        info!(guest_cid = cid, "vhost-vsock 后端激活成功");
+                                    }
+                                    Err(err) => {
+                                        // vhost 激活失败不阻断 guest 运行，降级为 MMIO 数据面模拟
+                                        tracing::warn!(
+                                            guest_cid = cid,
+                                            error = %err,
+                                            "vhost-vsock 后端激活失败，降级为 MMIO 模拟"
+                                        );
+                                    }
+                                }
                             }
                             *last_exit_reason = Some(KvmExitReason::Io);
                             return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
