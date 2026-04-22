@@ -62,8 +62,9 @@ use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
     CommandResponse, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG, I8042_RESET_CMD,
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SerialDevice,
-    emulate_boot_legacy_pio_read, encode_command_payload, handle_serial_read, handle_serial_write,
-    is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
+    VsockMmioAction, VsockMmioDevice, emulate_boot_legacy_pio_read, encode_command_payload,
+    handle_serial_read, handle_serial_write, is_boot_legacy_pio_port, is_serial_port,
+    preview_serial_output,
 };
 #[cfg(test)]
 use self::devices::{SERIAL_EXEC_PREFIX, build_guest_command, parse_serial_line};
@@ -81,7 +82,13 @@ pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
-const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init";
+const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init virtio_mmio.device=512@0xd0000000:5";
+/// vsock MMIO 设备在 guest 物理地址空间中的基地址
+const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
+/// vsock MMIO 设备地址空间大小
+const VSOCK_MMIO_SIZE: u64 = 0x200;
+/// vsock MMIO 设备使用的中断 GSI 号
+const VSOCK_GSI: u32 = 5;
 const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
 
 /// 缓存冷启动阶段重复读取的内核与 rootfs 字节，避免每次创建 VM 都访问磁盘。
@@ -260,6 +267,8 @@ pub struct KvmBackend {
     guest_booted: bool,
     guest_ready: bool,
     serial_device: SerialDevice,
+    /// vsock virtio MMIO 设备模拟器（None 表示 vsock 未启用）
+    vsock_device: Option<VsockMmioDevice>,
     serial_buffer: Vec<u8>,
     last_exit_reason: Option<KvmExitReason>,
     last_io_detail: Option<String>,
@@ -323,6 +332,7 @@ impl KvmBackend {
             guest_booted: false,
             guest_ready: false,
             serial_device: SerialDevice::default(),
+            vsock_device: None,
             serial_buffer: Vec::new(),
             last_exit_reason: None,
             last_io_detail: None,
@@ -485,6 +495,7 @@ impl KvmBackend {
             guest_booted: false,
             guest_ready: false,
             serial_device: SerialDevice::default(),
+            vsock_device: Some(VsockMmioDevice::new(3, VSOCK_MMIO_BASE, VSOCK_GSI)),
             serial_buffer: Vec::new(),
             last_exit_reason: None,
             last_io_detail: None,
@@ -1130,6 +1141,7 @@ impl KvmBackend {
             let last_exit_reason = &mut self.last_exit_reason;
             let last_io_detail = &mut self.last_io_detail;
             let recent_io_details = &mut self.recent_io_details;
+            let vsock_device = &mut self.vsock_device;
             #[cfg(any(debug_assertions, feature = "boot-profile"))]
             let boot_profile = &mut self.boot_profile;
 
@@ -1196,6 +1208,17 @@ impl KvmBackend {
                             format!("mmio read addr={addr:#x} size={}", data.len()),
                         );
                     }
+                    // 检查是否命中 vsock MMIO 地址范围
+                    if let Some(ref vsock) = *vsock_device {
+                        let base = vsock.mmio_base();
+                        let size = vsock.mmio_size();
+                        if addr >= base && addr < base.saturating_add(size) {
+                            let offset = addr - base;
+                            vsock.mmio_read(offset, data);
+                            *last_exit_reason = Some(KvmExitReason::Io);
+                            return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                        }
+                    }
                     data.fill(0);
                     debug!(addr, size = data.len(), "guest 触发 MMIO 读退出");
                     *last_exit_reason = Some(KvmExitReason::Io);
@@ -1208,6 +1231,20 @@ impl KvmBackend {
                             recent_io_details,
                             format!("mmio write addr={addr:#x} size={}", data.len()),
                         );
+                    }
+                    // 检查是否命中 vsock MMIO 地址范围
+                    if let Some(vsock) = vsock_device {
+                        let base = vsock.mmio_base();
+                        let size = vsock.mmio_size();
+                        if addr >= base && addr < base.saturating_add(size) {
+                            let offset = addr - base;
+                            let action = vsock.mmio_write(offset, data);
+                            if action == VsockMmioAction::Activated {
+                                debug!(addr, "vsock 设备已激活（guest driver 设置 DRIVER_OK）");
+                            }
+                            *last_exit_reason = Some(KvmExitReason::Io);
+                            return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
+                        }
                     }
                     debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
                     *last_exit_reason = Some(KvmExitReason::Io);

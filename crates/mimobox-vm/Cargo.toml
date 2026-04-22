@@ -14,12 +14,13 @@ tracing.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
+virtio-queue = { version = "0.16", optional = true }
 vm-memory = { workspace = true, features = ["backend-mmap"] }
 vmm-sys-util.workspace = true
 
 [features]
 default = []
-kvm = []
+kvm = ["virtio-queue"]
 boot-profile = []
 
 [dev-dependencies]

@@ -5,6 +5,7 @@ use super::profile::{BootProfile, parse_guest_boot_time_line};
 use super::*;
 
 mod serial;
+mod vsock;
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) use self::serial::SERIAL_BOOT_TIME_PREFIX;
@@ -13,6 +14,7 @@ pub(in crate::kvm) use self::serial::{
     PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SERIAL_READY_LINE,
     SerialDevice, encode_command_payload, parse_serial_line, preview_serial_output,
 };
+pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice};
 #[cfg(test)]
 pub(in crate::kvm) use self::serial::{SERIAL_EXEC_PREFIX, build_guest_command};
 
