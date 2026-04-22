@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -31,6 +32,8 @@ static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
 static const char *const INIT_OK_LINE = "mimobox-kvm: init OK\n";
 static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
+static const int OUTPUT_STREAM_STDOUT = STDOUT_FILENO;
+static const int OUTPUT_STREAM_STDERR = STDERR_FILENO;
 
 static void write_console_line(const char *message) {
     const unsigned char *cursor = (const unsigned char *)message;
@@ -227,11 +230,14 @@ static int read_command_frame(char *buffer, size_t capacity) {
     return 0;
 }
 
-static void write_escaped_output(const unsigned char *data, size_t length) {
-    static const char prefix[] = "OUTPUT:";
+static void write_escaped_output(int stream_fd, const unsigned char *data, size_t length) {
     char escaped[5];
+    char prefix[16];
+    int prefix_written = snprintf(prefix, sizeof(prefix), "OUTPUT:%d:", stream_fd);
 
-    write_console_bytes(prefix, sizeof(prefix) - 1);
+    if (prefix_written > 0) {
+        write_console_bytes(prefix, (size_t)prefix_written);
+    }
     for (size_t index = 0; index < length; index++) {
         unsigned char byte = data[index];
         switch (byte) {
@@ -280,17 +286,55 @@ static int child_exit_code_from_status(int status) {
     return 125;
 }
 
+static void close_fd_if_open(int *fd) {
+    if (fd == NULL || *fd < 0) {
+        return;
+    }
+
+    close(*fd);
+    *fd = -1;
+}
+
+static int forward_child_output(int stream_fd, int source_fd) {
+    unsigned char buffer[OUTPUT_BUFFER_CAP];
+
+    for (;;) {
+        ssize_t read_bytes = read(source_fd, buffer, sizeof(buffer));
+        if (read_bytes == 0) {
+            return 1;
+        }
+        if (read_bytes > 0) {
+            write_escaped_output(stream_fd, buffer, (size_t)read_bytes);
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+
+        dprintf(STDERR_FILENO, "guest-init: read child output failed: %s\n", strerror(errno));
+        return -1;
+    }
+}
+
 static int execute_command(const char *command_line) {
-    int pipe_fds[2];
-    if (pipe(pipe_fds) < 0) {
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+
+    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
         dprintf(STDERR_FILENO, "guest-init: pipe failed: %s\n", strerror(errno));
         return 125;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
         dprintf(STDERR_FILENO, "guest-init: fork failed: %s\n", strerror(errno));
         return 125;
     }
@@ -311,47 +355,83 @@ static int execute_command(const char *command_line) {
         };
         int stdin_fd = -1;
 
-        close(pipe_fds[0]);
-        if (dup2(pipe_fds[1], STDOUT_FILENO) < 0 || dup2(pipe_fds[1], STDERR_FILENO) < 0) {
-            dprintf(pipe_fds[1], "guest-init: dup2 failed: %s\n", strerror(errno));
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stderr_pipe[0]);
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+            dprintf(stderr_pipe[1], "guest-init: dup2 failed: %s\n", strerror(errno));
             _exit(125);
         }
         stdin_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (stdin_fd < 0 || dup2(stdin_fd, STDIN_FILENO) < 0) {
-            dprintf(pipe_fds[1], "guest-init: redirect stdin failed: %s\n", strerror(errno));
+            dprintf(stderr_pipe[1], "guest-init: redirect stdin failed: %s\n", strerror(errno));
             _exit(125);
         }
         if (stdin_fd > STDERR_FILENO) {
             close(stdin_fd);
         }
-        if (pipe_fds[1] > STDERR_FILENO) {
-            close(pipe_fds[1]);
-        }
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[1]);
 
         execve(SHELL_PATH, argv, envp);
         dprintf(STDERR_FILENO, "guest-init: execve failed: %s\n", strerror(errno));
         _exit(127);
     }
 
-    close(pipe_fds[1]);
+    close_fd_if_open(&stdout_pipe[1]);
+    close_fd_if_open(&stderr_pipe[1]);
 
-    unsigned char buffer[OUTPUT_BUFFER_CAP];
-    for (;;) {
-        ssize_t read_bytes = read(pipe_fds[0], buffer, sizeof(buffer));
-        if (read_bytes == 0) {
-            break;
-        }
-        if (read_bytes < 0) {
+    struct pollfd poll_fds[2] = {
+        {
+            .fd = stdout_pipe[0],
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        },
+        {
+            .fd = stderr_pipe[0],
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        },
+    };
+    const int stream_fds[2] = {OUTPUT_STREAM_STDOUT, OUTPUT_STREAM_STDERR};
+
+    while (poll_fds[0].fd >= 0 || poll_fds[1].fd >= 0) {
+        int poll_status = poll(poll_fds, 2, -1);
+        if (poll_status < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            dprintf(STDERR_FILENO, "guest-init: read child output failed: %s\n", strerror(errno));
-            close(pipe_fds[0]);
+
+            dprintf(STDERR_FILENO, "guest-init: poll child output failed: %s\n", strerror(errno));
+            close_fd_if_open(&poll_fds[0].fd);
+            close_fd_if_open(&poll_fds[1].fd);
             return 125;
         }
-        write_escaped_output(buffer, (size_t)read_bytes);
+
+        for (size_t index = 0; index < 2; index++) {
+            if (poll_fds[index].fd < 0 || poll_fds[index].revents == 0) {
+                continue;
+            }
+            if ((poll_fds[index].revents & (POLLIN | POLLHUP)) == 0) {
+                dprintf(STDERR_FILENO, "guest-init: child output poll failed: revents=%d\n", poll_fds[index].revents);
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+
+            int forward_status = forward_child_output(stream_fds[index], poll_fds[index].fd);
+            if (forward_status < 0) {
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+
+            if (forward_status > 0) {
+                close_fd_if_open(&poll_fds[index].fd);
+            }
+        }
     }
-    close(pipe_fds[0]);
+    close_fd_if_open(&poll_fds[0].fd);
+    close_fd_if_open(&poll_fds[1].fd);
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
@@ -404,7 +484,7 @@ int main(void) {
         int line_status = read_command_frame(command_buffer, sizeof(command_buffer));
         if (line_status == -2) {
             static const unsigned char too_long[] = "command frame too long";
-            write_escaped_output(too_long, sizeof(too_long) - 1);
+            write_escaped_output(OUTPUT_STREAM_STDOUT, too_long, sizeof(too_long) - 1);
             write_exit_code(126);
             continue;
         }
@@ -412,9 +492,9 @@ int main(void) {
             static const unsigned char read_failed[] = "serial command frame read failed";
             static const unsigned char invalid_frame[] = "invalid command frame";
             if (line_status == -3) {
-                write_escaped_output(invalid_frame, sizeof(invalid_frame) - 1);
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_frame, sizeof(invalid_frame) - 1);
             } else {
-                write_escaped_output(read_failed, sizeof(read_failed) - 1);
+                write_escaped_output(OUTPUT_STREAM_STDOUT, read_failed, sizeof(read_failed) - 1);
             }
             write_exit_code(125);
             continue;

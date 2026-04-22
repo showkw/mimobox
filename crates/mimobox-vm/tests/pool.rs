@@ -24,7 +24,7 @@ fn pool_config(min_size: usize, max_size: usize) -> VmPoolConfig {
 fn assert_success(result: GuestCommandResult, expected_stdout: &[u8]) {
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout, expected_stdout);
-    assert!(result.stderr.is_empty(), "当前协议阶段暂不拆分 stderr");
+    assert!(result.stderr.is_empty(), "该命令不应产生 stderr");
     assert!(!result.timed_out, "该命令不应超时");
 }
 

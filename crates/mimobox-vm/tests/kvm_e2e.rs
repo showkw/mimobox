@@ -69,7 +69,7 @@ fn test_kvm_vm_executes() {
 
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout, b"hello\n");
-    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+    assert!(result.stderr.is_empty(), "echo 不应产生 stderr");
     assert!(!result.timed_out, "echo 不应触发超时");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
@@ -85,8 +85,28 @@ fn test_kvm_vm_executes_argument_with_newline() {
 
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout, b"hello\nworld");
-    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+    assert!(result.stderr.is_empty(), "printf 不应产生 stderr");
     assert!(!result.timed_out, "换行参数不应被误判为协议超时");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_separates_stdout_and_stderr() {
+    let mut sandbox = MicrovmSandbox::new(e2e_config()).expect("创建 microVM 沙箱必须成功");
+
+    let result = sandbox
+        .execute(&guest_cmd(&[
+            "/bin/sh",
+            "-lc",
+            "printf 'hello-stdout'; printf 'hello-stderr' >&2; exit 3",
+        ]))
+        .expect("stdout/stderr 混合命令必须成功执行");
+
+    assert_eq!(result.exit_code, Some(3));
+    assert_eq!(result.stdout, b"hello-stdout");
+    assert_eq!(result.stderr, b"hello-stderr");
+    assert!(!result.timed_out, "正常退出的混合输出命令不应超时");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
 }
@@ -107,7 +127,7 @@ fn test_kvm_vm_exit_code_124_is_not_timeout() {
     assert_eq!(result.exit_code, Some(124));
     assert!(!result.timed_out, "用户命令合法返回 124 时不应被误判为超时");
     assert!(result.stdout.is_empty(), "exit 124 不应产生 stdout");
-    assert!(result.stderr.is_empty(), "单串口协议阶段暂不拆分 stderr");
+    assert!(result.stderr.is_empty(), "exit 124 不应产生 stderr");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
 }
@@ -131,6 +151,7 @@ fn test_kvm_vm_timeout_marks_result() {
     );
     assert_eq!(result.exit_code, None, "超时结果不应携带正常退出码");
     assert!(result.stdout.is_empty(), "忙等命令不应产生 stdout");
+    assert!(result.stderr.is_empty(), "忙等命令不应产生 stderr");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
 }
@@ -178,6 +199,7 @@ fn test_kvm_snapshot_restore_executes_command() {
 
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout, b"hello\n");
+    assert!(result.stderr.is_empty(), "恢复后的 echo 不应产生 stderr");
     assert!(!result.timed_out, "恢复后的 echo 不应超时");
 
     backend.shutdown().expect("关闭源 VM 必须成功");

@@ -13,6 +13,8 @@ mod vm_assets;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 mod kvm;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+mod restore_pool;
 
 pub use pool::{PoolError, PooledVm, VmPool, VmPoolConfig, VmPoolStats};
 pub use snapshot::MicrovmSnapshot;
@@ -24,3 +26,5 @@ pub use vm_assets::{
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 pub use kvm::{KvmBackend, KvmExitReason, KvmLifecycle, KvmTransport};
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+pub use restore_pool::{PooledRestoreVm, RestorePool, RestorePoolConfig, RestorePoolError};
