@@ -1385,7 +1385,10 @@ mod tests {
     #[test]
     fn capture_stderr_bytes_reads_process_stderr() {
         let (value, stderr) = capture_stderr_bytes(|| {
-            eprint!("fail");
+            // 直接写入并刷新标准错误，避免 eprint! 的缓冲层绕过底层 fd 2 捕获。
+            let mut stderr = io::stderr();
+            write!(stderr, "fail").expect("写入 stderr 应成功");
+            stderr.flush().expect("刷新 stderr 应成功");
             7
         })
         .expect("stderr 捕获应成功");
