@@ -2012,6 +2012,62 @@ impl KvmBackend {
             .map_err(to_backend_error)
     }
 
+    /// 从快照文件 mmap(MAP_PRIVATE) 恢复 guest memory。
+    ///
+    /// 相比 restore_guest_memory 接受 &[u8]，此方法直接 mmap 文件，
+    /// 避免了将整个快照文件读入 Vec<u8> 的内存分配开销。
+    #[cfg(target_os = "linux")]
+    pub(crate) fn restore_from_file(&self, memory_path: &Path) -> Result<(), MicrovmError> {
+        use std::fs::File;
+        use std::os::unix::io::AsRawFd;
+
+        let file = File::open(memory_path)?;
+        let metadata = file.metadata()?;
+        let file_size = usize::try_from(metadata.len())
+            .map_err(|_| MicrovmError::SnapshotFormat("快照文件大小超出 usize 范围".into()))?;
+
+        let expected_len = self.config.memory_bytes()?;
+        if file_size != expected_len {
+            return Err(MicrovmError::SnapshotFormat(format!(
+                "guest memory 文件大小不匹配: 文件为 {}，期望为 {}",
+                file_size, expected_len
+            )));
+        }
+
+        // SAFETY: mmap(MAP_PRIVATE) 将文件映射到进程地址空间。
+        // MAP_PRIVATE 保证写入不影响原文件。文件大小已验证匹配。
+        // 映射区域在显式 munmap 后释放。
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                file_size,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+
+        if ptr == libc::MAP_FAILED {
+            return Err(MicrovmError::Io(std::io::Error::last_os_error()));
+        }
+
+        // SAFETY: mmap 成功返回有效指针，且 file_size 已和映射长度一致。
+        let memory_slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, file_size) };
+
+        let result = self
+            .guest_memory
+            .write_slice(memory_slice, GuestAddress(0))
+            .map_err(to_backend_error);
+
+        // SAFETY: ptr 来自 mmap，file_size 为该映射的长度。
+        unsafe {
+            libc::munmap(ptr, file_size);
+        }
+
+        result
+    }
+
     fn write_guest_bytes(&self, guest_addr: u64, bytes: &[u8]) -> Result<(), MicrovmError> {
         self.guest_memory
             .write_slice(bytes, GuestAddress(guest_addr))
