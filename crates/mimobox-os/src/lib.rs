@@ -2,7 +2,7 @@
 //!
 //! 提供 Linux、macOS、Windows（骨架）平台上的进程级沙箱实现。
 //!
-//! Linux 后端（[`LinuxSandbox`]）是当前唯一完整实现，使用以下内核机制：
+//! Linux 后端（`LinuxSandbox`）是当前唯一完整实现，使用以下内核机制：
 //! - **Landlock** — 文件系统访问控制（默认拒绝所有，白名单放行）
 //! - **Seccomp-bpf** — 系统调用过滤（默认白名单模式）
 //! - **Namespaces** — PID / Network / Mount / IPC 隔离（含 user namespace 降级）

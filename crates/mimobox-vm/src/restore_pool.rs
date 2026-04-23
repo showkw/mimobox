@@ -114,19 +114,31 @@ impl EmptyVmSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// snapshot restore 池配置。
 pub struct RestorePoolConfig {
+    /// 初始化时预热的最小空壳 VM 数量。
     pub min_size: usize,
+    /// 恢复池允许保留的最大空壳 VM 数量。
     pub max_size: usize,
 }
 
 #[derive(Debug, Error)]
+/// snapshot restore 池错误。
 pub enum RestorePoolError {
+    /// 恢复池配置不合法。
     #[error("恢复池配置无效: min_size={min_size}, max_size={max_size}")]
-    InvalidConfig { min_size: usize, max_size: usize },
+    InvalidConfig {
+        /// 非法的最小空闲目标值。
+        min_size: usize,
+        /// 非法的最大容量值。
+        max_size: usize,
+    },
 
+    /// 内部共享状态锁已中毒。
     #[error("恢复池状态锁已中毒")]
     StatePoisoned,
 
+    /// 底层 microVM 错误。
     #[error(transparent)]
     Microvm(#[from] MicrovmError),
 }
@@ -240,11 +252,13 @@ impl RestorePoolInner {
 }
 
 #[derive(Clone)]
+/// 基于快照恢复的 microVM 恢复池。
 pub struct RestorePool {
     inner: Arc<RestorePoolInner>,
 }
 
 impl RestorePool {
+    /// 创建一个用于 snapshot restore 的空壳 VM 恢复池。
     pub fn new(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -275,6 +289,7 @@ impl RestorePool {
         Ok(pool)
     }
 
+    /// 使用内存页和 vCPU 状态恢复一个 microVM。
     pub fn restore(
         &self,
         memory: &[u8],
@@ -312,12 +327,14 @@ impl RestorePool {
         })
     }
 
+    /// 从完整快照字节恢复一个 microVM。
     pub fn restore_from_bytes(&self, data: &[u8]) -> Result<PooledRestoreVm, RestorePoolError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         let (_, _, memory, vcpu_state) = snapshot.into_parts();
         self.restore(memory.as_slice(), vcpu_state.as_slice())
     }
 
+    /// 返回当前恢复池中的空闲槽位数量。
     pub fn idle_count(&self) -> usize {
         match self.inner.state.lock() {
             Ok(state) => state.idle.len(),
@@ -328,21 +345,25 @@ impl RestorePool {
         }
     }
 
+    /// 将恢复池预热到至少 `target` 个空壳 VM。
     pub fn warm(&self, target: usize) -> Result<(), RestorePoolError> {
         self.inner.warm(target)
     }
 }
 
+/// 从 `RestorePool` 借出的恢复态 microVM 句柄。
 pub struct PooledRestoreVm {
     backend: Option<KvmBackend>,
     pool: Arc<RestorePoolInner>,
 }
 
 impl PooledRestoreVm {
+    /// 执行命令并等待完成。
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
+    /// 执行命令并应用命令级选项。
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -354,6 +375,7 @@ impl PooledRestoreVm {
         }
     }
 
+    /// 以流式事件形式执行命令。
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -361,6 +383,7 @@ impl PooledRestoreVm {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
+    /// 以流式事件形式执行命令，并应用命令级选项。
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -372,6 +395,7 @@ impl PooledRestoreVm {
         }
     }
 
+    /// 读取 guest 内文件内容。
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.read_file(path),
@@ -379,6 +403,7 @@ impl PooledRestoreVm {
         }
     }
 
+    /// 向 guest 内写入文件内容。
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
@@ -386,6 +411,7 @@ impl PooledRestoreVm {
         }
     }
 
+    /// 通过宿主受控 HTTP 代理发起请求。
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.http_request(request),
@@ -393,6 +419,7 @@ impl PooledRestoreVm {
         }
     }
 
+    /// 导出当前恢复态 VM 的快照字节。
     pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_ref() {
             Some(backend) => backend.snapshot_bytes(),

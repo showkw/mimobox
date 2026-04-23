@@ -3,12 +3,16 @@ name = "mimobox-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "mimobox SDK — 统一 Agent Sandbox API，默认智能路由 + 高级完全可控"
+readme = "README.md"
+keywords = ["sandbox", "sdk", "agent", "security", "isolation"]
+categories = ["development-tools", "api-bindings"]
 
 [dependencies]
 mimobox-core.workspace = true
 mimobox-os = { workspace = true, optional = true }
-mimobox-vm = { path = "../mimobox-vm", optional = true, default-features = false, features = ["kvm"] }
+mimobox-vm = { workspace = true, optional = true, features = ["kvm"] }
 mimobox-wasm = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
@@ -22,23 +26,28 @@ wasm = ["dep:mimobox-wasm"]
 
 [[example]]
 name = "basic"
-path = "../../examples/basic.rs"
+path = "examples/basic.rs"
 
 [[example]]
 name = "streaming"
-path = "../../examples/streaming.rs"
+path = "examples/streaming.rs"
 
 [[example]]
 name = "http_proxy"
-path = "../../examples/http_proxy.rs"
+path = "examples/http_proxy.rs"
 
 [[example]]
 name = "env_vars"
-path = "../../examples/env_vars.rs"
+path = "examples/env_vars.rs"
 
 [[example]]
 name = "file_ops"
-path = "../../examples/file_ops.rs"
+path = "examples/file_ops.rs"
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+rustdoc-args = ["--cfg", "docsrs"]

@@ -24,17 +24,25 @@ use tracing::warn;
 
 /// 沙箱执行结果
 pub struct ExecuteResult {
+    /// 标准输出字节流。
     pub stdout: Vec<u8>,
+    /// 标准错误字节流。
     pub stderr: Vec<u8>,
+    /// 退出码；若进程未正常退出则可能为 `None`。
     pub exit_code: Option<i32>,
+    /// 是否因超时被终止。
     pub timed_out: bool,
+    /// 本次执行的总耗时。
     pub elapsed: std::time::Duration,
 }
 
 /// HTTP 代理响应结果。
 pub struct HttpResponse {
+    /// HTTP 状态码。
     pub status: u16,
+    /// 归一化后的响应头集合。
     pub headers: std::collections::HashMap<String, String>,
+    /// 响应体字节流。
     pub body: Vec<u8>,
 }
 
@@ -81,6 +89,7 @@ impl SandboxSnapshot {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 #[derive(Debug, Clone)]
+/// 基于快照恢复池创建恢复态 microVM 的配置。
 pub struct RestorePoolConfig {
     /// 恢复池目标大小。
     pub pool_size: usize,
@@ -90,6 +99,9 @@ pub struct RestorePoolConfig {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 #[derive(Clone)]
+/// 基于快照的恢复池。
+///
+/// 该类型会预热一组可恢复的空壳 microVM，用于缩短 snapshot restore 到 ready 的延迟。
 pub struct RestorePool {
     inner: Arc<mimobox_vm::RestorePool>,
 }
@@ -120,13 +132,19 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 /// 流式执行事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
+    /// 一段标准输出数据。
     Stdout(Vec<u8>),
+    /// 一段标准错误数据。
     Stderr(Vec<u8>),
+    /// 进程退出并携带退出码。
     Exit(i32),
+    /// 执行因超时被终止。
     TimedOut,
 }
 
-/// 交互式 PTY 会话
+/// 交互式 PTY 会话。
+///
+/// 该类型封装底层后端提供的终端句柄，并暴露统一的输入、尺寸调整、事件接收与回收接口。
 pub struct PtySession {
     inner: Box<dyn mimobox_core::PtySession>,
 }
@@ -138,24 +156,29 @@ impl std::fmt::Debug for PtySession {
 }
 
 impl PtySession {
+    /// 向 PTY 会话写入输入数据。
     pub fn send_input(&mut self, data: &[u8]) -> Result<(), SdkError> {
         self.inner.send_input(data).map_err(map_pty_session_error)
     }
 
+    /// 调整 PTY 终端尺寸。
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SdkError> {
         self.inner
             .resize(PtySize { cols, rows })
             .map_err(map_pty_session_error)
     }
 
+    /// 返回 PTY 输出事件接收端。
     pub fn output(&self) -> &mpsc::Receiver<PtyEvent> {
         self.inner.output_rx()
     }
 
+    /// 强制结束 PTY 会话。
     pub fn kill(&mut self) -> Result<(), SdkError> {
         self.inner.kill().map_err(map_pty_session_error)
     }
 
+    /// 等待 PTY 进程退出并返回退出码。
     pub fn wait(&mut self) -> Result<i32, SdkError> {
         self.inner.wait().map_err(map_pty_session_error)
     }
@@ -389,6 +412,7 @@ pub struct Sandbox {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl RestorePool {
+    /// 根据基础配置创建一个固定大小的恢复池。
     pub fn new(config: RestorePoolConfig) -> Result<Self, SdkError> {
         let sandbox_config = config.base_config.to_sandbox_config();
         let microvm_config = config.base_config.to_microvm_config()?;
@@ -407,6 +431,7 @@ impl RestorePool {
         })
     }
 
+    /// 使用给定快照恢复一个新的沙箱实例。
     pub fn restore(&self, snapshot: &SandboxSnapshot) -> Result<Sandbox, SdkError> {
         let restored = self
             .inner
@@ -418,10 +443,12 @@ impl RestorePool {
         ))
     }
 
+    /// 返回当前恢复池中的空闲实例数量。
     pub fn idle_count(&self) -> usize {
         self.inner.idle_count()
     }
 
+    /// 将恢复池预热到至少 `target` 个空闲实例。
     pub fn warm(&self, target: usize) -> Result<(), SdkError> {
         self.inner.warm(target).map_err(map_restore_pool_error)
     }
@@ -447,12 +474,12 @@ macro_rules! dispatch_execute {
 }
 
 impl Sandbox {
-    /// 零配置创建沙箱，自动路由到最优隔离层级
+    /// 零配置创建沙箱，自动路由到最优隔离层级。
     pub fn new() -> Result<Self, SdkError> {
         Self::with_config(Config::default())
     }
 
-    /// 使用完整配置创建沙箱
+    /// 使用完整配置创建沙箱。
     #[allow(unused_mut)]
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
         let sandbox = Self::new_uninitialized(config);
@@ -484,6 +511,24 @@ impl Sandbox {
     }
 
     /// 拍摄当前沙箱快照。
+    ///
+    /// 该能力当前仅在 `Linux + vm feature + MicroVm` 后端上可用。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = Config::builder()
+    ///     .isolation(IsolationLevel::MicroVm)
+    ///     .build();
+    /// let mut sandbox = Sandbox::with_config(config)?;
+    /// let snapshot = sandbox.snapshot()?;
+    /// assert!(snapshot.size() > 0);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn snapshot(&mut self) -> Result<SandboxSnapshot, SdkError> {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         {
@@ -560,7 +605,20 @@ impl Sandbox {
         Self::from_snapshot(&snapshot)
     }
 
-    /// 在沙箱中执行命令
+    /// 在沙箱中执行命令。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::Sandbox;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let result = sandbox.execute("/bin/echo hello")?;
+    /// assert_eq!(result.exit_code, Some(0));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn execute(&mut self, command: &str) -> Result<ExecuteResult, SdkError> {
         let args = parse_command(command)?;
         self.ensure_backend(command)?;
@@ -574,7 +632,20 @@ impl Sandbox {
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
     }
 
-    /// 创建交互式终端会话
+    /// 创建交互式终端会话。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::Sandbox;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let mut pty = sandbox.create_pty("/bin/sh")?;
+    /// pty.send_input(b"echo hello\n")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn create_pty(&mut self, command: &str) -> Result<PtySession, SdkError> {
         let args = parse_command(command)?;
         if args.is_empty() {
@@ -590,7 +661,7 @@ impl Sandbox {
         })
     }
 
-    /// 创建交互式终端会话（带完整配置）
+    /// 使用完整 `PtyConfig` 创建交互式终端会话。
     pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
         if config.command.is_empty() {
             return Err(SdkError::Config("PTY 命令不能为空".to_string()));
@@ -642,6 +713,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
+    /// 在 microVM 后端中执行命令，并为本次调用附加环境变量。
     pub fn execute_with_env(
         &mut self,
         command: &str,
@@ -651,6 +723,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
+    /// 在 microVM 后端中执行命令，并覆写本次调用的超时时间。
     pub fn execute_with_timeout(
         &mut self,
         command: &str,
@@ -660,6 +733,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
+    /// 在 microVM 后端中执行命令，并同时覆写环境变量与超时时间。
     pub fn execute_with_env_and_timeout(
         &mut self,
         command: &str,
@@ -703,6 +777,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
+    /// 从 microVM 沙箱中读取文件内容。
     pub fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SdkError> {
         self.ensure_backend_for_file_ops()?;
         let inner = self.inner.as_mut().ok_or_else(|| {
@@ -735,6 +810,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
+    /// 向 microVM 沙箱中写入文件内容。
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), SdkError> {
         self.ensure_backend_for_file_ops()?;
         let inner = self.inner.as_mut().ok_or_else(|| {
@@ -770,6 +846,7 @@ impl Sandbox {
 
     #[cfg(feature = "vm")]
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    /// 通过受控 HTTP 代理发起请求。
     pub fn http_request(
         &mut self,
         method: &str,
@@ -815,7 +892,7 @@ impl Sandbox {
         self.active_isolation
     }
 
-    /// 销毁沙箱，释放资源
+    /// 销毁沙箱并释放资源。
     pub fn destroy(mut self) -> Result<(), SdkError> {
         self.destroy_inner()
     }

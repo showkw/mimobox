@@ -3,11 +3,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mimobox_core::{ErrorCode, Sandbox, SandboxConfig};
-use mimobox_sdk::{Config as SdkConfig, IsolationLevel, Sandbox as SdkSandbox, SdkError};
+use mimobox_core::{Sandbox, SandboxConfig};
 use mimobox_vm::{
-    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError, MicrovmSandbox, StreamEvent,
-    microvm_config_from_vm_assets, resolve_vm_assets_dir,
+    HttpProxyError, HttpRequest, KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError,
+    MicrovmSandbox, StreamEvent, microvm_config_from_vm_assets, resolve_vm_assets_dir,
 };
 
 const HTTP_PROXY_ALLOWED_HOST: &str = "api.github.com";
@@ -22,17 +21,16 @@ fn guest_cmd(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_string()).collect()
 }
 
-fn sdk_http_config(allowed_http_domains: &[&str]) -> SdkConfig {
-    let vm_config = e2e_config();
-
-    SdkConfig::builder()
-        .isolation(IsolationLevel::MicroVm)
-        .vm_vcpu_count(vm_config.vcpu_count)
-        .vm_memory_mb(vm_config.memory_mb)
-        .kernel_path(vm_config.kernel_path)
-        .rootfs_path(vm_config.rootfs_path)
-        .allowed_http_domains(allowed_http_domains.iter().copied())
-        .build()
+fn vm_http_sandbox(allowed_http_domains: &[&str]) -> MicrovmSandbox {
+    let base_config = SandboxConfig {
+        allowed_http_domains: allowed_http_domains
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+        ..SandboxConfig::default()
+    };
+    MicrovmSandbox::new_with_base(base_config, e2e_config())
+        .expect("创建 microVM HTTP 代理沙箱必须成功")
 }
 
 fn github_zen_headers() -> HashMap<String, String> {
@@ -45,12 +43,9 @@ fn github_zen_headers() -> HashMap<String, String> {
     ])
 }
 
-fn assert_http_denied_host(error: SdkError) {
+fn assert_http_denied_host(error: MicrovmError) {
     match error {
-        SdkError::Sandbox {
-            code: ErrorCode::HttpDeniedHost,
-            ..
-        } => {}
+        MicrovmError::HttpProxy(HttpProxyError::DeniedHost(_)) => {}
         other => panic!("预期收到 HttpDeniedHost，实际为: {other}"),
     }
 }
@@ -152,12 +147,20 @@ fn test_kvm_vm_execute_with_timeout() {
 
 #[test]
 fn test_kvm_vm_http_proxy_request() {
-    let mut sandbox = SdkSandbox::with_config(sdk_http_config(&[HTTP_PROXY_ALLOWED_HOST]))
-        .expect("创建 SDK microVM 沙箱必须成功");
+    let mut sandbox = vm_http_sandbox(&[HTTP_PROXY_ALLOWED_HOST]);
+    let request = HttpRequest::new(
+        "GET",
+        HTTP_PROXY_ALLOWED_URL,
+        github_zen_headers(),
+        None,
+        None,
+        None,
+    )
+    .expect("构造 HTTP 请求必须成功");
 
     let response = sandbox
-        .http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None)
-        .expect("通过 SDK 发起 HTTP 代理请求必须成功");
+        .http_request(request)
+        .expect("通过 microVM 发起 HTTP 代理请求必须成功");
 
     assert_eq!(response.status, 200, "公开 API 请求应返回 200");
     assert!(!response.body.is_empty(), "HTTP 代理响应 body 不应为空");
@@ -167,14 +170,21 @@ fn test_kvm_vm_http_proxy_request() {
 
 #[test]
 fn test_kvm_vm_http_proxy_denied_host() {
-    let mut sandbox =
-        SdkSandbox::with_config(sdk_http_config(&[])).expect("创建 SDK microVM 沙箱必须成功");
+    let mut sandbox = vm_http_sandbox(&[]);
+    let request = HttpRequest::new(
+        "GET",
+        HTTP_PROXY_ALLOWED_URL,
+        github_zen_headers(),
+        None,
+        None,
+        None,
+    )
+    .expect("构造 HTTP 请求必须成功");
 
-    let error =
-        match sandbox.http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None) {
-            Ok(_) => panic!("白名单缺失时请求必须被拒绝"),
-            Err(error) => error,
-        };
+    let error = match sandbox.http_request(request) {
+        Ok(_) => panic!("白名单缺失时请求必须被拒绝"),
+        Err(error) => error,
+    };
 
     assert_http_denied_host(error);
 
@@ -183,10 +193,18 @@ fn test_kvm_vm_http_proxy_denied_host() {
 
 #[test]
 fn test_kvm_vm_http_proxy_ip_rejected() {
-    let mut sandbox = SdkSandbox::with_config(sdk_http_config(&["127.0.0.1"]))
-        .expect("创建 SDK microVM 沙箱必须成功");
+    let mut sandbox = vm_http_sandbox(&["127.0.0.1"]);
+    let request = HttpRequest::new(
+        "GET",
+        HTTP_PROXY_LOCAL_IP_URL,
+        HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .expect("构造 HTTP 请求必须成功");
 
-    let error = match sandbox.http_request("GET", HTTP_PROXY_LOCAL_IP_URL, HashMap::new(), None) {
+    let error = match sandbox.http_request(request) {
         Ok(_) => panic!("回环 IP 直连必须被拒绝"),
         Err(error) => error,
     };

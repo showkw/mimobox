@@ -104,6 +104,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// 返回 `ConfigBuilder`，用于链式构造 SDK 配置。
     pub fn builder() -> ConfigBuilder {
         ConfigBuilder::default()
     }
@@ -202,46 +203,55 @@ pub struct ConfigBuilder {
 }
 
 impl ConfigBuilder {
+    /// 设置隔离层级选择策略。
     pub fn isolation(mut self, level: IsolationLevel) -> Self {
         self.inner.isolation = level;
         self
     }
 
+    /// 设置信任级别，影响自动路由决策。
     pub fn trust_level(mut self, level: TrustLevel) -> Self {
         self.inner.trust_level = level;
         self
     }
 
+    /// 设置网络访问策略。
     pub fn network(mut self, policy: NetworkPolicy) -> Self {
         self.inner.network = policy;
         self
     }
 
+    /// 设置默认命令超时时间。
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.inner.timeout = Some(timeout);
         self
     }
 
+    /// 设置沙箱内存上限，单位为 MiB。
     pub fn memory_limit_mb(mut self, mb: u64) -> Self {
         self.inner.memory_limit_mb = Some(mb);
         self
     }
 
+    /// 设置只读挂载路径列表。
     pub fn fs_readonly(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.inner.fs_readonly = paths.into_iter().map(Into::into).collect();
         self
     }
 
+    /// 设置可读写挂载路径列表。
     pub fn fs_readwrite(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.inner.fs_readwrite = paths.into_iter().map(Into::into).collect();
         self
     }
 
+    /// 设置是否允许沙箱内创建子进程。
     pub fn allow_fork(mut self, allow: bool) -> Self {
         self.inner.allow_fork = allow;
         self
     }
 
+    /// 设置受控 HTTP 代理允许访问的域名白名单。
     pub fn allowed_http_domains(
         mut self,
         domains: impl IntoIterator<Item = impl Into<String>>,
@@ -250,26 +260,31 @@ impl ConfigBuilder {
         self
     }
 
+    /// 设置 microVM vCPU 数量。
     pub fn vm_vcpu_count(mut self, count: u8) -> Self {
         self.inner.vm_vcpu_count = count;
         self
     }
 
+    /// 设置 microVM guest 内存大小，单位为 MiB。
     pub fn vm_memory_mb(mut self, mb: u32) -> Self {
         self.inner.vm_memory_mb = mb;
         self
     }
 
+    /// 设置 microVM 内核镜像路径。
     pub fn kernel_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.kernel_path = Some(path.into());
         self
     }
 
+    /// 设置 microVM rootfs 路径。
     pub fn rootfs_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.rootfs_path = Some(path.into());
         self
     }
 
+    /// 构建最终的 SDK 配置对象。
     pub fn build(self) -> Config {
         self.inner
     }

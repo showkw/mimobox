@@ -3,7 +3,11 @@ name = "mimobox-vm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "mimobox microVM 沙箱后端"
+readme = "README.md"
+keywords = ["sandbox", "microvm", "kvm", "security", "snapshot"]
+categories = ["development-tools"]
 
 [dependencies]
 libc.workspace = true
@@ -31,7 +35,6 @@ guest-vsock = []
 
 [dev-dependencies]
 criterion = "0.5"
-mimobox-sdk = { path = "../mimobox-sdk", features = ["vm"] }
 tempfile = "3"
 
 [[bench]]
@@ -41,3 +44,8 @@ path = "benches/kvm_bench.rs"
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+features = ["kvm"]
+rustdoc-args = ["--cfg", "docsrs"]

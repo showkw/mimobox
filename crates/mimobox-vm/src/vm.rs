@@ -93,58 +93,79 @@ impl MicrovmConfig {
 /// microVM 生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrovmState {
+    /// 实例已创建但尚未进入可执行状态。
     Created,
+    /// 实例已就绪，可执行命令或文件操作。
     Ready,
+    /// 实例当前正在执行命令或传输数据。
     Running,
+    /// 实例已经销毁，不能再复用。
     Destroyed,
 }
 
 /// guest 命令执行结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestCommandResult {
+    /// 标准输出字节流。
     pub stdout: Vec<u8>,
+    /// 标准错误字节流。
     pub stderr: Vec<u8>,
+    /// 退出码；若进程未正常退出则可能为 `None`。
     pub exit_code: Option<i32>,
+    /// 是否因超时被终止。
     pub timed_out: bool,
 }
 
 /// guest 命令级执行选项。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestExecOptions {
+    /// 仅对本次命令生效的环境变量。
     pub env: HashMap<String, String>,
+    /// 仅对本次命令生效的超时时间。
     pub timeout: Option<Duration>,
 }
 
 /// guest 流式执行事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
+    /// 一段标准输出数据。
     Stdout(Vec<u8>),
+    /// 一段标准错误数据。
     Stderr(Vec<u8>),
+    /// 进程退出并携带退出码。
     Exit(i32),
+    /// 执行因超时被终止。
     TimedOut,
 }
 
 /// microVM 级错误。
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
+    /// 当前平台或构建配置不支持 KVM microVM。
     #[error("当前平台不支持 KVM microVM 后端")]
     UnsupportedPlatform,
 
+    /// microVM 配置无效。
     #[error("microVM 配置无效: {0}")]
     InvalidConfig(String),
 
+    /// 生命周期状态不允许执行当前操作。
     #[error("microVM 生命周期错误: {0}")]
     Lifecycle(String),
 
+    /// KVM 或 guest 协议层错误。
     #[error("KVM 后端错误: {0}")]
     Backend(String),
 
+    /// 受控 HTTP 代理错误。
     #[error(transparent)]
     HttpProxy(#[from] HttpProxyError),
 
+    /// 快照格式非法或不兼容。
     #[error("快照格式错误: {0}")]
     SnapshotFormat(String),
 
+    /// 标准库 I/O 错误。
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -388,6 +409,7 @@ impl MicrovmSandbox {
         Ok(sandbox)
     }
 
+    /// 读取 guest 内文件内容。
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -401,6 +423,7 @@ impl MicrovmSandbox {
         result
     }
 
+    /// 向 guest 内写入文件内容。
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -414,6 +437,7 @@ impl MicrovmSandbox {
         result
     }
 
+    /// 以流式事件形式执行命令。
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -421,6 +445,7 @@ impl MicrovmSandbox {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
+    /// 以流式事件形式执行命令，并应用命令级选项。
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -448,6 +473,7 @@ impl MicrovmSandbox {
         result
     }
 
+    /// 执行命令并附加命令级环境变量。
     pub fn execute_with_env(
         &mut self,
         cmd: &[String],
@@ -456,6 +482,7 @@ impl MicrovmSandbox {
         self.execute_with_options(cmd, GuestExecOptions { env, timeout: None })
     }
 
+    /// 执行命令并覆写命令级超时时间。
     pub fn execute_with_timeout(
         &mut self,
         cmd: &[String],
@@ -470,6 +497,7 @@ impl MicrovmSandbox {
         )
     }
 
+    /// 执行命令并应用完整的命令级选项。
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -495,6 +523,7 @@ impl MicrovmSandbox {
         result
     }
 
+    /// 通过宿主受控 HTTP 代理发起请求。
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle(
