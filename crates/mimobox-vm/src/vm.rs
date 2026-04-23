@@ -5,7 +5,7 @@ use std::time::Instant;
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 use tracing::debug;
 
-use crate::http_proxy::{HttpRequest, HttpResponse};
+use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 use crate::snapshot::MicrovmSnapshot;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -123,6 +123,9 @@ pub enum MicrovmError {
     #[error("KVM 后端错误: {0}")]
     Backend(String),
 
+    #[error(transparent)]
+    HttpProxy(#[from] HttpProxyError),
+
     #[error("快照格式错误: {0}")]
     SnapshotFormat(String),
 
@@ -137,7 +140,9 @@ impl From<MicrovmError> for SandboxError {
             MicrovmError::InvalidConfig(message)
             | MicrovmError::Lifecycle(message)
             | MicrovmError::Backend(message)
+            | MicrovmError::HttpProxy(crate::http_proxy::HttpProxyError::Internal(message))
             | MicrovmError::SnapshotFormat(message) => SandboxError::ExecutionFailed(message),
+            MicrovmError::HttpProxy(error) => SandboxError::ExecutionFailed(error.to_string()),
             MicrovmError::Io(error) => SandboxError::Io(error),
         }
     }

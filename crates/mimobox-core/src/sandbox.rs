@@ -3,6 +3,57 @@ use std::time::Duration;
 
 use crate::seccomp::SeccompProfile;
 
+/// 结构化错误码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorCode {
+    // 命令执行
+    CommandTimeout,
+    CommandExit(i32),
+    CommandKilled,
+    // 文件操作
+    FileNotFound,
+    FilePermissionDenied,
+    FileTooLarge,
+    // HTTP 代理
+    HttpDeniedHost,
+    HttpTimeout,
+    HttpBodyTooLarge,
+    HttpConnectFail,
+    HttpTlsFail,
+    HttpInvalidUrl,
+    // 生命周期
+    SandboxNotReady,
+    SandboxDestroyed,
+    SandboxCreateFailed,
+    // 配置
+    InvalidConfig,
+    UnsupportedPlatform,
+}
+
+impl ErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CommandTimeout => "command_timeout",
+            Self::CommandExit(_) => "command_exit",
+            Self::CommandKilled => "command_killed",
+            Self::FileNotFound => "file_not_found",
+            Self::FilePermissionDenied => "file_permission_denied",
+            Self::FileTooLarge => "file_too_large",
+            Self::HttpDeniedHost => "http_denied_host",
+            Self::HttpTimeout => "http_timeout",
+            Self::HttpBodyTooLarge => "http_body_too_large",
+            Self::HttpConnectFail => "http_connect_fail",
+            Self::HttpTlsFail => "http_tls_fail",
+            Self::HttpInvalidUrl => "http_invalid_url",
+            Self::SandboxNotReady => "sandbox_not_ready",
+            Self::SandboxDestroyed => "sandbox_destroyed",
+            Self::SandboxCreateFailed => "sandbox_create_failed",
+            Self::InvalidConfig => "invalid_config",
+            Self::UnsupportedPlatform => "unsupported_platform",
+        }
+    }
+}
+
 /// 沙箱配置
 #[derive(Clone)]
 pub struct SandboxConfig {
