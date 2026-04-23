@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use crate::snapshot::MicrovmSnapshot;
 use crate::vm_assets::resolve_vm_assets_dir;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use crate::kvm::KvmBackend;
+use crate::kvm::{KvmBackend, restore_runtime_state};
 
 /// microVM 专属配置。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -322,6 +322,36 @@ impl BackendHandle {
             Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
         }
     }
+
+    #[cfg(all(target_os = "linux", feature = "kvm"))]
+    fn restore_from_file_parts(
+        &mut self,
+        memory_path: &Path,
+        vcpu_state: &[u8],
+    ) -> Result<(), MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => {
+                let mut restore_profile = backend.take_or_seed_restore_profile();
+
+                let restore_memory_started_at = Instant::now();
+                backend.restore_from_file(memory_path)?;
+                restore_profile.memory_state_write = restore_memory_started_at.elapsed();
+
+                restore_profile.cpuid_config = backend.prepare_restored_vcpus()?;
+
+                let runtime_restore_profile = restore_runtime_state(backend, vcpu_state)?;
+                restore_profile.vcpu_state_restore = runtime_restore_profile.vcpu_state_restore;
+                restore_profile.device_state_restore = runtime_restore_profile.device_state_restore;
+
+                backend.set_lifecycle_ready();
+                backend.emit_restore_profile_without_resume(&restore_profile);
+                backend.set_pending_restore_profile(restore_profile);
+                Ok(())
+            }
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
 }
 
 /// microVM 沙箱实现。
@@ -391,8 +421,7 @@ impl MicrovmSandbox {
     /// 从快照恢复 microVM。
     pub fn restore(snapshot: &SandboxSnapshot) -> Result<Self, MicrovmError> {
         if let Some(memory_path) = snapshot.memory_file_path() {
-            let snapshot = MicrovmSnapshot::from_memory_file(memory_path)?;
-            return Self::from_snapshot(snapshot);
+            return Self::restore_from_file_snapshot(memory_path);
         }
 
         let data = snapshot.as_bytes().map_err(map_snapshot_access_error)?;
@@ -403,6 +432,57 @@ impl MicrovmSandbox {
     pub fn restore_from_bytes(data: &[u8]) -> Result<Self, MicrovmError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         Self::from_snapshot(snapshot)
+    }
+
+    /// 从文件化快照恢复，memory 通过 mmap(MAP_PRIVATE) 加载。
+    #[cfg(all(target_os = "linux", feature = "kvm"))]
+    fn restore_from_file_snapshot(memory_path: &Path) -> Result<Self, MicrovmError> {
+        #[derive(serde::Deserialize)]
+        struct FileSnapshotState {
+            sandbox_config: SandboxConfig,
+            microvm_config: MicrovmConfig,
+            vcpu_state_base64: String,
+        }
+
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let snapshot_dir = memory_path.parent().ok_or_else(|| {
+            MicrovmError::SnapshotFormat(format!(
+                "快照文件路径缺少父目录: {}",
+                memory_path.display()
+            ))
+        })?;
+        let state_path = snapshot_dir.join("state.json");
+        let state_bytes = std::fs::read(&state_path)?;
+        let state: FileSnapshotState = serde_json::from_slice(&state_bytes).map_err(|error| {
+            MicrovmError::SnapshotFormat(format!("解析 state.json 失败: {error}"))
+        })?;
+
+        let vcpu_state = BASE64_STANDARD
+            .decode(state.vcpu_state_base64.as_bytes())
+            .map_err(|error| {
+                MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}"))
+            })?;
+
+        let mut backend = BackendHandle::create_for_restore(
+            state.sandbox_config.clone(),
+            state.microvm_config.clone(),
+        )?;
+        backend.restore_from_file_parts(memory_path, &vcpu_state)?;
+
+        Ok(Self {
+            base_config: state.sandbox_config,
+            microvm_config: state.microvm_config,
+            state: MicrovmState::Ready,
+            backend,
+        })
+    }
+
+    /// 非 Linux 平台的文件快照恢复回退。
+    #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+    fn restore_from_file_snapshot(_memory_path: &Path) -> Result<Self, MicrovmError> {
+        Err(MicrovmError::Backend("文件快照恢复仅支持 Linux".into()))
     }
 
     pub(crate) fn from_snapshot(snapshot: MicrovmSnapshot) -> Result<Self, MicrovmError> {
