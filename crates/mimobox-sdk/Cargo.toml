@@ -20,5 +20,25 @@ os = ["dep:mimobox-os"]
 vm = ["dep:mimobox-vm"]
 wasm = ["dep:mimobox-wasm"]
 
+[[example]]
+name = "basic"
+path = "../../examples/basic.rs"
+
+[[example]]
+name = "streaming"
+path = "../../examples/streaming.rs"
+
+[[example]]
+name = "http_proxy"
+path = "../../examples/http_proxy.rs"
+
+[[example]]
+name = "env_vars"
+path = "../../examples/env_vars.rs"
+
+[[example]]
+name = "file_ops"
+path = "../../examples/file_ops.rs"
+
 [lints]
 workspace = true

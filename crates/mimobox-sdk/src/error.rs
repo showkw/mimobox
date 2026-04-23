@@ -21,7 +21,11 @@ pub enum SdkError {
 }
 
 impl SdkError {
-    pub fn sandbox(code: ErrorCode, message: impl Into<String>, suggestion: Option<String>) -> Self {
+    pub fn sandbox(
+        code: ErrorCode,
+        message: impl Into<String>,
+        suggestion: Option<String>,
+    ) -> Self {
         Self::Sandbox {
             code,
             message: message.into(),

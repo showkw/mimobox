@@ -14,12 +14,12 @@ pub(in crate::kvm) use self::serial::SERIAL_BOOT_TIME_PREFIX;
 pub(in crate::kvm) use self::serial::{
     CommandResponse, FsResult, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG,
     I8042_RESET_CMD, MAX_FS_TRANSFER_BYTES, PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END,
-    PCI_CONFIG_DATA_REG_START, SERIAL_EXEC_PREFIX, SERIAL_EXECS_PREFIX,
-    SERIAL_FS_READ_PREFIX, SERIAL_FS_WRITE_PREFIX, SERIAL_HTTP_REQUEST_PREFIX,
-    SERIAL_HTTPRESP_BODY_PREFIX, SERIAL_HTTPRESP_END_PREFIX, SERIAL_HTTPRESP_ERROR_PREFIX,
-    SERIAL_HTTPRESP_HEADERS_PREFIX, SERIAL_READY_LINE, SerialDevice, SerialFrame,
-    SerialProtocolResult, SerialResponseCollector, build_guest_command, encode_command_payload,
-    encode_fs_read_payload, encode_fs_write_payload, parse_serial_line, preview_serial_output,
+    PCI_CONFIG_DATA_REG_START, SERIAL_EXEC_PREFIX, SERIAL_EXECS_PREFIX, SERIAL_FS_READ_PREFIX,
+    SERIAL_FS_WRITE_PREFIX, SERIAL_HTTP_REQUEST_PREFIX, SERIAL_HTTPRESP_BODY_PREFIX,
+    SERIAL_HTTPRESP_END_PREFIX, SERIAL_HTTPRESP_ERROR_PREFIX, SERIAL_HTTPRESP_HEADERS_PREFIX,
+    SERIAL_READY_LINE, SerialDevice, SerialFrame, SerialProtocolResult, SerialResponseCollector,
+    build_guest_command, encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
+    parse_serial_line, preview_serial_output,
 };
 pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
 pub(in crate::kvm) use self::vsock_channel::VsockCommandChannel;

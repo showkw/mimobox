@@ -741,7 +741,8 @@ mod tests {
             seccomp_profile: mimobox_core::SeccompProfile::Essential,
             allow_fork: false,
             allowed_http_domains: vec![],
-        }    }
+        }
+    }
 
     #[test]
     fn test_wasm_sandbox_create() {

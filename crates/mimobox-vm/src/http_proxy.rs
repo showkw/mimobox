@@ -88,9 +88,9 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
     fn try_from(value: HttpProxyRequestPayload) -> Result<Self, Self::Error> {
         let body = match value.body_b64 {
             Some(encoded) => {
-                let bytes = BASE64_STANDARD
-                    .decode(encoded)
-                    .map_err(|err| HttpProxyError::InvalidUrl(format!("body_b64 不是合法 base64: {err}")))?;
+                let bytes = BASE64_STANDARD.decode(encoded).map_err(|err| {
+                    HttpProxyError::InvalidUrl(format!("body_b64 不是合法 base64: {err}"))
+                })?;
                 if bytes.len() > MAX_REQUEST_BODY_BYTES {
                     return Err(HttpProxyError::BodyTooLarge);
                 }
@@ -209,10 +209,7 @@ pub fn is_allowed_http_host(config: &SandboxConfig, host: &str) -> bool {
     })
 }
 
-fn validate_http_request(
-    config: &SandboxConfig,
-    url: &reqwest::Url,
-) -> Result<(), HttpProxyError> {
+fn validate_http_request(config: &SandboxConfig, url: &reqwest::Url) -> Result<(), HttpProxyError> {
     if url.scheme() != "https" {
         return Err(HttpProxyError::InvalidUrl(format!(
             "仅允许 HTTPS，实际为 {}",
