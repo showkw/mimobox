@@ -15,7 +15,7 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
 
 fn e2e_config() -> MicrovmConfig {
     must(
-        microvm_config_from_vm_assets(64),
+        microvm_config_from_vm_assets(256),
         "加载 RestorePool 测试 VM assets 配置失败",
     )
 }

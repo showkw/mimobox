@@ -33,11 +33,17 @@ pub(super) const UART_LSR_THR_EMPTY: u8 = 0x20;
 pub(super) const UART_LSR_TRANSMITTER_EMPTY: u8 = 0x40;
 pub(in crate::kvm) const SERIAL_READY_LINE: &str = "READY";
 pub(in crate::kvm) const SERIAL_EXEC_PREFIX: &str = "EXEC:";
+#[allow(dead_code)] // Phase A 先落常量与解析，Phase B 再接 host 发送路径。
+pub(in crate::kvm) const SERIAL_EXECS_PREFIX: &str = "EXECS:";
 pub(in crate::kvm) const SERIAL_FS_READ_PREFIX: &str = "FS:READ:";
 pub(in crate::kvm) const SERIAL_FS_WRITE_PREFIX: &str = "FS:WRITE:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
 const SERIAL_FSRESULT_PREFIX: &str = "FSRESULT:";
+pub(in crate::kvm) const SERIAL_STREAM_START_PREFIX: &str = "STREAM:START:";
+pub(in crate::kvm) const SERIAL_STREAM_STDOUT_PREFIX: &str = "STREAM:STDOUT:";
+pub(in crate::kvm) const SERIAL_STREAM_STDERR_PREFIX: &str = "STREAM:STDERR:";
+pub(in crate::kvm) const SERIAL_STREAM_END_PREFIX: &str = "STREAM:END:";
 pub(in crate::kvm) const MAX_FS_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) const SERIAL_BOOT_TIME_PREFIX: &str = "BOOT_TIME:";
@@ -214,6 +220,10 @@ pub(in crate::kvm) struct FsResult {
 pub(in crate::kvm) enum SerialProtocolResult {
     Command(GuestCommandResult),
     Fs(FsResult),
+    StreamStart(u32),
+    StreamStdout(u32, Vec<u8>),
+    StreamStderr(u32, Vec<u8>),
+    StreamEnd(u32, i32),
 }
 
 #[derive(Debug)]
@@ -226,6 +236,7 @@ pub(in crate::kvm) enum SerialResponseCollector {
 pub(in crate::kvm) enum SerialFrame {
     Line(String),
     FsResult(FsResult),
+    Stream(SerialProtocolResult),
 }
 
 pub(in crate::kvm) fn encode_command_payload(
@@ -336,6 +347,12 @@ pub(in crate::kvm) fn take_serial_frame(
 
     if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
         return try_take_fs_result_frame(frame_buffer);
+    }
+    if frame_buffer.starts_with(b"STREAM:") {
+        if is_partial_stream_prefix(frame_buffer) {
+            return Ok(None);
+        }
+        return try_take_stream_frame(frame_buffer);
     }
 
     let Some(newline_index) = frame_buffer.iter().position(|&byte| byte == b'\n') else {
@@ -494,6 +511,165 @@ fn try_take_fs_result_frame(
     Ok(Some(SerialFrame::FsResult(FsResult { status, data })))
 }
 
+fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFrame>, MicrovmError> {
+    let bytes = frame_buffer.as_slice();
+
+    if bytes.starts_with(SERIAL_STREAM_START_PREFIX.as_bytes()) {
+        let prefix_len = SERIAL_STREAM_START_PREFIX.len();
+        let Some((stream_id, delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
+            return Ok(None);
+        };
+        let stream_id = u32::try_from(stream_id).map_err(|_| {
+            MicrovmError::Backend(format!("guest STREAM:START id 超出 u32 范围: {stream_id}"))
+        })?;
+        match bytes.get(delimiter_index) {
+            Some(b'\n') => {
+                frame_buffer.drain(..=delimiter_index);
+                return Ok(Some(SerialFrame::Stream(
+                    SerialProtocolResult::StreamStart(stream_id),
+                )));
+            }
+            Some(other) => {
+                return Err(MicrovmError::Backend(format!(
+                    "guest STREAM:START id 字段后缺少换行: {}",
+                    char::from(*other)
+                )));
+            }
+            None => return Ok(None),
+        }
+    }
+
+    if bytes.starts_with(SERIAL_STREAM_END_PREFIX.as_bytes()) {
+        let prefix_len = SERIAL_STREAM_END_PREFIX.len();
+        let Some((stream_id, stream_delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)?
+        else {
+            return Ok(None);
+        };
+        let stream_id = u32::try_from(stream_id).map_err(|_| {
+            MicrovmError::Backend(format!("guest STREAM:END id 超出 u32 范围: {stream_id}"))
+        })?;
+        match bytes.get(stream_delimiter_index) {
+            Some(b':') => {}
+            Some(other) => {
+                return Err(MicrovmError::Backend(format!(
+                    "guest STREAM:END id 字段后缺少冒号: {}",
+                    char::from(*other)
+                )));
+            }
+            None => return Ok(None),
+        }
+
+        let exit_code_start = stream_delimiter_index + 1;
+        let Some((exit_code, exit_delimiter_index)) =
+            parse_signed_decimal_prefix(bytes, exit_code_start)?
+        else {
+            return Ok(None);
+        };
+        match bytes.get(exit_delimiter_index) {
+            Some(b'\n') => {
+                frame_buffer.drain(..=exit_delimiter_index);
+                return Ok(Some(SerialFrame::Stream(SerialProtocolResult::StreamEnd(
+                    stream_id, exit_code,
+                ))));
+            }
+            Some(other) => {
+                return Err(MicrovmError::Backend(format!(
+                    "guest STREAM:END 退出码字段后缺少换行: {}",
+                    char::from(*other)
+                )));
+            }
+            None => return Ok(None),
+        }
+    }
+
+    let (prefix, is_stdout) = if bytes.starts_with(SERIAL_STREAM_STDOUT_PREFIX.as_bytes()) {
+        (SERIAL_STREAM_STDOUT_PREFIX, true)
+    } else if bytes.starts_with(SERIAL_STREAM_STDERR_PREFIX.as_bytes()) {
+        (SERIAL_STREAM_STDERR_PREFIX, false)
+    } else {
+        return Err(MicrovmError::Backend("guest STREAM 帧类型未知".into()));
+    };
+
+    let prefix_len = prefix.len();
+    let Some((stream_id, stream_delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
+        return Ok(None);
+    };
+    let stream_id = u32::try_from(stream_id).map_err(|_| {
+        MicrovmError::Backend(format!("guest STREAM id 超出 u32 范围: {stream_id}"))
+    })?;
+    match bytes.get(stream_delimiter_index) {
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest STREAM id 字段后缺少冒号: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let data_len_start = stream_delimiter_index + 1;
+    let Some((data_len, data_len_delimiter_index)) = parse_decimal_prefix(bytes, data_len_start)?
+    else {
+        return Ok(None);
+    };
+    match bytes.get(data_len_delimiter_index) {
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest STREAM 数据长度字段后缺少冒号: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let data_start = data_len_delimiter_index + 1;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| MicrovmError::Backend("guest STREAM 数据长度溢出".into()))?;
+    if frame_buffer.len() < data_end + 1 {
+        return Ok(None);
+    }
+    if bytes
+        .get(data_end)
+        .copied()
+        .ok_or_else(|| MicrovmError::Backend("guest STREAM 缺少结尾换行".into()))?
+        != b'\n'
+    {
+        return Err(MicrovmError::Backend(
+            "guest STREAM 数据帧未以换行结束".into(),
+        ));
+    }
+
+    let data = frame_buffer[data_start..data_end].to_vec();
+    frame_buffer.drain(..=data_end);
+    if is_stdout {
+        Ok(Some(SerialFrame::Stream(
+            SerialProtocolResult::StreamStdout(stream_id, data),
+        )))
+    } else {
+        Ok(Some(SerialFrame::Stream(
+            SerialProtocolResult::StreamStderr(stream_id, data),
+        )))
+    }
+}
+
+fn is_partial_stream_prefix(bytes: &[u8]) -> bool {
+    for prefix in [
+        SERIAL_STREAM_START_PREFIX,
+        SERIAL_STREAM_STDOUT_PREFIX,
+        SERIAL_STREAM_STDERR_PREFIX,
+        SERIAL_STREAM_END_PREFIX,
+    ] {
+        let prefix_bytes = prefix.as_bytes();
+        if bytes.len() < prefix_bytes.len() && prefix_bytes.starts_with(bytes) {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_decimal_prefix(
     bytes: &[u8],
     start: usize,
@@ -520,6 +696,34 @@ fn parse_decimal_prefix(
     }
 
     Ok(None)
+}
+
+fn parse_signed_decimal_prefix(
+    bytes: &[u8],
+    start: usize,
+) -> Result<Option<(i32, usize)>, MicrovmError> {
+    let mut index = start;
+    let mut negative = false;
+
+    if matches!(bytes.get(index), Some(b'-')) {
+        negative = true;
+        index += 1;
+    }
+
+    let Some((value, delimiter_index)) = parse_decimal_prefix(bytes, index)? else {
+        return Ok(None);
+    };
+    let value = i32::try_from(value).map_err(|_| {
+        MicrovmError::Backend(format!("guest STREAM 数字字段超出 i32 范围: {value}"))
+    })?;
+    let signed = if negative {
+        value
+            .checked_neg()
+            .ok_or_else(|| MicrovmError::Backend("guest STREAM 数字字段发生溢出".into()))?
+    } else {
+        value
+    };
+    Ok(Some((signed, delimiter_index)))
 }
 
 fn join_shell_command(cmd: &[String]) -> String {

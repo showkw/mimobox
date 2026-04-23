@@ -8,7 +8,7 @@ use mimobox_vm::{VmPoolConfig, microvm_config_from_vm_assets};
 
 fn sdk_config() -> Config {
     let microvm_config =
-        microvm_config_from_vm_assets(64).expect("加载 SDK VmPool 集成测试 VM assets 配置必须成功");
+        microvm_config_from_vm_assets(256).expect("加载 SDK VmPool 集成测试 VM assets 配置必须成功");
     let memory_mb = microvm_config.memory_mb;
     let kernel_path = microvm_config.kernel_path;
     let rootfs_path = microvm_config.rootfs_path;

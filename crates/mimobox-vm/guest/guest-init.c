@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -208,16 +209,19 @@ static bool is_supported_command_prefix(const char *prefix) {
     }
 
     return strcmp(prefix, "EXEC:") == 0 ||
+           strcmp(prefix, "EXECS:") == 0 ||
            strcmp(prefix, "FS:READ:") == 0 ||
            strcmp(prefix, "FS:WRITE:") == 0;
 }
 
 static int read_command_frame(char *buffer, size_t capacity) {
     char prefix[16];
+    char streaming_id[16];
     size_t prefix_len = 0;
     size_t payload_len = 0;
     unsigned char value = 0;
     bool saw_digit = false;
+    bool is_streaming_exec = false;
 
     if (capacity == 0) {
         return -1;
@@ -240,6 +244,45 @@ static int read_command_frame(char *buffer, size_t capacity) {
         }
         prefix[prefix_len++] = (char)value;
         prefix[prefix_len] = '\0';
+    }
+
+    is_streaming_exec = strcmp(prefix, "EXECS:") == 0;
+    if (is_streaming_exec) {
+        size_t id_len = 0;
+        streaming_id[id_len++] = (char)value;
+        streaming_id[id_len] = '\0';
+
+        for (;;) {
+            unsigned char digit = 0;
+            if (read_serial_byte(&digit) < 0) {
+                return -1;
+            }
+            if (digit == ':') {
+                if (id_len == 0) {
+                    return -3;
+                }
+                break;
+            }
+            if (digit < '0' || digit > '9') {
+                return -3;
+            }
+            if (id_len + 1 >= sizeof(streaming_id)) {
+                return -3;
+            }
+            streaming_id[id_len++] = (char)digit;
+            streaming_id[id_len] = '\0';
+        }
+
+        saw_digit = false;
+        payload_len = 0;
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        if (value < '0' || value > '9') {
+            return -3;
+        }
+        payload_len = (size_t)(value - '0');
+        saw_digit = true;
     }
 
     for (;;) {
@@ -273,7 +316,12 @@ static int read_command_frame(char *buffer, size_t capacity) {
         return value == '\n' ? -3 : -3;
     }
 
-    if (prefix_len + payload_len >= capacity) {
+    size_t total_prefix_len = prefix_len;
+    if (is_streaming_exec) {
+        total_prefix_len += strlen(streaming_id) + 1;
+    }
+
+    if (total_prefix_len + payload_len >= capacity) {
         if (discard_serial_bytes(payload_len) < 0) {
             return -1;
         }
@@ -287,11 +335,16 @@ static int read_command_frame(char *buffer, size_t capacity) {
     }
 
     memcpy(buffer, prefix, prefix_len);
+    if (is_streaming_exec) {
+        size_t id_len = strlen(streaming_id);
+        memcpy(buffer + prefix_len, streaming_id, id_len);
+        buffer[prefix_len + id_len] = ':';
+    }
     for (size_t index = 0; index < payload_len; index++) {
         if (read_serial_byte(&value) < 0) {
             return -1;
         }
-        buffer[prefix_len + index] = (char)value;
+        buffer[total_prefix_len + index] = (char)value;
     }
 
     if (read_serial_byte(&value) < 0) {
@@ -301,7 +354,7 @@ static int read_command_frame(char *buffer, size_t capacity) {
         return -3;
     }
 
-    buffer[prefix_len + payload_len] = '\0';
+    buffer[total_prefix_len + payload_len] = '\0';
     return 0;
 }
 
@@ -602,6 +655,42 @@ static void write_escaped_output(int stream_fd, const unsigned char *data, size_
 static void write_exit_code(int exit_code) {
     char buffer[32];
     int written = snprintf(buffer, sizeof(buffer), "EXIT:%d\n", exit_code);
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
+    }
+}
+
+static void write_stream_start(uint32_t stream_id) {
+    char buffer[64];
+    int written = snprintf(buffer, sizeof(buffer), "STREAM:START:%" PRIu32 "\n", stream_id);
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
+    }
+}
+
+static void write_stream_chunk(const char *kind, uint32_t stream_id,
+                               const unsigned char *data, size_t length) {
+    char header[96];
+    int header_len = snprintf(
+        header,
+        sizeof(header),
+        "STREAM:%s:%" PRIu32 ":%zu:",
+        kind,
+        stream_id,
+        length
+    );
+    if (header_len > 0) {
+        write_console_bytes(header, (size_t)header_len);
+    }
+    if (length > 0) {
+        write_console_bytes(data, length);
+    }
+    write_console_bytes("\n", 1);
+}
+
+static void write_stream_end(uint32_t stream_id, int exit_code) {
+    char buffer[64];
+    int written = snprintf(buffer, sizeof(buffer), "STREAM:END:%" PRIu32 ":%d\n", stream_id, exit_code);
     if (written > 0) {
         write_console_bytes(buffer, (size_t)written);
     }
@@ -973,10 +1062,65 @@ static void vsock_command_loop(int *vsock_fd) {
 
 /* ===== 串口数据面函数 ===== */
 
-static int forward_child_output(int stream_fd, int source_fd) {
-    unsigned char buffer[OUTPUT_BUFFER_CAP];
+static pid_t spawn_command_child(const char *command_line, int stdout_pipe[2], int stderr_pipe[2]) {
+    pid_t pid = fork();
+    if (pid != 0) {
+        return pid;
+    }
 
+    static char *const envp[] = {
+        "HOME=/root",
+        "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+        "SHELL=/bin/sh",
+        "TERM=dumb",
+        NULL,
+    };
+    char *const argv[] = {
+        (char *)SHELL_PATH,
+        "-lc",
+        (char *)command_line,
+        NULL,
+    };
+    int stdin_fd = -1;
+
+    close_fd_if_open(&stdout_pipe[0]);
+    close_fd_if_open(&stderr_pipe[0]);
+    if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+        dprintf(stderr_pipe[1], "guest-init: dup2 failed: %s\n", strerror(errno));
+        _exit(125);
+    }
+    stdin_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (stdin_fd < 0 || dup2(stdin_fd, STDIN_FILENO) < 0) {
+        dprintf(stderr_pipe[1], "guest-init: redirect stdin failed: %s\n", strerror(errno));
+        _exit(125);
+    }
+    if (stdin_fd > STDERR_FILENO) {
+        close(stdin_fd);
+    }
+    close_fd_if_open(&stdout_pipe[1]);
+    close_fd_if_open(&stderr_pipe[1]);
+
+    execve(SHELL_PATH, argv, envp);
+    dprintf(STDERR_FILENO, "guest-init: execve failed: %s\n", strerror(errno));
+    _exit(127);
+}
+
+static int wait_for_child_exit(pid_t pid) {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        dprintf(STDERR_FILENO, "guest-init: waitpid failed: %s\n", strerror(errno));
+        return 125;
+    }
+
+    return child_exit_code_from_status(status);
+}
+
+static int forward_child_output_blocking(int stream_fd, int source_fd) {
     for (;;) {
+        unsigned char buffer[OUTPUT_BUFFER_CAP];
         ssize_t read_bytes = read(source_fd, buffer, sizeof(buffer));
         if (read_bytes == 0) {
             return 1;
@@ -994,7 +1138,27 @@ static int forward_child_output(int stream_fd, int source_fd) {
     }
 }
 
-static int execute_command(const char *command_line) {
+static int forward_child_output_streaming(uint32_t stream_id, const char *kind, int source_fd) {
+    for (;;) {
+        unsigned char buffer[OUTPUT_BUFFER_CAP];
+        ssize_t read_bytes = read(source_fd, buffer, sizeof(buffer));
+        if (read_bytes == 0) {
+            return 1;
+        }
+        if (read_bytes > 0) {
+            write_stream_chunk(kind, stream_id, buffer, (size_t)read_bytes);
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+
+        dprintf(STDERR_FILENO, "guest-init: read child output failed: %s\n", strerror(errno));
+        return -1;
+    }
+}
+
+static int execute_command_blocking(const char *command_line) {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
 
@@ -1007,7 +1171,7 @@ static int execute_command(const char *command_line) {
         return 125;
     }
 
-    pid_t pid = fork();
+    pid_t pid = spawn_command_child(command_line, stdout_pipe, stderr_pipe);
     if (pid < 0) {
         close_fd_if_open(&stdout_pipe[0]);
         close_fd_if_open(&stdout_pipe[1]);
@@ -1015,44 +1179,6 @@ static int execute_command(const char *command_line) {
         close_fd_if_open(&stderr_pipe[1]);
         dprintf(STDERR_FILENO, "guest-init: fork failed: %s\n", strerror(errno));
         return 125;
-    }
-
-    if (pid == 0) {
-        static char *const envp[] = {
-            "HOME=/root",
-            "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
-            "SHELL=/bin/sh",
-            "TERM=dumb",
-            NULL,
-        };
-        char *const argv[] = {
-            (char *)SHELL_PATH,
-            "-lc",
-            (char *)command_line,
-            NULL,
-        };
-        int stdin_fd = -1;
-
-        close_fd_if_open(&stdout_pipe[0]);
-        close_fd_if_open(&stderr_pipe[0]);
-        if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
-            dprintf(stderr_pipe[1], "guest-init: dup2 failed: %s\n", strerror(errno));
-            _exit(125);
-        }
-        stdin_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (stdin_fd < 0 || dup2(stdin_fd, STDIN_FILENO) < 0) {
-            dprintf(stderr_pipe[1], "guest-init: redirect stdin failed: %s\n", strerror(errno));
-            _exit(125);
-        }
-        if (stdin_fd > STDERR_FILENO) {
-            close(stdin_fd);
-        }
-        close_fd_if_open(&stdout_pipe[1]);
-        close_fd_if_open(&stderr_pipe[1]);
-
-        execve(SHELL_PATH, argv, envp);
-        dprintf(STDERR_FILENO, "guest-init: execve failed: %s\n", strerror(errno));
-        _exit(127);
     }
 
     close_fd_if_open(&stdout_pipe[1]);
@@ -1096,7 +1222,7 @@ static int execute_command(const char *command_line) {
                 return 125;
             }
 
-            int forward_status = forward_child_output(stream_fds[index], poll_fds[index].fd);
+            int forward_status = forward_child_output_blocking(stream_fds[index], poll_fds[index].fd);
             if (forward_status < 0) {
                 close_fd_if_open(&poll_fds[0].fd);
                 close_fd_if_open(&poll_fds[1].fd);
@@ -1111,16 +1237,91 @@ static int execute_command(const char *command_line) {
     close_fd_if_open(&poll_fds[0].fd);
     close_fd_if_open(&poll_fds[1].fd);
 
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR) {
-            continue;
-        }
-        dprintf(STDERR_FILENO, "guest-init: waitpid failed: %s\n", strerror(errno));
+    return wait_for_child_exit(pid);
+}
+
+static int execute_command_streaming(uint32_t stream_id, const char *command_line) {
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+
+    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
+        dprintf(STDERR_FILENO, "guest-init: pipe failed: %s\n", strerror(errno));
         return 125;
     }
 
-    return child_exit_code_from_status(status);
+    pid_t pid = spawn_command_child(command_line, stdout_pipe, stderr_pipe);
+    if (pid < 0) {
+        close_fd_if_open(&stdout_pipe[0]);
+        close_fd_if_open(&stdout_pipe[1]);
+        close_fd_if_open(&stderr_pipe[0]);
+        close_fd_if_open(&stderr_pipe[1]);
+        dprintf(STDERR_FILENO, "guest-init: fork failed: %s\n", strerror(errno));
+        return 125;
+    }
+
+    close_fd_if_open(&stdout_pipe[1]);
+    close_fd_if_open(&stderr_pipe[1]);
+
+    write_stream_start(stream_id);
+
+    struct pollfd poll_fds[2] = {
+        {
+            .fd = stdout_pipe[0],
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        },
+        {
+            .fd = stderr_pipe[0],
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        },
+    };
+    const char *const stream_kinds[2] = {"STDOUT", "STDERR"};
+
+    while (poll_fds[0].fd >= 0 || poll_fds[1].fd >= 0) {
+        int poll_status = poll(poll_fds, 2, -1);
+        if (poll_status < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            dprintf(STDERR_FILENO, "guest-init: poll child output failed: %s\n", strerror(errno));
+            close_fd_if_open(&poll_fds[0].fd);
+            close_fd_if_open(&poll_fds[1].fd);
+            return 125;
+        }
+
+        for (size_t index = 0; index < 2; index++) {
+            if (poll_fds[index].fd < 0 || poll_fds[index].revents == 0) {
+                continue;
+            }
+            if ((poll_fds[index].revents & (POLLIN | POLLHUP)) == 0) {
+                dprintf(STDERR_FILENO, "guest-init: child output poll failed: revents=%d\n", poll_fds[index].revents);
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+
+            int forward_status = forward_child_output_streaming(stream_id, stream_kinds[index], poll_fds[index].fd);
+            if (forward_status < 0) {
+                close_fd_if_open(&poll_fds[0].fd);
+                close_fd_if_open(&poll_fds[1].fd);
+                return 125;
+            }
+
+            if (forward_status > 0) {
+                close_fd_if_open(&poll_fds[index].fd);
+            }
+        }
+    }
+
+    close_fd_if_open(&poll_fds[0].fd);
+    close_fd_if_open(&poll_fds[1].fd);
+    return wait_for_child_exit(pid);
 }
 
 static void serial_command_loop(void) {
@@ -1154,15 +1355,39 @@ static void serial_command_loop(void) {
             handle_fs_write(command_buffer + 9);
             continue;
         }
-        if (strncmp(command_buffer, "EXEC:", 5) != 0) {
+        if (strncmp(command_buffer, "EXEC:", 5) == 0) {
+            int exit_code = execute_command_blocking(command_buffer + 5);
+            write_exit_code(exit_code);
+            continue;
+        }
+        if (strncmp(command_buffer, "EXECS:", 6) == 0) {
+            char *id_end = strchr(command_buffer + 6, ':');
+            if (id_end == NULL) {
+                static const unsigned char invalid_streaming_frame[] = "invalid EXECS frame";
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_streaming_frame, sizeof(invalid_streaming_frame) - 1);
+                write_exit_code(125);
+                continue;
+            }
+
+            errno = 0;
+            char *parse_end = NULL;
+            unsigned long parsed_id = strtoul(command_buffer + 6, &parse_end, 10);
+            if (errno != 0 || parse_end != id_end || parsed_id > UINT32_MAX) {
+                static const unsigned char invalid_streaming_id[] = "invalid EXECS id";
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_streaming_id, sizeof(invalid_streaming_id) - 1);
+                write_exit_code(125);
+                continue;
+            }
+
+            int exit_code = execute_command_streaming((uint32_t)parsed_id, id_end + 1);
+            write_stream_end((uint32_t)parsed_id, exit_code);
+            continue;
+        }
+        {
             static const unsigned char invalid_prefix[] = "unsupported command prefix";
             write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_prefix, sizeof(invalid_prefix) - 1);
             write_exit_code(125);
-            continue;
         }
-
-        int exit_code = execute_command(command_buffer + 5);
-        write_exit_code(exit_code);
     }
 }
 
