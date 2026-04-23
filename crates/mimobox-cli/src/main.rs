@@ -1,3 +1,5 @@
+mod doctor;
+
 use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -66,6 +68,10 @@ enum CliCommand {
     Restore(RestoreArgs),
     /// 运行预热池相关基准
     Bench(BenchArgs),
+    /// 诊断当前运行环境
+    Doctor,
+    /// 初始化 mimobox 本地资产与目录
+    Setup,
     /// 输出版本信息
     Version,
 }
@@ -459,10 +465,13 @@ fn run_with_panic_guard() -> ExitCode {
 }
 
 fn run() -> Result<Option<i32>, CliError> {
-    info!("mimobox CLI 启动");
-
     let cli = Cli::try_parse().map_err(|error| CliError::Args(error.to_string()))?;
-    info!(command = ?cli.command, "CLI 参数解析完成");
+    let is_human_readable_command = matches!(cli.command, CliCommand::Doctor | CliCommand::Setup);
+
+    if !is_human_readable_command {
+        info!("mimobox CLI 启动");
+        info!(command = ?cli.command, "CLI 参数解析完成");
+    }
 
     let response = match cli.command {
         CliCommand::Run(args) => CommandResponse::Run(handle_run(args)?),
@@ -474,12 +483,28 @@ fn run() -> Result<Option<i32>, CliError> {
         CliCommand::Snapshot(args) => CommandResponse::Snapshot(handle_snapshot(args)?),
         CliCommand::Restore(args) => CommandResponse::Restore(handle_restore(args)?),
         CliCommand::Bench(args) => CommandResponse::Bench(handle_bench(args)?),
+        CliCommand::Doctor => {
+            let exit_code = doctor::run_doctor();
+            if !is_human_readable_command {
+                info!(exit_code, "doctor 子命令执行完成");
+            }
+            return Ok(Some(exit_code));
+        }
+        CliCommand::Setup => {
+            let exit_code = doctor::run_setup();
+            if !is_human_readable_command {
+                info!(exit_code, "setup 子命令执行完成");
+            }
+            return Ok(Some(exit_code));
+        }
         CliCommand::Version => CommandResponse::Version(handle_version()),
     };
 
     let exit_code = success_exit_code(&response);
     emit_success_json(&response)?;
-    info!("CLI 执行完成");
+    if !is_human_readable_command {
+        info!("CLI 执行完成");
+    }
     Ok(exit_code)
 }
 
@@ -1932,6 +1957,20 @@ mod tests {
         .expect_err("bench 子命令不应再接受 pool 参数");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn doctor_subcommand_parses() {
+        let cli = Cli::try_parse_from(["mimobox", "doctor"]).expect("doctor 子命令应解析成功");
+
+        assert!(matches!(cli.command, CliCommand::Doctor));
+    }
+
+    #[test]
+    fn setup_subcommand_parses() {
+        let cli = Cli::try_parse_from(["mimobox", "setup"]).expect("setup 子命令应解析成功");
+
+        assert!(matches!(cli.command, CliCommand::Setup));
     }
 
     #[test]

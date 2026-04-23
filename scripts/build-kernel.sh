@@ -13,6 +13,14 @@ TARGET_ARCH="x86_64"
 FALLBACK_KERNEL_VERSION="6.1.169"
 LOG_FILE=""
 
+if [[ "${OUTPUT}" = "crates/mimobox-vm/vmlinux" ]]; then
+    if [[ -n "${VM_ASSETS_DIR:-}" ]]; then
+        OUTPUT="${VM_ASSETS_DIR}/vmlinux"
+    elif [[ -n "${HOME:-}" ]]; then
+        OUTPUT="${HOME}/.mimobox/assets/vmlinux"
+    fi
+fi
+
 log() {
     printf '[build-kernel] %s\n' "$*"
 }
@@ -35,6 +43,7 @@ usage() {
   - 默认构建 x86_64 guest 的未压缩 ELF `vmlinux`
   - 未提供 --kernel-source 时，优先从 kernel.org 下载最新 6.1.y LTS
   - 若 6.1 LTS 无法解析，则回退到 kernel.org 当前 latest stable
+  - 默认输出到 `VM_ASSETS_DIR/vmlinux`，未设置时回退到 `~/.mimobox/assets/vmlinux`
   - 输出路径支持相对仓库根目录或绝对路径
   - 额外构建目录可通过环境变量 KERNEL_BUILD_DIR 覆盖
   - 非 x86_64 Linux 主机需要自行提供 x86_64 交叉编译链，并设置 CROSS_COMPILE

@@ -392,15 +392,10 @@ mod tests {
     fn microvm_config_uses_default_artifact_paths_when_not_overridden() {
         let config = Config::default();
         let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+        let defaults = mimobox_vm::MicrovmConfig::default();
 
-        assert_eq!(
-            microvm_config.kernel_path,
-            PathBuf::from("/var/lib/mimobox/vm/vmlinux")
-        );
-        assert_eq!(
-            microvm_config.rootfs_path,
-            PathBuf::from("/var/lib/mimobox/vm/rootfs.cpio.gz")
-        );
+        assert_eq!(microvm_config.kernel_path, defaults.kernel_path);
+        assert_eq!(microvm_config.rootfs_path, defaults.rootfs_path);
     }
 
     #[cfg(feature = "vm")]

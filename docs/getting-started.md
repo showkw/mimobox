@@ -355,8 +355,9 @@ if __name__ == "__main__":
 - 仅对 microVM 后端生效
 - 默认值 `256MB`
 - 如果未显式覆盖内核和 rootfs 路径，会走后端默认路径：
-  - `/var/lib/mimobox/vm/vmlinux`
-  - `/var/lib/mimobox/vm/rootfs.cpio.gz`
+  - `VM_ASSETS_DIR/vmlinux`
+  - `VM_ASSETS_DIR/rootfs.cpio.gz`
+  - 未设置 `VM_ASSETS_DIR` 时，回退到 `~/.mimobox/assets/`
 
 #### `allowed_http_domains`
 

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DEFAULT_VM_ASSETS_SUBDIR="mimobox-poc/vm-assets"
+DEFAULT_VM_ASSETS_SUBDIR=".mimobox/assets"
 OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
 ENABLE_BOOT_PROFILE="${ENABLE_BOOT_PROFILE:-}"
