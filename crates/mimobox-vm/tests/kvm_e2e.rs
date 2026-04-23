@@ -1,12 +1,18 @@
 #![cfg(all(target_os = "linux", feature = "kvm"))]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mimobox_core::{Sandbox, SandboxConfig};
+use mimobox_core::{ErrorCode, Sandbox, SandboxConfig};
+use mimobox_sdk::{Config as SdkConfig, IsolationLevel, Sandbox as SdkSandbox, SdkError};
 use mimobox_vm::{
     KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError, MicrovmSandbox, StreamEvent,
     microvm_config_from_vm_assets, resolve_vm_assets_dir,
 };
+
+const HTTP_PROXY_ALLOWED_HOST: &str = "api.github.com";
+const HTTP_PROXY_ALLOWED_URL: &str = "https://api.github.com/zen";
+const HTTP_PROXY_LOCAL_IP_URL: &str = "https://127.0.0.1";
 
 fn e2e_config() -> MicrovmConfig {
     microvm_config_from_vm_assets(256).expect("加载 e2e VM assets 配置必须成功")
@@ -14,6 +20,39 @@ fn e2e_config() -> MicrovmConfig {
 
 fn guest_cmd(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_string()).collect()
+}
+
+fn sdk_http_config(allowed_http_domains: &[&str]) -> SdkConfig {
+    let vm_config = e2e_config();
+
+    SdkConfig::builder()
+        .isolation(IsolationLevel::MicroVm)
+        .vm_vcpu_count(vm_config.vcpu_count)
+        .vm_memory_mb(vm_config.memory_mb)
+        .kernel_path(vm_config.kernel_path)
+        .rootfs_path(vm_config.rootfs_path)
+        .allowed_http_domains(allowed_http_domains.iter().copied())
+        .build()
+}
+
+fn github_zen_headers() -> HashMap<String, String> {
+    HashMap::from([
+        ("User-Agent".to_string(), "mimobox-kvm-e2e".to_string()),
+        (
+            "Accept".to_string(),
+            "application/vnd.github+json".to_string(),
+        ),
+    ])
+}
+
+fn assert_http_denied_host(error: SdkError) {
+    match error {
+        SdkError::Sandbox {
+            code: ErrorCode::HttpDeniedHost,
+            ..
+        } => {}
+        other => panic!("预期收到 HttpDeniedHost，实际为: {other}"),
+    }
 }
 
 #[test]
@@ -73,6 +112,55 @@ fn test_kvm_vm_executes() {
     assert!(!result.timed_out, "echo 不应触发超时");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_http_proxy_request() {
+    let mut sandbox = SdkSandbox::with_config(sdk_http_config(&[HTTP_PROXY_ALLOWED_HOST]))
+        .expect("创建 SDK microVM 沙箱必须成功");
+
+    let response = sandbox
+        .http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None)
+        .expect("通过 SDK 发起 HTTP 代理请求必须成功");
+
+    assert_eq!(response.status, 200, "公开 API 请求应返回 200");
+    assert!(
+        !response.body.is_empty(),
+        "HTTP 代理响应 body 不应为空"
+    );
+
+    sandbox.destroy().expect("销毁 SDK microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_http_proxy_denied_host() {
+    let mut sandbox =
+        SdkSandbox::with_config(sdk_http_config(&[])).expect("创建 SDK microVM 沙箱必须成功");
+
+    let error = match sandbox.http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None)
+    {
+        Ok(_) => panic!("白名单缺失时请求必须被拒绝"),
+        Err(error) => error,
+    };
+
+    assert_http_denied_host(error);
+
+    sandbox.destroy().expect("销毁 SDK microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_http_proxy_ip_rejected() {
+    let mut sandbox = SdkSandbox::with_config(sdk_http_config(&["127.0.0.1"]))
+        .expect("创建 SDK microVM 沙箱必须成功");
+
+    let error = match sandbox.http_request("GET", HTTP_PROXY_LOCAL_IP_URL, HashMap::new(), None) {
+        Ok(_) => panic!("回环 IP 直连必须被拒绝"),
+        Err(error) => error,
+    };
+
+    assert_http_denied_host(error);
+
+    sandbox.destroy().expect("销毁 SDK microVM 沙箱必须成功");
 }
 
 #[test]

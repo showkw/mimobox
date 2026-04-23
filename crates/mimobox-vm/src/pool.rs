@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::{GuestCommandResult, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError, StreamEvent};
+use mimobox_core::SandboxConfig;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
-#[cfg(all(target_os = "linux", feature = "kvm"))]
-use mimobox_core::SandboxConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmPoolConfig {
@@ -106,6 +105,7 @@ impl PoolState {
 }
 
 struct VmPoolInner {
+    base_config: SandboxConfig,
     config: MicrovmConfig,
     pool_config: VmPoolConfig,
     health_check_command: Vec<String>,
@@ -194,7 +194,7 @@ impl VmPoolInner {
             return;
         }
 
-        match create_backend(&self.config) {
+        match create_backend(&self.base_config, &self.config) {
             Ok(backend) => {
                 let evicted = self.push_idle_after_release(backend);
                 if let Some(entry) = evicted {
@@ -272,6 +272,14 @@ pub struct VmPool {
 
 impl VmPool {
     pub fn new(config: MicrovmConfig, pool_config: VmPoolConfig) -> Result<Self, PoolError> {
+        Self::new_with_base(SandboxConfig::default(), config, pool_config)
+    }
+
+    pub fn new_with_base(
+        base_config: SandboxConfig,
+        config: MicrovmConfig,
+        pool_config: VmPoolConfig,
+    ) -> Result<Self, PoolError> {
         if pool_config.max_size == 0 || pool_config.min_size > pool_config.max_size {
             return Err(PoolError::InvalidConfig {
                 min_size: pool_config.min_size,
@@ -284,6 +292,7 @@ impl VmPool {
 
         let pool = Self {
             inner: Arc::new(VmPoolInner {
+                base_config,
                 config,
                 pool_config,
                 health_check_command: vec!["/bin/true".to_string()],
@@ -333,7 +342,7 @@ impl VmPool {
         let reused_hit = reused.is_some();
         let backend = match reused {
             Some(backend) => backend,
-            None => match create_backend(&self.inner.config) {
+            None => match create_backend(&self.inner.base_config, &self.inner.config) {
                 Ok(backend) => backend,
                 Err(err) => {
                     self.inner.rollback_in_use();
@@ -376,7 +385,7 @@ impl VmPool {
         let create_count = target_idle_size.saturating_sub(current_idle);
         let mut created = Vec::with_capacity(create_count);
         for _ in 0..create_count {
-            created.push(create_backend(&self.inner.config)?);
+            created.push(create_backend(&self.inner.base_config, &self.inner.config)?);
         }
 
         let mut extra = Vec::new();
@@ -496,8 +505,8 @@ fn ensure_pool_supported() -> Result<(), MicrovmError> {
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-fn create_backend(config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config.clone())?;
+fn create_backend(base_config: &SandboxConfig, config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
+    let mut backend = KvmBackend::create_vm(base_config.clone(), config.clone())?;
     let exit_reason = backend.boot()?;
     if exit_reason != KvmExitReason::Io || !backend.is_guest_ready() {
         return Err(MicrovmError::Backend(format!(
@@ -509,7 +518,7 @@ fn create_backend(config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
 }
 
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
-fn create_backend(_config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
+fn create_backend(_base_config: &SandboxConfig, _config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 
