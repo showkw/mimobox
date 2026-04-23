@@ -453,6 +453,18 @@ pub trait Sandbox {
         ))
     }
 
+    /// 从当前沙箱 fork 一个独立的副本。
+    ///
+    /// 默认返回 `UnsupportedOperation`，仅 microVM 后端支持。
+    fn fork(&mut self) -> Result<Self, SandboxError>
+    where
+        Self: Sized,
+    {
+        Err(SandboxError::UnsupportedOperation(
+            "fork 当前后端不支持".to_string(),
+        ))
+    }
+
     /// 销毁沙箱并释放底层资源。
     fn destroy(self) -> Result<(), SandboxError>;
 }

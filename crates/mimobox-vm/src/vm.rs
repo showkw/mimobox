@@ -9,6 +9,8 @@ use tracing::debug;
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 use crate::snapshot::MicrovmSnapshot;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use crate::snapshot::{FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir};
 use crate::vm_assets::resolve_vm_assets_dir;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -437,13 +439,6 @@ impl MicrovmSandbox {
     /// 从文件化快照恢复，memory 通过 mmap(MAP_PRIVATE) 加载。
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     fn restore_from_file_snapshot(memory_path: &Path) -> Result<Self, MicrovmError> {
-        #[derive(serde::Deserialize)]
-        struct FileSnapshotState {
-            sandbox_config: SandboxConfig,
-            microvm_config: MicrovmConfig,
-            vcpu_state_base64: String,
-        }
-
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
@@ -455,9 +450,16 @@ impl MicrovmSandbox {
         })?;
         let state_path = snapshot_dir.join("state.json");
         let state_bytes = std::fs::read(&state_path)?;
-        let state: FileSnapshotState = serde_json::from_slice(&state_bytes).map_err(|error| {
+        let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
             MicrovmError::SnapshotFormat(format!("解析 state.json 失败: {error}"))
         })?;
+
+        if state.version != FILE_SNAPSHOT_VERSION {
+            return Err(MicrovmError::SnapshotFormat(format!(
+                "不支持的文件快照版本: {}",
+                state.version
+            )));
+        }
 
         let vcpu_state = BASE64_STANDARD
             .decode(state.vcpu_state_base64.as_bytes())
@@ -483,6 +485,50 @@ impl MicrovmSandbox {
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     fn restore_from_file_snapshot(_memory_path: &Path) -> Result<Self, MicrovmError> {
         Err(MicrovmError::Backend("文件快照恢复仅支持 Linux".into()))
+    }
+
+    /// 从当前 microVM 创建一个独立的副本。
+    ///
+    /// 实现方式：复用文件快照恢复链路，先把当前 memory/vCPU state
+    /// 写入临时目录，再从该文件化快照恢复出新的 VM 实例。
+    #[cfg(all(target_os = "linux", feature = "kvm"))]
+    pub fn fork(&mut self) -> Result<Self, MicrovmError> {
+        use base64::Engine as _;
+
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle("仅 Ready 状态允许 fork".into()));
+        }
+
+        let (memory, vcpu_state) = self.backend.snapshot_parts()?;
+        let snapshot_dir = create_snapshot_dir()?;
+        let memory_path = snapshot_dir.join("memory.bin");
+        let state_path = snapshot_dir.join("state.json");
+
+        let fork_result = (|| {
+            std::fs::write(&memory_path, &memory)?;
+
+            let state = SnapshotStateFile {
+                version: FILE_SNAPSHOT_VERSION,
+                sandbox_config: self.base_config.clone(),
+                microvm_config: self.microvm_config.clone(),
+                vcpu_state_base64: base64::engine::general_purpose::STANDARD
+                    .encode(&vcpu_state),
+            };
+            let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+                MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
+            })?;
+            std::fs::write(&state_path, state_bytes)?;
+
+            Self::restore_from_file_snapshot(&memory_path)
+        })();
+
+        let _ = std::fs::remove_dir_all(snapshot_dir);
+        fork_result
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+    pub fn fork(&mut self) -> Result<Self, MicrovmError> {
+        Err(MicrovmError::Backend("fork 仅支持 Linux + KVM".into()))
     }
 
     pub(crate) fn from_snapshot(snapshot: MicrovmSnapshot) -> Result<Self, MicrovmError> {
@@ -655,6 +701,10 @@ impl Sandbox for MicrovmSandbox {
 
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
         MicrovmSandbox::snapshot(self).map_err(SandboxError::from)
+    }
+
+    fn fork(&mut self) -> Result<Self, SandboxError> {
+        MicrovmSandbox::fork(self).map_err(SandboxError::from)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
