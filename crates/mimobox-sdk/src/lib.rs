@@ -1600,7 +1600,7 @@ mod tests {
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
-    #[cfg(all(feature = "vm", target_os = "linux"))]
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
     #[test]
     fn create_pty_microvm_is_rejected() {
         let mut sandbox =
@@ -1610,12 +1610,57 @@ mod tests {
         let result = sandbox.create_pty("/bin/sh");
 
         match result {
+            Err(SdkError::BackendUnavailable("microvm")) => {}
+            Err(other) => panic!("期望 microVM 后端不可用，实际为: {other}"),
+            Ok(_) => panic!("期望 PTY 在 microVM 配置下被拒绝，实际却创建成功"),
+        }
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    #[test]
+    fn create_pty_microvm_maps_unsupported_operation_on_supported_vm_build() {
+        let microvm_config = mimobox_vm::microvm_config_from_vm_assets(256)
+            .expect("加载 PTY microVM 测试 VM assets 配置必须成功");
+        let config = Config::builder()
+            .isolation(IsolationLevel::MicroVm)
+            .vm_memory_mb(microvm_config.memory_mb)
+            .kernel_path(microvm_config.kernel_path.clone())
+            .rootfs_path(microvm_config.rootfs_path.clone())
+            .build();
+        let mut microvm = mimobox_vm::MicrovmSandbox::new_with_base(
+            mimobox_core::SandboxConfig::default(),
+            microvm_config,
+        )
+        .expect("创建 microVM 沙箱必须成功");
+        let pty_config = PtyConfig {
+            command: vec!["/bin/sh".to_string()],
+            size: PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: config.timeout,
+        };
+
+        match CoreSandbox::create_pty(&mut microvm, pty_config) {
+            Err(mimobox_core::SandboxError::UnsupportedOperation(message)) => {
+                assert!(message.contains("microVM"));
+            }
+            Err(other) => panic!("期望 microVM PTY 返回 UnsupportedOperation，实际为: {other}"),
+            Ok(_) => panic!("期望 microVM PTY 被拒绝，实际却创建成功"),
+        }
+
+        let mut sandbox = Sandbox::from_initialized_inner(SandboxInner::MicroVm(microvm), config);
+        let result = sandbox.create_pty("/bin/sh");
+
+        match result {
             Err(SdkError::Sandbox { code, message, .. }) => {
                 assert_eq!(code, ErrorCode::UnsupportedPlatform);
                 assert!(message.contains("microVM"));
             }
-            other => panic!("期望 PTY 不支持 microVM，实际为: {other:?}"),
+            Err(other) => panic!("期望 SDK 将 UnsupportedOperation 映射为 UnsupportedPlatform，实际为: {other}"),
+            Ok(_) => panic!("期望 SDK PTY 在 microVM 下被拒绝，实际却创建成功"),
         }
+
+        sandbox.destroy().expect("销毁沙箱失败");
     }
 
     #[cfg(all(

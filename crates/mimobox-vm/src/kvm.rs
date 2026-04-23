@@ -73,7 +73,7 @@ use self::devices::{
     handle_serial_write, is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
-use self::devices::{SERIAL_EXEC_PREFIX, SerialFrame, parse_serial_line, take_serial_frame};
+use self::devices::{SerialFrame, parse_serial_line, take_serial_frame};
 pub(crate) use self::profile::RestoreProfile;
 #[cfg(all(any(debug_assertions, feature = "boot-profile"), test))]
 use self::profile::parse_guest_boot_time_line;
@@ -2211,9 +2211,9 @@ mod tests {
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
     use super::{
-        DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, SerialProtocolResult,
-        devices::build_guest_exec_payload, encode_command_payload, encode_fs_read_payload,
-        encode_fs_write_payload, parse_serial_line, take_serial_frame,
+        DEFAULT_CMDLINE, SerialFrame, SerialProtocolResult, devices::build_guest_exec_payload,
+        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
+        parse_serial_line, take_serial_frame,
     };
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;

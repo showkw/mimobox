@@ -18,8 +18,8 @@ pub(in crate::kvm) use self::serial::{
     SERIAL_FS_WRITE_PREFIX, SERIAL_HTTP_REQUEST_PREFIX, SERIAL_HTTPRESP_BODY_PREFIX,
     SERIAL_HTTPRESP_END_PREFIX, SERIAL_HTTPRESP_ERROR_PREFIX, SERIAL_HTTPRESP_HEADERS_PREFIX,
     SERIAL_READY_LINE, SerialDevice, SerialFrame, SerialProtocolResult, SerialResponseCollector,
-    build_guest_command, encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
-    parse_serial_line, preview_serial_output,
+    build_guest_command, build_guest_exec_payload, encode_command_payload,
+    encode_fs_read_payload, encode_fs_write_payload, parse_serial_line, preview_serial_output,
 };
 pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
 pub(in crate::kvm) use self::vsock_channel::VsockCommandChannel;
