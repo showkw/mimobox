@@ -12,7 +12,7 @@ use crate::{
     GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
     StreamEvent,
 };
-use mimobox_core::SandboxConfig;
+use mimobox_core::{SandboxConfig, SandboxSnapshot};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
@@ -520,11 +520,11 @@ impl PooledVm {
         }
     }
 
-    /// 导出当前 VM 的快照字节。
-    pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
+    /// 导出当前 VM 的文件化快照。
+    pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
-            Some(backend) => backend.snapshot_bytes(),
+            Some(backend) => backend.snapshot_to_file(),
             #[cfg(not(all(target_os = "linux", feature = "kvm")))]
             Some(_) => Err(MicrovmError::UnsupportedPlatform),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),

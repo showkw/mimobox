@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -72,7 +72,7 @@ impl ErrorCode {
 ///
 /// 该配置描述所有后端共享的最小能力集合，包括文件系统权限、网络策略、
 /// 资源限制和受控 HTTP 代理白名单。
-#[derive(Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxConfig {
     /// 只读路径列表
     pub fs_readonly: Vec<PathBuf>,
@@ -133,12 +133,31 @@ pub struct SandboxResult {
     pub timed_out: bool,
 }
 
+/// 沙箱快照内部存储。
+///
+/// 该枚举支持两种快照承载模式：
+/// 1. 直接以内存字节形式保存快照内容；
+/// 2. 仅保存快照文件路径与大小，由外部按文件方式管理真实数据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotInner {
+    /// 内存中的快照字节。
+    Bytes(Vec<u8>),
+    /// 文件形式保存的快照引用。
+    File {
+        /// 快照文件路径。
+        path: PathBuf,
+        /// 快照文件大小（字节）。
+        size: usize,
+    },
+}
+
 /// 沙箱快照。
 ///
-/// 该类型只负责承载后端生成的原始快照字节，不解析内部格式。
+/// 该类型负责承载后端生成的快照句柄，不解析内部格式。
+/// 当前支持内存字节和文件引用两种存储模式。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSnapshot {
-    data: Vec<u8>,
+    inner: SnapshotInner,
 }
 
 impl SandboxSnapshot {
@@ -151,7 +170,7 @@ impl SandboxSnapshot {
         }
 
         Ok(Self {
-            data: data.to_vec(),
+            inner: SnapshotInner::Bytes(data.to_vec()),
         })
     }
 
@@ -163,27 +182,76 @@ impl SandboxSnapshot {
             ));
         }
 
-        Ok(Self { data })
+        Ok(Self {
+            inner: SnapshotInner::Bytes(data),
+        })
+    }
+
+    /// 从快照文件创建快照引用。
+    ///
+    /// 该构造函数只记录路径和文件大小，不会把文件内容读入内存。
+    pub fn from_file(path: PathBuf) -> Result<Self, SandboxError> {
+        let metadata = std::fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(SandboxError::InvalidSnapshot);
+        }
+
+        let size = usize::try_from(metadata.len()).map_err(|_| SandboxError::InvalidSnapshot)?;
+        if size == 0 {
+            return Err(SandboxError::InvalidSnapshot);
+        }
+
+        Ok(Self {
+            inner: SnapshotInner::File { path, size },
+        })
+    }
+
+    /// 返回内存文件路径。
+    ///
+    /// 当快照由文件承载时返回对应路径，否则返回 `None`。
+    pub fn memory_file_path(&self) -> Option<&Path> {
+        match &self.inner {
+            SnapshotInner::Bytes(_) => None,
+            SnapshotInner::File { path, .. } => Some(path.as_path()),
+        }
     }
 
     /// 返回快照字节切片，避免不必要拷贝。
-    pub fn as_bytes(&self) -> &[u8] {
-        self.data.as_slice()
+    ///
+    /// 仅内存模式支持该操作；文件模式会返回错误。
+    pub fn as_bytes(&self) -> Result<&[u8], SandboxError> {
+        match &self.inner {
+            SnapshotInner::Bytes(data) => Ok(data.as_slice()),
+            SnapshotInner::File { .. } => Err(SandboxError::InvalidSnapshot),
+        }
     }
 
     /// 序列化为字节副本。
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.data.clone()
+    ///
+    /// 文件模式会从磁盘重新读取文件内容。
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SandboxError> {
+        match &self.inner {
+            SnapshotInner::Bytes(data) => Ok(data.clone()),
+            SnapshotInner::File { path, .. } => std::fs::read(path).map_err(Into::into),
+        }
     }
 
     /// 消费快照并返回底层字节，避免额外复制。
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.data
+    ///
+    /// 文件模式会从磁盘重新读取文件内容。
+    pub fn into_bytes(self) -> Result<Vec<u8>, SandboxError> {
+        match self.inner {
+            SnapshotInner::Bytes(data) => Ok(data),
+            SnapshotInner::File { path, .. } => std::fs::read(path).map_err(Into::into),
+        }
     }
 
     /// 返回快照大小（字节）。
     pub fn size(&self) -> usize {
-        self.data.len()
+        match &self.inner {
+            SnapshotInner::Bytes(data) => data.len(),
+            SnapshotInner::File { size, .. } => *size,
+        }
     }
 }
 
@@ -274,6 +342,10 @@ pub enum SandboxError {
     /// 命令执行或协议处理失败。
     #[error("命令执行失败: {0}")]
     ExecutionFailed(String),
+
+    /// 快照内容或访问模式无效。
+    #[error("无效的沙箱快照")]
+    InvalidSnapshot,
 
     /// 子进程执行超时。
     #[error("子进程超时")]
@@ -372,7 +444,7 @@ pub trait Sandbox {
     ///
     /// let mut sandbox = MicrovmSandbox::new(MicrovmConfig::default())?;
     /// let snapshot = sandbox.snapshot()?;
-    /// assert!(!snapshot.as_bytes().is_empty());
+    /// assert!(!snapshot.to_bytes()?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
@@ -387,7 +459,10 @@ pub trait Sandbox {
 
 #[cfg(test)]
 mod tests {
-    use super::{PtySize, SandboxSnapshot};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{PtySize, SandboxError, SandboxSnapshot};
 
     #[test]
     fn pty_size_default_is_80x24() {
@@ -401,8 +476,14 @@ mod tests {
         let snapshot =
             SandboxSnapshot::from_owned_bytes(original.clone()).expect("快照创建必须成功");
 
-        assert_eq!(snapshot.as_bytes(), original.as_slice());
-        assert_eq!(snapshot.to_bytes(), original);
+        assert_eq!(
+            snapshot.as_bytes().expect("内存快照必须可读取字节"),
+            original.as_slice()
+        );
+        assert_eq!(
+            snapshot.to_bytes().expect("内存快照必须可复制字节"),
+            original
+        );
         assert_eq!(snapshot.size(), 6);
     }
 
@@ -411,5 +492,42 @@ mod tests {
         let error = SandboxSnapshot::from_bytes(&[]).expect_err("空快照必须被拒绝");
 
         assert!(error.to_string().contains("不能为空"));
+    }
+
+    #[test]
+    fn sandbox_snapshot_file_mode_exposes_metadata_only() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间必须晚于 UNIX_EPOCH")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mimobox-sandbox-snapshot-{}-{}.bin",
+            std::process::id(),
+            unique
+        ));
+
+        fs::write(&path, b"file-backed-snapshot").expect("测试快照文件写入必须成功");
+
+        let snapshot = SandboxSnapshot::from_file(path.clone()).expect("文件快照创建必须成功");
+
+        assert_eq!(snapshot.memory_file_path(), Some(path.as_path()));
+        assert_eq!(snapshot.size(), b"file-backed-snapshot".len());
+        assert!(matches!(
+            snapshot.as_bytes().expect_err("文件快照不应暴露内存字节"),
+            SandboxError::InvalidSnapshot
+        ));
+        assert_eq!(
+            snapshot.to_bytes().expect("文件快照必须可读回字节"),
+            b"file-backed-snapshot"
+        );
+        assert_eq!(
+            snapshot
+                .clone()
+                .into_bytes()
+                .expect("文件快照必须可转移为字节"),
+            b"file-backed-snapshot"
+        );
+
+        fs::remove_file(path).expect("测试快照文件清理必须成功");
     }
 }

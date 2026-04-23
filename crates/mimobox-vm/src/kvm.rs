@@ -1336,6 +1336,17 @@ impl KvmBackend {
         .snapshot()
     }
 
+    pub(crate) fn snapshot_to_file(&self) -> Result<mimobox_core::SandboxSnapshot, MicrovmError> {
+        let (memory, vcpu_state) = self.snapshot_state()?;
+        MicrovmSnapshot::new(
+            self.base_config.clone(),
+            self.config.clone(),
+            memory,
+            vcpu_state,
+        )
+        .persist_to_files()
+    }
+
     /// 从快照恢复 guest memory 和 vCPU 状态。
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
         let mut restore_profile = self.take_or_seed_restore_profile();

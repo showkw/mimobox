@@ -1,11 +1,30 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use mimobox_core::{SandboxConfig, SeccompProfile};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile};
+use serde::{Deserialize, Serialize};
 
 use crate::vm::{MicrovmConfig, MicrovmError};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
 const SNAPSHOT_VERSION: u16 = 1;
+const FILE_SNAPSHOT_VERSION: u16 = 1;
+const SNAPSHOT_MEMORY_FILE_NAME: &str = "memory.bin";
+const SNAPSHOT_STATE_FILE_NAME: &str = "state.json";
+static SNAPSHOT_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotStateFile {
+    version: u16,
+    sandbox_config: SandboxConfig,
+    microvm_config: MicrovmConfig,
+    vcpu_state_base64: String,
+}
 
 /// microVM 自描述快照。
 #[derive(Clone)]
@@ -78,6 +97,69 @@ impl MicrovmSnapshot {
         })
     }
 
+    /// 将快照持久化到 `~/.mimobox/snapshots/<id>/memory.bin + state.json`。
+    pub(crate) fn persist_to_files(&self) -> Result<SandboxSnapshot, MicrovmError> {
+        let snapshot_dir = create_snapshot_dir()?;
+        let memory_path = snapshot_dir.join(SNAPSHOT_MEMORY_FILE_NAME);
+        let state_path = snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME);
+
+        let write_result = (|| {
+            fs::write(&memory_path, &self.memory)?;
+
+            let state = SnapshotStateFile {
+                version: FILE_SNAPSHOT_VERSION,
+                sandbox_config: self.sandbox_config.clone(),
+                microvm_config: self.microvm_config.clone(),
+                vcpu_state_base64: BASE64_STANDARD.encode(&self.vcpu_state),
+            };
+            let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+                MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
+            })?;
+            fs::write(&state_path, state_bytes)?;
+
+            SandboxSnapshot::from_file(memory_path).map_err(map_snapshot_error)
+        })();
+
+        if write_result.is_err() {
+            let _ = fs::remove_dir_all(snapshot_dir);
+        }
+
+        write_result
+    }
+
+    /// 从文件化快照的 `memory.bin` 恢复完整快照对象。
+    pub fn from_memory_file(memory_path: &Path) -> Result<Self, MicrovmError> {
+        let state_path = state_file_path(memory_path)?;
+        let state_bytes = fs::read(&state_path)?;
+        let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
+            MicrovmError::SnapshotFormat(format!(
+                "解析 state.json 失败 ({}): {error}",
+                state_path.display()
+            ))
+        })?;
+
+        if state.version != FILE_SNAPSHOT_VERSION {
+            return Err(MicrovmError::SnapshotFormat(format!(
+                "不支持的文件快照版本: {}",
+                state.version
+            )));
+        }
+
+        let vcpu_state = BASE64_STANDARD
+            .decode(state.vcpu_state_base64.as_bytes())
+            .map_err(|error| {
+                MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}"))
+            })?;
+        let memory = fs::read(memory_path)?;
+
+        Ok(Self {
+            sandbox_config: state.sandbox_config,
+            microvm_config: state.microvm_config,
+            memory,
+            vcpu_state,
+        })
+    }
+
     pub(crate) fn into_parts(self) -> (SandboxConfig, MicrovmConfig, Vec<u8>, Vec<u8>) {
         (
             self.sandbox_config,
@@ -86,6 +168,54 @@ impl MicrovmSnapshot {
             self.vcpu_state,
         )
     }
+}
+
+fn map_snapshot_error(error: SandboxError) -> MicrovmError {
+    match error {
+        SandboxError::Io(error) => MicrovmError::Io(error),
+        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("文件快照无效".into()),
+        other => MicrovmError::SnapshotFormat(other.to_string()),
+    }
+}
+
+fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        MicrovmError::SnapshotFormat("HOME 环境变量缺失，无法定位快照目录".into())
+    })?;
+    Ok(home_dir.join(".mimobox").join("snapshots"))
+}
+
+fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
+    let root_dir = snapshot_root_dir()?;
+    fs::create_dir_all(&root_dir)?;
+
+    for _ in 0..32 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| MicrovmError::SnapshotFormat(format!("系统时间异常: {error}")))?;
+        let sequence = SNAPSHOT_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let snapshot_dir = root_dir.join(format!(
+            "{:x}-{:x}-{:x}",
+            timestamp.as_nanos(),
+            std::process::id(),
+            sequence
+        ));
+
+        match fs::create_dir(&snapshot_dir) {
+            Ok(()) => return Ok(snapshot_dir),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(MicrovmError::Io(error)),
+        }
+    }
+
+    Err(MicrovmError::SnapshotFormat("生成唯一快照目录失败".into()))
+}
+
+fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
+    let snapshot_dir = memory_path.parent().ok_or_else(|| {
+        MicrovmError::SnapshotFormat(format!("快照文件路径缺少父目录: {}", memory_path.display()))
+    })?;
+    Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
 }
 
 fn encode_sandbox_config(out: &mut Vec<u8>, config: &SandboxConfig) -> Result<(), MicrovmError> {

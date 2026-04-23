@@ -736,13 +736,14 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
             }
         };
 
-        fs::write(&args.output, snapshot.as_bytes())?;
+        let snapshot_bytes = snapshot.to_bytes().map_err(map_sdk_error)?;
+        fs::write(&args.output, &snapshot_bytes)?;
         sandbox.destroy().map_err(map_sdk_error)?;
 
         Ok(SnapshotResponse {
             output_path: args.output,
             init_command: args.init_command,
-            size_bytes: snapshot.size(),
+            size_bytes: snapshot_bytes.len(),
             backend: Backend::Kvm,
         })
     }
