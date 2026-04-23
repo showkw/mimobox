@@ -28,6 +28,7 @@ use mimobox_core::SandboxConfig;
 use tracing::{debug, info, warn};
 use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
+use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
 
 mod boot;
@@ -62,11 +63,12 @@ use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
     CommandResponse, FsResult, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG,
     I8042_RESET_CMD, PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START,
-    SERIAL_EXECS_PREFIX, SerialDevice, SerialProtocolResult, SerialResponseCollector,
-    VsockCommandChannel, VsockMmioAction, VsockMmioDevice, activate_vhost_backend,
-    build_guest_command, emulate_boot_legacy_pio_read, encode_command_payload,
-    encode_fs_read_payload, encode_fs_write_payload, handle_serial_read, handle_serial_write,
-    is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
+    SERIAL_EXECS_PREFIX, SERIAL_HTTPRESP_BODY_PREFIX, SERIAL_HTTPRESP_END_PREFIX,
+    SERIAL_HTTPRESP_ERROR_PREFIX, SERIAL_HTTPRESP_HEADERS_PREFIX, SerialDevice,
+    SerialProtocolResult, SerialResponseCollector, VsockCommandChannel, VsockMmioAction,
+    VsockMmioDevice, activate_vhost_backend, build_guest_command, emulate_boot_legacy_pio_read,
+    encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, handle_serial_read,
+    handle_serial_write, is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
 use self::devices::{SERIAL_EXEC_PREFIX, SerialFrame, parse_serial_line, take_serial_frame};
@@ -1114,6 +1116,14 @@ impl KvmBackend {
         result
     }
 
+    pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+        }
+
+        execute_http_request(&self.base_config, &request).map_err(Into::into)
+    }
+
     fn run_command_over_vsock(&mut self, cmd: &[u8]) -> Result<GuestCommandResult, MicrovmError> {
         let channel = self
             .vsock_channel
@@ -1159,6 +1169,93 @@ impl KvmBackend {
             }
         }
         Ok(stream_rx)
+    }
+
+    fn run_http_proxy_request(
+        &mut self,
+        request_id: u32,
+        request: HttpRequest,
+    ) -> Result<(), MicrovmError> {
+        match execute_http_request(&self.base_config, &request) {
+            Ok(response) => {
+                self.queue_http_response_headers(request_id, &response)?;
+                self.queue_http_response_body(request_id, &response.body)?;
+                self.queue_http_response_end(request_id);
+                Ok(())
+            }
+            Err(error) => {
+                self.queue_http_response_error(request_id, &error);
+                match error {
+                    HttpProxyError::DeniedHost(_) => Ok(()),
+                    other => {
+                        warn!(
+                            request_id,
+                            method = request.method,
+                            url = request.url,
+                            error = %other,
+                            "处理 guest HTTP 代理请求失败"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    fn queue_http_response_headers(
+        &mut self,
+        request_id: u32,
+        response: &HttpResponse,
+    ) -> Result<(), MicrovmError> {
+        let payload = serde_json::json!({
+            "status": response.status,
+            "headers": response.headers,
+            "body_len": response.body.len(),
+            "truncated": false,
+        });
+        let payload = serde_json::to_vec(&payload)
+            .map_err(|err| MicrovmError::Backend(format!("序列化 HTTP 响应头失败: {err}")))?;
+        let mut frame =
+            format!("{SERIAL_HTTPRESP_HEADERS_PREFIX}{request_id}:{}:", payload.len()).into_bytes();
+        frame.extend_from_slice(&payload);
+        frame.push(b'\n');
+        self.serial_device.queue_input(&frame);
+        Ok(())
+    }
+
+    fn queue_http_response_body(
+        &mut self,
+        request_id: u32,
+        body: &[u8],
+    ) -> Result<(), MicrovmError> {
+        const HTTP_BODY_FRAME_BYTES: usize = 16 * 1024;
+
+        for chunk in body.chunks(HTTP_BODY_FRAME_BYTES) {
+            let mut frame =
+                format!("{SERIAL_HTTPRESP_BODY_PREFIX}{request_id}:{}:", chunk.len()).into_bytes();
+            frame.extend_from_slice(chunk);
+            frame.push(b'\n');
+            self.serial_device.queue_input(&frame);
+        }
+        Ok(())
+    }
+
+    fn queue_http_response_end(&mut self, request_id: u32) {
+        let frame = format!("{SERIAL_HTTPRESP_END_PREFIX}{request_id}\n");
+        self.serial_device.queue_input(frame.as_bytes());
+    }
+
+    fn queue_http_response_error(&mut self, request_id: u32, error: &HttpProxyError) {
+        let message = error.to_string();
+        let mut frame = format!(
+            "{SERIAL_HTTPRESP_ERROR_PREFIX}{request_id}:{}:{}:",
+            error.code(),
+            message.len()
+        )
+        .into_bytes();
+        frame.extend_from_slice(message.as_bytes());
+        frame.push(b'\n');
+        self.serial_device.queue_input(&frame);
     }
 
     fn run_fs_operation_over_serial(&mut self, payload: Vec<u8>) -> Result<FsResult, MicrovmError> {
@@ -1362,6 +1459,9 @@ impl KvmBackend {
                         "命令执行阶段收到意外 FSRESULT 帧".into(),
                     ));
                 }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
+                    self.run_http_proxy_request(frame.id, frame.request)?;
+                }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
                     | SerialProtocolResult::StreamStdout(_, _)
@@ -1470,6 +1570,9 @@ impl KvmBackend {
                     emit_command_result_as_stream(&stream_tx, result);
                     return Ok(StreamCommandOutcome::Completed);
                 }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
+                    self.run_http_proxy_request(frame.id, frame.request)?;
+                }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(_))) => {
                     return Err(MicrovmError::Backend(
                         "流式执行阶段收到意外 FSRESULT 帧".into(),
@@ -1508,6 +1611,9 @@ impl KvmBackend {
                     return Err(MicrovmError::Backend(
                         "文件操作阶段收到意外命令结果帧".into(),
                     ));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
+                    self.run_http_proxy_request(frame.id, frame.request)?;
                 }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
@@ -2010,6 +2116,7 @@ mod tests {
         CPUID_LEAF_KVM_FEATURES, CPUID_LEAF_KVM_SIGNATURE, CPUID_LEAF_TIMING_INFO,
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
+    use super::devices::SERIAL_HTTP_REQUEST_PREFIX;
     use super::{
         DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, SerialProtocolResult,
         build_guest_command, encode_command_payload, encode_fs_read_payload,
@@ -2115,6 +2222,26 @@ mod tests {
             SerialFrame::Stream(SerialProtocolResult::StreamEnd(7, -9))
         );
         assert!(end_buffer.is_empty(), "END 帧被取出后缓冲区应清空");
+    }
+
+    #[test]
+    fn test_take_serial_frame_parses_http_request() {
+        let json = r#"{"method":"GET","url":"https://api.openai.com/v1/models","headers":{"authorization":"Bearer test"},"timeout_ms":1000,"max_response_bytes":2048}"#;
+        let mut buffer =
+            format!("{SERIAL_HTTP_REQUEST_PREFIX}7:{}:{json}\n", json.len()).into_bytes();
+
+        let frame = take_serial_frame(&mut buffer)
+            .expect("解析 HTTP:REQUEST 帧必须成功")
+            .expect("HTTP:REQUEST 帧必须被识别");
+
+        assert!(matches!(
+            frame,
+            SerialFrame::Stream(SerialProtocolResult::HttpRequest(ref request))
+                if request.id == 7
+                    && request.request.method == "GET"
+                    && request.request.url == "https://api.openai.com/v1/models"
+        ));
+        assert!(buffer.is_empty(), "完整 HTTP:REQUEST 帧被取出后缓冲区应清空");
     }
 
     #[test]

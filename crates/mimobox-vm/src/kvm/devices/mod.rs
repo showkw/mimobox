@@ -10,13 +10,16 @@ mod vsock_channel;
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) use self::serial::SERIAL_BOOT_TIME_PREFIX;
+#[allow(unused_imports)]
 pub(in crate::kvm) use self::serial::{
     CommandResponse, FsResult, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG,
     I8042_RESET_CMD, MAX_FS_TRANSFER_BYTES, PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END,
-    PCI_CONFIG_DATA_REG_START, SERIAL_EXEC_PREFIX, SERIAL_EXECS_PREFIX, SERIAL_FS_READ_PREFIX,
-    SERIAL_FS_WRITE_PREFIX, SERIAL_READY_LINE, SerialDevice, SerialFrame, SerialProtocolResult,
-    SerialResponseCollector, build_guest_command, encode_command_payload, encode_fs_read_payload,
-    encode_fs_write_payload, parse_serial_line, preview_serial_output,
+    PCI_CONFIG_DATA_REG_START, SERIAL_EXEC_PREFIX, SERIAL_EXECS_PREFIX,
+    SERIAL_FS_READ_PREFIX, SERIAL_FS_WRITE_PREFIX, SERIAL_HTTP_REQUEST_PREFIX,
+    SERIAL_HTTPRESP_BODY_PREFIX, SERIAL_HTTPRESP_END_PREFIX, SERIAL_HTTPRESP_ERROR_PREFIX,
+    SERIAL_HTTPRESP_HEADERS_PREFIX, SERIAL_READY_LINE, SerialDevice, SerialFrame,
+    SerialProtocolResult, SerialResponseCollector, build_guest_command, encode_command_payload,
+    encode_fs_read_payload, encode_fs_write_payload, parse_serial_line, preview_serial_output,
 };
 pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
 pub(in crate::kvm) use self::vsock_channel::VsockCommandChannel;
@@ -103,6 +106,13 @@ pub(super) fn handle_serial_write(
                                         )));
                                     }
                                 }
+                                SerialResponseCollector::Http => {
+                                    if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
+                                        return Err(MicrovmError::Backend(format!(
+                                            "等待 HTTP 响应时收到意外串口行: {line}"
+                                        )));
+                                    }
+                                }
                             }
                         }
                     }
@@ -117,6 +127,11 @@ pub(super) fn handle_serial_write(
                                 SerialResponseCollector::Fs => {
                                     return Ok(Some(SerialProtocolResult::Fs(fs_result)));
                                 }
+                                SerialResponseCollector::Http => {
+                                    return Err(MicrovmError::Backend(
+                                        "等待 HTTP 响应时收到意外 FSRESULT 帧".into(),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -130,6 +145,9 @@ pub(super) fn handle_serial_write(
                                     return Err(MicrovmError::Backend(format!(
                                         "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
                                     )));
+                                }
+                                SerialResponseCollector::Http => {
+                                    return Ok(Some(stream_result));
                                 }
                             }
                         }
@@ -185,6 +203,13 @@ pub(super) fn handle_serial_write(
                                         )));
                                     }
                                 }
+                                SerialResponseCollector::Http => {
+                                    if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
+                                        return Err(MicrovmError::Backend(format!(
+                                            "等待 HTTP 响应时收到意外串口行: {line}"
+                                        )));
+                                    }
+                                }
                             }
                         }
                     }
@@ -199,6 +224,11 @@ pub(super) fn handle_serial_write(
                                 SerialResponseCollector::Fs => {
                                     return Ok(Some(SerialProtocolResult::Fs(fs_result)));
                                 }
+                                SerialResponseCollector::Http => {
+                                    return Err(MicrovmError::Backend(
+                                        "等待 HTTP 响应时收到意外 FSRESULT 帧".into(),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -212,6 +242,9 @@ pub(super) fn handle_serial_write(
                                     return Err(MicrovmError::Backend(format!(
                                         "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
                                     )));
+                                }
+                                SerialResponseCollector::Http => {
+                                    return Ok(Some(stream_result));
                                 }
                             }
                         }

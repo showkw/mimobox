@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "kvm"))]
 
 use super::*;
+use crate::http_proxy::HttpRequest;
 
 pub(super) const SERIAL_PORT_COM1: u16 = 0x3f8;
 pub(super) const SERIAL_PORT_LAST: u16 = SERIAL_PORT_COM1 + 7;
@@ -40,6 +41,11 @@ pub(in crate::kvm) const SERIAL_FS_WRITE_PREFIX: &str = "FS:WRITE:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
 const SERIAL_FSRESULT_PREFIX: &str = "FSRESULT:";
+pub(in crate::kvm) const SERIAL_HTTP_REQUEST_PREFIX: &str = "HTTP:REQUEST:";
+pub(in crate::kvm) const SERIAL_HTTPRESP_HEADERS_PREFIX: &str = "HTTPRESP:HEADERS:";
+pub(in crate::kvm) const SERIAL_HTTPRESP_BODY_PREFIX: &str = "HTTPRESP:BODY:";
+pub(in crate::kvm) const SERIAL_HTTPRESP_END_PREFIX: &str = "HTTPRESP:END:";
+pub(in crate::kvm) const SERIAL_HTTPRESP_ERROR_PREFIX: &str = "HTTPRESP:ERROR:";
 pub(in crate::kvm) const SERIAL_STREAM_START_PREFIX: &str = "STREAM:START:";
 pub(in crate::kvm) const SERIAL_STREAM_STDOUT_PREFIX: &str = "STREAM:STDOUT:";
 pub(in crate::kvm) const SERIAL_STREAM_STDERR_PREFIX: &str = "STREAM:STDERR:";
@@ -217,9 +223,16 @@ pub(in crate::kvm) struct FsResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::kvm) struct HttpRequestFrame {
+    pub(in crate::kvm) id: u32,
+    pub(in crate::kvm) request: HttpRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::kvm) enum SerialProtocolResult {
     Command(GuestCommandResult),
     Fs(FsResult),
+    HttpRequest(HttpRequestFrame),
     StreamStart(u32),
     StreamStdout(u32, Vec<u8>),
     StreamStderr(u32, Vec<u8>),
@@ -230,6 +243,8 @@ pub(in crate::kvm) enum SerialProtocolResult {
 pub(in crate::kvm) enum SerialResponseCollector {
     Command(CommandResponse),
     Fs,
+    #[allow(dead_code)] // 预留给后续 host 主动 HTTP 帧收发路径。
+    Http,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +362,12 @@ pub(in crate::kvm) fn take_serial_frame(
 
     if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
         return try_take_fs_result_frame(frame_buffer);
+    }
+    if frame_buffer.starts_with(SERIAL_HTTP_REQUEST_PREFIX.as_bytes()) {
+        if is_partial_http_prefix(frame_buffer) {
+            return Ok(None);
+        }
+        return try_take_http_request_frame(frame_buffer);
     }
     if frame_buffer.starts_with(b"STREAM:") {
         if is_partial_stream_prefix(frame_buffer) {
@@ -653,6 +674,83 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             SerialProtocolResult::StreamStderr(stream_id, data),
         )))
     }
+}
+
+fn try_take_http_request_frame(
+    frame_buffer: &mut Vec<u8>,
+) -> Result<Option<SerialFrame>, MicrovmError> {
+    let bytes = frame_buffer.as_slice();
+    let prefix_len = SERIAL_HTTP_REQUEST_PREFIX.len();
+    let Some((request_id, id_delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
+        return Ok(None);
+    };
+    let request_id = u32::try_from(request_id).map_err(|_| {
+        MicrovmError::Backend(format!(
+            "guest HTTP:REQUEST id 超出 u32 范围: {request_id}"
+        ))
+    })?;
+
+    match bytes.get(id_delimiter_index) {
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest HTTP:REQUEST id 字段后缺少冒号: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let json_len_start = id_delimiter_index + 1;
+    let Some((json_len, json_len_delimiter_index)) = parse_decimal_prefix(bytes, json_len_start)?
+    else {
+        return Ok(None);
+    };
+    match bytes.get(json_len_delimiter_index) {
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest HTTP:REQUEST 长度字段后缺少冒号: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let json_start = json_len_delimiter_index + 1;
+    let json_end = json_start
+        .checked_add(json_len)
+        .ok_or_else(|| MicrovmError::Backend("guest HTTP:REQUEST JSON 长度溢出".into()))?;
+    if frame_buffer.len() < json_end + 1 {
+        return Ok(None);
+    }
+    if bytes
+        .get(json_end)
+        .copied()
+        .ok_or_else(|| MicrovmError::Backend("guest HTTP:REQUEST 缺少结尾换行".into()))?
+        != b'\n'
+    {
+        return Err(MicrovmError::Backend(
+            "guest HTTP:REQUEST 数据帧未以换行结束".into(),
+        ));
+    }
+
+    let json = String::from_utf8(frame_buffer[json_start..json_end].to_vec()).map_err(|err| {
+        MicrovmError::Backend(format!("guest HTTP:REQUEST JSON 不是合法 UTF-8: {err}"))
+    })?;
+    let request = HttpRequest::from_json(&json)?;
+    frame_buffer.drain(..=json_end);
+    Ok(Some(SerialFrame::Stream(SerialProtocolResult::HttpRequest(
+        HttpRequestFrame {
+            id: request_id,
+            request,
+        },
+    ))))
+}
+
+fn is_partial_http_prefix(bytes: &[u8]) -> bool {
+    let prefix_bytes = SERIAL_HTTP_REQUEST_PREFIX.as_bytes();
+    bytes.len() < prefix_bytes.len() && prefix_bytes.starts_with(bytes)
 }
 
 fn is_partial_stream_prefix(bytes: &[u8]) -> bool {

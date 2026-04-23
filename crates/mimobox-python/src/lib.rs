@@ -5,7 +5,7 @@
 use mimobox_sdk::{ExecuteResult, Sandbox as RustSandbox, SdkError, StreamEvent};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::sync::mpsc;
 
 /// Python 侧执行结果对象。
@@ -34,6 +34,42 @@ impl From<ExecuteResult> for PyExecuteResult {
             // 并通过 timed_out 字段让调用方区分超时与正常退出。
             exit_code: result.exit_code.unwrap_or(-1),
             timed_out: result.timed_out,
+        }
+    }
+}
+
+#[pyclass(name = "HttpResponse")]
+#[derive(Debug, Clone)]
+struct PyHttpResponse {
+    #[pyo3(get)]
+    status: u16,
+    headers: std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+#[pymethods]
+impl PyHttpResponse {
+    #[getter]
+    fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (key, value) in &self.headers {
+            dict.set_item(key, value)?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
+    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.body.as_slice())
+    }
+}
+
+impl From<mimobox_sdk::HttpResponse> for PyHttpResponse {
+    fn from(value: mimobox_sdk::HttpResponse) -> Self {
+        Self {
+            status: value.status,
+            headers: value.headers,
+            body: value.body,
         }
     }
 }
@@ -178,6 +214,22 @@ impl PySandbox {
         sandbox.write_file(path, &data).map_err(map_sdk_error)
     }
 
+    /// 通过 host HTTP 代理执行 HTTPS 请求。
+    #[pyo3(signature = (method, url, headers=None, body=None))]
+    fn http_request(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: Option<std::collections::HashMap<String, String>>,
+        body: Option<Vec<u8>>,
+    ) -> PyResult<PyHttpResponse> {
+        let sandbox = self.inner_mut()?;
+        let response = sandbox
+            .http_request(method, url, headers.unwrap_or_default(), body.as_deref())
+            .map_err(map_sdk_error)?;
+        Ok(response.into())
+    }
+
     /// 支持 `with Sandbox() as sandbox:` 用法。
     fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
@@ -225,6 +277,7 @@ fn map_sdk_error(error: SdkError) -> PyErr {
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySandbox>()?;
     module.add_class::<PyExecuteResult>()?;
+    module.add_class::<PyHttpResponse>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
     Ok(())

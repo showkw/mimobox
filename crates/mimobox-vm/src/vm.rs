@@ -5,6 +5,7 @@ use std::time::Instant;
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 use tracing::debug;
 
+use crate::http_proxy::{HttpRequest, HttpResponse};
 use crate::snapshot::MicrovmSnapshot;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -222,6 +223,14 @@ impl BackendHandle {
         }
     }
 
+    fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.http_request(request),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
     fn shutdown(&mut self) -> Result<(), MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -388,6 +397,16 @@ impl MicrovmSandbox {
             MicrovmState::Ready
         };
         result
+    }
+
+    pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可执行 HTTP 代理状态".into(),
+            ));
+        }
+
+        self.backend.http_request(request)
     }
 }
 

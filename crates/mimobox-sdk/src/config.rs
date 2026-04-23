@@ -119,6 +119,7 @@ impl Config {
             timeout_secs: self.timeout.map(round_up_timeout_secs),
             seccomp_profile: resolve_seccomp_profile(deny_network, self.allow_fork),
             allow_fork: self.allow_fork,
+            allowed_http_domains: Vec::new(),
         }
     }
 

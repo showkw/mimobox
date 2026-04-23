@@ -96,6 +96,7 @@ fn encode_sandbox_config(out: &mut Vec<u8>, config: &SandboxConfig) -> Result<()
     encode_opt_u64(out, config.timeout_secs);
     out.push(seccomp_to_u8(config.seccomp_profile));
     out.push(u8::from(config.allow_fork));
+    encode_strings(out, &config.allowed_http_domains)?;
     Ok(())
 }
 
@@ -108,6 +109,7 @@ fn decode_sandbox_config(cursor: &mut SnapshotCursor<'_>) -> Result<SandboxConfi
         timeout_secs: cursor.read_opt_u64()?,
         seccomp_profile: u8_to_seccomp(cursor.read_u8()?)?,
         allow_fork: cursor.read_bool()?,
+        allowed_http_domains: decode_strings(cursor)?,
     })
 }
 
@@ -145,6 +147,28 @@ fn decode_paths(cursor: &mut SnapshotCursor<'_>) -> Result<Vec<PathBuf>, Microvm
         paths.push(decode_path(cursor)?);
     }
     Ok(paths)
+}
+
+fn encode_strings(out: &mut Vec<u8>, strings: &[String]) -> Result<(), MicrovmError> {
+    let len = u32::try_from(strings.len())
+        .map_err(|_| MicrovmError::SnapshotFormat("字符串数量超过 u32 上限".into()))?;
+    out.extend_from_slice(&len.to_le_bytes());
+    for s in strings {
+        encode_bytes(out, s.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn decode_strings(cursor: &mut SnapshotCursor<'_>) -> Result<Vec<String>, MicrovmError> {
+    let len = cursor.read_u32()? as usize;
+    let mut strings = Vec::with_capacity(len);
+    for _ in 0..len {
+        let bytes = cursor.read_bytes()?;
+        String::from_utf8(bytes)
+            .map_err(|e| MicrovmError::SnapshotFormat(format!("字符串 UTF-8 解码失败: {e}")))
+            .map(|s| strings.push(s))?;
+    }
+    Ok(strings)
 }
 
 fn encode_path(out: &mut Vec<u8>, path: &std::path::Path) -> Result<(), MicrovmError> {

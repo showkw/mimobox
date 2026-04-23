@@ -26,6 +26,13 @@ pub struct ExecuteResult {
     pub elapsed: std::time::Duration,
 }
 
+/// HTTP 代理响应结果。
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
 impl From<SandboxResult> for ExecuteResult {
     fn from(r: SandboxResult) -> Self {
         Self {
@@ -34,6 +41,17 @@ impl From<SandboxResult> for ExecuteResult {
             exit_code: r.exit_code,
             timed_out: r.timed_out,
             elapsed: r.elapsed,
+        }
+    }
+}
+
+#[cfg(feature = "vm")]
+impl From<mimobox_vm::HttpResponse> for HttpResponse {
+    fn from(value: mimobox_vm::HttpResponse) -> Self {
+        Self {
+            status: value.status,
+            headers: value.headers,
+            body: value.body,
         }
     }
 }
@@ -57,6 +75,17 @@ trait StreamExecuteForSdk {
         &mut self,
         args: &[String],
     ) -> Result<mpsc::Receiver<StreamEvent>, SdkError>;
+}
+
+#[cfg(feature = "vm")]
+trait HttpRequestForSdk {
+    fn http_request_for_sdk(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, SdkError>;
 }
 
 #[cfg(all(feature = "os", target_os = "linux"))]
@@ -99,6 +128,30 @@ impl StreamExecuteForSdk for mimobox_vm::MicrovmSandbox {
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
+impl HttpRequestForSdk for mimobox_vm::MicrovmSandbox {
+    fn http_request_for_sdk(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, SdkError> {
+        let request = mimobox_vm::HttpRequest::new(
+            method,
+            url,
+            headers,
+            body.map(|item| item.to_vec()),
+            None,
+            None,
+        )
+        .map_err(|error| SdkError::ExecutionFailed(error.to_string()))?;
+        self.http_request(request)
+            .map(HttpResponse::from)
+            .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_vm::PooledVm {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
         let start = std::time::Instant::now();
@@ -122,6 +175,30 @@ impl StreamExecuteForSdk for mimobox_vm::PooledVm {
     ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
         self.stream_execute(args)
             .map(bridge_vm_stream)
+            .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl HttpRequestForSdk for mimobox_vm::PooledVm {
+    fn http_request_for_sdk(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, SdkError> {
+        let request = mimobox_vm::HttpRequest::new(
+            method,
+            url,
+            headers,
+            body.map(|item| item.to_vec()),
+            None,
+            None,
+        )
+        .map_err(|error| SdkError::ExecutionFailed(error.to_string()))?;
+        self.http_request(request)
+            .map(HttpResponse::from)
             .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
     }
 }
@@ -290,6 +367,35 @@ impl Sandbox {
                 .map_err(|error| SdkError::ExecutionFailed(error.to_string())),
             _ => Err(SdkError::ExecutionFailed(
                 "文件传输仅支持 microVM 后端".to_string(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "vm")]
+    pub fn http_request(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, SdkError> {
+        self.ensure_backend_for_file_ops()?;
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => {
+                sandbox.http_request_for_sdk(method, url, headers, body)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => {
+                sandbox.http_request_for_sdk(method, url, headers, body)
+            }
+            _ => Err(SdkError::ExecutionFailed(
+                "HTTP 代理仅支持 microVM 后端".to_string(),
             )),
         }
     }
