@@ -18,6 +18,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+/* USE_VSOCK 由构建脚本通过 -DUSE_VSOCK 显式启用，默认不定义。
+ * vhost-vsock 数据面恢复前，guest-init 默认只走串口协议。 */
+#ifdef USE_VSOCK
 /* Alpine musl 没有 linux/vm_sockets.h，手动定义 AF_VSOCK 和 sockaddr_vm。
  * 定义与 Linux 内核 include/uapi/linux/vm_sockets.h 一致。 */
 #ifndef AF_VSOCK
@@ -35,6 +38,7 @@ struct sockaddr_vm {
                            sizeof(unsigned int) -
                            sizeof(unsigned int)];
 };
+#endif
 
 #define SERIAL_COM1_BASE 0x3f8
 #define SERIAL_REG_RBR 0
@@ -45,9 +49,12 @@ struct sockaddr_vm {
 
 #define COMMAND_BUFFER_CAP 4096
 #define OUTPUT_BUFFER_CAP 1024
+#ifdef USE_VSOCK
 #define VSOCK_HOST_CID 2
 #define VSOCK_HOST_PORT 1024
 #define VSOCK_OUTPUT_CAP 65536
+#define VSOCK_COMMAND_POLL_TIMEOUT_MS 5000
+#endif
 
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
@@ -323,6 +330,7 @@ static void close_fd_if_open(int *fd) {
 }
 
 /* ===== vsock 数据面辅助函数 ===== */
+#ifdef USE_VSOCK
 
 /* 从 fd 读取精确 n 字节 */
 static int read_exact(int fd, void *buf, size_t n) {
@@ -605,12 +613,51 @@ static int execute_command_vsock(const char *command_line,
     return child_exit_code_from_status(status);
 }
 
+/* 串口命令循环前置声明，供 vsock 超时后直接回退。 */
+static void serial_command_loop(void);
+
 /* vsock 命令循环：从 vsock socket 读取命令，执行，返回二进制结果 */
-static void vsock_command_loop(int vsock_fd) {
+static void vsock_command_loop(int *vsock_fd) {
     char command_buffer[COMMAND_BUFFER_CAP];
 
+    if (vsock_fd == NULL || *vsock_fd < 0) {
+        return;
+    }
+
     for (;;) {
-        int read_status = read_vsock_command(vsock_fd, command_buffer, sizeof(command_buffer));
+        struct pollfd poll_fd = {
+            .fd = *vsock_fd,
+            .events = POLLIN | POLLHUP,
+            .revents = 0,
+        };
+
+        int poll_status = 0;
+        for (;;) {
+            poll_status = poll(&poll_fd, 1, VSOCK_COMMAND_POLL_TIMEOUT_MS);
+            if (poll_status < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        if (poll_status == 0) {
+            /* host 已建立连接但 5 秒内未下发命令，主动关闭并切回串口协议。 */
+            close_fd_if_open(vsock_fd);
+            serial_command_loop();
+            return;
+        }
+        if (poll_status < 0) {
+            break;
+        }
+        if ((poll_fd.revents & (POLLERR | POLLNVAL)) != 0) {
+            break;
+        }
+        if ((poll_fd.revents & POLLIN) == 0) {
+            /* 仅收到 HUP 等非可读事件时，认为 host 已放弃当前 vsock 会话。 */
+            break;
+        }
+
+        int read_status = read_vsock_command(*vsock_fd, command_buffer, sizeof(command_buffer));
         if (read_status < 0) {
             /* vsock 连接断开或读取失败，退出循环 */
             break;
@@ -619,12 +666,13 @@ static void vsock_command_loop(int vsock_fd) {
         output_buffer_t stdout_buf;
         output_buffer_t stderr_buf;
         int exit_code = execute_command_vsock(command_buffer, &stdout_buf, &stderr_buf);
-        send_vsock_result(vsock_fd,
+        send_vsock_result(*vsock_fd,
                           stdout_buf.data, stdout_buf.len,
                           stderr_buf.data, stderr_buf.len,
                           exit_code);
     }
 }
+#endif
 
 /* ===== 串口数据面函数 ===== */
 
@@ -778,6 +826,34 @@ static int execute_command(const char *command_line) {
     return child_exit_code_from_status(status);
 }
 
+static void serial_command_loop(void) {
+    char command_buffer[COMMAND_BUFFER_CAP];
+
+    for (;;) {
+        int line_status = read_command_frame(command_buffer, sizeof(command_buffer));
+        if (line_status == -2) {
+            static const unsigned char too_long[] = "command frame too long";
+            write_escaped_output(OUTPUT_STREAM_STDOUT, too_long, sizeof(too_long) - 1);
+            write_exit_code(126);
+            continue;
+        }
+        if (line_status < 0) {
+            static const unsigned char read_failed[] = "serial command frame read failed";
+            static const unsigned char invalid_frame[] = "invalid command frame";
+            if (line_status == -3) {
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_frame, sizeof(invalid_frame) - 1);
+            } else {
+                write_escaped_output(OUTPUT_STREAM_STDOUT, read_failed, sizeof(read_failed) - 1);
+            }
+            write_exit_code(125);
+            continue;
+        }
+
+        int exit_code = execute_command(command_buffer);
+        write_exit_code(exit_code);
+    }
+}
+
 int main(void) {
 #ifdef BOOT_PROFILE
     uint64_t init_entry_ns = monotonic_now_ns();
@@ -821,36 +897,15 @@ int main(void) {
     write_boot_time("command_loop", command_loop_ns);
 #endif
 
-    /* 优先尝试通过 vsock 连接 host，成功则进入 vsock 命令循环 */
+    /* 默认禁用 vsock，直接走串口。vhost-vsock 数据面恢复后可通过 -DUSE_VSOCK 重新启用。 */
+#ifdef USE_VSOCK
     int vsock_fd = connect_to_host_vsock();
     if (vsock_fd >= 0) {
-        vsock_command_loop(vsock_fd);
-        close(vsock_fd);
+        vsock_command_loop(&vsock_fd);
+        close_fd_if_open(&vsock_fd);
         /* vsock 循环退出（连接断开），回退到串口命令循环 */
     }
+#endif
 
-    char command_buffer[COMMAND_BUFFER_CAP];
-    for (;;) {
-        int line_status = read_command_frame(command_buffer, sizeof(command_buffer));
-        if (line_status == -2) {
-            static const unsigned char too_long[] = "command frame too long";
-            write_escaped_output(OUTPUT_STREAM_STDOUT, too_long, sizeof(too_long) - 1);
-            write_exit_code(126);
-            continue;
-        }
-        if (line_status < 0) {
-            static const unsigned char read_failed[] = "serial command frame read failed";
-            static const unsigned char invalid_frame[] = "invalid command frame";
-            if (line_status == -3) {
-                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_frame, sizeof(invalid_frame) - 1);
-            } else {
-                write_escaped_output(OUTPUT_STREAM_STDOUT, read_failed, sizeof(read_failed) - 1);
-            }
-            write_exit_code(125);
-            continue;
-        }
-
-        int exit_code = execute_command(command_buffer);
-        write_exit_code(exit_code);
-    }
+    serial_command_loop();
 }

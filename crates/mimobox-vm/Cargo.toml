@@ -23,6 +23,7 @@ vmm-sys-util.workspace = true
 default = []
 kvm = ["virtio-queue", "vhost"]
 boot-profile = []
+guest-vsock = []
 
 [dev-dependencies]
 criterion = "0.5"

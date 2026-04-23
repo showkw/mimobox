@@ -16,6 +16,10 @@ const VMADDR_CID_HOST: u32 = 2;
 const COMMAND_PORT: u32 = 1024;
 /// listener backlog 只需要容纳单个 guest 连接。
 const LISTEN_BACKLOG: libc::c_int = 1;
+/// 已建立的 vsock 流最多阻塞 30 秒，超时后由上层回退串口协议。
+const STREAM_RECV_TIMEOUT_SECS: u64 = 30;
+/// 使用 shell 内建 no-op 验证 vsock 数据面是否真正可收发。
+const PROBE_COMMAND: &[u8] = b":";
 
 #[repr(C)]
 struct SockAddrVm {
@@ -77,6 +81,37 @@ impl VsockStream {
         Self {
             fd: VsockFd::new(fd),
         }
+    }
+
+    fn set_recv_timeout(&self, timeout: Duration) -> Result<(), MicrovmError> {
+        let tv_sec = libc::time_t::try_from(timeout.as_secs())
+            .map_err(|_| MicrovmError::Backend("vsock 接收超时秒数无法转换为 time_t".into()))?;
+        let tv_usec = libc::suseconds_t::try_from(timeout.subsec_micros()).map_err(|_| {
+            MicrovmError::Backend("vsock 接收超时微秒数无法转换为 suseconds_t".into())
+        })?;
+        let timeout_value = libc::timeval { tv_sec, tv_usec };
+        let timeout_len = libc::socklen_t::try_from(mem::size_of::<libc::timeval>())
+            .map_err(|_| MicrovmError::Backend("timeval 长度无法转换为 socklen_t".into()))?;
+
+        // SAFETY: `timeout_value` 是当前栈上有效的 `timeval`，
+        // `setsockopt` 只同步读取该结构体，不会越界或悬垂引用。
+        let result = unsafe {
+            libc::setsockopt(
+                self.fd.raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                ptr::from_ref(&timeout_value).cast::<libc::c_void>(),
+                timeout_len,
+            )
+        };
+        if result != 0 {
+            return Err(MicrovmError::Backend(format!(
+                "设置 vsock 接收超时失败: {}",
+                Error::last_os_error()
+            )));
+        }
+
+        Ok(())
     }
 
     fn read_exact(&self, buf: &mut [u8]) -> Result<(), MicrovmError> {
@@ -246,7 +281,9 @@ impl VsockCommandChannel {
             let stream_fd =
                 unsafe { libc::accept(self.listener.raw_fd(), ptr::null_mut(), ptr::null_mut()) };
             if stream_fd >= 0 {
-                self.stream = Some(VsockStream::new(stream_fd));
+                let stream = VsockStream::new(stream_fd);
+                stream.set_recv_timeout(Duration::from_secs(STREAM_RECV_TIMEOUT_SECS))?;
+                self.stream = Some(stream);
                 return Ok(());
             }
 
@@ -292,6 +329,29 @@ impl VsockCommandChannel {
             timed_out: false,
         })
     }
+
+    pub(in crate::kvm) fn probe_round_trip(&self, timeout: Duration) -> Result<(), MicrovmError> {
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道尚未建立连接".into()))?;
+        let default_timeout = Duration::from_secs(STREAM_RECV_TIMEOUT_SECS);
+
+        stream.set_recv_timeout(timeout)?;
+
+        let probe_result = self
+            .send_command(PROBE_COMMAND)
+            .and_then(|_| self.recv_result())
+            .and_then(validate_probe_result);
+
+        if let Err(err) = stream.set_recv_timeout(default_timeout) {
+            if probe_result.is_ok() {
+                return Err(err);
+            }
+        }
+
+        probe_result
+    }
 }
 
 fn read_length_prefixed_bytes(stream: &VsockStream) -> Result<Vec<u8>, MicrovmError> {
@@ -305,6 +365,27 @@ fn read_length_prefixed_bytes(stream: &VsockStream) -> Result<Vec<u8>, MicrovmEr
         stream.read_exact(&mut data)?;
     }
     Ok(data)
+}
+
+fn validate_probe_result(result: GuestCommandResult) -> Result<(), MicrovmError> {
+    if result.exit_code != Some(0) {
+        return Err(MicrovmError::Backend(format!(
+            "vsock 探针返回了非零退出码: {:?}",
+            result.exit_code
+        )));
+    }
+    if !result.stdout.is_empty() || !result.stderr.is_empty() {
+        return Err(MicrovmError::Backend(format!(
+            "vsock 探针不应产生输出: stdout={}B stderr={}B",
+            result.stdout.len(),
+            result.stderr.len()
+        )));
+    }
+    if result.timed_out {
+        return Err(MicrovmError::Backend("vsock 探针被错误标记为超时".into()));
+    }
+
+    Ok(())
 }
 
 fn duration_to_poll_timeout_ms(timeout: Duration) -> libc::c_int {
