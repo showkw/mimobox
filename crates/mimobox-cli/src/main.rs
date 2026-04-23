@@ -21,6 +21,8 @@ use mimobox_os::LinuxSandbox;
 use mimobox_os::MacOsSandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use mimobox_os::run_pool_benchmark;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use mimobox_sdk::SandboxSnapshot as SdkSnapshot;
 use mimobox_sdk::{
     Config as SdkConfig, ExecuteResult as SdkExecuteResult, IsolationLevel as SdkIsolationLevel,
     NetworkPolicy as SdkNetworkPolicy, PtyConfig as SdkPtyConfig, PtyEvent as SdkPtyEvent,
@@ -58,6 +60,10 @@ enum CliCommand {
     Run(RunArgs),
     /// 启动交互式终端会话
     Shell(ShellArgs),
+    /// 创建 microVM 快照文件
+    Snapshot(SnapshotArgs),
+    /// 从快照文件恢复并执行命令
+    Restore(RestoreArgs),
     /// 运行预热池相关基准
     Bench(BenchArgs),
     /// 输出版本信息
@@ -153,6 +159,60 @@ struct ShellArgs {
 }
 
 #[derive(Debug, Args)]
+struct SnapshotArgs {
+    /// 快照输出文件路径
+    #[arg(long, value_name = "path")]
+    output: String,
+
+    /// 快照前执行的初始化命令
+    #[arg(long, value_name = "cmd")]
+    init_command: Option<String>,
+
+    /// 内存上限（MB）
+    #[arg(long)]
+    memory: Option<u64>,
+
+    /// 超时时间（秒），传 0 表示不设置超时
+    #[arg(long)]
+    timeout: Option<u64>,
+
+    /// 是否拒绝网络访问
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
+    deny_network: bool,
+
+    /// 是否允许网络访问
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
+    allow_network: bool,
+
+    /// 是否允许子进程 fork/clone
+    #[arg(long, default_value_t = false)]
+    allow_fork: bool,
+
+    /// KVM 内核镜像路径
+    #[arg(long)]
+    kernel: Option<String>,
+
+    /// KVM rootfs 路径
+    #[arg(long)]
+    rootfs: Option<String>,
+
+    /// KVM vCPU 数量
+    #[arg(long, default_value_t = 1)]
+    vcpu_count: u8,
+}
+
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    /// 快照文件路径
+    #[arg(long, value_name = "path")]
+    snapshot: String,
+
+    /// 恢复后执行的命令
+    #[arg(long, value_name = "cmd")]
+    command: String,
+}
+
+#[derive(Debug, Args)]
 struct BenchArgs {
     /// 基准目标
     #[arg(long, value_enum)]
@@ -180,6 +240,8 @@ struct ErrorEnvelope {
 #[serde(tag = "command", rename_all = "kebab-case")]
 enum CommandResponse {
     Run(RunResponse),
+    Snapshot(SnapshotResponse),
+    Restore(RestoreResponse),
     Bench(BenchResponse),
     Version(VersionResponse),
 }
@@ -199,6 +261,27 @@ struct RunResponse {
     timeout_secs: Option<u64>,
     deny_network: bool,
     allow_fork: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotResponse {
+    output_path: String,
+    init_command: Option<String>,
+    size_bytes: usize,
+    backend: Backend,
+}
+
+#[derive(Debug, Serialize)]
+struct RestoreResponse {
+    snapshot_path: String,
+    requested_command: String,
+    argv: Vec<String>,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    elapsed_ms: f64,
+    stdout: String,
+    stderr: String,
+    snapshot_size: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -388,6 +471,8 @@ fn run() -> Result<Option<i32>, CliError> {
             info!(exit_code, "shell 子命令执行完成");
             return Ok(Some(exit_code));
         }
+        CliCommand::Snapshot(args) => CommandResponse::Snapshot(handle_snapshot(args)?),
+        CliCommand::Restore(args) => CommandResponse::Restore(handle_restore(args)?),
         CliCommand::Bench(args) => CommandResponse::Bench(handle_bench(args)?),
         CliCommand::Version => CommandResponse::Version(handle_version()),
     };
@@ -561,6 +646,126 @@ fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
         }
 
         shell_result
+    }
+}
+
+fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
+    #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+    {
+        let _ = args;
+        Err(CliError::KvmFeatureDisabled)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "kvm"))]
+    {
+        let deny_network = if args.allow_network {
+            false
+        } else {
+            args.deny_network
+        };
+        let config = build_snapshot_sdk_config(&args, deny_network)?;
+
+        info!(
+            output = %args.output,
+            init_command = args.init_command.as_deref().unwrap_or("<none>"),
+            memory_mb = config.memory_limit_mb,
+            timeout_secs = config.timeout.as_ref().map(Duration::as_secs),
+            deny_network,
+            allow_fork = args.allow_fork,
+            kernel = args.kernel.as_deref().unwrap_or("default"),
+            rootfs = args.rootfs.as_deref().unwrap_or("default"),
+            vcpu_count = args.vcpu_count,
+            "准备执行 snapshot 子命令"
+        );
+
+        let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
+
+        if let Some(init_command) = args.init_command.as_deref() {
+            let init_result = sandbox.execute(init_command).map_err(|error| {
+                let cli_error = map_sdk_error(error);
+                error!(
+                    code = cli_error.code(),
+                    message = %cli_error,
+                    "snapshot 初始化命令执行失败"
+                );
+                cli_error
+            })?;
+
+            if init_result.timed_out || init_result.exit_code != Some(0) {
+                let stderr = String::from_utf8_lossy(&init_result.stderr);
+                let cli_error = CliError::Sdk(format!(
+                    "初始化命令执行失败: exit_code={:?}, timed_out={}, stderr={stderr}",
+                    init_result.exit_code, init_result.timed_out,
+                ));
+                destroy_sdk_sandbox_quietly(sandbox, "snapshot 初始化失败后清理沙箱");
+                return Err(cli_error);
+            }
+        }
+
+        let snapshot = match sandbox.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let cli_error = map_sdk_error(error);
+                destroy_sdk_sandbox_quietly(sandbox, "snapshot 失败后清理沙箱");
+                return Err(cli_error);
+            }
+        };
+
+        fs::write(&args.output, snapshot.as_bytes())?;
+        sandbox.destroy().map_err(map_sdk_error)?;
+
+        Ok(SnapshotResponse {
+            output_path: args.output,
+            init_command: args.init_command,
+            size_bytes: snapshot.size(),
+            backend: Backend::Kvm,
+        })
+    }
+}
+
+fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliError> {
+    #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+    {
+        let _ = args;
+        Err(CliError::KvmFeatureDisabled)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "kvm"))]
+    {
+        info!(
+            snapshot = %args.snapshot,
+            command = %args.command,
+            "准备执行 restore 子命令"
+        );
+
+        let snapshot_bytes = fs::read(&args.snapshot)?;
+        let snapshot = SdkSnapshot::from_bytes(&snapshot_bytes).map_err(map_sdk_error)?;
+        let argv = parse_command(&args.command)?;
+        let snapshot_size = snapshot.size();
+        let mut sandbox = SdkSandbox::from_snapshot(&snapshot).map_err(map_sdk_error)?;
+
+        let execute_result = match sandbox.execute(&args.command) {
+            Ok(result) => result,
+            Err(error) => {
+                let cli_error = map_sdk_error(error);
+                destroy_sdk_sandbox_quietly(sandbox, "restore 执行失败后清理沙箱");
+                return Err(cli_error);
+            }
+        };
+
+        sandbox.destroy().map_err(map_sdk_error)?;
+
+        Ok(RestoreResponse {
+            snapshot_path: args.snapshot,
+            requested_command: args.command,
+            argv,
+            exit_code: execute_result.exit_code,
+            timed_out: execute_result.timed_out,
+            elapsed_ms: execute_result.elapsed.as_secs_f64() * 1000.0,
+            stdout: String::from_utf8_lossy(&execute_result.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&execute_result.stderr).to_string(),
+            snapshot_size,
+        })
     }
 }
 
@@ -806,6 +1011,31 @@ fn build_sdk_config(
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn build_snapshot_sdk_config(
+    args: &SnapshotArgs,
+    deny_network: bool,
+) -> Result<SdkConfig, CliError> {
+    let mut config = build_sdk_config(args.memory, args.timeout, deny_network, args.allow_fork);
+    config.isolation = SdkIsolationLevel::MicroVm;
+    config.vm_vcpu_count = args.vcpu_count;
+
+    if let Some(memory) = args.memory {
+        config.vm_memory_mb = u32::try_from(memory)
+            .map_err(|_| CliError::Args(format!("snapshot memory 超出 u32 范围: {memory}")))?;
+    }
+
+    if let Some(kernel) = &args.kernel {
+        config.kernel_path = Some(std::path::PathBuf::from(kernel));
+    }
+
+    if let Some(rootfs) = &args.rootfs {
+        config.rootfs_path = Some(std::path::PathBuf::from(rootfs));
+    }
+
+    Ok(config)
+}
+
 fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
     if deny_network {
         SdkNetworkPolicy::DenyAll
@@ -941,6 +1171,18 @@ fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
     error.into()
 }
 
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn destroy_sdk_sandbox_quietly(sandbox: SdkSandbox, context: &str) {
+    if let Err(error) = sandbox.destroy() {
+        let cli_error = map_sdk_error(error);
+        warn!(
+            code = cli_error.code(),
+            message = %cli_error,
+            "{context}"
+        );
+    }
+}
+
 fn apply_stderr_fallback(stderr: &mut Vec<u8>, fallback: Vec<u8>) {
     // 优先使用后端显式返回的 stderr；只有后端遗漏时才使用进程级兜底捕获。
     if stderr.is_empty() && !fallback.is_empty() {
@@ -960,7 +1202,10 @@ fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option<Backend> {
 fn success_exit_code(response: &CommandResponse) -> Option<i32> {
     match response {
         CommandResponse::Run(run) => run.exit_code.filter(|code| *code != 0),
-        CommandResponse::Bench(_) | CommandResponse::Version(_) => None,
+        CommandResponse::Restore(restore) => restore.exit_code.filter(|code| *code != 0),
+        CommandResponse::Snapshot(_) | CommandResponse::Bench(_) | CommandResponse::Version(_) => {
+            None
+        }
     }
 }
 
@@ -1451,6 +1696,67 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_subcommand_parses_expected_flags() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "snapshot",
+            "--output",
+            "/tmp/base.snap",
+            "--init-command",
+            "/bin/echo seed",
+            "--memory",
+            "256",
+            "--timeout",
+            "9",
+            "--deny-network",
+            "--allow-fork",
+            "--kernel",
+            "/tmp/vmlinux",
+            "--rootfs",
+            "/tmp/rootfs.cpio.gz",
+            "--vcpu-count",
+            "2",
+        ])
+        .expect("snapshot 子命令应解析成功");
+
+        match cli.command {
+            CliCommand::Snapshot(args) => {
+                assert_eq!(args.output, "/tmp/base.snap");
+                assert_eq!(args.init_command.as_deref(), Some("/bin/echo seed"));
+                assert_eq!(args.memory, Some(256));
+                assert_eq!(args.timeout, Some(9));
+                assert!(args.deny_network);
+                assert!(args.allow_fork);
+                assert_eq!(args.kernel.as_deref(), Some("/tmp/vmlinux"));
+                assert_eq!(args.rootfs.as_deref(), Some("/tmp/rootfs.cpio.gz"));
+                assert_eq!(args.vcpu_count, 2);
+            }
+            _ => panic!("应解析为 snapshot 子命令"),
+        }
+    }
+
+    #[test]
+    fn restore_subcommand_parses_expected_flags() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "restore",
+            "--snapshot",
+            "/tmp/base.snap",
+            "--command",
+            "/bin/echo hello",
+        ])
+        .expect("restore 子命令应解析成功");
+
+        match cli.command {
+            CliCommand::Restore(args) => {
+                assert_eq!(args.snapshot, "/tmp/base.snap");
+                assert_eq!(args.command, "/bin/echo hello");
+            }
+            _ => panic!("应解析为 restore 子命令"),
+        }
+    }
+
+    #[test]
     fn auto_backend_routes_to_sdk_executor() {
         assert_eq!(
             resolve_run_execution_mode(Backend::Auto),
@@ -1743,6 +2049,14 @@ mod tests {
         let version_response = CommandResponse::Version(handle_version());
         assert_eq!(success_exit_code(&version_response), None);
 
+        let snapshot_response = CommandResponse::Snapshot(SnapshotResponse {
+            output_path: "/tmp/base.snap".to_string(),
+            init_command: None,
+            size_bytes: 128,
+            backend: Backend::Kvm,
+        });
+        assert_eq!(success_exit_code(&snapshot_response), None);
+
         let zero_exit_response = CommandResponse::Run(RunResponse {
             backend: Backend::Os,
             requested_backend: Backend::Os,
@@ -1780,6 +2094,23 @@ mod tests {
         });
 
         assert_eq!(success_exit_code(&response), Some(7));
+    }
+
+    #[test]
+    fn success_exit_code_propagates_non_zero_restore_exit_code() {
+        let response = CommandResponse::Restore(RestoreResponse {
+            snapshot_path: "/tmp/base.snap".to_string(),
+            requested_command: "/bin/false".to_string(),
+            argv: vec!["/bin/false".to_string()],
+            exit_code: Some(9),
+            timed_out: false,
+            elapsed_ms: 1.0,
+            stdout: String::new(),
+            stderr: String::new(),
+            snapshot_size: 256,
+        });
+
+        assert_eq!(success_exit_code(&response), Some(9));
     }
 
     #[cfg(unix)]

@@ -490,6 +490,16 @@ impl PooledVm {
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         }
     }
+
+    pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
+        match self.backend.as_ref() {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Some(backend) => backend.snapshot_bytes(),
+            #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+            Some(_) => Err(MicrovmError::UnsupportedPlatform),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
 }
 
 impl Drop for PooledVm {

@@ -113,6 +113,60 @@ pub struct SandboxResult {
     pub timed_out: bool,
 }
 
+/// 沙箱快照。
+///
+/// 该类型只负责承载后端生成的原始快照字节，不解析内部格式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxSnapshot {
+    data: Vec<u8>,
+}
+
+impl SandboxSnapshot {
+    /// 从原始字节创建快照。
+    pub fn from_bytes(data: &[u8]) -> Result<Self, SandboxError> {
+        if data.is_empty() {
+            return Err(SandboxError::ExecutionFailed(
+                "快照数据不能为空".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            data: data.to_vec(),
+        })
+    }
+
+    /// 从已拥有所有权的字节创建快照，避免额外复制。
+    pub fn from_owned_bytes(data: Vec<u8>) -> Result<Self, SandboxError> {
+        if data.is_empty() {
+            return Err(SandboxError::ExecutionFailed(
+                "快照数据不能为空".to_string(),
+            ));
+        }
+
+        Ok(Self { data })
+    }
+
+    /// 返回快照字节切片，避免不必要拷贝。
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+
+    /// 序列化为字节副本。
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+
+    /// 消费快照并返回底层字节，避免额外复制。
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+
+    /// 返回快照大小（字节）。
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
 /// PTY 终端尺寸
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
@@ -224,15 +278,39 @@ pub trait Sandbox {
             "当前后端不支持文件写入".into(),
         ))
     }
+    fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
+        Err(SandboxError::UnsupportedOperation(
+            "快照当前后端不支持".to_string(),
+        ))
+    }
     fn destroy(self) -> Result<(), SandboxError>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PtySize;
+    use super::{PtySize, SandboxSnapshot};
 
     #[test]
     fn pty_size_default_is_80x24() {
         assert_eq!(PtySize::default(), PtySize { cols: 80, rows: 24 });
+    }
+
+    #[test]
+    fn sandbox_snapshot_round_trip_preserves_bytes() {
+        let original = vec![0x4d, 0x4d, 0x42, 0x58, 0x01, 0x02];
+
+        let snapshot =
+            SandboxSnapshot::from_owned_bytes(original.clone()).expect("快照创建必须成功");
+
+        assert_eq!(snapshot.as_bytes(), original.as_slice());
+        assert_eq!(snapshot.to_bytes(), original);
+        assert_eq!(snapshot.size(), 6);
+    }
+
+    #[test]
+    fn sandbox_snapshot_rejects_empty_bytes() {
+        let error = SandboxSnapshot::from_bytes(&[]).expect_err("空快照必须被拒绝");
+
+        assert!(error.to_string().contains("不能为空"));
     }
 }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SandboxSnapshot};
 use tracing::debug;
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
@@ -254,10 +254,10 @@ impl BackendHandle {
         }
     }
 
-    fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+    fn http_request(&mut self, _request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
-            Self::Kvm(backend) => backend.http_request(request),
+            Self::Kvm(backend) => backend.http_request(_request),
             Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
         }
     }
@@ -523,6 +523,11 @@ impl Sandbox for MicrovmSandbox {
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         MicrovmSandbox::write_file(self, path, data).map_err(SandboxError::from)
+    }
+
+    fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
+        let bytes = MicrovmSandbox::snapshot(self).map_err(SandboxError::from)?;
+        SandboxSnapshot::from_owned_bytes(bytes)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
