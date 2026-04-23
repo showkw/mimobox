@@ -2,10 +2,11 @@
 //!
 //! 通过 PyO3 将 `mimobox-sdk` 暴露为 Python 可调用模块。
 
-use mimobox_sdk::{ExecuteResult, Sandbox as RustSandbox, SdkError};
+use mimobox_sdk::{ExecuteResult, Sandbox as RustSandbox, SdkError, StreamEvent};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyBytes};
+use std::sync::mpsc;
 
 /// Python 侧执行结果对象。
 ///
@@ -46,6 +47,99 @@ struct PySandbox {
     inner: Option<RustSandbox>,
 }
 
+#[pyclass(name = "StreamEvent")]
+#[derive(Debug, Clone)]
+struct PyStreamEvent {
+    stdout: Option<Vec<u8>>,
+    stderr: Option<Vec<u8>>,
+    exit_code: Option<i32>,
+    timed_out: bool,
+}
+
+#[pymethods]
+impl PyStreamEvent {
+    #[getter]
+    fn stdout<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.stdout
+            .as_ref()
+            .map(|data| PyBytes::new(py, data.as_slice()))
+    }
+
+    #[getter]
+    fn stderr<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.stderr
+            .as_ref()
+            .map(|data| PyBytes::new(py, data.as_slice()))
+    }
+
+    #[getter]
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    #[getter]
+    fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+}
+
+impl From<StreamEvent> for PyStreamEvent {
+    fn from(event: StreamEvent) -> Self {
+        match event {
+            StreamEvent::Stdout(data) => Self {
+                stdout: Some(data),
+                stderr: None,
+                exit_code: None,
+                timed_out: false,
+            },
+            StreamEvent::Stderr(data) => Self {
+                stdout: None,
+                stderr: Some(data),
+                exit_code: None,
+                timed_out: false,
+            },
+            StreamEvent::Exit(code) => Self {
+                stdout: None,
+                stderr: None,
+                exit_code: Some(code),
+                timed_out: false,
+            },
+            StreamEvent::TimedOut => Self {
+                stdout: None,
+                stderr: None,
+                exit_code: None,
+                timed_out: true,
+            },
+        }
+    }
+}
+
+#[pyclass(name = "StreamIterator", unsendable)]
+struct PyStreamIterator {
+    receiver: Option<mpsc::Receiver<StreamEvent>>,
+}
+
+#[pymethods]
+impl PyStreamIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> PyResult<Option<PyStreamEvent>> {
+        let Some(receiver) = self.receiver.as_ref() else {
+            return Ok(None);
+        };
+
+        match receiver.recv() {
+            Ok(event) => Ok(Some(event.into())),
+            Err(_) => {
+                self.receiver = None;
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[pymethods]
 impl PySandbox {
     #[new]
@@ -61,6 +155,15 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let result = sandbox.execute(command).map_err(map_sdk_error)?;
         Ok(result.into())
+    }
+
+    /// 以 Python 迭代器形式返回流式执行事件。
+    fn stream_execute(&mut self, command: &str) -> PyResult<PyStreamIterator> {
+        let sandbox = self.inner_mut()?;
+        let receiver = sandbox.stream_execute(command).map_err(map_sdk_error)?;
+        Ok(PyStreamIterator {
+            receiver: Some(receiver),
+        })
     }
 
     /// 从沙箱内读取文件内容，返回 Python `bytes`。
@@ -122,6 +225,8 @@ fn map_sdk_error(error: SdkError) -> PyErr {
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySandbox>()?;
     module.add_class::<PyExecuteResult>()?;
+    module.add_class::<PyStreamEvent>()?;
+    module.add_class::<PyStreamIterator>()?;
     Ok(())
 }
 
@@ -158,5 +263,21 @@ mod tests {
         assert_eq!(result.stderr, "\u{fffd}");
         assert_eq!(result.exit_code, 7);
         assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn stream_event_maps_to_python_bytes_and_exit() {
+        let stdout = PyStreamEvent::from(StreamEvent::Stdout(b"out".to_vec()));
+        let timed_out = PyStreamEvent::from(StreamEvent::TimedOut);
+        let exit = PyStreamEvent::from(StreamEvent::Exit(9));
+
+        Python::with_gil(|py| {
+            assert_eq!(
+                stdout.stdout(py).expect("stdout bytes 必须存在").as_bytes(),
+                b"out"
+            );
+        });
+        assert!(timed_out.timed_out);
+        assert_eq!(exit.exit_code(), Some(9));
     }
 }

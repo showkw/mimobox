@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
@@ -97,6 +98,15 @@ pub struct GuestCommandResult {
     pub timed_out: bool,
 }
 
+/// guest 流式执行事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(i32),
+    TimedOut,
+}
+
 /// microVM 级错误。
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
@@ -185,6 +195,17 @@ impl BackendHandle {
         }
     }
 
+    fn run_command_streaming(
+        &mut self,
+        _cmd: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.run_command_streaming(_cmd),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
     fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -206,6 +227,14 @@ impl BackendHandle {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
             Self::Kvm(backend) => backend.shutdown(),
             Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
+    fn is_destroyed(&self) -> bool {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.lifecycle() == crate::kvm::KvmLifecycle::Destroyed,
+            Self::Unsupported => true,
         }
     }
 
@@ -334,6 +363,30 @@ impl MicrovmSandbox {
         self.state = MicrovmState::Running;
         let result = self.backend.write_file(path, data);
         self.state = MicrovmState::Ready;
+        result
+    }
+
+    pub fn stream_execute(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        if cmd.is_empty() {
+            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+        }
+
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可执行状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.run_command_streaming(cmd);
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
         result
     }
 }
