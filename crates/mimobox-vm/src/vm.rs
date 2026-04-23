@@ -15,7 +15,7 @@ use crate::vm_assets::resolve_vm_assets_dir;
 use crate::kvm::KvmBackend;
 
 /// microVM 专属配置。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MicrovmConfig {
     /// vCPU 数量。
     pub vcpu_count: u8,
@@ -373,7 +373,7 @@ impl MicrovmSandbox {
     }
 
     /// 导出当前 microVM 快照。
-    pub fn snapshot(&mut self) -> Result<Vec<u8>, MicrovmError> {
+    pub fn snapshot(&mut self) -> Result<SandboxSnapshot, MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle("仅 Ready 状态允许创建快照".into()));
         }
@@ -385,11 +385,22 @@ impl MicrovmSandbox {
             memory,
             vcpu_state,
         )
-        .snapshot()
+        .persist_to_files()
     }
 
     /// 从快照恢复 microVM。
-    pub fn restore(data: &[u8]) -> Result<Self, MicrovmError> {
+    pub fn restore(snapshot: &SandboxSnapshot) -> Result<Self, MicrovmError> {
+        if let Some(memory_path) = snapshot.memory_file_path() {
+            let snapshot = MicrovmSnapshot::from_memory_file(memory_path)?;
+            return Self::from_snapshot(snapshot);
+        }
+
+        let data = snapshot.as_bytes().map_err(map_snapshot_access_error)?;
+        Self::restore_from_bytes(data)
+    }
+
+    /// 从自描述快照字节恢复 microVM。
+    pub fn restore_from_bytes(data: &[u8]) -> Result<Self, MicrovmError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         Self::from_snapshot(snapshot)
     }
@@ -563,8 +574,7 @@ impl Sandbox for MicrovmSandbox {
     }
 
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
-        let bytes = MicrovmSandbox::snapshot(self).map_err(SandboxError::from)?;
-        SandboxSnapshot::from_owned_bytes(bytes)
+        MicrovmSandbox::snapshot(self).map_err(SandboxError::from)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
@@ -572,6 +582,14 @@ impl Sandbox for MicrovmSandbox {
         this.backend.shutdown().map_err(SandboxError::from)?;
         this.state = MicrovmState::Destroyed;
         Ok(())
+    }
+}
+
+fn map_snapshot_access_error(error: SandboxError) -> MicrovmError {
+    match error {
+        SandboxError::Io(error) => MicrovmError::Io(error),
+        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("无效的沙箱快照".into()),
+        other => MicrovmError::SnapshotFormat(other.to_string()),
     }
 }
 

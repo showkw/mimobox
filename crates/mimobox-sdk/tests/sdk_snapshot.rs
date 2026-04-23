@@ -68,6 +68,17 @@ fn test_sdk_restore_pool_restores_snapshot_and_executes() {
         .execute("/bin/sh -lc 'echo restored > /tmp/restore.txt'")
         .expect("准备 restore 快照状态必须成功");
     let snapshot = sandbox.snapshot().expect("拍摄快照必须成功");
+    assert!(
+        snapshot.memory_file_path().is_some(),
+        "microVM snapshot 应返回文件模式快照"
+    );
+    assert!(
+        !snapshot
+            .to_bytes()
+            .expect("文件快照应可重建为自描述字节")
+            .is_empty(),
+        "文件快照重建后的字节不应为空"
+    );
     sandbox.destroy().expect("销毁种子沙箱必须成功");
 
     let pool = RestorePool::new(RestorePoolConfig {

@@ -100,8 +100,9 @@ impl PySnapshot {
         Ok(Self { inner: snapshot })
     }
 
-    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.inner.as_bytes())
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self.inner.to_bytes().map_err(map_sdk_error)?;
+        Ok(PyBytes::new(py, bytes.as_slice()))
     }
 
     #[getter]
@@ -524,7 +525,13 @@ mod tests {
         let py_snapshot = PySnapshot { inner: snapshot };
 
         Python::with_gil(|py| {
-            assert_eq!(py_snapshot.to_bytes(py).as_bytes(), b"snapshot-bytes");
+            assert_eq!(
+                py_snapshot
+                    .to_bytes(py)
+                    .expect("Python 快照导出字节必须成功")
+                    .as_bytes(),
+                b"snapshot-bytes"
+            );
         });
         assert_eq!(py_snapshot.size(), "snapshot-bytes".len());
     }

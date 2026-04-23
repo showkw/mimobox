@@ -15,6 +15,7 @@ use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
 #[cfg(feature = "vm")]
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "vm")]
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -62,19 +63,51 @@ impl SandboxSnapshot {
             .map_err(map_snapshot_bytes_error)
     }
 
+    /// 从文件化快照的 `memory.bin` 创建快照。
+    pub fn from_file(path: PathBuf) -> Result<Self, SdkError> {
+        mimobox_core::SandboxSnapshot::from_file(path)
+            .map(Self::from_core)
+            .map_err(map_snapshot_bytes_error)
+    }
+
+    /// 返回文件模式快照对应的 memory 文件路径。
+    pub fn memory_file_path(&self) -> Option<&Path> {
+        self.inner.memory_file_path()
+    }
+
     /// 返回快照字节切片，避免额外拷贝。
-    pub fn as_bytes(&self) -> &[u8] {
-        self.inner.as_bytes()
+    ///
+    /// 仅内存模式支持该操作；文件模式会返回错误。
+    pub fn as_bytes(&self) -> Result<&[u8], SdkError> {
+        self.inner.as_bytes().map_err(map_snapshot_bytes_error)
     }
 
     /// 返回快照字节副本。
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.inner.to_bytes()
+    ///
+    /// 文件模式下会重建完整的自描述快照字节。
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SdkError> {
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        if let Some(memory_path) = self.inner.memory_file_path() {
+            return mimobox_vm::MicrovmSnapshot::from_memory_file(memory_path)
+                .and_then(|snapshot| snapshot.snapshot())
+                .map_err(map_microvm_error);
+        }
+
+        self.inner.to_bytes().map_err(map_snapshot_bytes_error)
     }
 
     /// 消费快照并返回底层字节，避免额外拷贝。
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.inner.into_bytes()
+    ///
+    /// 文件模式下会重建完整的自描述快照字节。
+    pub fn into_bytes(self) -> Result<Vec<u8>, SdkError> {
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        if let Some(memory_path) = self.inner.memory_file_path().map(Path::to_path_buf) {
+            return mimobox_vm::MicrovmSnapshot::from_memory_file(&memory_path)
+                .and_then(|snapshot| snapshot.snapshot())
+                .map_err(map_microvm_error);
+        }
+
+        self.inner.into_bytes().map_err(map_snapshot_bytes_error)
     }
 
     /// 返回快照大小（字节）。
@@ -435,7 +468,7 @@ impl RestorePool {
     pub fn restore(&self, snapshot: &SandboxSnapshot) -> Result<Sandbox, SdkError> {
         let restored = self
             .inner
-            .restore_from_bytes(snapshot.as_bytes())
+            .restore_snapshot(&snapshot.inner)
             .map_err(map_restore_pool_error)?;
         Ok(Sandbox::from_initialized_inner(
             SandboxInner::RestoredPooledMicroVm(restored),
@@ -541,7 +574,7 @@ impl Sandbox {
                 )
             })?;
 
-            let bytes = match inner {
+            let snapshot = match inner {
                 SandboxInner::MicroVm(sandbox) => sandbox.snapshot().map_err(map_microvm_error)?,
                 SandboxInner::PooledMicroVm(sandbox) => {
                     sandbox.snapshot().map_err(map_microvm_error)?
@@ -561,9 +594,7 @@ impl Sandbox {
                 }
             };
 
-            return mimobox_core::SandboxSnapshot::from_owned_bytes(bytes)
-                .map(SandboxSnapshot::from_core)
-                .map_err(map_snapshot_bytes_error);
+            return Ok(SandboxSnapshot::from_core(snapshot));
         }
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
@@ -580,8 +611,8 @@ impl Sandbox {
     pub fn from_snapshot(snapshot: &SandboxSnapshot) -> Result<Self, SdkError> {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         {
-            let sandbox = mimobox_vm::MicrovmSandbox::restore(snapshot.as_bytes())
-                .map_err(map_microvm_error)?;
+            let sandbox =
+                mimobox_vm::MicrovmSandbox::restore(&snapshot.inner).map_err(map_microvm_error)?;
             return Ok(Self::from_initialized_inner(
                 SandboxInner::MicroVm(sandbox),
                 Config::builder().isolation(IsolationLevel::MicroVm).build(),
@@ -1242,6 +1273,11 @@ fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkError {
 
 fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
+        mimobox_core::SandboxError::InvalidSnapshot => SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            "无效的沙箱快照",
+            Some("文件模式快照请优先使用 from_snapshot()/restore() 或 to_bytes()".to_string()),
+        ),
         mimobox_core::SandboxError::ExecutionFailed(message) => SdkError::sandbox(
             ErrorCode::InvalidConfig,
             message,

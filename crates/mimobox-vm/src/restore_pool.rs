@@ -8,7 +8,7 @@ use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{KVM_PIT_SPEAKER_DUMMY, kvm_pit_config};
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
-use mimobox_core::SandboxConfig;
+use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot};
 use thiserror::Error;
 use tracing::warn;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
@@ -334,6 +334,21 @@ impl RestorePool {
         self.restore(memory.as_slice(), vcpu_state.as_slice())
     }
 
+    /// 从 `SandboxSnapshot` 恢复一个 microVM。
+    pub fn restore_snapshot(
+        &self,
+        snapshot: &SandboxSnapshot,
+    ) -> Result<PooledRestoreVm, RestorePoolError> {
+        if let Some(memory_path) = snapshot.memory_file_path() {
+            let snapshot = MicrovmSnapshot::from_memory_file(memory_path)?;
+            let (_, _, memory, vcpu_state) = snapshot.into_parts();
+            return self.restore(memory.as_slice(), vcpu_state.as_slice());
+        }
+
+        let data = snapshot.as_bytes().map_err(map_snapshot_access_error)?;
+        self.restore_from_bytes(data)
+    }
+
     /// 返回当前恢复池中的空闲槽位数量。
     pub fn idle_count(&self) -> usize {
         match self.inner.state.lock() {
@@ -419,10 +434,10 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 导出当前恢复态 VM 的快照字节。
-    pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
+    /// 导出当前恢复态 VM 的文件化快照。
+    pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
-            Some(backend) => backend.snapshot_bytes(),
+            Some(backend) => backend.snapshot_to_file(),
             None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
         }
     }
@@ -466,4 +481,13 @@ fn register_guest_memory(
 
 fn to_backend_error(err: impl std::fmt::Display) -> MicrovmError {
     MicrovmError::Backend(err.to_string())
+}
+
+fn map_snapshot_access_error(error: SandboxError) -> RestorePoolError {
+    let error = match error {
+        SandboxError::Io(error) => MicrovmError::Io(error),
+        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("无效的沙箱快照".into()),
+        other => MicrovmError::SnapshotFormat(other.to_string()),
+    };
+    RestorePoolError::Microvm(error)
 }

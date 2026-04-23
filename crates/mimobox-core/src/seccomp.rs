@@ -4,7 +4,7 @@
 //! 具体的 BPF 过滤器实现在 mimobox-os crate 的 seccomp 模块中。
 
 /// Seccomp 过滤策略
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub enum SeccompProfile {
     /// 仅允许核心系统调用（最严格，禁止 fork）
     #[default]
