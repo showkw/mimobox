@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/io.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
@@ -49,6 +50,12 @@ struct sockaddr_vm {
 
 #define COMMAND_BUFFER_CAP 4096
 #define OUTPUT_BUFFER_CAP 1024
+#define FS_WRITE_MAX_BYTES (10 * 1024 * 1024)
+#define FS_RESULT_STATUS_OK 0
+#define FS_RESULT_STATUS_PATH_ERROR 1
+#define FS_RESULT_STATUS_IO_ERROR 2
+#define FS_RESULT_STATUS_PERMISSION_ERROR 3
+#define FS_RESULT_STATUS_NO_SPACE 4
 #ifdef USE_VSOCK
 #define VSOCK_HOST_CID 2
 #define VSOCK_HOST_PORT 1024
@@ -66,6 +73,8 @@ static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
 #endif
 static const int OUTPUT_STREAM_STDOUT = STDOUT_FILENO;
 static const int OUTPUT_STREAM_STDERR = STDERR_FILENO;
+
+static void close_fd_if_open(int *fd);
 
 static void write_console_line(const char *message) {
     const unsigned char *cursor = (const unsigned char *)message;
@@ -193,8 +202,19 @@ static int discard_serial_bytes(size_t length) {
     return 0;
 }
 
+static bool is_supported_command_prefix(const char *prefix) {
+    if (prefix == NULL) {
+        return false;
+    }
+
+    return strcmp(prefix, "EXEC:") == 0 ||
+           strcmp(prefix, "FS:READ:") == 0 ||
+           strcmp(prefix, "FS:WRITE:") == 0;
+}
+
 static int read_command_frame(char *buffer, size_t capacity) {
-    static const char prefix[] = "EXEC:";
+    char prefix[16];
+    size_t prefix_len = 0;
     size_t payload_len = 0;
     unsigned char value = 0;
     bool saw_digit = false;
@@ -203,13 +223,23 @@ static int read_command_frame(char *buffer, size_t capacity) {
         return -1;
     }
 
-    for (size_t index = 0; index < sizeof(prefix) - 1; index++) {
+    for (;;) {
         if (read_serial_byte(&value) < 0) {
             return -1;
         }
-        if (value != (unsigned char)prefix[index]) {
+        if (value >= '0' && value <= '9') {
+            payload_len = (size_t)(value - '0');
+            saw_digit = true;
+            break;
+        }
+        if (value == '\n' || value == '\r') {
             return -3;
         }
+        if (prefix_len + 1 >= sizeof(prefix)) {
+            return -3;
+        }
+        prefix[prefix_len++] = (char)value;
+        prefix[prefix_len] = '\0';
     }
 
     for (;;) {
@@ -233,7 +263,17 @@ static int read_command_frame(char *buffer, size_t capacity) {
         payload_len = payload_len * 10 + (size_t)(digit - '0');
     }
 
-    if (payload_len >= capacity) {
+    if (!is_supported_command_prefix(prefix)) {
+        if (discard_serial_bytes(payload_len) < 0) {
+            return -1;
+        }
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        return value == '\n' ? -3 : -3;
+    }
+
+    if (prefix_len + payload_len >= capacity) {
         if (discard_serial_bytes(payload_len) < 0) {
             return -1;
         }
@@ -246,11 +286,12 @@ static int read_command_frame(char *buffer, size_t capacity) {
         return -2;
     }
 
+    memcpy(buffer, prefix, prefix_len);
     for (size_t index = 0; index < payload_len; index++) {
         if (read_serial_byte(&value) < 0) {
             return -1;
         }
-        buffer[index] = (char)value;
+        buffer[prefix_len + index] = (char)value;
     }
 
     if (read_serial_byte(&value) < 0) {
@@ -260,8 +301,264 @@ static int read_command_frame(char *buffer, size_t capacity) {
         return -3;
     }
 
-    buffer[payload_len] = '\0';
+    buffer[prefix_len + payload_len] = '\0';
     return 0;
+}
+
+static int expect_serial_newline(void) {
+    unsigned char value = 0;
+    if (read_serial_byte(&value) < 0) {
+        return -1;
+    }
+    return value == '\n' ? 0 : -1;
+}
+
+static int read_length_prefix(size_t *length) {
+    size_t parsed = 0;
+    bool saw_digit = false;
+
+    if (length == NULL) {
+        return -1;
+    }
+
+    for (;;) {
+        unsigned char digit = 0;
+        if (read_serial_byte(&digit) < 0) {
+            return -1;
+        }
+        if (digit == ':') {
+            if (!saw_digit) {
+                return -3;
+            }
+            *length = parsed;
+            return 0;
+        }
+        if (digit < '0' || digit > '9') {
+            return -3;
+        }
+        saw_digit = true;
+        if (parsed > (SIZE_MAX - (size_t)(digit - '0')) / 10) {
+            return -3;
+        }
+        parsed = parsed * 10 + (size_t)(digit - '0');
+    }
+}
+
+static int write_all_fd(int fd, const unsigned char *data, size_t length) {
+    size_t written_total = 0;
+
+    while (written_total < length) {
+        ssize_t written = write(fd, data + written_total, length - written_total);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (written == 0) {
+            errno = EIO;
+            return -1;
+        }
+        written_total += (size_t)written;
+    }
+
+    return 0;
+}
+
+static int fs_status_from_errno(int errnum) {
+    switch (errnum) {
+    case ENOENT:
+    case ENOTDIR:
+    case EISDIR:
+    case ENAMETOOLONG:
+    case EINVAL:
+        return FS_RESULT_STATUS_PATH_ERROR;
+    case EACCES:
+    case EPERM:
+    case EROFS:
+        return FS_RESULT_STATUS_PERMISSION_ERROR;
+    case ENOSPC:
+    case EDQUOT:
+    case EFBIG:
+        return FS_RESULT_STATUS_NO_SPACE;
+    default:
+        return FS_RESULT_STATUS_IO_ERROR;
+    }
+}
+
+static bool has_parent_dir_component(const char *path) {
+    const char *cursor = path;
+
+    while (cursor != NULL && *cursor != '\0') {
+        while (*cursor == '/') {
+            cursor++;
+        }
+
+        const char *component_start = cursor;
+        while (*cursor != '\0' && *cursor != '/') {
+            cursor++;
+        }
+
+        size_t component_len = (size_t)(cursor - component_start);
+        if (component_len == 2 &&
+            component_start[0] == '.' &&
+            component_start[1] == '.') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int validate_sandbox_path(const char *path) {
+    if (path == NULL) {
+        return FS_RESULT_STATUS_PATH_ERROR;
+    }
+    if (strncmp(path, "/sandbox/", 9) != 0) {
+        return FS_RESULT_STATUS_PATH_ERROR;
+    }
+    if (has_parent_dir_component(path)) {
+        return FS_RESULT_STATUS_PATH_ERROR;
+    }
+
+    return FS_RESULT_STATUS_OK;
+}
+
+static void write_fs_write_result(int status) {
+    char buffer[32];
+    int written = snprintf(buffer, sizeof(buffer), "FSRESULT:%d\n", status);
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
+    }
+}
+
+static void write_fs_read_result_prefix(int status, size_t data_len) {
+    char buffer[64];
+    int written = snprintf(buffer, sizeof(buffer), "FSRESULT:%d:%zu:", status, data_len);
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
+    }
+}
+
+static void write_fs_read_result_status(int status) {
+    write_fs_read_result_prefix(status, 0);
+    write_console_bytes("\n", 1);
+}
+
+static int consume_fs_write_body(int fd, size_t data_len, int initial_status) {
+    unsigned char chunk[OUTPUT_BUFFER_CAP];
+    int status = initial_status;
+
+    while (data_len > 0) {
+        size_t chunk_len = data_len < sizeof(chunk) ? data_len : sizeof(chunk);
+        for (size_t index = 0; index < chunk_len; index++) {
+            if (read_serial_byte(&chunk[index]) < 0) {
+                return FS_RESULT_STATUS_IO_ERROR;
+            }
+        }
+
+        if (status == FS_RESULT_STATUS_OK && fd >= 0) {
+            if (write_all_fd(fd, chunk, chunk_len) < 0) {
+                status = fs_status_from_errno(errno);
+                close_fd_if_open(&fd);
+            }
+        }
+
+        data_len -= chunk_len;
+    }
+
+    if (expect_serial_newline() < 0) {
+        return FS_RESULT_STATUS_IO_ERROR;
+    }
+
+    if (fd >= 0 && close(fd) < 0 && status == FS_RESULT_STATUS_OK) {
+        status = fs_status_from_errno(errno);
+    }
+
+    return status;
+}
+
+static void handle_fs_read(const char *path) {
+    int status = validate_sandbox_path(path);
+    if (status != FS_RESULT_STATUS_OK) {
+        write_fs_read_result_status(status);
+        return;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        write_fs_read_result_status(fs_status_from_errno(errno));
+        return;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        status = fs_status_from_errno(errno);
+        close_fd_if_open(&fd);
+        write_fs_read_result_status(status);
+        return;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+        close_fd_if_open(&fd);
+        write_fs_read_result_status(FS_RESULT_STATUS_PATH_ERROR);
+        return;
+    }
+
+    size_t data_len = (size_t)st.st_size;
+    write_fs_read_result_prefix(FS_RESULT_STATUS_OK, data_len);
+
+    unsigned char chunk[OUTPUT_BUFFER_CAP];
+    size_t remaining = data_len;
+    while (remaining > 0) {
+        size_t chunk_len = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        ssize_t read_len = read(fd, chunk, chunk_len);
+        if (read_len < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close_fd_if_open(&fd);
+            return;
+        }
+        if (read_len == 0) {
+            close_fd_if_open(&fd);
+            return;
+        }
+        write_console_bytes(chunk, (size_t)read_len);
+        remaining -= (size_t)read_len;
+    }
+
+    close_fd_if_open(&fd);
+    write_console_bytes("\n", 1);
+}
+
+static void handle_fs_write(const char *path) {
+    size_t data_len = 0;
+    int status = read_length_prefix(&data_len);
+    if (status < 0) {
+        write_fs_write_result(FS_RESULT_STATUS_IO_ERROR);
+        return;
+    }
+
+    int path_status = validate_sandbox_path(path);
+    if (path_status != FS_RESULT_STATUS_OK) {
+        status = consume_fs_write_body(-1, data_len, path_status);
+        write_fs_write_result(status);
+        return;
+    }
+    if (data_len > FS_WRITE_MAX_BYTES) {
+        status = consume_fs_write_body(-1, data_len, FS_RESULT_STATUS_NO_SPACE);
+        write_fs_write_result(status);
+        return;
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int open_status = FS_RESULT_STATUS_OK;
+    if (fd < 0) {
+        open_status = fs_status_from_errno(errno);
+    }
+
+    status = consume_fs_write_body(fd, data_len, open_status);
+    write_fs_write_result(status);
 }
 
 static void write_escaped_output(int stream_fd, const unsigned char *data, size_t length) {
@@ -849,7 +1146,22 @@ static void serial_command_loop(void) {
             continue;
         }
 
-        int exit_code = execute_command(command_buffer);
+        if (strncmp(command_buffer, "FS:READ:", 8) == 0) {
+            handle_fs_read(command_buffer + 8);
+            continue;
+        }
+        if (strncmp(command_buffer, "FS:WRITE:", 9) == 0) {
+            handle_fs_write(command_buffer + 9);
+            continue;
+        }
+        if (strncmp(command_buffer, "EXEC:", 5) != 0) {
+            static const unsigned char invalid_prefix[] = "unsupported command prefix";
+            write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_prefix, sizeof(invalid_prefix) - 1);
+            write_exit_code(125);
+            continue;
+        }
+
+        int exit_code = execute_command(command_buffer + 5);
         write_exit_code(exit_code);
     }
 }
@@ -871,6 +1183,7 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     mount_if_needed("proc", "/proc", "proc", 0);
     mount_if_needed("devtmpfs", "/dev", "devtmpfs", 0);
+    mkdir("/sandbox", 0755);
 #ifdef BOOT_PROFILE
     mounts_done_ns = monotonic_now_ns();
 #endif

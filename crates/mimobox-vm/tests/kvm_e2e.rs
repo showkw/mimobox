@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use mimobox_core::{Sandbox, SandboxConfig};
 use mimobox_vm::{
-    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmSandbox, microvm_config_from_vm_assets,
-    resolve_vm_assets_dir,
+    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError, MicrovmSandbox,
+    microvm_config_from_vm_assets, resolve_vm_assets_dir,
 };
 
 fn e2e_config() -> MicrovmConfig {
@@ -204,4 +204,38 @@ fn test_kvm_snapshot_restore_executes_command() {
 
     backend.shutdown().expect("关闭源 VM 必须成功");
     restored.shutdown().expect("关闭恢复 VM 必须成功");
+}
+
+#[test]
+fn test_kvm_vm_write_and_read_file() {
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), e2e_config()).expect("创建 VM 必须成功");
+    let file_path = "/sandbox/phase-a-fs.bin";
+    let expected = b"hello\nphase-a\x00payload";
+
+    backend
+        .write_file(file_path, expected)
+        .expect("guest 写文件必须成功");
+    let actual = backend.read_file(file_path).expect("guest 读文件必须成功");
+
+    assert_eq!(actual, expected);
+
+    backend.shutdown().expect("关闭 VM 必须成功");
+}
+
+#[test]
+fn test_kvm_vm_read_nonexistent_file() {
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), e2e_config()).expect("创建 VM 必须成功");
+
+    let error = backend
+        .read_file("/sandbox/phase-a-missing.txt")
+        .expect_err("读取不存在文件必须失败");
+
+    assert!(
+        matches!(error, MicrovmError::Backend(ref message) if message.contains("路径错误")),
+        "不存在文件应映射为路径错误: {error}"
+    );
+
+    backend.shutdown().expect("关闭 VM 必须成功");
 }

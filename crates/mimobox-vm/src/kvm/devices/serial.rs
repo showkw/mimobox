@@ -33,8 +33,12 @@ pub(super) const UART_LSR_THR_EMPTY: u8 = 0x20;
 pub(super) const UART_LSR_TRANSMITTER_EMPTY: u8 = 0x40;
 pub(in crate::kvm) const SERIAL_READY_LINE: &str = "READY";
 pub(in crate::kvm) const SERIAL_EXEC_PREFIX: &str = "EXEC:";
+pub(in crate::kvm) const SERIAL_FS_READ_PREFIX: &str = "FS:READ:";
+pub(in crate::kvm) const SERIAL_FS_WRITE_PREFIX: &str = "FS:WRITE:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
+const SERIAL_FSRESULT_PREFIX: &str = "FSRESULT:";
+pub(in crate::kvm) const MAX_FS_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) const SERIAL_BOOT_TIME_PREFIX: &str = "BOOT_TIME:";
 
@@ -200,13 +204,56 @@ pub(in crate::kvm) struct CommandResponse {
     pub(in crate::kvm) stderr: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::kvm) struct FsResult {
+    pub(in crate::kvm) status: u8,
+    pub(in crate::kvm) data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::kvm) enum SerialProtocolResult {
+    Command(GuestCommandResult),
+    Fs(FsResult),
+}
+
+#[derive(Debug)]
+pub(in crate::kvm) enum SerialResponseCollector {
+    Command(CommandResponse),
+    Fs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::kvm) enum SerialFrame {
+    Line(String),
+    FsResult(FsResult),
+}
+
 pub(in crate::kvm) fn encode_command_payload(
     cmd: &[String],
     timeout_secs: Option<u64>,
 ) -> Result<Vec<u8>, MicrovmError> {
     let command = build_guest_command(cmd, timeout_secs)?;
-    let mut frame = format!("{SERIAL_EXEC_PREFIX}{}:", command.len()).into_bytes();
-    frame.extend_from_slice(command.as_bytes());
+    encode_text_frame(SERIAL_EXEC_PREFIX, command.as_bytes())
+}
+
+pub(in crate::kvm) fn encode_fs_read_payload(path: &str) -> Result<Vec<u8>, MicrovmError> {
+    encode_text_frame(SERIAL_FS_READ_PREFIX, path.as_bytes())
+}
+
+pub(in crate::kvm) fn encode_fs_write_payload(
+    path: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, MicrovmError> {
+    if data.len() > MAX_FS_TRANSFER_BYTES {
+        return Err(MicrovmError::InvalidConfig(format!(
+            "FS:WRITE 数据超过 10MB 限制: {} bytes",
+            data.len()
+        )));
+    }
+
+    let mut frame = encode_text_frame(SERIAL_FS_WRITE_PREFIX, path.as_bytes())?;
+    frame.extend_from_slice(format!("{}:", data.len()).as_bytes());
+    frame.extend_from_slice(data);
     frame.push(b'\n');
     Ok(frame)
 }
@@ -226,6 +273,14 @@ pub(in crate::kvm) fn build_guest_command(
     }
 
     Ok(join_shell_command(cmd))
+}
+
+fn encode_text_frame(prefix: &str, payload: &[u8]) -> Result<Vec<u8>, MicrovmError> {
+    let payload_len = payload.len();
+    let mut frame = format!("{prefix}{payload_len}:").into_bytes();
+    frame.extend_from_slice(payload);
+    frame.push(b'\n');
+    Ok(frame)
 }
 
 pub(in crate::kvm) fn parse_serial_line(
@@ -272,10 +327,23 @@ pub(in crate::kvm) fn preview_serial_output(serial: &[u8]) -> String {
     }
 }
 
-pub(super) fn take_serial_line(line_buffer: &mut Vec<u8>) -> String {
-    let line = String::from_utf8_lossy(line_buffer).into_owned();
-    line_buffer.clear();
-    line
+pub(in crate::kvm) fn take_serial_frame(
+    frame_buffer: &mut Vec<u8>,
+) -> Result<Option<SerialFrame>, MicrovmError> {
+    if frame_buffer.is_empty() {
+        return Ok(None);
+    }
+
+    if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
+        return try_take_fs_result_frame(frame_buffer);
+    }
+
+    let Some(newline_index) = frame_buffer.iter().position(|&byte| byte == b'\n') else {
+        return Ok(None);
+    };
+    let line = String::from_utf8_lossy(&frame_buffer[..newline_index]).into_owned();
+    frame_buffer.drain(..=newline_index);
+    Ok(Some(SerialFrame::Line(line)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +419,107 @@ fn parse_hex_digit(value: u8) -> Result<u8, MicrovmError> {
             char::from(other)
         ))),
     }
+}
+
+fn try_take_fs_result_frame(
+    frame_buffer: &mut Vec<u8>,
+) -> Result<Option<SerialFrame>, MicrovmError> {
+    let bytes = frame_buffer.as_slice();
+    if bytes.is_empty() || !bytes.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
+        return Ok(None);
+    }
+
+    let prefix_len = SERIAL_FSRESULT_PREFIX.len();
+    let Some((status, status_delim_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
+        return Ok(None);
+    };
+    let status = u8::try_from(status).map_err(|_| {
+        MicrovmError::Backend(format!("guest FSRESULT 状态码超出 u8 范围: {status}"))
+    })?;
+
+    match bytes.get(status_delim_index) {
+        Some(b'\n') => {
+            frame_buffer.drain(..=status_delim_index);
+            return Ok(Some(SerialFrame::FsResult(FsResult {
+                status,
+                data: Vec::new(),
+            })));
+        }
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest FSRESULT 状态字段后缺少分隔符: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let data_len_start = status_delim_index + 1;
+    let Some((data_len, data_len_delim_index)) = parse_decimal_prefix(bytes, data_len_start)?
+    else {
+        return Ok(None);
+    };
+    match bytes.get(data_len_delim_index) {
+        Some(b':') => {}
+        Some(other) => {
+            return Err(MicrovmError::Backend(format!(
+                "guest FSRESULT 数据长度字段后缺少冒号: {}",
+                char::from(*other)
+            )));
+        }
+        None => return Ok(None),
+    }
+
+    let data_start = data_len_delim_index + 1;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 数据长度溢出".into()))?;
+    if frame_buffer.len() < data_end + 1 {
+        return Ok(None);
+    }
+    if bytes
+        .get(data_end)
+        .copied()
+        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 缺少结尾换行".into()))?
+        != b'\n'
+    {
+        return Err(MicrovmError::Backend(
+            "guest FSRESULT 数据帧未以换行结束".into(),
+        ));
+    }
+
+    let data = frame_buffer[data_start..data_end].to_vec();
+    frame_buffer.drain(..=data_end);
+    Ok(Some(SerialFrame::FsResult(FsResult { status, data })))
+}
+
+fn parse_decimal_prefix(
+    bytes: &[u8],
+    start: usize,
+) -> Result<Option<(usize, usize)>, MicrovmError> {
+    let mut value = 0usize;
+    let mut index = start;
+    let mut saw_digit = false;
+
+    while let Some(byte) = bytes.get(index).copied() {
+        if byte.is_ascii_digit() {
+            saw_digit = true;
+            value = value
+                .checked_mul(10)
+                .and_then(|current| current.checked_add(usize::from(byte - b'0')))
+                .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 数字字段溢出".into()))?;
+            index += 1;
+            continue;
+        }
+
+        if !saw_digit {
+            return Err(MicrovmError::Backend("guest FSRESULT 缺少数字字段".into()));
+        }
+        return Ok(Some((value, index)));
+    }
+
+    Ok(None)
 }
 
 fn join_shell_command(cmd: &[String]) -> String {

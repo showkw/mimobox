@@ -60,14 +60,16 @@ use self::boot::{
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
-    CommandResponse, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG, I8042_RESET_CMD,
-    PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START, SerialDevice,
-    VsockCommandChannel, VsockMmioAction, VsockMmioDevice, activate_vhost_backend,
-    build_guest_command, emulate_boot_legacy_pio_read, encode_command_payload, handle_serial_read,
-    handle_serial_write, is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
+    CommandResponse, FsResult, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG,
+    I8042_RESET_CMD, PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START,
+    SerialDevice, SerialProtocolResult, SerialResponseCollector, VsockCommandChannel,
+    VsockMmioAction, VsockMmioDevice, activate_vhost_backend, build_guest_command,
+    emulate_boot_legacy_pio_read, encode_command_payload, encode_fs_read_payload,
+    encode_fs_write_payload, handle_serial_read, handle_serial_write, is_boot_legacy_pio_port,
+    is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
-use self::devices::{SERIAL_EXEC_PREFIX, parse_serial_line};
+use self::devices::{SERIAL_EXEC_PREFIX, SerialFrame, parse_serial_line, take_serial_frame};
 pub(crate) use self::profile::RestoreProfile;
 #[cfg(all(any(debug_assertions, feature = "boot-profile"), test))]
 use self::profile::parse_guest_boot_time_line;
@@ -192,7 +194,7 @@ pub(crate) struct LoadedKernel {
 #[derive(Debug)]
 enum RunLoopOutcome {
     Exit(KvmExitReason),
-    CommandDone(GuestCommandResult),
+    ResponseDone(SerialProtocolResult),
 }
 
 static WATCHDOG_SIGNAL_HANDLER_INIT: Once = Once::new();
@@ -1016,6 +1018,66 @@ impl KvmBackend {
         result
     }
 
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+        }
+
+        self.ensure_guest_ready()?;
+        if self
+            .vsock_channel
+            .as_ref()
+            .is_some_and(|channel| channel.is_connected())
+        {
+            return Err(MicrovmError::Backend(
+                "FS 串口协议暂不支持已建立的 guest-vsock 连接".into(),
+            ));
+        }
+
+        let payload = encode_fs_read_payload(path)?;
+        self.lifecycle = KvmLifecycle::Running;
+        let result =
+            self.run_fs_operation_over_serial(payload)
+                .and_then(|fs_result| match fs_result.status {
+                    0 => Ok(fs_result.data),
+                    status => Err(fs_result_to_error(status, path)),
+                });
+        if self.lifecycle != KvmLifecycle::Destroyed {
+            self.lifecycle = KvmLifecycle::Ready;
+        }
+        result
+    }
+
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+        }
+
+        self.ensure_guest_ready()?;
+        if self
+            .vsock_channel
+            .as_ref()
+            .is_some_and(|channel| channel.is_connected())
+        {
+            return Err(MicrovmError::Backend(
+                "FS 串口协议暂不支持已建立的 guest-vsock 连接".into(),
+            ));
+        }
+
+        let payload = encode_fs_write_payload(path, data)?;
+        self.lifecycle = KvmLifecycle::Running;
+        let result =
+            self.run_fs_operation_over_serial(payload)
+                .and_then(|fs_result| match fs_result.status {
+                    0 => Ok(()),
+                    status => Err(fs_result_to_error(status, path)),
+                });
+        if self.lifecycle != KvmLifecycle::Destroyed {
+            self.lifecycle = KvmLifecycle::Ready;
+        }
+        result
+    }
+
     fn run_command_over_vsock(&mut self, cmd: &[u8]) -> Result<GuestCommandResult, MicrovmError> {
         let channel = self
             .vsock_channel
@@ -1036,6 +1098,13 @@ impl KvmBackend {
         self.last_command_payload = payload;
         self.transport = KvmTransport::Serial;
         self.run_until_command_result()
+    }
+
+    fn run_fs_operation_over_serial(&mut self, payload: Vec<u8>) -> Result<FsResult, MicrovmError> {
+        self.serial_device.queue_input(&payload);
+        self.last_command_payload = payload;
+        self.transport = KvmTransport::Serial;
+        self.run_until_fs_result()
     }
 
     /// 导出快照所需的内存和 vCPU 状态。
@@ -1150,9 +1219,9 @@ impl KvmBackend {
                         "等待 vsock 连接期间 guest 异常退出: {exit_reason:?}"
                     )));
                 }
-                Ok(RunLoopOutcome::CommandDone(_)) => {
+                Ok(RunLoopOutcome::ResponseDone(_)) => {
                     return Err(MicrovmError::Backend(
-                        "vsock 连接握手阶段不应收到命令完成事件".into(),
+                        "vsock 连接握手阶段不应收到协议完成事件".into(),
                     ));
                 }
                 Err(err) if watchdog.timed_out() => {
@@ -1196,9 +1265,9 @@ impl KvmBackend {
                         return Ok(KvmExitReason::Io);
                     }
                 }
-                Ok(RunLoopOutcome::CommandDone(_)) => {
+                Ok(RunLoopOutcome::ResponseDone(_)) => {
                     return Err(MicrovmError::Backend(
-                        "boot 阶段不应收到命令完成事件".into(),
+                        "boot 阶段不应收到协议完成事件".into(),
                     ));
                 }
                 Err(err) if watchdog.timed_out() => {
@@ -1217,14 +1286,21 @@ impl KvmBackend {
 
     fn run_until_command_result(&mut self) -> Result<GuestCommandResult, MicrovmError> {
         let mut line_buffer = Vec::new();
-        let mut response = CommandResponse::default();
+        let mut response = SerialResponseCollector::Command(CommandResponse::default());
         let watchdog = self.start_watchdog(Duration::from_secs(
             self.base_config.timeout_secs.unwrap_or(30),
         ))?;
 
         loop {
             match self.run_vcpu_step(&mut line_buffer, Some(&mut response), &watchdog) {
-                Ok(RunLoopOutcome::CommandDone(result)) => return Ok(result),
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
+                    return Ok(result);
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(_))) => {
+                    return Err(MicrovmError::Backend(
+                        "命令执行阶段收到意外 FSRESULT 帧".into(),
+                    ));
+                }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
@@ -1234,6 +1310,9 @@ impl KvmBackend {
                 Err(_) if watchdog.timed_out() => {
                     self.guest_ready = false;
                     self.lifecycle = KvmLifecycle::Destroyed;
+                    let SerialResponseCollector::Command(response) = &mut response else {
+                        unreachable!("命令等待阶段必须使用命令响应收集器");
+                    };
                     return Ok(GuestCommandResult {
                         stdout: std::mem::take(&mut response.stdout),
                         stderr: std::mem::take(&mut response.stderr),
@@ -1246,10 +1325,46 @@ impl KvmBackend {
         }
     }
 
+    fn run_until_fs_result(&mut self) -> Result<FsResult, MicrovmError> {
+        let mut line_buffer = Vec::new();
+        let mut response = SerialResponseCollector::Fs;
+        let watchdog = self.start_watchdog(Duration::from_secs(
+            self.base_config.timeout_secs.unwrap_or(30),
+        ))?;
+
+        loop {
+            match self.run_vcpu_step(&mut line_buffer, Some(&mut response), &watchdog) {
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(result))) => {
+                    return Ok(result);
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(_))) => {
+                    return Err(MicrovmError::Backend(
+                        "文件操作阶段收到意外命令结果帧".into(),
+                    ));
+                }
+                Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
+                Ok(RunLoopOutcome::Exit(exit_reason)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "guest 在返回 FSRESULT 帧前异常退出: {exit_reason:?}"
+                    )));
+                }
+                Err(err) if watchdog.timed_out() => {
+                    self.guest_ready = false;
+                    self.lifecycle = KvmLifecycle::Destroyed;
+                    return Err(MicrovmError::Backend(format!(
+                        "guest 文件操作超时: {err}; serial={}",
+                        preview_serial_output(&self.serial_buffer),
+                    )));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     fn run_vcpu_step(
         &mut self,
         line_buffer: &mut Vec<u8>,
-        response: Option<&mut CommandResponse>,
+        response: Option<&mut SerialResponseCollector>,
         watchdog: &VcpuRunWatchdog,
     ) -> Result<RunLoopOutcome, MicrovmError> {
         let should_track_io_detail = response.is_some();
@@ -1316,7 +1431,7 @@ impl KvmBackend {
                         response,
                     )?;
                     if let Some(result) = action {
-                        return Ok(RunLoopOutcome::CommandDone(result));
+                        return Ok(RunLoopOutcome::ResponseDone(result));
                     }
                     #[cfg(any(debug_assertions, feature = "boot-profile"))]
                     if boot_profile.host_logged
@@ -1585,6 +1700,16 @@ pub(crate) fn restore_runtime_state(
     ))
 }
 
+fn fs_result_to_error(status: u8, path: &str) -> MicrovmError {
+    match status {
+        1 => MicrovmError::Backend(format!("guest 文件路径错误: {path}")),
+        2 => MicrovmError::Backend(format!("guest 文件 IO 错误: {path}")),
+        3 => MicrovmError::Backend(format!("guest 文件权限错误: {path}")),
+        4 => MicrovmError::Backend(format!("guest 文件空间不足: {path}")),
+        other => MicrovmError::Backend(format!("guest 返回未知文件状态码 {other}: {path}")),
+    }
+}
+
 fn validate_initrd_image(bytes: &[u8]) -> Result<(), MicrovmError> {
     if bytes.len() < GZIP_MAGIC.len() || bytes[..2] != GZIP_MAGIC {
         return Err(MicrovmError::Backend(
@@ -1659,9 +1784,11 @@ mod tests {
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
     use super::{
-        CommandResponse, DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, build_guest_command,
-        encode_command_payload, parse_serial_line,
+        DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, build_guest_command,
+        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, parse_serial_line,
+        take_serial_frame,
     };
+    use super::devices::CommandResponse;
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;
 
@@ -1687,6 +1814,48 @@ mod tests {
                 .any(|window| window == b"hello\nworld"),
             "长度前缀帧必须保留命令参数中的换行字节"
         );
+    }
+
+    #[test]
+    fn test_encode_fs_write_payload_preserves_raw_bytes() {
+        let path = "/sandbox/raw.bin";
+        let data = b"hello\nworld\x00tail";
+
+        let payload = encode_fs_write_payload(path, data).expect("编码 FS:WRITE 必须成功");
+        let header = format!("FS:WRITE:{}:{path}\n{}:", path.len(), data.len()).into_bytes();
+
+        assert!(payload.starts_with(&header));
+        assert!(payload.ends_with(b"\n"));
+        assert!(
+            payload.windows(data.len()).any(|window| window == data),
+            "FS:WRITE 必须保留原始数据字节"
+        );
+    }
+
+    #[test]
+    fn test_take_serial_frame_parses_fsresult_with_raw_newline_bytes() {
+        let expected = b"hello\nworld\x00tail".to_vec();
+        let mut buffer = format!("FSRESULT:0:{}:", expected.len()).into_bytes();
+        buffer.extend_from_slice(&expected);
+        buffer.push(b'\n');
+
+        let frame = take_serial_frame(&mut buffer)
+            .expect("解析 FSRESULT 帧必须成功")
+            .expect("FSRESULT 帧必须被识别");
+
+        assert!(
+            matches!(frame, SerialFrame::FsResult(ref result) if result.status == 0 && result.data == expected)
+        );
+        assert!(buffer.is_empty(), "完整帧被取出后缓冲区应清空");
+    }
+
+    #[test]
+    fn test_encode_fs_read_payload_uses_length_prefixed_frame() {
+        let path = "/sandbox/example.txt";
+        let payload = encode_fs_read_payload(path).expect("编码 FS:READ 必须成功");
+        let expected = format!("FS:READ:{}:{path}\n", path.len()).into_bytes();
+
+        assert_eq!(payload, expected);
     }
 
     #[test]
