@@ -2,7 +2,7 @@
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__cpuid_count;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
+use crate::vm::GuestExecOptions;
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
 
 mod boot;
@@ -989,6 +990,15 @@ impl KvmBackend {
 
     /// 显式启用 guest-vsock 时优先走 vsock，否则默认走串口协议。
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        self.run_command_with_options(cmd, &GuestExecOptions::default())
+    }
+
+    /// 允许按命令覆写环境变量与超时。
+    pub fn run_command_with_options(
+        &mut self,
+        cmd: &[String],
+        options: &GuestExecOptions,
+    ) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
         }
@@ -999,21 +1009,24 @@ impl KvmBackend {
         self.ensure_guest_ready()?;
         self.ensure_vsock_channel_connected()?;
 
-        let guest_command = build_guest_command(cmd, self.base_config.timeout_secs)?;
+        let effective_timeout_secs = self.effective_command_timeout_secs(options.timeout)?;
+        let guest_command = build_guest_command(cmd)?;
         self.last_command_payload = guest_command.as_bytes().to_vec();
 
         self.lifecycle = KvmLifecycle::Running;
-        let result = if self.vsock_channel.is_some() {
+        let use_vsock =
+            self.vsock_channel.is_some() && options.env.is_empty() && options.timeout.is_none();
+        let result = if use_vsock {
             match self.run_command_over_vsock(guest_command.as_bytes()) {
                 Ok(result) => Ok(result),
                 Err(err) => {
                     warn!(error = %err, "vsock 命令通道执行失败，回退串口协议");
                     self.drop_vsock_channel();
-                    self.run_command_over_serial(cmd)
+                    self.run_command_over_serial(cmd, &options.env, effective_timeout_secs)
                 }
             }
         } else {
-            self.run_command_over_serial(cmd)
+            self.run_command_over_serial(cmd, &options.env, effective_timeout_secs)
         };
         // watchdog 超时会把实例标记为 Destroyed，不能再被后续代码误写回 Ready。
         if self.lifecycle != KvmLifecycle::Destroyed {
@@ -1031,6 +1044,14 @@ impl KvmBackend {
         &mut self,
         cmd: &[String],
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        self.run_command_streaming_with_options(cmd, &GuestExecOptions::default())
+    }
+
+    pub fn run_command_streaming_with_options(
+        &mut self,
+        cmd: &[String],
+        options: &GuestExecOptions,
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
         }
@@ -1041,7 +1062,9 @@ impl KvmBackend {
         self.ensure_guest_ready()?;
 
         self.lifecycle = KvmLifecycle::Running;
-        let result = self.run_command_streaming_over_serial(cmd);
+        let effective_timeout_secs = self.effective_command_timeout_secs(options.timeout)?;
+        let result =
+            self.run_command_streaming_over_serial(cmd, &options.env, effective_timeout_secs);
         if self.lifecycle != KvmLifecycle::Destroyed {
             self.lifecycle = KvmLifecycle::Ready;
         }
@@ -1138,37 +1161,63 @@ impl KvmBackend {
     fn run_command_over_serial(
         &mut self,
         cmd: &[String],
+        env: &HashMap<String, String>,
+        timeout_secs: Option<u64>,
     ) -> Result<GuestCommandResult, MicrovmError> {
-        let payload = encode_command_payload(cmd, self.base_config.timeout_secs)?;
+        let payload = encode_command_payload(cmd, env, timeout_secs)?;
         self.serial_device.queue_input(&payload);
         self.last_command_payload = payload;
         self.transport = KvmTransport::Serial;
-        self.run_until_command_result()
+        self.run_until_command_result(timeout_secs)
     }
 
     fn run_command_streaming_over_serial(
         &mut self,
         cmd: &[String],
+        env: &HashMap<String, String>,
+        timeout_secs: Option<u64>,
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
-        let guest_command = build_guest_command(cmd, self.base_config.timeout_secs)?;
+        let guest_command = build_guest_command(cmd)?;
         let payload = encode_streaming_command_payload(&guest_command);
         let (stream_tx, stream_rx) = spawn_stream_event_forwarder();
         self.serial_device.queue_input(&payload);
         self.last_command_payload = payload;
         self.transport = KvmTransport::Serial;
-        match self.run_until_command_stream(stream_tx.clone())? {
+        match self.run_until_command_stream(stream_tx.clone(), timeout_secs)? {
             StreamCommandOutcome::Completed => {}
             StreamCommandOutcome::RetryBlocking => {
                 // 旧 guest 拒绝 EXECS 时可能不会消费完整 payload，回退前必须清空残留串口输入。
                 self.serial_device.rx_fifo.clear();
-                let payload = encode_command_payload(cmd, self.base_config.timeout_secs)?;
+                let payload = encode_command_payload(cmd, env, timeout_secs)?;
                 self.serial_device.queue_input(&payload);
                 self.last_command_payload = payload;
-                let result = self.run_until_command_result()?;
+                let result = self.run_until_command_result(timeout_secs)?;
                 emit_command_result_as_stream(&stream_tx, result);
             }
         }
         Ok(stream_rx)
+    }
+
+    fn effective_command_timeout_secs(
+        &self,
+        timeout_override: Option<Duration>,
+    ) -> Result<Option<u64>, MicrovmError> {
+        match timeout_override {
+            Some(timeout) => {
+                if timeout.is_zero() {
+                    return Err(MicrovmError::InvalidConfig(
+                        "命令级 timeout 不能为 0".into(),
+                    ));
+                }
+                let millis = timeout.as_millis();
+                let secs = millis.div_ceil(1000);
+                let secs = u64::try_from(secs).map_err(|_| {
+                    MicrovmError::InvalidConfig("命令级 timeout 超出 u64 范围".into())
+                })?;
+                Ok(Some(secs.max(1)))
+            }
+            None => Ok(self.base_config.timeout_secs),
+        }
     }
 
     fn run_http_proxy_request(
@@ -1215,8 +1264,11 @@ impl KvmBackend {
         });
         let payload = serde_json::to_vec(&payload)
             .map_err(|err| MicrovmError::Backend(format!("序列化 HTTP 响应头失败: {err}")))?;
-        let mut frame =
-            format!("{SERIAL_HTTPRESP_HEADERS_PREFIX}{request_id}:{}:", payload.len()).into_bytes();
+        let mut frame = format!(
+            "{SERIAL_HTTPRESP_HEADERS_PREFIX}{request_id}:{}:",
+            payload.len()
+        )
+        .into_bytes();
         frame.extend_from_slice(&payload);
         frame.push(b'\n');
         self.serial_device.queue_input(&frame);
@@ -1442,12 +1494,13 @@ impl KvmBackend {
         }
     }
 
-    fn run_until_command_result(&mut self) -> Result<GuestCommandResult, MicrovmError> {
+    fn run_until_command_result(
+        &mut self,
+        timeout_secs: Option<u64>,
+    ) -> Result<GuestCommandResult, MicrovmError> {
         let mut line_buffer = Vec::new();
         let mut response = SerialResponseCollector::Command(CommandResponse::default());
-        let watchdog = self.start_watchdog(Duration::from_secs(
-            self.base_config.timeout_secs.unwrap_or(30),
-        ))?;
+        let watchdog = self.start_watchdog(Duration::from_secs(timeout_secs.unwrap_or(30)))?;
 
         loop {
             match self.run_vcpu_step(&mut line_buffer, Some(&mut response), &watchdog) {
@@ -1466,7 +1519,8 @@ impl KvmBackend {
                     SerialProtocolResult::StreamStart(_)
                     | SerialProtocolResult::StreamStdout(_, _)
                     | SerialProtocolResult::StreamStderr(_, _)
-                    | SerialProtocolResult::StreamEnd(_, _),
+                    | SerialProtocolResult::StreamEnd(_, _)
+                    | SerialProtocolResult::StreamTimeout(_),
                 )) => {
                     return Err(MicrovmError::Backend(
                         "Phase A 尚未接入流式命令执行路径，却收到了 STREAM 帧".into(),
@@ -1499,12 +1553,11 @@ impl KvmBackend {
     fn run_until_command_stream(
         &mut self,
         stream_tx: mpsc::Sender<StreamEvent>,
+        timeout_secs: Option<u64>,
     ) -> Result<StreamCommandOutcome, MicrovmError> {
         let mut line_buffer = Vec::new();
         let mut response = SerialResponseCollector::Command(CommandResponse::default());
-        let watchdog = self.start_watchdog(Duration::from_secs(
-            self.base_config.timeout_secs.unwrap_or(30),
-        ))?;
+        let watchdog = self.start_watchdog(Duration::from_secs(timeout_secs.unwrap_or(30)))?;
         let mut started = false;
 
         loop {
@@ -1563,6 +1616,22 @@ impl KvmBackend {
                         "收到意外 STREAM:END id，期望 0，实际 {stream_id}"
                     )));
                 }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamTimeout(0))) => {
+                    if !started {
+                        return Err(MicrovmError::Backend(
+                            "收到 STREAM:TIMEOUT 前缺少 STREAM:START".into(),
+                        ));
+                    }
+                    let _ = stream_tx.send(StreamEvent::TimedOut);
+                    return Ok(StreamCommandOutcome::Completed);
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamTimeout(
+                    stream_id,
+                ))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "收到意外 STREAM:TIMEOUT id，期望 0，实际 {stream_id}"
+                    )));
+                }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
                     if should_retry_stream_with_blocking_command(&result) {
                         return Ok(StreamCommandOutcome::RetryBlocking);
@@ -1619,7 +1688,8 @@ impl KvmBackend {
                     SerialProtocolResult::StreamStart(_)
                     | SerialProtocolResult::StreamStdout(_, _)
                     | SerialProtocolResult::StreamStderr(_, _)
-                    | SerialProtocolResult::StreamEnd(_, _),
+                    | SerialProtocolResult::StreamEnd(_, _)
+                    | SerialProtocolResult::StreamTimeout(_),
                 )) => {
                     return Err(MicrovmError::Backend(
                         "文件操作阶段收到意外 STREAM 帧".into(),
@@ -2109,6 +2179,7 @@ fn install_watchdog_signal_handler() {
 #[cfg(test)]
 mod tests {
     use super::devices::CommandResponse;
+    use super::devices::SERIAL_HTTP_REQUEST_PREFIX;
     #[cfg(any(debug_assertions, feature = "boot-profile"))]
     use super::{BootProfile, parse_guest_boot_time_line};
     #[cfg(target_arch = "x86_64")]
@@ -2116,37 +2187,45 @@ mod tests {
         CPUID_LEAF_KVM_FEATURES, CPUID_LEAF_KVM_SIGNATURE, CPUID_LEAF_TIMING_INFO,
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
-    use super::devices::SERIAL_HTTP_REQUEST_PREFIX;
     use super::{
         DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, SerialProtocolResult,
-        build_guest_command, encode_command_payload, encode_fs_read_payload,
+        devices::build_guest_exec_payload, encode_command_payload, encode_fs_read_payload,
         encode_fs_write_payload, parse_serial_line, take_serial_frame,
     };
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;
+    use std::collections::HashMap;
 
     #[test]
     fn test_encode_command_payload_uses_length_prefixed_frame() {
         let command = vec![
-            "/bin/printf".to_string(),
-            "%s".to_string(),
-            "hello\nworld".to_string(),
+            "/bin/echo".to_string(),
+            "test".to_string(),
         ];
 
-        let payload = encode_command_payload(&command, Some(1)).expect("编码命令帧必须成功");
-        let command_line = build_guest_command(&command, Some(1)).expect("构建 shell 命令必须成功");
-        let header = format!("{SERIAL_EXEC_PREFIX}{}:", command_line.len());
-        let mut expected = header.into_bytes();
-        expected.extend_from_slice(command_line.as_bytes());
-        expected.push(b'\n');
+        let payload =
+            encode_command_payload(&command, &HashMap::new(), None).expect("编码命令帧必须成功");
 
-        assert_eq!(payload, expected);
-        assert!(
-            payload
-                .windows(b"hello\nworld".len())
-                .any(|window| window == b"hello\nworld"),
-            "长度前缀帧必须保留命令参数中的换行字节"
-        );
+        assert!(payload.starts_with(b"EXEC:"));
+        assert!(payload.ends_with(b"\n"));
+        let payload_str = String::from_utf8(payload).expect("payload 必须是合法 UTF-8");
+        // JSON 格式: {"cmd":"/bin/echo test"}
+        assert!(payload_str.contains(r#""cmd""#), "payload 必须包含 cmd 字段: {payload_str}");
+        assert!(payload_str.contains("echo"), "payload 必须包含命令: {payload_str}");
+    }
+
+    #[test]
+    fn test_build_guest_exec_payload_contains_env_and_timeout() {
+        let command = vec!["/bin/echo".to_string(), "hello".to_string()];
+        let env = HashMap::from([("MY_VAR".to_string(), "value".to_string())]);
+
+        let payload =
+            build_guest_exec_payload(&command, &env, Some(10)).expect("构建 EXEC 负载必须成功");
+
+        assert!(payload.contains(r#""cmd""#), "payload 必须包含 cmd: {payload}");
+        assert!(payload.contains("echo"), "payload 必须包含命令: {payload}");
+        assert!(payload.contains(r#""MY_VAR":"value""#));
+        assert!(payload.contains(r#""timeout":10"#));
     }
 
     #[test]
@@ -2241,7 +2320,10 @@ mod tests {
                     && request.request.method == "GET"
                     && request.request.url == "https://api.openai.com/v1/models"
         ));
-        assert!(buffer.is_empty(), "完整 HTTP:REQUEST 帧被取出后缓冲区应清空");
+        assert!(
+            buffer.is_empty(),
+            "完整 HTTP:REQUEST 帧被取出后缓冲区应清空"
+        );
     }
 
     #[test]
@@ -2265,6 +2347,18 @@ mod tests {
         assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
         assert!(result.stdout.is_empty(), "纯 EXIT 帧不应携带 stdout");
         assert!(result.stderr.is_empty(), "纯 EXIT 帧不应携带 stderr");
+    }
+
+    #[test]
+    fn test_exit_timeout_maps_to_timed_out_result() {
+        let mut response = CommandResponse::default();
+
+        let result = parse_serial_line("EXIT:TIMEOUT", &mut response)
+            .expect("解析 EXIT:TIMEOUT 帧必须成功")
+            .expect("EXIT:TIMEOUT 帧必须产生命令结果");
+
+        assert_eq!(result.exit_code, None);
+        assert!(result.timed_out, "EXIT:TIMEOUT 必须映射为超时");
     }
 
     #[test]

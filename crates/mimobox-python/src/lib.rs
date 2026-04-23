@@ -196,9 +196,26 @@ impl PySandbox {
     }
 
     /// 在沙箱中执行一条 shell 风格命令。
-    fn execute(&mut self, command: &str) -> PyResult<PyExecuteResult> {
+    #[pyo3(signature = (command, env=None, timeout=None))]
+    fn execute(
+        &mut self,
+        command: &str,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+    ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
-        let result = sandbox.execute(command).map_err(map_sdk_error)?;
+        let result = match (env, timeout) {
+            (Some(env), Some(timeout)) => sandbox
+                .execute_with_env_and_timeout(command, env, parse_python_timeout(timeout)?)
+                .map_err(map_sdk_error)?,
+            (Some(env), None) => sandbox
+                .execute_with_env(command, env)
+                .map_err(map_sdk_error)?,
+            (None, Some(timeout)) => sandbox
+                .execute_with_timeout(command, parse_python_timeout(timeout)?)
+                .map_err(map_sdk_error)?,
+            (None, None) => sandbox.execute(command).map_err(map_sdk_error)?,
+        };
         Ok(result.into())
     }
 
@@ -313,6 +330,14 @@ fn map_sdk_error(error: SdkError) -> PyErr {
     }
 }
 
+fn parse_python_timeout(timeout: f64) -> PyResult<std::time::Duration> {
+    if !timeout.is_finite() || timeout <= 0.0 {
+        return Err(PyValueError::new_err("timeout 必须是大于 0 的有限浮点数"));
+    }
+
+    Ok(std::time::Duration::from_secs_f64(timeout))
+}
+
 #[pymodule]
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
@@ -324,7 +349,10 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SandboxError", py.get_type::<SandboxError>())?;
     module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
     module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
-    module.add("SandboxLifecycleError", py.get_type::<SandboxLifecycleError>())?;
+    module.add(
+        "SandboxLifecycleError",
+        py.get_type::<SandboxLifecycleError>(),
+    )?;
     Ok(())
 }
 

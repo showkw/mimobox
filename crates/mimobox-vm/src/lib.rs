@@ -6,8 +6,8 @@
 //! - [`MicrovmSnapshot`]：自描述快照格式（magic + version + config + memory + vCPU state）
 //! - Linux + `kvm` feature 下的 [`KvmBackend`]：KVM 生命周期基础实现
 
-pub mod pool;
 mod http_proxy;
+pub mod pool;
 mod snapshot;
 mod vm;
 mod vm_assets;
@@ -17,11 +17,12 @@ mod kvm;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 mod restore_pool;
 
+pub use http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 pub use pool::{PoolError, PooledVm, VmPool, VmPoolConfig, VmPoolStats};
 pub use snapshot::MicrovmSnapshot;
-pub use http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 pub use vm::{
-    GuestCommandResult, MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState, StreamEvent,
+    GuestCommandResult, GuestExecOptions, MicrovmConfig, MicrovmError, MicrovmSandbox,
+    MicrovmState, StreamEvent,
 };
 pub use vm_assets::{
     microvm_config_from_assets_dir, microvm_config_from_vm_assets, resolve_vm_assets_dir,

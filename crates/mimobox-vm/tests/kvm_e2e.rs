@@ -115,6 +115,42 @@ fn test_kvm_vm_executes() {
 }
 
 #[test]
+fn test_kvm_vm_execute_with_env_vars() {
+    let mut sandbox = MicrovmSandbox::new(e2e_config()).expect("创建 microVM 沙箱必须成功");
+    let env = HashMap::from([("MY_VAR".to_string(), "hello".to_string())]);
+
+    let result = sandbox
+        .execute_with_env(&guest_cmd(&["/bin/sh", "-lc", "echo \"$MY_VAR\""]), env)
+        .expect("带环境变量的命令必须成功执行");
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, b"hello\n");
+    assert!(result.stderr.is_empty(), "echo 不应产生 stderr");
+    assert!(!result.timed_out, "环境变量命令不应超时");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_execute_with_timeout() {
+    let mut sandbox = MicrovmSandbox::new(e2e_config()).expect("创建 microVM 沙箱必须成功");
+
+    let result = sandbox
+        .execute_with_timeout(
+            &guest_cmd(&["/bin/sh", "-lc", "sleep 5"]),
+            std::time::Duration::from_millis(200),
+        )
+        .expect("命令级超时也必须返回结果结构");
+
+    assert!(result.timed_out, "短超时必须终止长时间命令");
+    assert_eq!(result.exit_code, None, "超时结果不应携带退出码");
+    assert!(result.stdout.is_empty(), "超时结果不应包含 stdout");
+    assert!(result.stderr.is_empty(), "超时结果不应包含 stderr");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
 fn test_kvm_vm_http_proxy_request() {
     let mut sandbox = SdkSandbox::with_config(sdk_http_config(&[HTTP_PROXY_ALLOWED_HOST]))
         .expect("创建 SDK microVM 沙箱必须成功");
@@ -124,10 +160,7 @@ fn test_kvm_vm_http_proxy_request() {
         .expect("通过 SDK 发起 HTTP 代理请求必须成功");
 
     assert_eq!(response.status, 200, "公开 API 请求应返回 200");
-    assert!(
-        !response.body.is_empty(),
-        "HTTP 代理响应 body 不应为空"
-    );
+    assert!(!response.body.is_empty(), "HTTP 代理响应 body 不应为空");
 
     sandbox.destroy().expect("销毁 SDK microVM 沙箱必须成功");
 }
@@ -137,11 +170,11 @@ fn test_kvm_vm_http_proxy_denied_host() {
     let mut sandbox =
         SdkSandbox::with_config(sdk_http_config(&[])).expect("创建 SDK microVM 沙箱必须成功");
 
-    let error = match sandbox.http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None)
-    {
-        Ok(_) => panic!("白名单缺失时请求必须被拒绝"),
-        Err(error) => error,
-    };
+    let error =
+        match sandbox.http_request("GET", HTTP_PROXY_ALLOWED_URL, github_zen_headers(), None) {
+            Ok(_) => panic!("白名单缺失时请求必须被拒绝"),
+            Err(error) => error,
+        };
 
     assert_http_denied_host(error);
 
