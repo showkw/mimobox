@@ -3,7 +3,7 @@ use std::error::Error;
 use std::io;
 use std::path::PathBuf;
 
-use mimobox_core::{SandboxConfig, SandboxError, SeccompProfile};
+use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,4 +113,15 @@ fn seccomp_profile_variants_are_complete_and_distinct() {
     assert!(names.contains("network"));
     assert!(names.contains("essential-with-fork"));
     assert!(names.contains("network-with-fork"));
+}
+
+#[test]
+fn sandbox_snapshot_round_trips_through_bytes() {
+    let bytes = b"opaque-snapshot-payload".to_vec();
+
+    let snapshot = SandboxSnapshot::from_owned_bytes(bytes.clone()).expect("快照创建必须成功");
+    let restored = SandboxSnapshot::from_bytes(snapshot.as_bytes()).expect("快照恢复必须成功");
+
+    assert_eq!(restored.size(), bytes.len());
+    assert_eq!(restored.to_bytes(), bytes);
 }

@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
+use crate::snapshot::MicrovmSnapshot;
 use crate::vm::GuestExecOptions;
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
 
@@ -1322,6 +1323,17 @@ impl KvmBackend {
         let memory = self.dump_guest_memory()?;
         let vcpu_state = encode_runtime_state(self)?;
         Ok((memory, vcpu_state))
+    }
+
+    pub(crate) fn snapshot_bytes(&self) -> Result<Vec<u8>, MicrovmError> {
+        let (memory, vcpu_state) = self.snapshot_state()?;
+        MicrovmSnapshot::new(
+            self.base_config.clone(),
+            self.config.clone(),
+            memory,
+            vcpu_state,
+        )
+        .snapshot()
     }
 
     /// 从快照恢复 guest memory 和 vCPU 状态。

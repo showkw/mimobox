@@ -3,7 +3,8 @@
 //! 通过 PyO3 将 `mimobox-sdk` 暴露为 Python 可调用模块。
 
 use mimobox_sdk::{
-    Config, ErrorCode, ExecuteResult, IsolationLevel, Sandbox as RustSandbox, SdkError, StreamEvent,
+    Config, ErrorCode, ExecuteResult, IsolationLevel, Sandbox as RustSandbox,
+    SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -11,7 +12,7 @@ use pyo3::exceptions::{
     PyRuntimeError, PyTimeoutError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::sync::mpsc;
 
 create_exception!(mimobox, SandboxError, pyo3::exceptions::PyException);
@@ -82,6 +83,30 @@ impl From<mimobox_sdk::HttpResponse> for PyHttpResponse {
             headers: value.headers,
             body: value.body,
         }
+    }
+}
+
+#[pyclass(name = "Snapshot")]
+#[derive(Debug, Clone)]
+struct PySnapshot {
+    inner: RustSnapshot,
+}
+
+#[pymethods]
+impl PySnapshot {
+    #[classmethod]
+    fn from_bytes(_cls: &Bound<'_, PyType>, data: &[u8]) -> PyResult<Self> {
+        let snapshot = RustSnapshot::from_bytes(data).map_err(map_sdk_error)?;
+        Ok(Self { inner: snapshot })
+    }
+
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.as_bytes())
+    }
+
+    #[getter]
+    fn size(&self) -> usize {
+        self.inner.size()
     }
 }
 
@@ -245,6 +270,31 @@ impl PySandbox {
         sandbox.write_file(path, &data).map_err(map_sdk_error)
     }
 
+    /// 拍摄当前沙箱快照。
+    fn snapshot(&mut self) -> PyResult<PySnapshot> {
+        let sandbox = self.inner_mut()?;
+        let snapshot = sandbox.snapshot().map_err(map_sdk_error)?;
+        Ok(PySnapshot { inner: snapshot })
+    }
+
+    /// 从快照恢复一个新的沙箱实例。
+    #[classmethod]
+    fn from_snapshot(_cls: &Bound<'_, PyType>, snapshot: PyRef<'_, PySnapshot>) -> PyResult<Self> {
+        let sandbox = RustSandbox::from_snapshot(&snapshot.inner).map_err(map_sdk_error)?;
+        Ok(Self {
+            inner: Some(sandbox),
+        })
+    }
+
+    /// 基于当前状态创建一个独立的新沙箱。
+    fn fork(&mut self) -> PyResult<Self> {
+        let sandbox = self.inner_mut()?;
+        let forked = sandbox.fork().map_err(map_sdk_error)?;
+        Ok(Self {
+            inner: Some(forked),
+        })
+    }
+
     /// 通过 host HTTP 代理执行 HTTPS 请求。
     #[pyo3(signature = (method, url, headers=None, body=None))]
     fn http_request(
@@ -376,6 +426,7 @@ fn parse_python_timeout(timeout: f64) -> PyResult<std::time::Duration> {
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add_class::<PySandbox>()?;
+    module.add_class::<PySnapshot>()?;
     module.add_class::<PyExecuteResult>()?;
     module.add_class::<PyHttpResponse>()?;
     module.add_class::<PyStreamEvent>()?;
@@ -464,5 +515,17 @@ mod tests {
         });
         assert!(timed_out.timed_out);
         assert_eq!(exit.exit_code(), Some(9));
+    }
+
+    #[test]
+    fn python_snapshot_round_trip_preserves_bytes() {
+        let snapshot =
+            RustSnapshot::from_bytes(b"snapshot-bytes").expect("从字节构造 Python 快照必须成功");
+        let py_snapshot = PySnapshot { inner: snapshot };
+
+        Python::with_gil(|py| {
+            assert_eq!(py_snapshot.to_bytes(py).as_bytes(), b"snapshot-bytes");
+        });
+        assert_eq!(py_snapshot.size(), "snapshot-bytes".len());
     }
 }

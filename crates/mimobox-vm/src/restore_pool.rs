@@ -16,7 +16,10 @@ use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::{KVM_IDENTITY_MAP_ADDR, KVM_TSS_ADDR};
 use crate::kvm::{KvmBackend, RestoreProfile, restore_runtime_state};
-use crate::{GuestCommandResult, MicrovmConfig, MicrovmError};
+use crate::{
+    GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
+    MicrovmSnapshot, StreamEvent,
+};
 
 pub(crate) struct EmptyVmSlot {
     kvm: Kvm,
@@ -308,6 +311,26 @@ impl RestorePool {
             pool: Arc::clone(&self.inner),
         })
     }
+
+    pub fn restore_from_bytes(&self, data: &[u8]) -> Result<PooledRestoreVm, RestorePoolError> {
+        let snapshot = MicrovmSnapshot::restore(data)?;
+        let (_, _, memory, vcpu_state) = snapshot.into_parts();
+        self.restore(memory.as_slice(), vcpu_state.as_slice())
+    }
+
+    pub fn idle_count(&self) -> usize {
+        match self.inner.state.lock() {
+            Ok(state) => state.idle.len(),
+            Err(_) => {
+                warn!("查询恢复池空闲槽位失败：状态锁已中毒");
+                0
+            }
+        }
+    }
+
+    pub fn warm(&self, target: usize) -> Result<(), RestorePoolError> {
+        self.inner.warm(target)
+    }
 }
 
 pub struct PooledRestoreVm {
@@ -317,8 +340,62 @@ pub struct PooledRestoreVm {
 
 impl PooledRestoreVm {
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        self.execute_with_options(cmd, GuestExecOptions::default())
+    }
+
+    pub fn execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<GuestCommandResult, MicrovmError> {
         match self.backend.as_mut() {
-            Some(backend) => backend.run_command(cmd),
+            Some(backend) => backend.run_command_with_options(cmd, &options),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    pub fn stream_execute(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        self.stream_execute_with_options(cmd, GuestExecOptions::default())
+    }
+
+    pub fn stream_execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => backend.run_command_streaming_with_options(cmd, &options),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => backend.read_file(path),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => backend.write_file(path, data),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => backend.http_request(request),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
+        match self.backend.as_ref() {
+            Some(backend) => backend.snapshot_bytes(),
             None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
         }
     }
