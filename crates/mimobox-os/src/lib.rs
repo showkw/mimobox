@@ -30,6 +30,9 @@ mod pool;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod pty;
+
 // 公开导出各平台后端
 #[cfg(target_os = "linux")]
 pub use linux::LinuxSandbox;

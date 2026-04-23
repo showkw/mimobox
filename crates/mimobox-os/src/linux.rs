@@ -1,6 +1,7 @@
 use std::ffi::CString;
 use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
 
+use crate::pty::{allocate_pty, build_child_env, build_session};
 use crate::seccomp;
 
 /// 使用 pipe2 + O_CLOEXEC 创建管道
@@ -364,6 +366,199 @@ impl LinuxSandbox {
             libc::_exit(125);
         }
     }
+
+    fn pty_child_main(
+        cmd: &[String],
+        sandbox_config: &SandboxConfig,
+        pty_config: &mimobox_core::PtyConfig,
+        slave_path: &Path,
+    ) -> ! {
+        if unsafe { reset_child_environment_for_pty(pty_config) }.is_err() {
+            unsafe {
+                write_error(2, "PTY 环境变量初始化失败");
+                libc::_exit(119);
+            }
+        }
+
+        if let Err(error) = attach_pty_stdio(slave_path) {
+            unsafe {
+                write_error(2, &format!("附加 PTY slave 失败: {error}"));
+                libc::_exit(120);
+            }
+        }
+
+        if let Some(cwd) = pty_config.cwd.as_deref()
+            && let Err(error) = change_child_cwd(cwd)
+        {
+            unsafe {
+                write_error(2, &format!("切换工作目录失败: {error}"));
+                libc::_exit(124);
+            }
+        }
+
+        if let Some(limit_mb) = sandbox_config.memory_limit_mb
+            && let Err(error) = set_memory_limit(limit_mb)
+        {
+            unsafe {
+                write_error(2, &format!("内存限制设置失败: {error}"));
+                libc::_exit(124);
+            }
+        }
+
+        if sandbox_config.allow_fork {
+            const MAX_NPROC: libc::rlim_t = 256;
+            let rlim = libc::rlimit {
+                rlim_cur: MAX_NPROC,
+                rlim_max: MAX_NPROC,
+            };
+            // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法。
+            let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
+            if ret != 0 {
+                let errno = unsafe { *libc::__errno_location() };
+                tracing::warn!(
+                    "setrlimit(RLIMIT_NPROC, 256) 失败: errno={}，fork bomb 防护未生效",
+                    errno
+                );
+            }
+        }
+
+        {
+            use landlock::{
+                ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, path_beneath_rules,
+            };
+
+            let abi = ABI::V1;
+            let all_access = AccessFs::from_all(abi);
+            let read_access = AccessFs::from_read(abi);
+
+            let result = (|| -> Result<(), landlock::RulesetError> {
+                let mut ruleset = Ruleset::default().handle_access(all_access)?.create()?;
+
+                let default_ro: Vec<&str> = [
+                    "/bin",
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/etc",
+                    "/proc/self",
+                    "/dev/urandom",
+                    "/tmp",
+                ]
+                .into_iter()
+                .filter(|path| std::path::Path::new(path).exists())
+                .collect();
+                if !default_ro.is_empty() {
+                    ruleset = ruleset.add_rules(path_beneath_rules(&default_ro, read_access))?;
+                }
+
+                let user_ro: Vec<&str> = sandbox_config
+                    .fs_readonly
+                    .iter()
+                    .filter_map(|p| p.to_str())
+                    .collect();
+                if !user_ro.is_empty() {
+                    ruleset = ruleset.add_rules(path_beneath_rules(&user_ro, read_access))?;
+                }
+
+                let rw: Vec<&str> = sandbox_config
+                    .fs_readwrite
+                    .iter()
+                    .filter_map(|p| p.to_str())
+                    .collect();
+                if !rw.is_empty() {
+                    ruleset = ruleset.add_rules(path_beneath_rules(&rw, all_access))?;
+                }
+
+                ruleset.restrict_self()?;
+                Ok(())
+            })();
+
+            if let Err(error) = result {
+                unsafe {
+                    write_error(2, &format!("Landlock 应用失败（致命）: {error}"));
+                    libc::_exit(122);
+                }
+            }
+        }
+
+        let ns_flags = CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWNET
+            | CloneFlags::CLONE_NEWIPC;
+        let full_flags = CloneFlags::CLONE_NEWUSER | ns_flags;
+        let ns_result = nix::sched::unshare(full_flags);
+
+        if let Err(error) = ns_result {
+            unsafe {
+                write_error(
+                    2,
+                    &format!("unshare(full_flags) 失败: {error}, 尝试不带 user ns"),
+                );
+            }
+
+            if let Err(fallback_error) = nix::sched::unshare(ns_flags) {
+                unsafe {
+                    write_error(
+                        2,
+                        &format!("unshare(ns_flags) 也失败（致命）: {fallback_error}"),
+                    );
+                    libc::_exit(121);
+                }
+            }
+        }
+
+        if ns_result.is_ok() {
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child }) => loop {
+                    match waitpid(child, None) {
+                        Ok(WaitStatus::Exited(_, code)) => unsafe { libc::_exit(code) },
+                        Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
+                            libc::_exit(128 + sig as i32)
+                        },
+                        _ => continue,
+                    }
+                },
+                Ok(ForkResult::Child) => {}
+                Err(error) => unsafe {
+                    write_error(2, &format!("内部 fork 失败: {error}"));
+                    libc::_exit(123);
+                },
+            }
+        }
+
+        let effective_profile = match (sandbox_config.allow_fork, sandbox_config.seccomp_profile) {
+            (true, SeccompProfile::Essential) => SeccompProfile::EssentialWithFork,
+            (true, SeccompProfile::Network) => SeccompProfile::NetworkWithFork,
+            (_, other) => other,
+        };
+        if let Err(error) = seccomp::apply_seccomp(effective_profile) {
+            unsafe {
+                write_error(2, &format!("Seccomp error: {error}"));
+                libc::_exit(126);
+            }
+        }
+
+        let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
+            write_error(2, &format!("命令包含内嵌 NUL: {}", cmd[0]));
+            libc::_exit(127);
+        });
+        let c_args: Vec<CString> = cmd
+            .iter()
+            .map(|s| {
+                CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
+                    write_error(2, &format!("参数包含内嵌 NUL: {s}"));
+                    libc::_exit(127);
+                })
+            })
+            .collect();
+
+        let _ = execvp(&c_cmd, &c_args);
+
+        unsafe {
+            write_error(2, &format!("execvp failed: {}", cmd[0]));
+            libc::_exit(125);
+        }
+    }
 }
 
 impl Sandbox for LinuxSandbox {
@@ -516,8 +711,118 @@ impl Sandbox for LinuxSandbox {
         }
     }
 
+    fn create_pty(
+        &mut self,
+        config: mimobox_core::PtyConfig,
+    ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
+        if config.command.is_empty() {
+            return Err(SandboxError::ExecutionFailed("PTY 命令为空".into()));
+        }
+
+        tracing::info!(
+            "创建 Linux PTY 会话: {}",
+            command_log_summary(&config.command)
+        );
+
+        let allocated = allocate_pty(config.size)?;
+        let slave_path = allocated.slave_path.clone();
+
+        let mut child_config = self.config.clone();
+        child_config.seccomp_profile = match child_config.seccomp_profile {
+            p @ mimobox_core::SeccompProfile::Essential => {
+                if child_config.allow_fork {
+                    mimobox_core::SeccompProfile::EssentialWithFork
+                } else {
+                    p
+                }
+            }
+            p @ mimobox_core::SeccompProfile::Network => {
+                if child_config.allow_fork {
+                    mimobox_core::SeccompProfile::NetworkWithFork
+                } else {
+                    p
+                }
+            }
+            other => other,
+        };
+
+        match unsafe { fork() }.map_err(|error| SandboxError::Syscall(error.to_string()))? {
+            ForkResult::Parent { child } => {
+                Ok(build_session(allocated, child.as_raw(), config.timeout))
+            }
+            ForkResult::Child => {
+                Self::pty_child_main(&config.command, &child_config, &config, &slave_path);
+            }
+        }
+    }
+
     fn destroy(self) -> Result<(), SandboxError> {
         Ok(())
+    }
+}
+
+unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> Result<(), ()> {
+    if unsafe { libc::clearenv() } != 0 {
+        return Err(());
+    }
+
+    for (name, value) in build_child_env(config) {
+        let name = CString::new(name).map_err(|_| ())?;
+        let value = CString::new(value).map_err(|_| ())?;
+        if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
+            return Err(());
+        }
+    }
+
+    Ok(())
+}
+
+fn attach_pty_stdio(slave_path: &Path) -> Result<(), String> {
+    // SAFETY: `setsid` 在当前 fork 后子进程内调用，用于建立新的会话和控制终端。
+    if unsafe { libc::setsid() } < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let slave = CString::new(slave_path.as_os_str().as_bytes())
+        .map_err(|_| format!("PTY slave 路径包含内嵌 NUL: {}", slave_path.display()))?;
+    // SAFETY: 路径来自父进程创建完成的 PTY slave 设备，传入合法 C 字符串。
+    let slave_fd = unsafe { libc::open(slave.as_ptr(), libc::O_RDWR) };
+    if slave_fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    // SAFETY: `slave_fd` 已成功打开，dup2/ioctl 目标 fd 合法。
+    unsafe {
+        if libc::dup2(slave_fd, 0) < 0 || libc::dup2(slave_fd, 1) < 0 || libc::dup2(slave_fd, 2) < 0
+        {
+            let error = std::io::Error::last_os_error().to_string();
+            libc::close(slave_fd);
+            return Err(error);
+        }
+
+        #[allow(clippy::cast_lossless)]
+        if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+            let error = std::io::Error::last_os_error().to_string();
+            libc::close(slave_fd);
+            return Err(error);
+        }
+
+        if slave_fd > 2 {
+            libc::close(slave_fd);
+        }
+    }
+
+    Ok(())
+}
+
+fn change_child_cwd(cwd: &str) -> Result<(), String> {
+    let cwd = CString::new(cwd).map_err(|_| "工作目录包含内嵌 NUL".to_string())?;
+    // SAFETY: `cwd` 是当前函数中构造的有效 C 字符串。
+    let result = unsafe { libc::chdir(cwd.as_ptr()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
     }
 }
 
@@ -735,6 +1040,83 @@ mod tests {
     }
 
     #[test]
+    fn test_pty_basic_echo() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/cat".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session
+            .send_input(b"hello-pty\n")
+            .expect("发送 PTY 输入失败");
+
+        let output = read_pty_until(session.output_rx(), b"hello-pty", Duration::from_secs(5));
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output.contains("hello-pty"),
+            "PTY 输出应包含回显结果, 实际: {output}"
+        );
+
+        session.kill().expect("终止 PTY 会话失败");
+        assert!(
+            session.wait().expect("等待 PTY 退出失败") < 0,
+            "基础回显测试结束后应返回信号退出码"
+        );
+    }
+
+    #[test]
+    fn test_pty_resize() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/cat".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session
+            .resize(mimobox_core::PtySize {
+                cols: 120,
+                rows: 40,
+            })
+            .expect("调整 PTY 尺寸失败");
+
+        session.kill().expect("终止 PTY 会话失败");
+        assert!(
+            session.wait().expect("等待 PTY 退出失败") < 0,
+            "被终止的 PTY 应返回信号退出码"
+        );
+    }
+
+    #[test]
+    fn test_pty_kill() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/cat".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session.kill().expect("终止 PTY 会话失败");
+
+        let exit_code = session.wait().expect("等待 PTY 退出失败");
+        assert!(exit_code < 0, "kill 后应返回信号退出码, 实际: {exit_code}");
+    }
+
+    #[test]
     fn test_empty_command_error() {
         let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
         let result = sb.execute(&[]);
@@ -761,6 +1143,31 @@ mod tests {
                 .any(|name| matches!(*name, "LD_PRELOAD" | "BASH_ENV" | "ENV")),
             "危险环境变量不应进入白名单"
         );
+    }
+
+    fn read_pty_until(
+        rx: &std::sync::mpsc::Receiver<mimobox_core::PtyEvent>,
+        needle: &[u8],
+        timeout: Duration,
+    ) -> Vec<u8> {
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(mimobox_core::PtyEvent::Output(chunk)) => {
+                    output.extend_from_slice(&chunk);
+                    if output.windows(needle.len()).any(|window| window == needle) {
+                        break;
+                    }
+                }
+                Ok(mimobox_core::PtyEvent::Exit(_)) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        output
     }
 }
 

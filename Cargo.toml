@@ -54,6 +54,7 @@ kvm-bindings = { version = "0.10.0", features = ["fam-wrappers"] }
 vm-memory = { version = "0.16", features = ["backend-mmap"] }
 vmm-sys-util = "0.12.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+portable-pty = "0.9"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
