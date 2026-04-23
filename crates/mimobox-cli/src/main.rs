@@ -31,7 +31,7 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt::writer::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt};
 
-const DEFAULT_MEMORY_MB: u64 = 64;
+const DEFAULT_MEMORY_MB: u64 = 256;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_BENCH_ITERATIONS: usize = 50;
 const DEFAULT_POOL_SIZE: usize = 16;
