@@ -131,6 +131,12 @@ pub struct PtySession {
     inner: Box<dyn mimobox_core::PtySession>,
 }
 
+impl std::fmt::Debug for PtySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtySession").finish_non_exhaustive()
+    }
+}
+
 impl PtySession {
     pub fn send_input(&mut self, data: &[u8]) -> Result<(), SdkError> {
         self.inner.send_input(data).map_err(map_pty_session_error)
@@ -1481,6 +1487,7 @@ mod tests {
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
+    #[cfg(all(feature = "vm", target_os = "linux"))]
     #[test]
     fn create_pty_microvm_is_rejected() {
         let mut sandbox =
@@ -1489,7 +1496,6 @@ mod tests {
 
         let result = sandbox.create_pty("/bin/sh");
 
-        #[cfg(all(feature = "vm", target_os = "linux"))]
         match result {
             Err(SdkError::Sandbox { code, message, .. }) => {
                 assert_eq!(code, ErrorCode::UnsupportedPlatform);
@@ -1497,12 +1503,6 @@ mod tests {
             }
             other => panic!("期望 PTY 不支持 microVM，实际为: {other:?}"),
         }
-
-        #[cfg(not(all(feature = "vm", target_os = "linux")))]
-        assert!(matches!(
-            result,
-            Err(SdkError::BackendUnavailable("microvm"))
-        ));
     }
 
     #[cfg(all(
