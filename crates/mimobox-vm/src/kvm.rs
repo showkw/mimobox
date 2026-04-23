@@ -1301,6 +1301,16 @@ impl KvmBackend {
                         "命令执行阶段收到意外 FSRESULT 帧".into(),
                     ));
                 }
+                Ok(RunLoopOutcome::ResponseDone(
+                    SerialProtocolResult::StreamStart(_)
+                    | SerialProtocolResult::StreamStdout(_, _)
+                    | SerialProtocolResult::StreamStderr(_, _)
+                    | SerialProtocolResult::StreamEnd(_, _),
+                )) => {
+                    return Err(MicrovmError::Backend(
+                        "Phase A 尚未接入流式命令执行路径，却收到了 STREAM 帧".into(),
+                    ));
+                }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
@@ -1340,6 +1350,16 @@ impl KvmBackend {
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(_))) => {
                     return Err(MicrovmError::Backend(
                         "文件操作阶段收到意外命令结果帧".into(),
+                    ));
+                }
+                Ok(RunLoopOutcome::ResponseDone(
+                    SerialProtocolResult::StreamStart(_)
+                    | SerialProtocolResult::StreamStdout(_, _)
+                    | SerialProtocolResult::StreamStderr(_, _)
+                    | SerialProtocolResult::StreamEnd(_, _),
+                )) => {
+                    return Err(MicrovmError::Backend(
+                        "文件操作阶段收到意外 STREAM 帧".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
@@ -1776,6 +1796,7 @@ fn install_watchdog_signal_handler() {
 
 #[cfg(test)]
 mod tests {
+    use super::devices::CommandResponse;
     #[cfg(any(debug_assertions, feature = "boot-profile"))]
     use super::{BootProfile, parse_guest_boot_time_line};
     #[cfg(target_arch = "x86_64")]
@@ -1784,11 +1805,10 @@ mod tests {
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
     use super::{
-        DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, build_guest_command,
-        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, parse_serial_line,
-        take_serial_frame,
+        DEFAULT_CMDLINE, SERIAL_EXEC_PREFIX, SerialFrame, SerialProtocolResult,
+        build_guest_command, encode_command_payload, encode_fs_read_payload,
+        encode_fs_write_payload, parse_serial_line, take_serial_frame,
     };
-    use super::devices::CommandResponse;
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;
 
@@ -1847,6 +1867,48 @@ mod tests {
             matches!(frame, SerialFrame::FsResult(ref result) if result.status == 0 && result.data == expected)
         );
         assert!(buffer.is_empty(), "完整帧被取出后缓冲区应清空");
+    }
+
+    #[test]
+    fn test_take_serial_frame_parses_stream_stdout_with_raw_newline_bytes() {
+        let expected = b"hello\nworld\x00tail".to_vec();
+        let mut buffer = format!("STREAM:STDOUT:0:{}:", expected.len()).into_bytes();
+        buffer.extend_from_slice(&expected);
+        buffer.push(b'\n');
+
+        let frame = take_serial_frame(&mut buffer)
+            .expect("解析 STREAM:STDOUT 帧必须成功")
+            .expect("STREAM:STDOUT 帧必须被识别");
+
+        assert!(matches!(
+            frame,
+            SerialFrame::Stream(SerialProtocolResult::StreamStdout(0, ref data))
+                if data == &expected
+        ));
+        assert!(buffer.is_empty(), "完整 STREAM 帧被取出后缓冲区应清空");
+    }
+
+    #[test]
+    fn test_take_serial_frame_parses_stream_start_and_end() {
+        let mut start_buffer = b"STREAM:START:7\n".to_vec();
+        let start_frame = take_serial_frame(&mut start_buffer)
+            .expect("解析 STREAM:START 帧必须成功")
+            .expect("STREAM:START 帧必须被识别");
+        assert_eq!(
+            start_frame,
+            SerialFrame::Stream(SerialProtocolResult::StreamStart(7))
+        );
+        assert!(start_buffer.is_empty(), "START 帧被取出后缓冲区应清空");
+
+        let mut end_buffer = b"STREAM:END:7:-9\n".to_vec();
+        let end_frame = take_serial_frame(&mut end_buffer)
+            .expect("解析 STREAM:END 帧必须成功")
+            .expect("STREAM:END 帧必须被识别");
+        assert_eq!(
+            end_frame,
+            SerialFrame::Stream(SerialProtocolResult::StreamEnd(7, -9))
+        );
+        assert!(end_buffer.is_empty(), "END 帧被取出后缓冲区应清空");
     }
 
     #[test]
