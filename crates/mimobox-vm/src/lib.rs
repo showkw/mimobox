@@ -4,7 +4,7 @@
 //! - [`MicrovmConfig`]：microVM 专属配置
 //! - [`MicrovmSandbox`]：实现 [`mimobox_core::Sandbox`] 的外部入口
 //! - [`MicrovmSnapshot`]：自描述快照格式（magic + version + config + memory + vCPU state）
-//! - Linux + `kvm` feature 下的 [`KvmBackend`]：KVM 生命周期基础实现
+//! - Linux + `kvm` feature 下的 `KvmBackend`：KVM 生命周期基础实现
 
 mod http_proxy;
 pub mod pool;

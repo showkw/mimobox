@@ -23,14 +23,15 @@ default-members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/user/mimobox"
+repository = "https://github.com/showkw/mimobox"
 
 [workspace.dependencies]
 # 内部 crate
-mimobox-core = { path = "crates/mimobox-core" }
-mimobox-os = { path = "crates/mimobox-os" }
-mimobox-wasm = { path = "crates/mimobox-wasm" }
-mimobox-sdk = { path = "crates/mimobox-sdk" }
+mimobox-core = { path = "crates/mimobox-core", version = "0.1.0" }
+mimobox-os = { path = "crates/mimobox-os", version = "0.1.0" }
+mimobox-wasm = { path = "crates/mimobox-wasm", version = "0.1.0" }
+mimobox-vm = { path = "crates/mimobox-vm", version = "0.1.0" }
+mimobox-sdk = { path = "crates/mimobox-sdk", version = "0.1.0" }
 
 # 外部依赖（统一版本）
 thiserror = "2"

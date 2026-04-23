@@ -1,3 +1,5 @@
+#![cfg_attr(not(all(target_os = "linux", feature = "kvm")), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::IpAddr;
@@ -31,43 +33,64 @@ pub struct HttpProxyRequestPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// 经过校验和归一化的 HTTP 代理请求。
 pub struct HttpRequest {
+    /// 请求方法，例如 `GET`、`POST`。
     pub method: String,
+    /// 目标 HTTPS URL。
     pub url: String,
+    /// 请求头集合。
     pub headers: HashMap<String, String>,
+    /// 可选请求体。
     pub body: Option<Vec<u8>>,
+    /// 请求超时时间，单位为毫秒。
     pub timeout_ms: u64,
+    /// 允许返回的最大响应体大小。
     pub max_response_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// HTTP 代理响应。
 pub struct HttpResponse {
+    /// HTTP 状态码。
     pub status: u16,
+    /// 响应头集合。
     pub headers: HashMap<String, String>,
+    /// 响应体字节流。
     pub body: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
+/// microVM HTTP 代理错误。
 pub enum HttpProxyError {
+    /// 目标域名不在允许名单中。
     #[error("域名不在白名单内: {0}")]
     DeniedHost(String),
+    /// 请求超过超时时间。
     #[error("HTTP 请求超时")]
     Timeout,
+    /// 请求体或响应体超出大小限制。
     #[error("HTTP body 超出大小限制")]
     BodyTooLarge,
+    /// 与目标服务器建立连接失败。
     #[error("HTTP 连接失败: {0}")]
     ConnectFail(String),
+    /// TLS 握手失败。
     #[error("TLS 握手失败: {0}")]
     TlsFail(String),
+    /// 请求 URL 非法。
     #[error("URL 无效: {0}")]
     InvalidUrl(String),
+    /// DNS 解析到了内网或保留地址。
     #[error("DNS 解析命中内网地址: {0}")]
     DnsRebind(String),
+    /// 代理内部执行失败。
     #[error("HTTP 代理内部错误: {0}")]
     Internal(String),
 }
 
 impl HttpProxyError {
+    /// 返回稳定的错误码字符串。
     pub fn code(&self) -> &'static str {
         match self {
             Self::DeniedHost(_) => "DENIED_HOST",
@@ -113,6 +136,7 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
 }
 
 impl HttpRequest {
+    /// 构造一个新的 HTTP 代理请求并应用默认限制。
     pub fn new(
         method: impl Into<String>,
         url: impl Into<String>,
@@ -138,6 +162,7 @@ impl HttpRequest {
         })
     }
 
+    /// 从 JSON 负载解析 HTTP 代理请求。
     pub fn from_json(json: &str) -> Result<Self, HttpProxyError> {
         let payload = serde_json::from_str::<HttpProxyRequestPayload>(json)
             .map_err(|err| HttpProxyError::InvalidUrl(format!("HTTP 请求 JSON 无效: {err}")))?;
@@ -145,6 +170,7 @@ impl HttpRequest {
     }
 }
 
+/// 通过宿主受控代理执行 HTTP 请求。
 pub fn execute_http_request(
     config: &SandboxConfig,
     request: &HttpRequest,
@@ -188,6 +214,7 @@ pub fn execute_http_request(
     })
 }
 
+/// 判断指定域名是否命中允许的 HTTP 域名白名单。
 pub fn is_allowed_http_host(config: &SandboxConfig, host: &str) -> bool {
     let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
     if normalized_host.is_empty() {

@@ -7,31 +7,44 @@ use crate::seccomp::SeccompProfile;
 /// 结构化错误码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
-    // 命令执行
+    /// 命令执行超过超时时间。
     CommandTimeout,
+    /// 命令以非零状态码退出。
     CommandExit(i32),
+    /// 命令被宿主侧强制终止。
     CommandKilled,
-    // 文件操作
+    /// 目标文件不存在。
     FileNotFound,
+    /// 目标文件缺少访问权限。
     FilePermissionDenied,
+    /// 目标文件或传输内容超出大小限制。
     FileTooLarge,
-    // HTTP 代理
+    /// HTTP 代理访问的域名不在白名单内。
     HttpDeniedHost,
+    /// HTTP 代理请求超时。
     HttpTimeout,
+    /// HTTP 响应体超过允许大小。
     HttpBodyTooLarge,
+    /// HTTP 代理建立连接失败。
     HttpConnectFail,
+    /// HTTP 代理 TLS 握手失败。
     HttpTlsFail,
+    /// HTTP 请求 URL 非法。
     HttpInvalidUrl,
-    // 生命周期
+    /// 沙箱尚未进入可执行状态。
     SandboxNotReady,
+    /// 沙箱已销毁，不能再复用。
     SandboxDestroyed,
+    /// 沙箱创建流程失败。
     SandboxCreateFailed,
-    // 配置
+    /// 传入配置不合法。
     InvalidConfig,
+    /// 当前平台或后端不支持该能力。
     UnsupportedPlatform,
 }
 
 impl ErrorCode {
+    /// 返回稳定的字符串错误码，便于跨语言传输和日志检索。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CommandTimeout => "command_timeout",
@@ -55,7 +68,10 @@ impl ErrorCode {
     }
 }
 
-/// 沙箱配置
+/// 沙箱配置。
+///
+/// 该配置描述所有后端共享的最小能力集合，包括文件系统权限、网络策略、
+/// 资源限制和受控 HTTP 代理白名单。
 #[derive(Clone)]
 pub struct SandboxConfig {
     /// 只读路径列表
@@ -102,12 +118,16 @@ impl Default for SandboxConfig {
     }
 }
 
-/// 沙箱执行结果
+/// 沙箱执行结果。
 #[derive(Debug)]
 pub struct SandboxResult {
+    /// 标准输出内容。
     pub stdout: Vec<u8>,
+    /// 标准错误输出内容。
     pub stderr: Vec<u8>,
+    /// 子进程退出码；若进程未正常退出则可能为 `None`。
     pub exit_code: Option<i32>,
+    /// 本次执行消耗的总时长。
     pub elapsed: Duration,
     /// 是否因超时被终止
     pub timed_out: bool,
@@ -170,7 +190,9 @@ impl SandboxSnapshot {
 /// PTY 终端尺寸
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
+    /// 终端列数。
     pub cols: u16,
+    /// 终端行数。
     pub rows: u16,
 }
 
@@ -192,10 +214,15 @@ pub enum PtyEvent {
 /// PTY 会话配置
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
+    /// 启动 PTY 会话时执行的命令及参数。
     pub command: Vec<String>,
+    /// 初始终端尺寸。
     pub size: PtySize,
+    /// 额外注入到会话中的环境变量。
     pub env: std::collections::HashMap<String, String>,
+    /// 会话工作目录。
     pub cwd: Option<String>,
+    /// 会话超时时间。
     pub timeout: Option<Duration>,
 }
 
@@ -216,61 +243,116 @@ pub trait PtySession {
 /// 沙箱错误类型
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
+    /// 当前平台不支持该沙箱实现。
     #[error("当前平台不支持该沙箱后端")]
     Unsupported,
 
+    /// 当前后端不支持指定操作。
     #[error("当前操作不受支持: {0}")]
     UnsupportedOperation(String),
 
+    /// 命名空间初始化失败。
     #[error("命名空间创建失败: {0}")]
     NamespaceFailed(String),
 
+    /// `pivot_root` 调用失败。
     #[error("pivot_root 失败: {0}")]
     PivotRootFailed(String),
 
+    /// 挂载文件系统失败。
     #[error("mount 失败: {0}")]
     MountFailed(String),
 
+    /// Landlock 规则应用失败。
     #[error("Landlock 规则应用失败: {0}")]
     LandlockFailed(String),
 
+    /// Seccomp 规则应用失败。
     #[error("Seccomp 过滤器应用失败: {0}")]
     SeccompFailed(String),
 
+    /// 命令执行或协议处理失败。
     #[error("命令执行失败: {0}")]
     ExecutionFailed(String),
 
+    /// 子进程执行超时。
     #[error("子进程超时")]
     Timeout,
 
+    /// 管道读写失败。
     #[error("管道 I/O 错误: {0}")]
     PipeError(String),
 
+    /// 系统调用失败。
     #[error("系统调用错误: {0}")]
     Syscall(String),
 
+    /// 标准库 I/O 错误。
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// 沙箱 trait
+/// 沙箱生命周期 trait。
+///
+/// 各后端通过该 trait 提供统一的创建、执行、文件传输、快照和销毁能力。
 pub trait Sandbox {
+    /// 使用给定配置创建新的沙箱实例。
     fn new(config: SandboxConfig) -> Result<Self, SandboxError>
     where
         Self: Sized;
+
+    /// 在沙箱内执行命令并等待完成。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use mimobox_core::Sandbox;
+    /// use mimobox_os::LinuxSandbox;
+    ///
+    /// let mut sandbox = LinuxSandbox::new(Default::default())?;
+    /// let result = sandbox.execute(&["/bin/echo".into(), "hello".into()])?;
+    /// assert_eq!(result.exit_code, Some(0));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError>;
+
+    /// 创建交互式 PTY 会话。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use mimobox_core::{PtyConfig, PtySize, Sandbox};
+    /// use mimobox_os::LinuxSandbox;
+    /// use std::collections::HashMap;
+    /// use std::time::Duration;
+    ///
+    /// let mut sandbox = LinuxSandbox::new(Default::default())?;
+    /// let mut session = sandbox.create_pty(PtyConfig {
+    ///     command: vec!["/bin/sh".into()],
+    ///     size: PtySize { cols: 80, rows: 24 },
+    ///     env: HashMap::new(),
+    ///     cwd: None,
+    ///     timeout: Some(Duration::from_secs(10)),
+    /// })?;
+    /// session.send_input(b"echo hello\n")?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn create_pty(&mut self, config: PtyConfig) -> Result<Box<dyn PtySession>, SandboxError> {
         let _ = config;
         Err(SandboxError::UnsupportedOperation(
             "PTY 会话当前后端不支持".to_string(),
         ))
     }
+
+    /// 读取沙箱内文件内容。
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
         Err(SandboxError::ExecutionFailed(
             "当前后端不支持文件读取".into(),
         ))
     }
+
+    /// 向沙箱内写入文件内容。
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         let _ = path;
         let _ = data;
@@ -278,11 +360,28 @@ pub trait Sandbox {
             "当前后端不支持文件写入".into(),
         ))
     }
+
+    /// 导出当前沙箱状态快照。
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use mimobox_core::Sandbox;
+    /// use mimobox_vm::MicrovmSandbox;
+    /// use mimobox_vm::MicrovmConfig;
+    ///
+    /// let mut sandbox = MicrovmSandbox::new(MicrovmConfig::default())?;
+    /// let snapshot = sandbox.snapshot()?;
+    /// assert!(!snapshot.as_bytes().is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
         Err(SandboxError::UnsupportedOperation(
             "快照当前后端不支持".to_string(),
         ))
     }
+
+    /// 销毁沙箱并释放底层资源。
     fn destroy(self) -> Result<(), SandboxError>;
 }
 
