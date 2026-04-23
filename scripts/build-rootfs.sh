@@ -12,6 +12,7 @@ ENABLE_VSOCK="${ENABLE_VSOCK:-}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
+TARGET_ALPINE_ARCH="x86_64"
 BUSYBOX_APPLETS=(
     sh
     echo
@@ -63,6 +64,55 @@ require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         fail "缺少依赖命令: $1"
     fi
+}
+
+install_python_runtime_with_apk() {
+    local rootfs_dir="$1"
+
+    log "向 Alpine rootfs 安装 Python 3 运行时"
+    apk add \
+        --root "${rootfs_dir}" \
+        --initdb \
+        --no-cache \
+        --arch "${TARGET_ALPINE_ARCH}" \
+        --repositories-file /etc/apk/repositories \
+        --keys-dir /etc/apk/keys \
+        python3 \
+        py3-pip >/dev/null
+    rm -rf -- "${rootfs_dir}/var/cache/apk"
+
+    [[ -x "${rootfs_dir}/usr/bin/python3" ]] || fail "rootfs 中未找到 /usr/bin/python3"
+}
+
+install_python_runtime_in_rootfs() {
+    local rootfs_dir="$1"
+
+    if command -v apk >/dev/null 2>&1; then
+        install_python_runtime_with_apk "${rootfs_dir}"
+        return
+    fi
+
+    require_command docker
+    log "宿主机未安装 apk，使用 Docker 为 rootfs 安装 Python 3 运行时"
+
+    # 通过 Alpine 容器对目标 rootfs 执行 apk add，保持本地与 Docker 构建结果一致。
+    docker run --rm \
+        -e TARGET_ALPINE_ARCH="${TARGET_ALPINE_ARCH}" \
+        -v "${rootfs_dir}:/rootfs" \
+        "${DOCKER_IMAGE}" \
+        sh -eu -c '
+            apk add \
+                --root /rootfs \
+                --initdb \
+                --no-cache \
+                --arch "${TARGET_ALPINE_ARCH}" \
+                --repositories-file /etc/apk/repositories \
+                --keys-dir /etc/apk/keys \
+                python3 \
+                py3-pip >/dev/null
+            rm -rf /rootfs/var/cache/apk
+            [ -x /rootfs/usr/bin/python3 ]
+        '
 }
 
 resolve_output_path() {
@@ -154,6 +204,7 @@ EOF
 
     mknod -m 600 "${rootfs_dir}/dev/console" c 5 1
     mknod -m 666 "${rootfs_dir}/dev/null" c 1 3
+    install_python_runtime_in_rootfs "${rootfs_dir}"
 
     mkdir -p "$(dirname "${output_path}")"
     (
@@ -177,6 +228,7 @@ build_rootfs_in_docker() {
         -e HOST_GID="$(id -g)" \
         -e OUTPUT_NAME="${output_name}" \
         -e GUEST_INIT_CFLAGS="${GUEST_INIT_CFLAGS[*]}" \
+        -e TARGET_ALPINE_ARCH="${TARGET_ALPINE_ARCH}" \
         -e PRIMARY_BUSYBOX_URL="${PRIMARY_BUSYBOX_URL}" \
         -e FALLBACK_BUSYBOX_URL="${FALLBACK_BUSYBOX_URL}" \
         -e BUSYBOX_APPLETS="${BUSYBOX_APPLETS[*]}" \
@@ -227,6 +279,17 @@ root:x:0:
 EOF
             mknod -m 600 "${rootfs_dir}/dev/console" c 5 1
             mknod -m 666 "${rootfs_dir}/dev/null" c 1 3
+            apk add \
+                --root "${rootfs_dir}" \
+                --initdb \
+                --no-cache \
+                --arch "${TARGET_ALPINE_ARCH}" \
+                --repositories-file /etc/apk/repositories \
+                --keys-dir /etc/apk/keys \
+                python3 \
+                py3-pip >/dev/null
+            rm -rf -- "${rootfs_dir}/var/cache/apk"
+            [ -x "${rootfs_dir}/usr/bin/python3" ]
 
             (
                 cd "${rootfs_dir}"
