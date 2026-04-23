@@ -28,7 +28,7 @@ use mimobox_core::SandboxConfig;
 use tracing::{debug, info, warn};
 use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
-use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError};
+use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
 
 mod boot;
 mod devices;
@@ -62,11 +62,11 @@ use self::devices::SERIAL_BOOT_TIME_PREFIX;
 use self::devices::{
     CommandResponse, FsResult, I8042_COMMAND_REG, I8042_PORT_B_PIT_TICK, I8042_PORT_B_REG,
     I8042_RESET_CMD, PCI_CONFIG_ADDRESS_REG, PCI_CONFIG_DATA_REG_END, PCI_CONFIG_DATA_REG_START,
-    SerialDevice, SerialProtocolResult, SerialResponseCollector, VsockCommandChannel,
-    VsockMmioAction, VsockMmioDevice, activate_vhost_backend, build_guest_command,
-    emulate_boot_legacy_pio_read, encode_command_payload, encode_fs_read_payload,
-    encode_fs_write_payload, handle_serial_read, handle_serial_write, is_boot_legacy_pio_port,
-    is_serial_port, preview_serial_output,
+    SERIAL_EXECS_PREFIX, SerialDevice, SerialProtocolResult, SerialResponseCollector,
+    VsockCommandChannel, VsockMmioAction, VsockMmioDevice, activate_vhost_backend,
+    build_guest_command, emulate_boot_legacy_pio_read, encode_command_payload,
+    encode_fs_read_payload, encode_fs_write_payload, handle_serial_read, handle_serial_write,
+    is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
 };
 #[cfg(test)]
 use self::devices::{SERIAL_EXEC_PREFIX, SerialFrame, parse_serial_line, take_serial_frame};
@@ -195,6 +195,12 @@ pub(crate) struct LoadedKernel {
 enum RunLoopOutcome {
     Exit(KvmExitReason),
     ResponseDone(SerialProtocolResult),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamCommandOutcome {
+    Completed,
+    RetryBlocking,
 }
 
 static WATCHDOG_SIGNAL_HANDLER_INIT: Once = Once::new();
@@ -1018,6 +1024,36 @@ impl KvmBackend {
         result
     }
 
+    /// Phase B 流式执行固定走串口协议，避免与当前 vsock 命令通道语义冲突。
+    pub fn run_command_streaming(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+        }
+        if cmd.is_empty() {
+            return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
+        }
+
+        self.ensure_guest_ready()?;
+
+        self.lifecycle = KvmLifecycle::Running;
+        let result = self.run_command_streaming_over_serial(cmd);
+        if self.lifecycle != KvmLifecycle::Destroyed {
+            self.lifecycle = KvmLifecycle::Ready;
+        }
+        #[cfg(any(debug_assertions, feature = "boot-profile"))]
+        if self.boot_profile.host_logged && !self.boot_profile.guest_extension_logged {
+            self.boot_profile.close_guest_capture();
+        }
+        result
+    }
+
+    pub fn lifecycle(&self) -> KvmLifecycle {
+        self.lifecycle
+    }
+
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
@@ -1098,6 +1134,31 @@ impl KvmBackend {
         self.last_command_payload = payload;
         self.transport = KvmTransport::Serial;
         self.run_until_command_result()
+    }
+
+    fn run_command_streaming_over_serial(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        let guest_command = build_guest_command(cmd, self.base_config.timeout_secs)?;
+        let payload = encode_streaming_command_payload(&guest_command);
+        let (stream_tx, stream_rx) = spawn_stream_event_forwarder();
+        self.serial_device.queue_input(&payload);
+        self.last_command_payload = payload;
+        self.transport = KvmTransport::Serial;
+        match self.run_until_command_stream(stream_tx.clone())? {
+            StreamCommandOutcome::Completed => {}
+            StreamCommandOutcome::RetryBlocking => {
+                // 旧 guest 拒绝 EXECS 时可能不会消费完整 payload，回退前必须清空残留串口输入。
+                self.serial_device.rx_fifo.clear();
+                let payload = encode_command_payload(cmd, self.base_config.timeout_secs)?;
+                self.serial_device.queue_input(&payload);
+                self.last_command_payload = payload;
+                let result = self.run_until_command_result()?;
+                emit_command_result_as_stream(&stream_tx, result);
+            }
+        }
+        Ok(stream_rx)
     }
 
     fn run_fs_operation_over_serial(&mut self, payload: Vec<u8>) -> Result<FsResult, MicrovmError> {
@@ -1329,6 +1390,102 @@ impl KvmBackend {
                         exit_code: None,
                         timed_out: true,
                     });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn run_until_command_stream(
+        &mut self,
+        stream_tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<StreamCommandOutcome, MicrovmError> {
+        let mut line_buffer = Vec::new();
+        let mut response = SerialResponseCollector::Command(CommandResponse::default());
+        let watchdog = self.start_watchdog(Duration::from_secs(
+            self.base_config.timeout_secs.unwrap_or(30),
+        ))?;
+        let mut started = false;
+
+        loop {
+            match self.run_vcpu_step(&mut line_buffer, Some(&mut response), &watchdog) {
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStart(0))) => {
+                    started = true;
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStart(stream_id))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "收到意外 STREAM:START id，期望 0，实际 {stream_id}"
+                    )));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStdout(0, data))) => {
+                    if !started {
+                        return Err(MicrovmError::Backend(
+                            "收到 STREAM:STDOUT 前缺少 STREAM:START".into(),
+                        ));
+                    }
+                    let _ = stream_tx.send(StreamEvent::Stdout(data));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStdout(
+                    stream_id,
+                    _,
+                ))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "收到意外 STREAM:STDOUT id，期望 0，实际 {stream_id}"
+                    )));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStderr(0, data))) => {
+                    if !started {
+                        return Err(MicrovmError::Backend(
+                            "收到 STREAM:STDERR 前缺少 STREAM:START".into(),
+                        ));
+                    }
+                    let _ = stream_tx.send(StreamEvent::Stderr(data));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStderr(
+                    stream_id,
+                    _,
+                ))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "收到意外 STREAM:STDERR id，期望 0，实际 {stream_id}"
+                    )));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamEnd(0, exit_code))) => {
+                    if !started {
+                        return Err(MicrovmError::Backend(
+                            "收到 STREAM:END 前缺少 STREAM:START".into(),
+                        ));
+                    }
+                    let _ = stream_tx.send(StreamEvent::Exit(exit_code));
+                    return Ok(StreamCommandOutcome::Completed);
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamEnd(stream_id, _))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "收到意外 STREAM:END id，期望 0，实际 {stream_id}"
+                    )));
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
+                    if should_retry_stream_with_blocking_command(&result) {
+                        return Ok(StreamCommandOutcome::RetryBlocking);
+                    }
+                    emit_command_result_as_stream(&stream_tx, result);
+                    return Ok(StreamCommandOutcome::Completed);
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(_))) => {
+                    return Err(MicrovmError::Backend(
+                        "流式执行阶段收到意外 FSRESULT 帧".into(),
+                    ));
+                }
+                Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
+                Ok(RunLoopOutcome::Exit(exit_reason)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "guest 在返回 STREAM:END 前异常退出: {exit_reason:?}"
+                    )));
+                }
+                Err(_) if watchdog.timed_out() => {
+                    self.guest_ready = false;
+                    self.lifecycle = KvmLifecycle::Destroyed;
+                    let _ = stream_tx.send(StreamEvent::TimedOut);
+                    return Ok(StreamCommandOutcome::Completed);
                 }
                 Err(err) => return Err(err),
             }
@@ -1728,6 +1885,55 @@ fn fs_result_to_error(status: u8, path: &str) -> MicrovmError {
         4 => MicrovmError::Backend(format!("guest 文件空间不足: {path}")),
         other => MicrovmError::Backend(format!("guest 返回未知文件状态码 {other}: {path}")),
     }
+}
+
+fn encode_streaming_command_payload(command: &str) -> Vec<u8> {
+    let mut frame = format!("{}0:{}:", SERIAL_EXECS_PREFIX, command.len()).into_bytes();
+    frame.extend_from_slice(command.as_bytes());
+    frame.push(b'\n');
+    frame
+}
+
+fn spawn_stream_event_forwarder() -> (mpsc::Sender<StreamEvent>, mpsc::Receiver<StreamEvent>) {
+    let (forward_tx, forward_rx) = mpsc::channel();
+    let (stream_tx, stream_rx) = mpsc::sync_channel(32);
+    thread::spawn(move || {
+        while let Ok(event) = forward_rx.recv() {
+            if stream_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    (forward_tx, stream_rx)
+}
+
+fn emit_command_result_as_stream(
+    stream_tx: &mpsc::Sender<StreamEvent>,
+    result: GuestCommandResult,
+) {
+    if !result.stdout.is_empty() {
+        let _ = stream_tx.send(StreamEvent::Stdout(result.stdout));
+    }
+    if !result.stderr.is_empty() {
+        let _ = stream_tx.send(StreamEvent::Stderr(result.stderr));
+    }
+    if result.timed_out {
+        let _ = stream_tx.send(StreamEvent::TimedOut);
+    } else if let Some(exit_code) = result.exit_code {
+        let _ = stream_tx.send(StreamEvent::Exit(exit_code));
+    }
+}
+
+fn should_retry_stream_with_blocking_command(result: &GuestCommandResult) -> bool {
+    if result.timed_out || !result.stderr.is_empty() {
+        return false;
+    }
+
+    let stdout = result.stdout.as_slice();
+    stdout == b"invalid command frame"
+        || stdout == b"invalid EXECS frame"
+        || stdout == b"invalid EXECS id"
+        || stdout == b"unsupported command prefix"
 }
 
 fn validate_initrd_image(bytes: &[u8]) -> Result<(), MicrovmError> {

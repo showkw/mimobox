@@ -121,10 +121,17 @@ pub(super) fn handle_serial_write(
                         }
                     }
                     SerialFrame::Stream(stream_result) => {
-                        if response.is_some() {
-                            return Err(MicrovmError::Backend(format!(
-                                "Phase A 尚未接入 STREAM 帧消费路径，收到意外流式结果: {stream_result:?}"
-                            )));
+                        if let Some(response) = response.as_deref_mut() {
+                            match response {
+                                SerialResponseCollector::Command(_) => {
+                                    return Ok(Some(stream_result));
+                                }
+                                SerialResponseCollector::Fs => {
+                                    return Err(MicrovmError::Backend(format!(
+                                        "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
+                                    )));
+                                }
+                            }
                         }
                     }
                 }
@@ -196,10 +203,17 @@ pub(super) fn handle_serial_write(
                         }
                     }
                     SerialFrame::Stream(stream_result) => {
-                        if response.is_some() {
-                            return Err(MicrovmError::Backend(format!(
-                                "Phase A 尚未接入 STREAM 帧消费路径，收到意外流式结果: {stream_result:?}"
-                            )));
+                        if let Some(response) = response.as_deref_mut() {
+                            match response {
+                                SerialResponseCollector::Command(_) => {
+                                    return Ok(Some(stream_result));
+                                }
+                                SerialResponseCollector::Fs => {
+                                    return Err(MicrovmError::Backend(format!(
+                                        "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
+                                    )));
+                                }
+                            }
                         }
                     }
                 }

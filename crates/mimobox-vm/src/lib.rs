@@ -18,7 +18,9 @@ mod restore_pool;
 
 pub use pool::{PoolError, PooledVm, VmPool, VmPoolConfig, VmPoolStats};
 pub use snapshot::MicrovmSnapshot;
-pub use vm::{GuestCommandResult, MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState};
+pub use vm::{
+    GuestCommandResult, MicrovmConfig, MicrovmError, MicrovmSandbox, MicrovmState, StreamEvent,
+};
 pub use vm_assets::{
     microvm_config_from_assets_dir, microvm_config_from_vm_assets, resolve_vm_assets_dir,
     vm_assets_dir,

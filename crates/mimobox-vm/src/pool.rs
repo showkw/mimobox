@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::{GuestCommandResult, MicrovmConfig, MicrovmError};
+use crate::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
@@ -432,6 +432,16 @@ impl PooledVm {
         result
     }
 
+    pub fn stream_execute(
+        &mut self,
+        cmd: &[String],
+    ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => stream_execute_backend(backend, cmd),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
+
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => read_file_backend(backend, path),
@@ -539,11 +549,27 @@ fn execute_backend(
     backend.run_command(cmd)
 }
 
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn stream_execute_backend(
+    backend: &mut Backend,
+    cmd: &[String],
+) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+    backend.run_command_streaming(cmd)
+}
+
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
 fn execute_backend(
     _backend: &mut Backend,
     _cmd: &[String],
 ) -> Result<GuestCommandResult, MicrovmError> {
+    Err(MicrovmError::UnsupportedPlatform)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn stream_execute_backend(
+    _backend: &mut Backend,
+    _cmd: &[String],
+) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 

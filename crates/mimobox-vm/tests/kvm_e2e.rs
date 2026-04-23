@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use mimobox_core::{Sandbox, SandboxConfig};
 use mimobox_vm::{
-    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError, MicrovmSandbox,
+    KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError, MicrovmSandbox, StreamEvent,
     microvm_config_from_vm_assets, resolve_vm_assets_dir,
 };
 
@@ -152,6 +152,40 @@ fn test_kvm_vm_timeout_marks_result() {
     assert_eq!(result.exit_code, None, "超时结果不应携带正常退出码");
     assert!(result.stdout.is_empty(), "忙等命令不应产生 stdout");
     assert!(result.stderr.is_empty(), "忙等命令不应产生 stderr");
+
+    sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
+}
+
+#[test]
+fn test_kvm_vm_stream_execute_separates_stdout_and_stderr() {
+    let mut sandbox = MicrovmSandbox::new(e2e_config()).expect("创建 microVM 沙箱必须成功");
+
+    let receiver = sandbox
+        .stream_execute(&guest_cmd(&[
+            "/bin/sh",
+            "-lc",
+            "printf 'stdout-1\\n'; sleep 0.1; printf 'stderr-1\\n' >&2; sleep 0.1; printf 'stdout-2\\n'; sleep 0.1; printf 'stderr-2\\n' >&2; exit 7",
+        ]))
+        .expect("流式执行必须成功");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = None;
+    let mut timed_out = false;
+
+    for event in receiver {
+        match event {
+            StreamEvent::Stdout(data) => stdout.extend(data),
+            StreamEvent::Stderr(data) => stderr.extend(data),
+            StreamEvent::Exit(code) => exit_code = Some(code),
+            StreamEvent::TimedOut => timed_out = true,
+        }
+    }
+
+    assert_eq!(stdout, b"stdout-1\nstdout-2\n");
+    assert_eq!(stderr, b"stderr-1\nstderr-2\n");
+    assert_eq!(exit_code, Some(7));
+    assert!(!timed_out, "正常退出的流式命令不应超时");
 
     sandbox.destroy().expect("销毁 microVM 沙箱必须成功");
 }

@@ -14,6 +14,7 @@ use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
+use std::sync::mpsc;
 use tracing::warn;
 
 /// 沙箱执行结果
@@ -37,8 +38,25 @@ impl From<SandboxResult> for ExecuteResult {
     }
 }
 
+/// 流式执行事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(i32),
+    TimedOut,
+}
+
 trait ExecuteForSdk {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError>;
+}
+
+#[allow(dead_code)]
+trait StreamExecuteForSdk {
+    fn stream_execute_for_sdk(
+        &mut self,
+        args: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError>;
 }
 
 #[cfg(all(feature = "os", target_os = "linux"))]
@@ -69,6 +87,18 @@ impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
+impl StreamExecuteForSdk for mimobox_vm::MicrovmSandbox {
+    fn stream_execute_for_sdk(
+        &mut self,
+        args: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+        self.stream_execute(args)
+            .map(bridge_vm_stream)
+            .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_vm::PooledVm {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
         let start = std::time::Instant::now();
@@ -80,6 +110,18 @@ impl ExecuteForSdk for mimobox_vm::PooledVm {
                 timed_out: result.timed_out,
                 elapsed: start.elapsed(),
             })
+            .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl StreamExecuteForSdk for mimobox_vm::PooledVm {
+    fn stream_execute_for_sdk(
+        &mut self,
+        args: &[String],
+    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+        self.stream_execute(args)
+            .map(bridge_vm_stream)
             .map_err(|error| SdkError::ExecutionFailed(error.to_string()))
     }
 }
@@ -180,6 +222,30 @@ impl Sandbox {
             .as_mut()
             .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
+    }
+
+    /// 以流式事件形式执行命令。
+    pub fn stream_execute(
+        &mut self,
+        command: &str,
+    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+        let args = parse_command(command)?;
+        let _ = &args;
+        self.ensure_backend(command)?;
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            _ => Err(SdkError::ExecutionFailed(
+                "流式执行仅支持 microVM 后端".to_string(),
+            )),
+        }
     }
 
     #[cfg(feature = "vm")]
@@ -408,6 +474,27 @@ fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
 fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
     shlex::split(command)
         .ok_or_else(|| SdkError::Config("命令解析失败：shell 风格引号不匹配".to_string()))
+}
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+fn bridge_vm_stream(
+    source: mpsc::Receiver<mimobox_vm::StreamEvent>,
+) -> mpsc::Receiver<StreamEvent> {
+    let (tx, rx) = mpsc::sync_channel(32);
+    std::thread::spawn(move || {
+        while let Ok(event) = source.recv() {
+            let mapped = match event {
+                mimobox_vm::StreamEvent::Stdout(data) => StreamEvent::Stdout(data),
+                mimobox_vm::StreamEvent::Stderr(data) => StreamEvent::Stderr(data),
+                mimobox_vm::StreamEvent::Exit(code) => StreamEvent::Exit(code),
+                mimobox_vm::StreamEvent::TimedOut => StreamEvent::TimedOut,
+            };
+            if tx.send(mapped).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 #[cfg(feature = "vm")]
