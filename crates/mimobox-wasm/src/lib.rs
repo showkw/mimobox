@@ -617,6 +617,7 @@ pub fn run_wasm_benchmark(
         fs_readwrite: vec![],
         seccomp_profile: mimobox_core::SeccompProfile::Essential,
         allow_fork: false,
+        allowed_http_domains: vec![],
     };
 
     if !Path::new(wasm_path).exists() {
@@ -739,8 +740,8 @@ mod tests {
             deny_network: true,
             seccomp_profile: mimobox_core::SeccompProfile::Essential,
             allow_fork: false,
-        }
-    }
+            allowed_http_domains: vec![],
+        }    }
 
     #[test]
     fn test_wasm_sandbox_create() {

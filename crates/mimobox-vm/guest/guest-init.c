@@ -210,6 +210,7 @@ static bool is_supported_command_prefix(const char *prefix) {
 
     return strcmp(prefix, "EXEC:") == 0 ||
            strcmp(prefix, "EXECS:") == 0 ||
+           strcmp(prefix, "HTTP:REQUEST:") == 0 ||
            strcmp(prefix, "FS:READ:") == 0 ||
            strcmp(prefix, "FS:WRITE:") == 0;
 }
@@ -217,11 +218,13 @@ static bool is_supported_command_prefix(const char *prefix) {
 static int read_command_frame(char *buffer, size_t capacity) {
     char prefix[16];
     char streaming_id[16];
+    char http_request_id[16];
     size_t prefix_len = 0;
     size_t payload_len = 0;
     unsigned char value = 0;
     bool saw_digit = false;
     bool is_streaming_exec = false;
+    bool is_http_request = false;
 
     if (capacity == 0) {
         return -1;
@@ -247,6 +250,7 @@ static int read_command_frame(char *buffer, size_t capacity) {
     }
 
     is_streaming_exec = strcmp(prefix, "EXECS:") == 0;
+    is_http_request = strcmp(prefix, "HTTP:REQUEST:") == 0;
     if (is_streaming_exec) {
         size_t id_len = 0;
         streaming_id[id_len++] = (char)value;
@@ -271,6 +275,43 @@ static int read_command_frame(char *buffer, size_t capacity) {
             }
             streaming_id[id_len++] = (char)digit;
             streaming_id[id_len] = '\0';
+        }
+
+        saw_digit = false;
+        payload_len = 0;
+        if (read_serial_byte(&value) < 0) {
+            return -1;
+        }
+        if (value < '0' || value > '9') {
+            return -3;
+        }
+        payload_len = (size_t)(value - '0');
+        saw_digit = true;
+    }
+    if (is_http_request) {
+        size_t id_len = 0;
+        http_request_id[id_len++] = (char)value;
+        http_request_id[id_len] = '\0';
+
+        for (;;) {
+            unsigned char digit = 0;
+            if (read_serial_byte(&digit) < 0) {
+                return -1;
+            }
+            if (digit == ':') {
+                if (id_len == 0) {
+                    return -3;
+                }
+                break;
+            }
+            if (digit < '0' || digit > '9') {
+                return -3;
+            }
+            if (id_len + 1 >= sizeof(http_request_id)) {
+                return -3;
+            }
+            http_request_id[id_len++] = (char)digit;
+            http_request_id[id_len] = '\0';
         }
 
         saw_digit = false;
@@ -320,6 +361,9 @@ static int read_command_frame(char *buffer, size_t capacity) {
     if (is_streaming_exec) {
         total_prefix_len += strlen(streaming_id) + 1;
     }
+    if (is_http_request) {
+        total_prefix_len += strlen(http_request_id) + 1;
+    }
 
     if (total_prefix_len + payload_len >= capacity) {
         if (discard_serial_bytes(payload_len) < 0) {
@@ -338,6 +382,11 @@ static int read_command_frame(char *buffer, size_t capacity) {
     if (is_streaming_exec) {
         size_t id_len = strlen(streaming_id);
         memcpy(buffer + prefix_len, streaming_id, id_len);
+        buffer[prefix_len + id_len] = ':';
+    }
+    if (is_http_request) {
+        size_t id_len = strlen(http_request_id);
+        memcpy(buffer + prefix_len, http_request_id, id_len);
         buffer[prefix_len + id_len] = ':';
     }
     for (size_t index = 0; index < payload_len; index++) {
@@ -694,6 +743,34 @@ static void write_stream_end(uint32_t stream_id, int exit_code) {
     if (written > 0) {
         write_console_bytes(buffer, (size_t)written);
     }
+}
+
+static void write_http_request_passthrough(const char *request_frame) {
+    const char *id_start = request_frame + strlen("HTTP:REQUEST:");
+    const char *payload_start = strchr(id_start, ':');
+    if (payload_start == NULL) {
+        static const unsigned char invalid_http_frame[] = "invalid HTTP:REQUEST frame";
+        write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_http_frame, sizeof(invalid_http_frame) - 1);
+        write_exit_code(125);
+        return;
+    }
+
+    size_t request_id_len = (size_t)(payload_start - id_start);
+    payload_start++;
+    size_t payload_len = strlen(payload_start);
+
+    write_console_bytes("HTTP:REQUEST:", sizeof("HTTP:REQUEST:") - 1);
+    write_console_bytes(id_start, request_id_len);
+
+    char len_buffer[32];
+    int len_written = snprintf(len_buffer, sizeof(len_buffer), ":%zu:", payload_len);
+    if (len_written > 0) {
+        write_console_bytes(len_buffer, (size_t)len_written);
+    }
+    if (payload_len > 0) {
+        write_console_bytes(payload_start, payload_len);
+    }
+    write_console_bytes("\n", 1);
 }
 
 static int child_exit_code_from_status(int status) {
@@ -1381,6 +1458,10 @@ static void serial_command_loop(void) {
 
             int exit_code = execute_command_streaming((uint32_t)parsed_id, id_end + 1);
             write_stream_end((uint32_t)parsed_id, exit_code);
+            continue;
+        }
+        if (strncmp(command_buffer, "HTTP:REQUEST:", 13) == 0) {
+            write_http_request_passthrough(command_buffer);
             continue;
         }
         {

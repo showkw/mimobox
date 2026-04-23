@@ -46,12 +46,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 shlex = "1"
 criterion = "0.5"
 kvm-ioctls = "0.19"
 kvm-bindings = { version = "0.10.0", features = ["fam-wrappers"] }
 vm-memory = { version = "0.16", features = ["backend-mmap"] }
 vmm-sys-util = "0.12.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

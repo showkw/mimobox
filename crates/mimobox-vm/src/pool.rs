@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
+use crate::{GuestCommandResult, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError, StreamEvent};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
@@ -455,6 +455,13 @@ impl PooledVm {
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         }
     }
+
+    pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => http_request_backend(backend, request),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
 }
 
 impl Drop for PooledVm {
@@ -594,6 +601,22 @@ fn write_file_backend(
     _path: &str,
     _data: &[u8],
 ) -> Result<(), MicrovmError> {
+    Err(MicrovmError::UnsupportedPlatform)
+}
+
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn http_request_backend(
+    backend: &mut Backend,
+    request: HttpRequest,
+) -> Result<HttpResponse, MicrovmError> {
+    backend.http_request(request)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn http_request_backend(
+    _backend: &mut Backend,
+    _request: HttpRequest,
+) -> Result<HttpResponse, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 

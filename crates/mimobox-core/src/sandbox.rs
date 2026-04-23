@@ -21,6 +21,8 @@ pub struct SandboxConfig {
     /// 是否允许沙箱内进程创建子进程（fork/clone）
     /// 默认 false，仅 shell 等需要子进程的场景设为 true
     pub allow_fork: bool,
+    /// HTTP 代理允许的域名白名单（支持通配符如 *.openai.com）
+    pub allowed_http_domains: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -42,6 +44,7 @@ impl Default for SandboxConfig {
             timeout_secs: Some(30),
             seccomp_profile: SeccompProfile::Essential,
             allow_fork: false,
+            allowed_http_domains: Vec::new(),
         }
     }
 }
