@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use crate::seccomp::SeccompProfile;
@@ -112,11 +113,60 @@ pub struct SandboxResult {
     pub timed_out: bool,
 }
 
+/// PTY 终端尺寸
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl Default for PtySize {
+    fn default() -> Self {
+        Self { cols: 80, rows: 24 }
+    }
+}
+
+/// PTY 会话事件
+#[derive(Debug)]
+pub enum PtyEvent {
+    /// 终端输出数据
+    Output(Vec<u8>),
+    /// 进程退出
+    Exit(i32),
+}
+
+/// PTY 会话配置
+#[derive(Debug, Clone)]
+pub struct PtyConfig {
+    pub command: Vec<String>,
+    pub size: PtySize,
+    pub env: std::collections::HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+/// PTY 会话 trait
+pub trait PtySession {
+    /// 向终端发送输入（stdin）
+    fn send_input(&mut self, data: &[u8]) -> Result<(), SandboxError>;
+    /// 调整终端尺寸
+    fn resize(&mut self, size: PtySize) -> Result<(), SandboxError>;
+    /// 获取输出事件接收端
+    fn output_rx(&self) -> &Receiver<PtyEvent>;
+    /// 终止会话
+    fn kill(&mut self) -> Result<(), SandboxError>;
+    /// 等待进程退出，返回 exit code
+    fn wait(&mut self) -> Result<i32, SandboxError>;
+}
+
 /// 沙箱错误类型
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     #[error("当前平台不支持该沙箱后端")]
     Unsupported,
+
+    #[error("当前操作不受支持: {0}")]
+    UnsupportedOperation(String),
 
     #[error("命名空间创建失败: {0}")]
     NamespaceFailed(String),
@@ -155,6 +205,12 @@ pub trait Sandbox {
     where
         Self: Sized;
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError>;
+    fn create_pty(&mut self, config: PtyConfig) -> Result<Box<dyn PtySession>, SandboxError> {
+        let _ = config;
+        Err(SandboxError::UnsupportedOperation(
+            "PTY 会话当前后端不支持".to_string(),
+        ))
+    }
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
         Err(SandboxError::ExecutionFailed(
@@ -169,4 +225,14 @@ pub trait Sandbox {
         ))
     }
     fn destroy(self) -> Result<(), SandboxError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PtySize;
+
+    #[test]
+    fn pty_size_default_is_80x24() {
+        assert_eq!(PtySize::default(), PtySize { cols: 80, rows: 24 });
+    }
 }

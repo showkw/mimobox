@@ -9,7 +9,7 @@ mod router;
 
 pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLevel};
 pub use error::SdkError;
-pub use mimobox_core::ErrorCode;
+pub use mimobox_core::{ErrorCode, PtyConfig, PtyEvent, PtySize};
 
 use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
@@ -68,6 +68,35 @@ pub enum StreamEvent {
     Stderr(Vec<u8>),
     Exit(i32),
     TimedOut,
+}
+
+/// 交互式 PTY 会话
+pub struct PtySession {
+    inner: Box<dyn mimobox_core::PtySession>,
+}
+
+impl PtySession {
+    pub fn send_input(&mut self, data: &[u8]) -> Result<(), SdkError> {
+        self.inner.send_input(data).map_err(map_pty_session_error)
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SdkError> {
+        self.inner
+            .resize(PtySize { cols, rows })
+            .map_err(map_pty_session_error)
+    }
+
+    pub fn output(&self) -> &mpsc::Receiver<PtyEvent> {
+        self.inner.output_rx()
+    }
+
+    pub fn kill(&mut self) -> Result<(), SdkError> {
+        self.inner.kill().map_err(map_pty_session_error)
+    }
+
+    pub fn wait(&mut self) -> Result<i32, SdkError> {
+        self.inner.wait().map_err(map_pty_session_error)
+    }
 }
 
 trait ExecuteForSdk {
@@ -308,6 +337,65 @@ impl Sandbox {
             )
         })?;
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
+    }
+
+    /// 创建交互式终端会话
+    pub fn create_pty(&mut self, command: &str) -> Result<PtySession, SdkError> {
+        let args = parse_command(command)?;
+        if args.is_empty() {
+            return Err(SdkError::Config("PTY 命令不能为空".to_string()));
+        }
+
+        self.create_pty_with_config(PtyConfig {
+            command: args,
+            size: PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: self.config.timeout,
+        })
+    }
+
+    /// 创建交互式终端会话（带完整配置）
+    pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
+        if config.command.is_empty() {
+            return Err(SdkError::Config("PTY 命令不能为空".to_string()));
+        }
+
+        self.ensure_backend_for_pty()?;
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            SdkError::sandbox(
+                ErrorCode::SandboxCreateFailed,
+                "后端初始化后缺失实例",
+                Some("检查沙箱初始化流程是否被中断".to_string()),
+            )
+        })?;
+
+        let session =
+            match inner {
+                #[cfg(all(feature = "os", target_os = "linux"))]
+                SandboxInner::Os(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "os", target_os = "macos"))]
+                SandboxInner::OsMac(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::MicroVm(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::PooledMicroVm(_) => {
+                    return Err(SdkError::sandbox(
+                        ErrorCode::UnsupportedPlatform,
+                        "PTY 会话当前仅支持 OS 级后端，microVM 预热池暂不支持",
+                        Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
+                    ));
+                }
+                #[cfg(feature = "wasm")]
+                SandboxInner::Wasm(sandbox) => {
+                    CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
+                }
+            };
+
+        Ok(PtySession { inner: session })
     }
 
     #[cfg(feature = "vm")]
@@ -586,6 +674,25 @@ impl Sandbox {
         Err(SdkError::unsupported_backend("microvm"))
     }
 
+    fn ensure_backend_for_pty(&mut self) -> Result<(), SdkError> {
+        let isolation = match self.config.isolation {
+            IsolationLevel::Auto => IsolationLevel::Os,
+            other => other,
+        };
+
+        if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            return Ok(());
+        }
+
+        if self.inner.is_some() {
+            self.destroy_inner()?;
+        }
+
+        self.inner = Some(self.create_inner(isolation)?);
+        self.active_isolation = Some(isolation);
+        Ok(())
+    }
+
     fn new_uninitialized(config: Config) -> Self {
         Self {
             config,
@@ -706,6 +813,33 @@ fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
 fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
     shlex::split(command)
         .ok_or_else(|| SdkError::Config("命令解析失败：shell 风格引号不匹配".to_string()))
+}
+
+fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
+    match error {
+        mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            message,
+            Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
+        ),
+        other => SdkError::sandbox(ErrorCode::SandboxCreateFailed, other.to_string(), None),
+    }
+}
+
+fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkError {
+    match error {
+        mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            message,
+            Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
+        ),
+        mimobox_core::SandboxError::Timeout => SdkError::sandbox(
+            ErrorCode::CommandTimeout,
+            "PTY 会话执行超时",
+            Some("增大 Config.timeout 或 PtyConfig.timeout".to_string()),
+        ),
+        other => SdkError::sandbox(ErrorCode::SandboxDestroyed, other.to_string(), None),
+    }
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -967,6 +1101,45 @@ mod tests {
         let result = parse_for_test("'unterminated");
 
         assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn create_pty_auto_routes_to_os_backend() {
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let mut session = sandbox
+            .create_pty("/bin/echo ready")
+            .expect("创建 PTY 会话失败");
+
+        assert_eq!(active_isolation(&sandbox), Some(IsolationLevel::Os));
+        assert_eq!(session.wait().expect("等待 PTY 退出失败"), 0);
+
+        drop(session);
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[test]
+    fn create_pty_microvm_is_rejected() {
+        let mut sandbox =
+            Sandbox::with_config(Config::builder().isolation(IsolationLevel::MicroVm).build())
+                .expect("创建沙箱失败");
+
+        let result = sandbox.create_pty("/bin/sh");
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        match result {
+            Err(SdkError::Sandbox { code, message, .. }) => {
+                assert_eq!(code, ErrorCode::UnsupportedPlatform);
+                assert!(message.contains("microVM"));
+            }
+            other => panic!("期望 PTY 不支持 microVM，实际为: {other:?}"),
+        }
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        assert!(matches!(
+            result,
+            Err(SdkError::BackendUnavailable("microvm"))
+        ));
     }
 
     #[cfg(all(

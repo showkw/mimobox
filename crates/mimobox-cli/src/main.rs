@@ -7,7 +7,10 @@ use std::panic::{self, AssertUnwindSafe};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
-use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -20,7 +23,8 @@ use mimobox_os::MacOsSandbox;
 use mimobox_os::run_pool_benchmark;
 use mimobox_sdk::{
     Config as SdkConfig, ExecuteResult as SdkExecuteResult, IsolationLevel as SdkIsolationLevel,
-    NetworkPolicy as SdkNetworkPolicy, Sandbox as SdkSandbox,
+    NetworkPolicy as SdkNetworkPolicy, PtyConfig as SdkPtyConfig, PtyEvent as SdkPtyEvent,
+    PtySize as SdkPtySize, Sandbox as SdkSandbox,
 };
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
@@ -52,6 +56,8 @@ struct Cli {
 enum CliCommand {
     /// 在指定后端沙箱中执行命令
     Run(RunArgs),
+    /// 启动交互式终端会话
+    Shell(ShellArgs),
     /// 运行预热池相关基准
     Bench(BenchArgs),
     /// 输出版本信息
@@ -117,6 +123,33 @@ struct RunArgs {
     /// KVM vCPU 数量
     #[arg(long, default_value_t = 1)]
     vcpu_count: u8,
+}
+
+#[derive(Debug, Args)]
+struct ShellArgs {
+    /// 选择后端
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    backend: Backend,
+
+    /// 待执行命令，默认启动 /bin/sh
+    #[arg(long, value_name = "cmd", default_value = "/bin/sh")]
+    command: String,
+
+    /// 内存上限（MB）
+    #[arg(long)]
+    memory: Option<u64>,
+
+    /// 超时时间（秒），传 0 表示不设置超时
+    #[arg(long)]
+    timeout: Option<u64>,
+
+    /// 是否拒绝网络访问
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
+    deny_network: bool,
+
+    /// 是否允许网络访问
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
+    allow_network: bool,
 }
 
 #[derive(Debug, Args)]
@@ -293,6 +326,11 @@ thread_local! {
     static STDERR_LOGGING_ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
+#[cfg(unix)]
+static SHELL_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static SHELL_SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
+
 fn main() -> ExitCode {
     if let Err(error) = init_tracing() {
         if let Err(print_error) = emit_error_json(&error) {
@@ -345,6 +383,11 @@ fn run() -> Result<Option<i32>, CliError> {
 
     let response = match cli.command {
         CliCommand::Run(args) => CommandResponse::Run(handle_run(args)?),
+        CliCommand::Shell(args) => {
+            let exit_code = handle_shell(args)?;
+            info!(exit_code, "shell 子命令执行完成");
+            return Ok(Some(exit_code));
+        }
         CliCommand::Bench(args) => CommandResponse::Bench(handle_bench(args)?),
         CliCommand::Version => CommandResponse::Version(handle_version()),
     };
@@ -466,6 +509,209 @@ fn resolve_run_execution_mode(backend: Backend) -> RunExecutionMode {
         Backend::Auto => RunExecutionMode::Sdk,
         Backend::Os | Backend::Wasm | Backend::Kvm => RunExecutionMode::Direct,
     }
+}
+
+fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        return Err(CliError::Sdk(
+            "shell 子命令当前仅支持 Unix 终端环境".to_string(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let deny_network = resolve_shell_deny_network(&args);
+        let sdk_config = build_shell_sdk_config(&args, deny_network);
+        let pty_config = SdkPtyConfig {
+            command: parse_command(&args.command)?,
+            size: current_terminal_size().unwrap_or_default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: sdk_config.timeout,
+        };
+
+        info!(
+            backend = ?args.backend,
+            command = %args.command,
+            timeout_secs = sdk_config.timeout.as_ref().map(Duration::as_secs),
+            deny_network,
+            "准备执行 shell 子命令"
+        );
+
+        install_shell_signal_handlers();
+
+        let mut sandbox = SdkSandbox::with_config(sdk_config).map_err(map_sdk_error)?;
+        let mut session = match sandbox.create_pty_with_config(pty_config) {
+            Ok(session) => session,
+            Err(error) => {
+                if let Err(destroy_error) = sandbox.destroy() {
+                    warn!(message = %destroy_error, "shell 初始化失败后销毁沙箱也失败");
+                }
+                return Err(map_sdk_error(error));
+            }
+        };
+
+        let shell_result = run_shell_session(&mut session);
+        drop(session);
+
+        if let Err(destroy_error) = sandbox.destroy() {
+            warn!(message = %destroy_error, "shell 会话结束后销毁沙箱失败");
+        }
+
+        shell_result
+    }
+}
+
+fn build_shell_sdk_config(args: &ShellArgs, deny_network: bool) -> SdkConfig {
+    let mut config = build_sdk_config(args.memory, args.timeout, deny_network, true);
+    config.isolation = backend_to_sdk_isolation(args.backend);
+    config
+}
+
+fn backend_to_sdk_isolation(backend: Backend) -> SdkIsolationLevel {
+    match backend {
+        Backend::Auto => SdkIsolationLevel::Auto,
+        Backend::Os => SdkIsolationLevel::Os,
+        Backend::Wasm => SdkIsolationLevel::Wasm,
+        Backend::Kvm => SdkIsolationLevel::MicroVm,
+    }
+}
+
+fn resolve_shell_deny_network(args: &ShellArgs) -> bool {
+    if args.allow_network {
+        false
+    } else {
+        args.deny_network
+    }
+}
+
+#[cfg(unix)]
+fn run_shell_session(session: &mut mimobox_sdk::PtySession) -> Result<i32, CliError> {
+    let (input_tx, input_rx) = mpsc::channel();
+    spawn_stdin_forwarder(input_tx);
+
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let mut exit_code = None;
+
+    loop {
+        while let Ok(data) = input_rx.try_recv() {
+            session.send_input(&data).map_err(map_sdk_error)?;
+        }
+
+        if shell_sigint_received() {
+            session.kill().map_err(map_sdk_error)?;
+        }
+
+        if shell_sigwinch_received()
+            && let Some(size) = current_terminal_size()
+        {
+            session
+                .resize(size.cols, size.rows)
+                .map_err(map_sdk_error)?;
+        }
+
+        match session.output().recv_timeout(Duration::from_millis(50)) {
+            Ok(SdkPtyEvent::Output(data)) => {
+                stdout.write_all(&data)?;
+                stdout.flush()?;
+            }
+            Ok(SdkPtyEvent::Exit(code)) => {
+                exit_code = Some(code);
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
+        }
+    }
+
+    match exit_code {
+        Some(code) => session.wait().map_err(map_sdk_error).or(Ok(code)),
+        None => session.wait().map_err(map_sdk_error),
+    }
+}
+
+#[cfg(unix)]
+fn spawn_stdin_forwarder(input_tx: mpsc::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        let mut buffer = [0_u8; 1024];
+
+        loop {
+            match stdin.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if input_tx.send(buffer[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    warn!(message = %error, "读取本地 stdin 失败，终止输入转发");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+fn current_terminal_size() -> Option<SdkPtySize> {
+    // SAFETY: `winsize` 在当前函数栈上分配，`ioctl` 仅写入该结构体。
+    let mut winsize = unsafe { std::mem::zeroed::<libc::winsize>() };
+    // SAFETY: `STDOUT_FILENO` 是当前进程的标准输出 fd，若不是终端会返回错误。
+    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut winsize) };
+    if result != 0 || winsize.ws_col == 0 || winsize.ws_row == 0 {
+        return None;
+    }
+
+    Some(SdkPtySize {
+        cols: winsize.ws_col,
+        rows: winsize.ws_row,
+    })
+}
+
+#[cfg(unix)]
+fn install_shell_signal_handlers() {
+    SHELL_SIGINT_RECEIVED.store(false, Ordering::SeqCst);
+    SHELL_SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
+
+    // SAFETY: 为当前 CLI 进程安装简单信号处理器，仅写原子标记，不执行非异步信号安全操作。
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            shell_sigint_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGWINCH,
+            shell_sigwinch_handler as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+#[cfg(unix)]
+fn shell_sigint_received() -> bool {
+    SHELL_SIGINT_RECEIVED.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+fn shell_sigwinch_received() -> bool {
+    SHELL_SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+extern "C" fn shell_sigint_handler(_: libc::c_int) {
+    SHELL_SIGINT_RECEIVED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+extern "C" fn shell_sigwinch_handler(_: libc::c_int) {
+    SHELL_SIGWINCH_RECEIVED.store(true, Ordering::SeqCst);
 }
 
 fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
@@ -910,6 +1156,9 @@ fn capture_fd_output<F, T>(target_fd: libc::c_int, run: F) -> Result<(T, Vec<u8>
 where
     F: FnOnce() -> T,
 {
+    let _capture_guard = fd_capture_lock()
+        .lock()
+        .map_err(|_| CliError::Io(io::Error::other("fd 捕获锁已中毒")))?;
     let mut capture = FdCapture::start(target_fd)?;
     let outcome = if target_fd == libc::STDERR_FILENO {
         let _guard = StderrLoggingGuard::suspend();
@@ -919,6 +1168,12 @@ where
     };
     let output = capture.finish()?;
     Ok((outcome, output))
+}
+
+#[cfg(unix)]
+fn fd_capture_lock() -> &'static Mutex<()> {
+    static FD_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    FD_CAPTURE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(unix)]
@@ -1179,6 +1434,23 @@ mod tests {
     }
 
     #[test]
+    fn shell_subcommand_parses_expected_defaults() {
+        let cli = Cli::try_parse_from(["mimobox", "shell"]).expect("shell 子命令应解析成功");
+
+        match cli.command {
+            CliCommand::Shell(args) => {
+                assert_eq!(args.backend, Backend::Auto);
+                assert_eq!(args.command, "/bin/sh");
+                assert_eq!(args.memory, None);
+                assert_eq!(args.timeout, None);
+                assert!(!args.deny_network);
+                assert!(!args.allow_network);
+            }
+            _ => panic!("应解析为 shell 子命令"),
+        }
+    }
+
+    #[test]
     fn auto_backend_routes_to_sdk_executor() {
         assert_eq!(
             resolve_run_execution_mode(Backend::Auto),
@@ -1196,6 +1468,23 @@ mod tests {
             resolve_run_execution_mode(Backend::Kvm),
             RunExecutionMode::Direct
         );
+    }
+
+    #[test]
+    fn shell_sdk_config_forces_allow_fork() {
+        let args = ShellArgs {
+            backend: Backend::Os,
+            command: "/bin/sh".to_string(),
+            memory: Some(256),
+            timeout: Some(10),
+            deny_network: true,
+            allow_network: false,
+        };
+
+        let config = build_shell_sdk_config(&args, true);
+        assert!(config.allow_fork);
+        assert_eq!(config.isolation, SdkIsolationLevel::Os);
+        assert!(matches!(config.network, SdkNetworkPolicy::DenyAll));
     }
 
     #[test]

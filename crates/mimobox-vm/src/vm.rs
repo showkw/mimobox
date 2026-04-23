@@ -508,6 +508,15 @@ impl Sandbox for MicrovmSandbox {
             .map_err(SandboxError::from)
     }
 
+    fn create_pty(
+        &mut self,
+        _config: mimobox_core::PtyConfig,
+    ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
+        Err(SandboxError::UnsupportedOperation(
+            "PTY 会话当前仅支持 OS 级后端，microVM 后端暂不支持".to_string(),
+        ))
+    }
+
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         MicrovmSandbox::read_file(self, path).map_err(SandboxError::from)
     }

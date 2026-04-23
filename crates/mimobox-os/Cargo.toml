@@ -10,6 +10,7 @@ mimobox-core.workspace = true
 thiserror.workspace = true
 libc.workspace = true
 tracing.workspace = true
+portable-pty.workspace = true
 
 # Linux 专属依赖
 [target.'cfg(target_os = "linux")'.dependencies]

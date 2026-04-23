@@ -16,6 +16,7 @@
 //! | 内存限制 | 不支持 | macOS 上 `RLIMIT_AS` 无法从无限值缩小，记录告警日志 |
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::Read;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
@@ -24,6 +25,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
+
+use crate::pty::{allocate_pty, build_child_env, build_session};
 
 /// 需要显式拒绝读取的敏感用户目录后缀（相对于 $HOME）
 ///
@@ -326,6 +329,81 @@ impl Sandbox for MacOsSandbox {
             elapsed,
             timed_out,
         })
+    }
+
+    fn create_pty(
+        &mut self,
+        config: mimobox_core::PtyConfig,
+    ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
+        if config.command.is_empty() {
+            return Err(SandboxError::ExecutionFailed("PTY 命令为空".into()));
+        }
+
+        tracing::info!(
+            "创建 macOS PTY 会话: {}",
+            command_log_summary(&config.command)
+        );
+
+        let allocated = allocate_pty(config.size)?;
+        let policy = self.generate_policy();
+        tracing::debug!("PTY Seatbelt 策略:\n{policy}");
+
+        let slave_file = File::options()
+            .read(true)
+            .write(true)
+            .open(&allocated.slave_path)
+            .map_err(|error| {
+                SandboxError::ExecutionFailed(format!("打开 PTY slave 失败: {error}"))
+            })?;
+        let stdin_slave = slave_file.try_clone().map_err(|error| {
+            SandboxError::ExecutionFailed(format!("克隆 PTY stdin 失败: {error}"))
+        })?;
+        let stdout_slave = slave_file.try_clone().map_err(|error| {
+            SandboxError::ExecutionFailed(format!("克隆 PTY stdout 失败: {error}"))
+        })?;
+
+        let mut args = vec!["-p".to_string(), policy, "--".to_string()];
+        args.extend(config.command.iter().cloned());
+
+        let mut command = Command::new("sandbox-exec");
+        command
+            .args(&args)
+            .env_clear()
+            .envs(build_child_env(&config))
+            .stdin(Stdio::from(stdin_slave))
+            .stdout(Stdio::from(stdout_slave))
+            .stderr(Stdio::from(slave_file));
+
+        if let Some(cwd) = config.cwd.as_deref() {
+            command.current_dir(cwd);
+        }
+
+        let child = unsafe {
+            command.pre_exec(|| {
+                // SAFETY: pre_exec 中仅调用 async-signal-safe 的 setsid/ioctl，
+                // 让 sandbox-exec 成为新的会话首进程并接管 PTY 作为控制终端。
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                #[allow(clippy::cast_lossless)]
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                Ok(())
+            })
+        }
+        .spawn()
+        .map_err(|error| {
+            SandboxError::ExecutionFailed(format!("sandbox-exec PTY 启动失败: {error}"))
+        })?;
+
+        Ok(build_session(
+            allocated,
+            child.id() as libc::pid_t,
+            config.timeout,
+        ))
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
@@ -639,6 +717,100 @@ mod tests {
     }
 
     #[test]
+    fn test_pty_basic_echo() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'ready\\n'; IFS= read -r line; printf 'reply:%s\\n' \"$line\""
+                        .to_string(),
+                ],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session
+            .send_input(b"hello-pty\n")
+            .expect("发送 PTY 输入失败");
+
+        let output = read_pty_until(
+            session.output_rx(),
+            b"reply:hello-pty",
+            Duration::from_secs(5),
+        );
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output.contains("reply:hello-pty"),
+            "PTY 输出应包含回显结果, 实际: {output}"
+        );
+
+        assert_eq!(session.wait().expect("等待 PTY 退出失败"), 0);
+    }
+
+    #[test]
+    fn test_pty_resize() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/cat".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session
+            .resize(mimobox_core::PtySize {
+                cols: 100,
+                rows: 32,
+            })
+            .expect("调整 PTY 尺寸失败");
+
+        session.kill().expect("终止 PTY 会话失败");
+        assert!(
+            session.wait().expect("等待 PTY 退出失败") < 0,
+            "被终止的 PTY 应返回信号退出码"
+        );
+    }
+
+    #[test]
+    fn test_pty_kill() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/cat".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .expect("创建 PTY 会话失败");
+
+        session.kill().expect("终止 PTY 会话失败");
+
+        let exit_code = session.wait().expect("等待 PTY 退出失败");
+        assert!(exit_code < 0, "kill 后应返回信号退出码, 实际: {exit_code}");
+    }
+
+    #[test]
     fn test_sandbox_create_with_memory_limit_warns() {
         // macOS 不支持内存限制，但创建不应失败（仅记录告警日志）
         let config = SandboxConfig {
@@ -647,5 +819,30 @@ mod tests {
         };
         let sb = MacOsSandbox::new(config);
         assert!(sb.is_ok(), "macOS 沙箱创建不应因内存限制而失败");
+    }
+
+    fn read_pty_until(
+        rx: &std::sync::mpsc::Receiver<mimobox_core::PtyEvent>,
+        needle: &[u8],
+        timeout: Duration,
+    ) -> Vec<u8> {
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(mimobox_core::PtyEvent::Output(chunk)) => {
+                    output.extend_from_slice(&chunk);
+                    if output.windows(needle.len()).any(|window| window == needle) {
+                        break;
+                    }
+                }
+                Ok(mimobox_core::PtyEvent::Exit(_)) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        output
     }
 }
