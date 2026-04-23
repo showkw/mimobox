@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+extern char **environ;
 /* USE_VSOCK 由构建脚本通过 -DUSE_VSOCK 显式启用，默认不定义。
  * vhost-vsock 数据面恢复前，guest-init 默认只走串口协议。 */
 #ifdef USE_VSOCK
@@ -74,6 +75,15 @@ static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
 #endif
 static const int OUTPUT_STREAM_STDOUT = STDOUT_FILENO;
 static const int OUTPUT_STREAM_STDERR = STDERR_FILENO;
+static volatile sig_atomic_t current_command_pid = -1;
+
+typedef struct {
+    char command_line[COMMAND_BUFFER_CAP];
+    const char *json_payload;
+    bool structured;
+    bool has_timeout;
+    uint64_t timeout_secs;
+} exec_request_t;
 
 static void close_fd_if_open(int *fd);
 
@@ -210,6 +220,7 @@ static bool is_supported_command_prefix(const char *prefix) {
 
     return strcmp(prefix, "EXEC:") == 0 ||
            strcmp(prefix, "EXECS:") == 0 ||
+           strcmp(prefix, "SIGNAL:KILL:") == 0 ||
            strcmp(prefix, "HTTP:REQUEST:") == 0 ||
            strcmp(prefix, "FS:READ:") == 0 ||
            strcmp(prefix, "FS:WRITE:") == 0;
@@ -247,6 +258,25 @@ static int read_command_frame(char *buffer, size_t capacity) {
         }
         prefix[prefix_len++] = (char)value;
         prefix[prefix_len] = '\0';
+        if (strcmp(prefix, "SIGNAL:KILL:") == 0) {
+            if (prefix_len >= capacity) {
+                return -2;
+            }
+            memcpy(buffer, prefix, prefix_len);
+            for (;;) {
+                if (read_serial_byte(&value) < 0) {
+                    return -1;
+                }
+                if (value == '\n') {
+                    buffer[prefix_len] = '\0';
+                    return 0;
+                }
+                if (prefix_len + 1 >= capacity) {
+                    return -2;
+                }
+                buffer[prefix_len++] = (char)value;
+            }
+        }
     }
 
     is_streaming_exec = strcmp(prefix, "EXECS:") == 0;
@@ -745,6 +775,18 @@ static void write_stream_end(uint32_t stream_id, int exit_code) {
     }
 }
 
+static void write_exit_timeout(void) {
+    write_console_line("EXIT:TIMEOUT\n");
+}
+
+static void write_stream_timeout(uint32_t stream_id) {
+    char buffer[64];
+    int written = snprintf(buffer, sizeof(buffer), "STREAM:TIMEOUT:%" PRIu32 "\n", stream_id);
+    if (written > 0) {
+        write_console_bytes(buffer, (size_t)written);
+    }
+}
+
 static void write_http_request_passthrough(const char *request_frame) {
     const char *id_start = request_frame + strlen("HTTP:REQUEST:");
     const char *payload_start = strchr(id_start, ':');
@@ -781,6 +823,372 @@ static int child_exit_code_from_status(int status) {
         return 128 + WTERMSIG(status);
     }
     return 125;
+}
+
+static void set_current_command_pid(pid_t pid) {
+    current_command_pid = (sig_atomic_t)pid;
+}
+
+static void clear_current_command_pid(void) {
+    current_command_pid = -1;
+}
+
+static void kill_running_command(void) {
+    pid_t pid = (pid_t)current_command_pid;
+    if (pid <= 0) {
+        return;
+    }
+    kill(-pid, SIGKILL);
+}
+
+static int monotonic_now_ms(uint64_t *now_ms) {
+    struct timespec ts;
+
+    if (now_ms == NULL) {
+        return -1;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+        return -1;
+    }
+
+    *now_ms = ((uint64_t)ts.tv_sec * 1000ull) + ((uint64_t)ts.tv_nsec / 1000000ull);
+    return 0;
+}
+
+static int remaining_timeout_ms(uint64_t deadline_ms) {
+    uint64_t now_ms = 0;
+
+    if (monotonic_now_ms(&now_ms) < 0) {
+        return 0;
+    }
+    if (now_ms >= deadline_ms) {
+        return 0;
+    }
+
+    uint64_t remaining = deadline_ms - now_ms;
+    if (remaining > (uint64_t)INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)remaining;
+}
+
+static void skip_json_ws(const char **cursor) {
+    while (cursor != NULL && *cursor != NULL) {
+        char ch = **cursor;
+        if (ch != ' ' && ch != '\n' && ch != '\r' && ch != '\t') {
+            return;
+        }
+        (*cursor)++;
+    }
+}
+
+static int parse_json_string(const char **cursor, char *buffer, size_t capacity) {
+    size_t written = 0;
+
+    if (cursor == NULL || *cursor == NULL || buffer == NULL || capacity == 0) {
+        return -1;
+    }
+    if (**cursor != '"') {
+        return -1;
+    }
+    (*cursor)++;
+
+    while (**cursor != '\0') {
+        char ch = **cursor;
+        (*cursor)++;
+
+        if (ch == '"') {
+            if (written >= capacity) {
+                return -1;
+            }
+            buffer[written] = '\0';
+            return 0;
+        }
+
+        if (ch == '\\') {
+            char escaped = **cursor;
+            if (escaped == '\0') {
+                return -1;
+            }
+            (*cursor)++;
+            switch (escaped) {
+            case '"':
+            case '\\':
+            case '/':
+                ch = escaped;
+                break;
+            case 'b':
+                ch = '\b';
+                break;
+            case 'f':
+                ch = '\f';
+                break;
+            case 'n':
+                ch = '\n';
+                break;
+            case 'r':
+                ch = '\r';
+                break;
+            case 't':
+                ch = '\t';
+                break;
+            default:
+                return -1;
+            }
+        }
+
+        if (written + 1 >= capacity) {
+            return -1;
+        }
+        buffer[written++] = ch;
+    }
+
+    return -1;
+}
+
+static int skip_json_string(const char **cursor) {
+    if (cursor == NULL || *cursor == NULL || **cursor != '"') {
+        return -1;
+    }
+    (*cursor)++;
+
+    while (**cursor != '\0') {
+        char ch = **cursor;
+        (*cursor)++;
+        if (ch == '"') {
+            return 0;
+        }
+        if (ch == '\\') {
+            if (**cursor == '\0') {
+                return -1;
+            }
+            (*cursor)++;
+        }
+    }
+
+    return -1;
+}
+
+static int parse_json_u64(const char **cursor, uint64_t *value) {
+    uint64_t parsed = 0;
+    bool saw_digit = false;
+
+    if (cursor == NULL || *cursor == NULL || value == NULL) {
+        return -1;
+    }
+
+    while (**cursor >= '0' && **cursor <= '9') {
+        saw_digit = true;
+        if (parsed > (UINT64_MAX - (uint64_t)(**cursor - '0')) / 10ull) {
+            return -1;
+        }
+        parsed = parsed * 10ull + (uint64_t)(**cursor - '0');
+        (*cursor)++;
+    }
+
+    if (!saw_digit) {
+        return -1;
+    }
+
+    *value = parsed;
+    return 0;
+}
+
+static int parse_exec_request(const char *payload, exec_request_t *request) {
+    const char *cursor = payload;
+    bool saw_cmd = false;
+
+    if (payload == NULL || request == NULL) {
+        return -1;
+    }
+
+    memset(request, 0, sizeof(*request));
+    skip_json_ws(&cursor);
+    if (*cursor != '{') {
+        size_t length = strnlen(payload, sizeof(request->command_line));
+        if (length >= sizeof(request->command_line)) {
+            return -1;
+        }
+        memcpy(request->command_line, payload, length);
+        request->command_line[length] = '\0';
+        return 0;
+    }
+
+    request->structured = true;
+    request->json_payload = payload;
+    cursor++;
+
+    for (;;) {
+        char key[32];
+
+        skip_json_ws(&cursor);
+        if (*cursor == '}') {
+            cursor++;
+            break;
+        }
+        if (parse_json_string(&cursor, key, sizeof(key)) < 0) {
+            return -1;
+        }
+        skip_json_ws(&cursor);
+        if (*cursor != ':') {
+            return -1;
+        }
+        cursor++;
+        skip_json_ws(&cursor);
+
+        if (strcmp(key, "cmd") == 0) {
+            if (parse_json_string(&cursor, request->command_line, sizeof(request->command_line)) < 0) {
+                return -1;
+            }
+            saw_cmd = true;
+        } else if (strcmp(key, "timeout") == 0) {
+            if (parse_json_u64(&cursor, &request->timeout_secs) < 0 || request->timeout_secs == 0) {
+                return -1;
+            }
+            request->has_timeout = true;
+        } else if (strcmp(key, "env") == 0) {
+            if (*cursor != '{') {
+                return -1;
+            }
+            int depth = 1;
+            cursor++;
+            while (*cursor != '\0' && depth > 0) {
+                if (*cursor == '"') {
+                    if (skip_json_string(&cursor) < 0) {
+                        return -1;
+                    }
+                    continue;
+                }
+                if (*cursor == '{') {
+                    depth++;
+                } else if (*cursor == '}') {
+                    depth--;
+                }
+                cursor++;
+            }
+            if (depth != 0) {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+
+        skip_json_ws(&cursor);
+        if (*cursor == ',') {
+            cursor++;
+            continue;
+        }
+        if (*cursor == '}') {
+            cursor++;
+            break;
+        }
+        return -1;
+    }
+
+    skip_json_ws(&cursor);
+    if (*cursor != '\0' || !saw_cmd || request->command_line[0] == '\0') {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int apply_exec_env_from_json(const exec_request_t *request, int stderr_fd) {
+    const char *cursor = request != NULL ? request->json_payload : NULL;
+
+    if (request == NULL || !request->structured || cursor == NULL) {
+        return 0;
+    }
+
+    skip_json_ws(&cursor);
+    if (*cursor != '{') {
+        return -1;
+    }
+    cursor++;
+
+    for (;;) {
+        char key[32];
+
+        skip_json_ws(&cursor);
+        if (*cursor == '}') {
+            return 0;
+        }
+        if (parse_json_string(&cursor, key, sizeof(key)) < 0) {
+            return -1;
+        }
+        skip_json_ws(&cursor);
+        if (*cursor != ':') {
+            return -1;
+        }
+        cursor++;
+        skip_json_ws(&cursor);
+
+        if (strcmp(key, "cmd") == 0) {
+            char discarded[COMMAND_BUFFER_CAP];
+            if (parse_json_string(&cursor, discarded, sizeof(discarded)) < 0) {
+                return -1;
+            }
+        } else if (strcmp(key, "timeout") == 0) {
+            uint64_t discarded_timeout = 0;
+            if (parse_json_u64(&cursor, &discarded_timeout) < 0) {
+                return -1;
+            }
+        } else if (strcmp(key, "env") == 0) {
+            skip_json_ws(&cursor);
+            if (*cursor != '{') {
+                return -1;
+            }
+            cursor++;
+            for (;;) {
+                char env_key[256];
+                char env_value[1024];
+
+                skip_json_ws(&cursor);
+                if (*cursor == '}') {
+                    cursor++;
+                    break;
+                }
+                if (parse_json_string(&cursor, env_key, sizeof(env_key)) < 0) {
+                    return -1;
+                }
+                skip_json_ws(&cursor);
+                if (*cursor != ':') {
+                    return -1;
+                }
+                cursor++;
+                skip_json_ws(&cursor);
+                if (parse_json_string(&cursor, env_value, sizeof(env_value)) < 0) {
+                    return -1;
+                }
+                if (setenv(env_key, env_value, 1) < 0) {
+                    dprintf(stderr_fd, "guest-init: setenv failed for %s: %s\n", env_key, strerror(errno));
+                    return -1;
+                }
+                skip_json_ws(&cursor);
+                if (*cursor == ',') {
+                    cursor++;
+                    continue;
+                }
+                if (*cursor == '}') {
+                    cursor++;
+                    break;
+                }
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+
+        skip_json_ws(&cursor);
+        if (*cursor == ',') {
+            cursor++;
+            continue;
+        }
+        if (*cursor == '}') {
+            return 0;
+        }
+        return -1;
+    }
 }
 
 static void close_fd_if_open(int *fd) {
@@ -1139,27 +1547,28 @@ static void vsock_command_loop(int *vsock_fd) {
 
 /* ===== 串口数据面函数 ===== */
 
-static pid_t spawn_command_child(const char *command_line, int stdout_pipe[2], int stderr_pipe[2]) {
+static pid_t spawn_command_child(const exec_request_t *request, int stdout_pipe[2], int stderr_pipe[2]) {
     pid_t pid = fork();
     if (pid != 0) {
+        if (pid > 0) {
+            setpgid(pid, pid);
+        }
         return pid;
     }
 
-    static char *const envp[] = {
-        "HOME=/root",
-        "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
-        "SHELL=/bin/sh",
-        "TERM=dumb",
-        NULL,
-    };
+    static char home_env[] = "HOME=/root";
+    static char path_env[] = "PATH=/bin:/sbin:/usr/bin:/usr/sbin";
+    static char shell_env[] = "SHELL=/bin/sh";
+    static char term_env[] = "TERM=dumb";
     char *const argv[] = {
         (char *)SHELL_PATH,
         "-lc",
-        (char *)command_line,
+        (char *)request->command_line,
         NULL,
     };
     int stdin_fd = -1;
 
+    setpgid(0, 0);
     close_fd_if_open(&stdout_pipe[0]);
     close_fd_if_open(&stderr_pipe[0]);
     if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
@@ -1177,7 +1586,17 @@ static pid_t spawn_command_child(const char *command_line, int stdout_pipe[2], i
     close_fd_if_open(&stdout_pipe[1]);
     close_fd_if_open(&stderr_pipe[1]);
 
-    execve(SHELL_PATH, argv, envp);
+    clearenv();
+    putenv(home_env);
+    putenv(path_env);
+    putenv(shell_env);
+    putenv(term_env);
+    if (apply_exec_env_from_json(request, STDERR_FILENO) < 0) {
+        dprintf(STDERR_FILENO, "guest-init: invalid EXEC env payload\n");
+        _exit(125);
+    }
+
+    execve(SHELL_PATH, argv, environ);
     dprintf(STDERR_FILENO, "guest-init: execve failed: %s\n", strerror(errno));
     _exit(127);
 }
@@ -1235,9 +1654,14 @@ static int forward_child_output_streaming(uint32_t stream_id, const char *kind, 
     }
 }
 
-static int execute_command_blocking(const char *command_line) {
+static int execute_command_blocking(const exec_request_t *request, bool *timed_out) {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
+    uint64_t deadline_ms = 0;
+
+    if (timed_out != NULL) {
+        *timed_out = false;
+    }
 
     if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
         close_fd_if_open(&stdout_pipe[0]);
@@ -1248,7 +1672,7 @@ static int execute_command_blocking(const char *command_line) {
         return 125;
     }
 
-    pid_t pid = spawn_command_child(command_line, stdout_pipe, stderr_pipe);
+    pid_t pid = spawn_command_child(request, stdout_pipe, stderr_pipe);
     if (pid < 0) {
         close_fd_if_open(&stdout_pipe[0]);
         close_fd_if_open(&stdout_pipe[1]);
@@ -1260,6 +1684,10 @@ static int execute_command_blocking(const char *command_line) {
 
     close_fd_if_open(&stdout_pipe[1]);
     close_fd_if_open(&stderr_pipe[1]);
+    set_current_command_pid(pid);
+    if (request->has_timeout && monotonic_now_ms(&deadline_ms) == 0) {
+        deadline_ms += request->timeout_secs * 1000ull;
+    }
 
     struct pollfd poll_fds[2] = {
         {
@@ -1276,7 +1704,19 @@ static int execute_command_blocking(const char *command_line) {
     const int stream_fds[2] = {OUTPUT_STREAM_STDOUT, OUTPUT_STREAM_STDERR};
 
     while (poll_fds[0].fd >= 0 || poll_fds[1].fd >= 0) {
-        int poll_status = poll(poll_fds, 2, -1);
+        int poll_timeout_ms = request->has_timeout ? remaining_timeout_ms(deadline_ms) : -1;
+        int poll_status = poll(poll_fds, 2, poll_timeout_ms);
+        if (poll_status == 0 && request->has_timeout) {
+            kill_running_command();
+            close_fd_if_open(&poll_fds[0].fd);
+            close_fd_if_open(&poll_fds[1].fd);
+            wait_for_child_exit(pid);
+            clear_current_command_pid();
+            if (timed_out != NULL) {
+                *timed_out = true;
+            }
+            return 124;
+        }
         if (poll_status < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1285,6 +1725,9 @@ static int execute_command_blocking(const char *command_line) {
             dprintf(STDERR_FILENO, "guest-init: poll child output failed: %s\n", strerror(errno));
             close_fd_if_open(&poll_fds[0].fd);
             close_fd_if_open(&poll_fds[1].fd);
+            kill_running_command();
+            wait_for_child_exit(pid);
+            clear_current_command_pid();
             return 125;
         }
 
@@ -1296,6 +1739,9 @@ static int execute_command_blocking(const char *command_line) {
                 dprintf(STDERR_FILENO, "guest-init: child output poll failed: revents=%d\n", poll_fds[index].revents);
                 close_fd_if_open(&poll_fds[0].fd);
                 close_fd_if_open(&poll_fds[1].fd);
+                kill_running_command();
+                wait_for_child_exit(pid);
+                clear_current_command_pid();
                 return 125;
             }
 
@@ -1303,6 +1749,9 @@ static int execute_command_blocking(const char *command_line) {
             if (forward_status < 0) {
                 close_fd_if_open(&poll_fds[0].fd);
                 close_fd_if_open(&poll_fds[1].fd);
+                kill_running_command();
+                wait_for_child_exit(pid);
+                clear_current_command_pid();
                 return 125;
             }
 
@@ -1314,12 +1763,18 @@ static int execute_command_blocking(const char *command_line) {
     close_fd_if_open(&poll_fds[0].fd);
     close_fd_if_open(&poll_fds[1].fd);
 
+    clear_current_command_pid();
     return wait_for_child_exit(pid);
 }
 
-static int execute_command_streaming(uint32_t stream_id, const char *command_line) {
+static int execute_command_streaming(uint32_t stream_id, const exec_request_t *request, bool *timed_out) {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
+    uint64_t deadline_ms = 0;
+
+    if (timed_out != NULL) {
+        *timed_out = false;
+    }
 
     if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
         close_fd_if_open(&stdout_pipe[0]);
@@ -1330,7 +1785,7 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
         return 125;
     }
 
-    pid_t pid = spawn_command_child(command_line, stdout_pipe, stderr_pipe);
+    pid_t pid = spawn_command_child(request, stdout_pipe, stderr_pipe);
     if (pid < 0) {
         close_fd_if_open(&stdout_pipe[0]);
         close_fd_if_open(&stdout_pipe[1]);
@@ -1342,6 +1797,10 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
 
     close_fd_if_open(&stdout_pipe[1]);
     close_fd_if_open(&stderr_pipe[1]);
+    set_current_command_pid(pid);
+    if (request->has_timeout && monotonic_now_ms(&deadline_ms) == 0) {
+        deadline_ms += request->timeout_secs * 1000ull;
+    }
 
     write_stream_start(stream_id);
 
@@ -1360,7 +1819,19 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
     const char *const stream_kinds[2] = {"STDOUT", "STDERR"};
 
     while (poll_fds[0].fd >= 0 || poll_fds[1].fd >= 0) {
-        int poll_status = poll(poll_fds, 2, -1);
+        int poll_timeout_ms = request->has_timeout ? remaining_timeout_ms(deadline_ms) : -1;
+        int poll_status = poll(poll_fds, 2, poll_timeout_ms);
+        if (poll_status == 0 && request->has_timeout) {
+            kill_running_command();
+            close_fd_if_open(&poll_fds[0].fd);
+            close_fd_if_open(&poll_fds[1].fd);
+            wait_for_child_exit(pid);
+            clear_current_command_pid();
+            if (timed_out != NULL) {
+                *timed_out = true;
+            }
+            return 124;
+        }
         if (poll_status < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1369,6 +1840,9 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
             dprintf(STDERR_FILENO, "guest-init: poll child output failed: %s\n", strerror(errno));
             close_fd_if_open(&poll_fds[0].fd);
             close_fd_if_open(&poll_fds[1].fd);
+            kill_running_command();
+            wait_for_child_exit(pid);
+            clear_current_command_pid();
             return 125;
         }
 
@@ -1380,6 +1854,9 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
                 dprintf(STDERR_FILENO, "guest-init: child output poll failed: revents=%d\n", poll_fds[index].revents);
                 close_fd_if_open(&poll_fds[0].fd);
                 close_fd_if_open(&poll_fds[1].fd);
+                kill_running_command();
+                wait_for_child_exit(pid);
+                clear_current_command_pid();
                 return 125;
             }
 
@@ -1387,6 +1864,9 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
             if (forward_status < 0) {
                 close_fd_if_open(&poll_fds[0].fd);
                 close_fd_if_open(&poll_fds[1].fd);
+                kill_running_command();
+                wait_for_child_exit(pid);
+                clear_current_command_pid();
                 return 125;
             }
 
@@ -1398,6 +1878,7 @@ static int execute_command_streaming(uint32_t stream_id, const char *command_lin
 
     close_fd_if_open(&poll_fds[0].fd);
     close_fd_if_open(&poll_fds[1].fd);
+    clear_current_command_pid();
     return wait_for_child_exit(pid);
 }
 
@@ -1432,9 +1913,27 @@ static void serial_command_loop(void) {
             handle_fs_write(command_buffer + 9);
             continue;
         }
+        if (strncmp(command_buffer, "SIGNAL:KILL:", 12) == 0) {
+            kill_running_command();
+            continue;
+        }
         if (strncmp(command_buffer, "EXEC:", 5) == 0) {
-            int exit_code = execute_command_blocking(command_buffer + 5);
-            write_exit_code(exit_code);
+            exec_request_t request;
+            bool timed_out = false;
+
+            if (parse_exec_request(command_buffer + 5, &request) < 0) {
+                static const unsigned char invalid_exec_payload[] = "invalid EXEC payload";
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_exec_payload, sizeof(invalid_exec_payload) - 1);
+                write_exit_code(125);
+                continue;
+            }
+
+            int exit_code = execute_command_blocking(&request, &timed_out);
+            if (timed_out) {
+                write_exit_timeout();
+            } else {
+                write_exit_code(exit_code);
+            }
             continue;
         }
         if (strncmp(command_buffer, "EXECS:", 6) == 0) {
@@ -1456,8 +1955,21 @@ static void serial_command_loop(void) {
                 continue;
             }
 
-            int exit_code = execute_command_streaming((uint32_t)parsed_id, id_end + 1);
-            write_stream_end((uint32_t)parsed_id, exit_code);
+            exec_request_t request;
+            bool timed_out = false;
+            if (parse_exec_request(id_end + 1, &request) < 0) {
+                static const unsigned char invalid_streaming_payload[] = "invalid EXECS payload";
+                write_escaped_output(OUTPUT_STREAM_STDOUT, invalid_streaming_payload, sizeof(invalid_streaming_payload) - 1);
+                write_stream_end((uint32_t)parsed_id, 125);
+                continue;
+            }
+
+            int exit_code = execute_command_streaming((uint32_t)parsed_id, &request, &timed_out);
+            if (timed_out) {
+                write_stream_timeout((uint32_t)parsed_id);
+            } else {
+                write_stream_end((uint32_t)parsed_id, exit_code);
+            }
             continue;
         }
         if (strncmp(command_buffer, "HTTP:REQUEST:", 13) == 0) {

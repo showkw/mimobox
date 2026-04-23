@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::http_proxy::HttpRequest;
+use serde::Serialize;
+use std::collections::HashMap;
 
 pub(super) const SERIAL_PORT_COM1: u16 = 0x3f8;
 pub(super) const SERIAL_PORT_LAST: u16 = SERIAL_PORT_COM1 + 7;
@@ -36,10 +38,13 @@ pub(in crate::kvm) const SERIAL_READY_LINE: &str = "READY";
 pub(in crate::kvm) const SERIAL_EXEC_PREFIX: &str = "EXEC:";
 #[allow(dead_code)] // Phase A 先落常量与解析，Phase B 再接 host 发送路径。
 pub(in crate::kvm) const SERIAL_EXECS_PREFIX: &str = "EXECS:";
+#[allow(dead_code)] // 当前仅预留 kill 协议帧，后续再接 host 主动信号发送。
+pub(in crate::kvm) const SERIAL_SIGNAL_KILL_PREFIX: &str = "SIGNAL:KILL:";
 pub(in crate::kvm) const SERIAL_FS_READ_PREFIX: &str = "FS:READ:";
 pub(in crate::kvm) const SERIAL_FS_WRITE_PREFIX: &str = "FS:WRITE:";
 const SERIAL_OUTPUT_PREFIX: &str = "OUTPUT:";
 const SERIAL_EXIT_PREFIX: &str = "EXIT:";
+const SERIAL_EXIT_TIMEOUT: &str = "EXIT:TIMEOUT";
 const SERIAL_FSRESULT_PREFIX: &str = "FSRESULT:";
 pub(in crate::kvm) const SERIAL_HTTP_REQUEST_PREFIX: &str = "HTTP:REQUEST:";
 pub(in crate::kvm) const SERIAL_HTTPRESP_HEADERS_PREFIX: &str = "HTTPRESP:HEADERS:";
@@ -50,6 +55,7 @@ pub(in crate::kvm) const SERIAL_STREAM_START_PREFIX: &str = "STREAM:START:";
 pub(in crate::kvm) const SERIAL_STREAM_STDOUT_PREFIX: &str = "STREAM:STDOUT:";
 pub(in crate::kvm) const SERIAL_STREAM_STDERR_PREFIX: &str = "STREAM:STDERR:";
 pub(in crate::kvm) const SERIAL_STREAM_END_PREFIX: &str = "STREAM:END:";
+pub(in crate::kvm) const SERIAL_STREAM_TIMEOUT_PREFIX: &str = "STREAM:TIMEOUT:";
 pub(in crate::kvm) const MAX_FS_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) const SERIAL_BOOT_TIME_PREFIX: &str = "BOOT_TIME:";
@@ -237,6 +243,7 @@ pub(in crate::kvm) enum SerialProtocolResult {
     StreamStdout(u32, Vec<u8>),
     StreamStderr(u32, Vec<u8>),
     StreamEnd(u32, i32),
+    StreamTimeout(u32),
 }
 
 #[derive(Debug)]
@@ -256,14 +263,20 @@ pub(in crate::kvm) enum SerialFrame {
 
 pub(in crate::kvm) fn encode_command_payload(
     cmd: &[String],
+    env: &HashMap<String, String>,
     timeout_secs: Option<u64>,
 ) -> Result<Vec<u8>, MicrovmError> {
-    let command = build_guest_command(cmd, timeout_secs)?;
-    encode_text_frame(SERIAL_EXEC_PREFIX, command.as_bytes())
+    let payload = build_guest_exec_payload(cmd, env, timeout_secs)?;
+    encode_text_frame(SERIAL_EXEC_PREFIX, payload.as_bytes())
 }
 
 pub(in crate::kvm) fn encode_fs_read_payload(path: &str) -> Result<Vec<u8>, MicrovmError> {
     encode_text_frame(SERIAL_FS_READ_PREFIX, path.as_bytes())
+}
+
+#[allow(dead_code)] // 预留给后续 host 主动 kill 当前命令的控制面。
+pub(in crate::kvm) fn encode_signal_kill_payload(pid: u32) -> Vec<u8> {
+    format!("{SERIAL_SIGNAL_KILL_PREFIX}{pid}\n").into_bytes()
 }
 
 pub(in crate::kvm) fn encode_fs_write_payload(
@@ -284,21 +297,42 @@ pub(in crate::kvm) fn encode_fs_write_payload(
     Ok(frame)
 }
 
-pub(in crate::kvm) fn build_guest_command(
-    cmd: &[String],
-    timeout_secs: Option<u64>,
-) -> Result<String, MicrovmError> {
+pub(in crate::kvm) fn build_guest_command(cmd: &[String]) -> Result<String, MicrovmError> {
     if cmd.is_empty() {
         return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
     }
 
+    Ok(join_shell_command(cmd))
+}
+
+pub(in crate::kvm) fn build_guest_exec_payload(
+    cmd: &[String],
+    env: &HashMap<String, String>,
+    timeout_secs: Option<u64>,
+) -> Result<String, MicrovmError> {
     if let Some(timeout_secs) = timeout_secs
         && timeout_secs == 0
     {
         return Err(MicrovmError::InvalidConfig("timeout_secs 不能为 0".into()));
     }
 
-    Ok(join_shell_command(cmd))
+    let command = build_guest_command(cmd)?;
+    let payload = GuestExecPayload {
+        cmd: &command,
+        env,
+        timeout: timeout_secs,
+    };
+    serde_json::to_string(&payload)
+        .map_err(|err| MicrovmError::Backend(format!("序列化 guest EXEC 负载失败: {err}")))
+}
+
+#[derive(Debug, Serialize)]
+struct GuestExecPayload<'a> {
+    cmd: &'a str,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    env: &'a HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout: Option<u64>,
 }
 
 fn encode_text_frame(prefix: &str, payload: &[u8]) -> Result<Vec<u8>, MicrovmError> {
@@ -313,6 +347,15 @@ pub(in crate::kvm) fn parse_serial_line(
     line: &str,
     response: &mut CommandResponse,
 ) -> Result<Option<GuestCommandResult>, MicrovmError> {
+    if line == SERIAL_EXIT_TIMEOUT {
+        return Ok(Some(GuestCommandResult {
+            stdout: std::mem::take(&mut response.stdout),
+            stderr: std::mem::take(&mut response.stderr),
+            exit_code: None,
+            timed_out: true,
+        }));
+    }
+
     if let Some(payload) = line.strip_prefix(SERIAL_OUTPUT_PREFIX) {
         let (stream, encoded) = parse_output_payload(payload);
         let decoded = decode_guest_output(encoded)?;
@@ -603,6 +646,33 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
         }
     }
 
+    if bytes.starts_with(SERIAL_STREAM_TIMEOUT_PREFIX.as_bytes()) {
+        let prefix_len = SERIAL_STREAM_TIMEOUT_PREFIX.len();
+        let Some((stream_id, delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
+            return Ok(None);
+        };
+        let stream_id = u32::try_from(stream_id).map_err(|_| {
+            MicrovmError::Backend(format!(
+                "guest STREAM:TIMEOUT id 超出 u32 范围: {stream_id}"
+            ))
+        })?;
+        match bytes.get(delimiter_index) {
+            Some(b'\n') => {
+                frame_buffer.drain(..=delimiter_index);
+                return Ok(Some(SerialFrame::Stream(
+                    SerialProtocolResult::StreamTimeout(stream_id),
+                )));
+            }
+            Some(other) => {
+                return Err(MicrovmError::Backend(format!(
+                    "guest STREAM:TIMEOUT id 字段后缺少换行: {}",
+                    char::from(*other)
+                )));
+            }
+            None => return Ok(None),
+        }
+    }
+
     let (prefix, is_stdout) = if bytes.starts_with(SERIAL_STREAM_STDOUT_PREFIX.as_bytes()) {
         (SERIAL_STREAM_STDOUT_PREFIX, true)
     } else if bytes.starts_with(SERIAL_STREAM_STDERR_PREFIX.as_bytes()) {
@@ -685,9 +755,7 @@ fn try_take_http_request_frame(
         return Ok(None);
     };
     let request_id = u32::try_from(request_id).map_err(|_| {
-        MicrovmError::Backend(format!(
-            "guest HTTP:REQUEST id 超出 u32 范围: {request_id}"
-        ))
+        MicrovmError::Backend(format!("guest HTTP:REQUEST id 超出 u32 范围: {request_id}"))
     })?;
 
     match bytes.get(id_delimiter_index) {
@@ -740,12 +808,12 @@ fn try_take_http_request_frame(
     })?;
     let request = HttpRequest::from_json(&json)?;
     frame_buffer.drain(..=json_end);
-    Ok(Some(SerialFrame::Stream(SerialProtocolResult::HttpRequest(
-        HttpRequestFrame {
+    Ok(Some(SerialFrame::Stream(
+        SerialProtocolResult::HttpRequest(HttpRequestFrame {
             id: request_id,
             request,
-        },
-    ))))
+        }),
+    )))
 }
 
 fn is_partial_http_prefix(bytes: &[u8]) -> bool {

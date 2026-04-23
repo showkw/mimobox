@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 use tracing::debug;
@@ -99,6 +100,13 @@ pub struct GuestCommandResult {
     pub timed_out: bool,
 }
 
+/// guest 命令级执行选项。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuestExecOptions {
+    pub env: HashMap<String, String>,
+    pub timeout: Option<Duration>,
+}
+
 /// guest 流式执行事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
@@ -193,21 +201,39 @@ impl BackendHandle {
         }
     }
 
+    #[allow(dead_code)]
     fn run_command(&mut self, _cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        self.run_command_with_options(_cmd, &GuestExecOptions::default())
+    }
+
+    fn run_command_with_options(
+        &mut self,
+        _cmd: &[String],
+        _options: &GuestExecOptions,
+    ) -> Result<GuestCommandResult, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
-            Self::Kvm(backend) => backend.run_command(_cmd),
+            Self::Kvm(backend) => backend.run_command_with_options(_cmd, _options),
             Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
         }
     }
 
+    #[allow(dead_code)]
     fn run_command_streaming(
         &mut self,
         _cmd: &[String],
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        self.run_command_streaming_with_options(_cmd, &GuestExecOptions::default())
+    }
+
+    fn run_command_streaming_with_options(
+        &mut self,
+        _cmd: &[String],
+        _options: &GuestExecOptions,
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
-            Self::Kvm(backend) => backend.run_command_streaming(_cmd),
+            Self::Kvm(backend) => backend.run_command_streaming_with_options(_cmd, _options),
             Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
         }
     }
@@ -384,6 +410,14 @@ impl MicrovmSandbox {
         &mut self,
         cmd: &[String],
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
+        self.stream_execute_with_options(cmd, GuestExecOptions::default())
+    }
+
+    pub fn stream_execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         if cmd.is_empty() {
             return Err(MicrovmError::InvalidConfig("命令为空".into()));
         }
@@ -395,7 +429,56 @@ impl MicrovmSandbox {
         }
 
         self.state = MicrovmState::Running;
-        let result = self.backend.run_command_streaming(cmd);
+        let result = self
+            .backend
+            .run_command_streaming_with_options(cmd, &options);
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
+        result
+    }
+
+    pub fn execute_with_env(
+        &mut self,
+        cmd: &[String],
+        env: HashMap<String, String>,
+    ) -> Result<GuestCommandResult, MicrovmError> {
+        self.execute_with_options(cmd, GuestExecOptions { env, timeout: None })
+    }
+
+    pub fn execute_with_timeout(
+        &mut self,
+        cmd: &[String],
+        timeout: Duration,
+    ) -> Result<GuestCommandResult, MicrovmError> {
+        self.execute_with_options(
+            cmd,
+            GuestExecOptions {
+                env: HashMap::new(),
+                timeout: Some(timeout),
+            },
+        )
+    }
+
+    pub fn execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<GuestCommandResult, MicrovmError> {
+        if cmd.is_empty() {
+            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+        }
+
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可执行状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.run_command_with_options(cmd, &options);
         self.state = if self.backend.is_destroyed() {
             MicrovmState::Destroyed
         } else {
@@ -421,29 +504,8 @@ impl Sandbox for MicrovmSandbox {
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
-        if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed("命令为空".into()));
-        }
-
-        if self.state != MicrovmState::Ready {
-            return Err(SandboxError::ExecutionFailed(
-                "microVM 当前不处于可执行状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let start = Instant::now();
-        let result = self.backend.run_command(cmd);
-        self.state = MicrovmState::Ready;
-
-        let guest = result.map_err(SandboxError::from)?;
-        Ok(SandboxResult {
-            stdout: guest.stdout,
-            stderr: guest.stderr,
-            exit_code: guest.exit_code,
-            elapsed: start.elapsed(),
-            timed_out: guest.timed_out,
-        })
+        self.execute_with_options_for_sandbox(cmd, GuestExecOptions::default())
+            .map_err(SandboxError::from)
     }
 
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
@@ -459,5 +521,41 @@ impl Sandbox for MicrovmSandbox {
         this.backend.shutdown().map_err(SandboxError::from)?;
         this.state = MicrovmState::Destroyed;
         Ok(())
+    }
+}
+
+impl MicrovmSandbox {
+    fn execute_with_options_for_sandbox(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<SandboxResult, MicrovmError> {
+        if cmd.is_empty() {
+            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+        }
+
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可执行状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let start = Instant::now();
+        let result = self.backend.run_command_with_options(cmd, &options);
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
+
+        let guest = result?;
+        Ok(SandboxResult {
+            stdout: guest.stdout,
+            stderr: guest.stderr,
+            exit_code: guest.exit_code,
+            elapsed: start.elapsed(),
+            timed_out: guest.timed_out,
+        })
     }
 }

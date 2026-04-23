@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::{GuestCommandResult, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError, StreamEvent};
+use crate::{
+    GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
+    StreamEvent,
+};
 use mimobox_core::SandboxConfig;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -426,10 +429,18 @@ pub struct PooledVm {
 
 impl PooledVm {
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        self.execute_with_options(cmd, GuestExecOptions::default())
+    }
+
+    pub fn execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<GuestCommandResult, MicrovmError> {
         #[cfg(feature = "boot-profile")]
         let execute_started_at = Instant::now();
         let result = match self.backend.as_mut() {
-            Some(backend) => execute_backend(backend, cmd),
+            Some(backend) => execute_backend(backend, cmd, &options),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         };
         #[cfg(feature = "boot-profile")]
@@ -445,8 +456,16 @@ impl PooledVm {
         &mut self,
         cmd: &[String],
     ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        self.stream_execute_with_options(cmd, GuestExecOptions::default())
+    }
+
+    pub fn stream_execute_with_options(
+        &mut self,
+        cmd: &[String],
+        options: GuestExecOptions,
+    ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
         match self.backend.as_mut() {
-            Some(backend) => stream_execute_backend(backend, cmd),
+            Some(backend) => stream_execute_backend(backend, cmd, &options),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         }
     }
@@ -505,7 +524,10 @@ fn ensure_pool_supported() -> Result<(), MicrovmError> {
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-fn create_backend(base_config: &SandboxConfig, config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
+fn create_backend(
+    base_config: &SandboxConfig,
+    config: &MicrovmConfig,
+) -> Result<Backend, MicrovmError> {
     let mut backend = KvmBackend::create_vm(base_config.clone(), config.clone())?;
     let exit_reason = backend.boot()?;
     if exit_reason != KvmExitReason::Io || !backend.is_guest_ready() {
@@ -518,7 +540,10 @@ fn create_backend(base_config: &SandboxConfig, config: &MicrovmConfig) -> Result
 }
 
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
-fn create_backend(_base_config: &SandboxConfig, _config: &MicrovmConfig) -> Result<Backend, MicrovmError> {
+fn create_backend(
+    _base_config: &SandboxConfig,
+    _config: &MicrovmConfig,
+) -> Result<Backend, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 
@@ -561,22 +586,25 @@ fn destroy_idle_entry(_entry: IdleVm, _reason: &str) {}
 fn execute_backend(
     backend: &mut Backend,
     cmd: &[String],
+    options: &GuestExecOptions,
 ) -> Result<GuestCommandResult, MicrovmError> {
-    backend.run_command(cmd)
+    backend.run_command_with_options(cmd, options)
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn stream_execute_backend(
     backend: &mut Backend,
     cmd: &[String],
+    options: &GuestExecOptions,
 ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
-    backend.run_command_streaming(cmd)
+    backend.run_command_streaming_with_options(cmd, options)
 }
 
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
 fn execute_backend(
     _backend: &mut Backend,
     _cmd: &[String],
+    _options: &GuestExecOptions,
 ) -> Result<GuestCommandResult, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
@@ -585,6 +613,7 @@ fn execute_backend(
 fn stream_execute_backend(
     _backend: &mut Backend,
     _cmd: &[String],
+    _options: &GuestExecOptions,
 ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
