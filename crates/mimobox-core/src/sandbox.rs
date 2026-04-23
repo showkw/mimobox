@@ -61,7 +61,7 @@ pub struct SandboxConfig {
     pub fs_readonly: Vec<PathBuf>,
     /// 读写路径列表
     pub fs_readwrite: Vec<PathBuf>,
-    /// 是否拒绝网络访问
+    /// 是否拒绝沙箱内进程的直接网络访问
     pub deny_network: bool,
     /// 内存限制 (MB) — 通过 cgroups v2 或 setrlimit 实施
     pub memory_limit_mb: Option<u64>,
@@ -73,6 +73,7 @@ pub struct SandboxConfig {
     /// 默认 false，仅 shell 等需要子进程的场景设为 true
     pub allow_fork: bool,
     /// HTTP 代理允许的域名白名单（支持通配符如 *.openai.com）
+    /// 即使 `deny_network = true`，仍可通过受控代理访问这些域名
     pub allowed_http_domains: Vec<String>,
 }
 

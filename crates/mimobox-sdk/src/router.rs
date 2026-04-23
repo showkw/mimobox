@@ -1,5 +1,6 @@
 use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
+use mimobox_core::ErrorCode;
 
 /// 智能路由器：根据命令内容和信任级别自动选择最优隔离层级
 pub(crate) fn resolve_isolation(
@@ -55,15 +56,9 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
         }
     }
 
-    // 不可信代码优先走 microVM；若当前构建或平台不支持，则 fallback 到 OS 级。
+    // 不可信代码必须走 microVM；当前构建或平台不支持时直接 fail-closed。
     if trust_level == TrustLevel::Untrusted {
-        #[cfg(all(feature = "vm", target_os = "linux"))]
-        return Ok(IsolationLevel::MicroVm);
-
-        #[cfg(not(all(feature = "vm", target_os = "linux")))]
-        tracing::warn!(
-            "Untrusted 代码建议使用 microVM 隔离，当前 fallback 到 OS 级（隔离强度较低）"
-        );
+        return require_microvm_for_untrusted();
     }
 
     // 默认走 OS 级
@@ -72,6 +67,22 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
 
     #[cfg(not(feature = "os"))]
     return Err(SdkError::BackendUnavailable("os"));
+}
+
+fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    {
+        Ok(IsolationLevel::MicroVm)
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    {
+        Err(SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            "Untrusted 隔离级别需要 microVM 后端，当前平台不支持",
+            Some("使用 IsolationLevel::Os 替代".to_string()),
+        ))
+    }
 }
 
 fn is_wasm_command(command: &str) -> bool {
@@ -99,17 +110,27 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_prefers_microvm_when_available() {
+    fn untrusted_requires_microvm_or_fails_closed() {
         let result = auto_route(TrustLevel::Untrusted, "python script.py");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
         assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
 
-        #[cfg(all(not(all(feature = "vm", target_os = "linux")), feature = "os"))]
-        assert_eq!(result.unwrap(), IsolationLevel::Os);
-
-        #[cfg(not(any(all(feature = "vm", target_os = "linux"), feature = "os")))]
-        assert!(matches!(result, Err(SdkError::BackendUnavailable("os"))));
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        match result {
+            Err(SdkError::Sandbox {
+                code: ErrorCode::UnsupportedPlatform,
+                message,
+                suggestion,
+            }) => {
+                assert_eq!(
+                    message,
+                    "Untrusted 隔离级别需要 microVM 后端，当前平台不支持"
+                );
+                assert_eq!(suggestion.as_deref(), Some("使用 IsolationLevel::Os 替代"));
+            }
+            other => panic!("期望 fail-closed 的结构化错误，实际为: {other:?}"),
+        }
     }
 
     #[test]

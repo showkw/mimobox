@@ -26,6 +26,7 @@ struct SandboxConfigDef {
     #[serde(with = "SeccompProfileDef")]
     seccomp_profile: SeccompProfile,
     allow_fork: bool,
+    allowed_http_domains: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,6 +54,7 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
         timeout_secs: Some(9),
         seccomp_profile: SeccompProfile::NetworkWithFork,
         allow_fork: true,
+        allowed_http_domains: vec!["api.openai.com".to_string(), "*.openai.com".to_string()],
     };
 
     let json = serde_json::to_string_pretty(&SandboxConfigJson(config.clone()))?;
@@ -68,8 +70,10 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
         seccomp_profile_name(config.seccomp_profile)
     );
     assert_eq!(decoded.allow_fork, config.allow_fork);
+    assert_eq!(decoded.allowed_http_domains, config.allowed_http_domains);
     assert!(json.contains("\"deny_network\": false"));
     assert!(json.contains("\"allow_fork\": true"));
+    assert!(json.contains("\"allowed_http_domains\""));
 
     Ok(())
 }

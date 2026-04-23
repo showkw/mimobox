@@ -37,12 +37,10 @@ pub enum NetworkPolicy {
     /// 默认拒绝所有网络访问
     #[default]
     DenyAll,
-    /// 仅允许指定域名（未来实现，当前等价于 DenyAll）
-    #[allow(dead_code)]
+    /// 保持沙箱内直接网络关闭，仅允许通过受控 HTTP 代理访问指定域名
     AllowDomains(Vec<String>),
-    /// 拒绝指定域名，允许其余（未来实现）
-    #[allow(dead_code)]
-    DenyDomains(Vec<String>),
+    /// 允许任意网络访问
+    AllowAll,
 }
 
 /// SDK 级配置
@@ -150,10 +148,8 @@ impl Config {
 fn resolve_deny_network(network: &NetworkPolicy) -> bool {
     match network {
         NetworkPolicy::DenyAll => true,
-        // allow-list 语义尚未实现，在底层沙箱仍按“拒绝全部网络”处理。
         NetworkPolicy::AllowDomains(_) => true,
-        // deny-list 目前无法下沉到域名级过滤，按“允许网络”保留调用方意图。
-        NetworkPolicy::DenyDomains(_) => false,
+        NetworkPolicy::AllowAll => false,
     }
 }
 
@@ -319,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_domains_still_denies_network_until_whitelist_is_implemented() {
+    fn allow_domains_keep_direct_network_denied_and_forward_whitelist() {
         let config = Config::builder()
             .network(NetworkPolicy::AllowDomains(vec!["example.com".to_string()]))
             .build();
@@ -332,9 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn deny_domains_preserves_allow_network_intent_for_cli_mapping() {
+    fn allow_all_opens_network_and_uses_network_seccomp_profile() {
         let config = Config::builder()
-            .network(NetworkPolicy::DenyDomains(Vec::new()))
+            .network(NetworkPolicy::AllowAll)
             .allow_fork(true)
             .build();
         let sandbox_config = config.to_sandbox_config();
@@ -367,6 +363,27 @@ mod tests {
         assert_eq!(
             sandbox_config.allowed_http_domains,
             vec!["api.openai.com".to_string(), "*.openai.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn allow_domains_merge_with_explicit_http_whitelist_without_duplicates() {
+        let config = Config::builder()
+            .network(NetworkPolicy::AllowDomains(vec![
+                "api.openai.com".to_string(),
+                "example.com".to_string(),
+            ]))
+            .allowed_http_domains(["api.openai.com", "*.openai.com"])
+            .build();
+        let sandbox_config = config.to_sandbox_config();
+
+        assert_eq!(
+            sandbox_config.allowed_http_domains,
+            vec![
+                "api.openai.com".to_string(),
+                "*.openai.com".to_string(),
+                "example.com".to_string()
+            ]
         );
     }
 
