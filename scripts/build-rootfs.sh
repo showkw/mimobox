@@ -8,6 +8,7 @@ DEFAULT_VM_ASSETS_SUBDIR="mimobox-poc/vm-assets"
 OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
 ENABLE_BOOT_PROFILE="${ENABLE_BOOT_PROFILE:-}"
+ENABLE_VSOCK="${ENABLE_VSOCK:-}"
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
@@ -40,6 +41,16 @@ fail() {
 
 should_enable_boot_profile() {
     case "${ENABLE_BOOT_PROFILE}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+should_enable_vsock() {
+    case "${ENABLE_VSOCK}" in
         1|true|TRUE|yes|YES|on|ON)
             return 0
             ;;
@@ -191,7 +202,7 @@ build_rootfs_in_docker() {
                 "${rootfs_dir}/root"
 
             if [ -n "${GUEST_INIT_CFLAGS}" ]; then
-                echo "[build-rootfs] 启用 guest boot profile 串口时间戳输出"
+                echo "[build-rootfs] 额外 guest init 编译参数: ${GUEST_INIT_CFLAGS}"
             fi
 
             gcc -O2 -Wall -Wextra -Werror -static -s ${GUEST_INIT_CFLAGS} \
@@ -240,6 +251,11 @@ GUEST_INIT_CFLAGS=()
 if should_enable_boot_profile; then
     GUEST_INIT_CFLAGS+=("-DBOOT_PROFILE")
     log "启用 guest boot profile 串口时间戳输出"
+fi
+
+if should_enable_vsock; then
+    GUEST_INIT_CFLAGS+=("-DUSE_VSOCK")
+    log "启用 guest vsock 命令通道"
 fi
 
 cd "${ROOT_DIR}"

@@ -82,8 +82,15 @@ pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 const VSOCK_ACCEPT_TIMEOUT_SECS: u64 = 10;
+const VSOCK_PROBE_TIMEOUT_MILLIS: u64 = 500;
+/// `guest-vsock` feature 默认关闭，关闭时 host 不暴露 virtio-vsock 设备。
+#[cfg(feature = "guest-vsock")]
+const VSOCK_TRANSPORT_ENABLED: bool = true;
+#[cfg(not(feature = "guest-vsock"))]
+const VSOCK_TRANSPORT_ENABLED: bool = false;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
-const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init virtio_mmio.device=512@0xd0000000:5";
+const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init";
+const VSOCK_CMDLINE_FRAGMENT: &str = " virtio_mmio.device=512@0xd0000000:5";
 /// vsock MMIO 设备在 guest 物理地址空间中的基地址
 const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
 /// vsock MMIO 设备地址空间大小
@@ -270,7 +277,7 @@ pub struct KvmBackend {
     serial_device: SerialDevice,
     /// vsock virtio MMIO 设备模拟器（None 表示 vsock 未启用）
     vsock_device: Option<VsockMmioDevice>,
-    /// host 侧 vsock 命令通道；建立后优先替代串口命令协议。
+    /// host 侧 vsock 命令通道；仅在显式启用 guest-vsock 时建立。
     vsock_channel: Option<VsockCommandChannel>,
     serial_buffer: Vec<u8>,
     last_exit_reason: Option<KvmExitReason>,
@@ -289,6 +296,14 @@ enum BackendCreateMode {
 }
 
 impl KvmBackend {
+    fn default_cmdline() -> String {
+        let mut cmdline = String::from(DEFAULT_CMDLINE);
+        if VSOCK_TRANSPORT_ENABLED {
+            cmdline.push_str(VSOCK_CMDLINE_FRAGMENT);
+        }
+        cmdline
+    }
+
     /// 执行 `KVM_CREATE_VM`，分配 guest memory 并创建 vCPU。
     pub fn create_vm(
         base_config: SandboxConfig,
@@ -499,7 +514,11 @@ impl KvmBackend {
             guest_booted: false,
             guest_ready: false,
             serial_device: SerialDevice::default(),
-            vsock_device: Some(VsockMmioDevice::new(3, VSOCK_MMIO_BASE, VSOCK_GSI)),
+            vsock_device: if VSOCK_TRANSPORT_ENABLED {
+                Some(VsockMmioDevice::new(3, VSOCK_MMIO_BASE, VSOCK_GSI))
+            } else {
+                None
+            },
             vsock_channel: None,
             serial_buffer: Vec::new(),
             last_exit_reason: None,
@@ -850,7 +869,7 @@ impl KvmBackend {
 
     /// 构造 zero page / `boot_params`，并写入命令行和 initrd 信息。
     fn write_boot_params(&mut self) -> Result<(), MicrovmError> {
-        let mut cmdline = DEFAULT_CMDLINE.as_bytes().to_vec();
+        let mut cmdline = Self::default_cmdline().into_bytes();
         cmdline.push(0);
         self.write_guest_bytes(self.cmdline_addr, &cmdline)?;
 
@@ -958,7 +977,7 @@ impl KvmBackend {
         self.write_guest_bytes(ROOTFS_METADATA_ADDR, metadata.as_bytes())
     }
 
-    /// 优先通过 guest-init vsock 协议执行命令，失败时回退到串口协议。
+    /// 显式启用 guest-vsock 时优先走 vsock，否则默认走串口协议。
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
@@ -1077,6 +1096,10 @@ impl KvmBackend {
     }
 
     fn ensure_vsock_channel_connected(&mut self) -> Result<(), MicrovmError> {
+        if !VSOCK_TRANSPORT_ENABLED {
+            return Ok(());
+        }
+
         let Some(channel) = self.vsock_channel.as_ref() else {
             return Ok(());
         };
@@ -1095,6 +1118,20 @@ impl KvmBackend {
             };
             match accept_result {
                 Ok(()) => {
+                    let probe_result = match self.vsock_channel.as_ref() {
+                        Some(channel) => channel
+                            .probe_round_trip(Duration::from_millis(VSOCK_PROBE_TIMEOUT_MILLIS)),
+                        None => Ok(()),
+                    };
+                    if let Err(err) = probe_result {
+                        warn!(
+                            error = %err,
+                            timeout_ms = VSOCK_PROBE_TIMEOUT_MILLIS,
+                            "guest vsock 已连接但数据面探针失败，回退串口协议"
+                        );
+                        self.drop_vsock_channel();
+                        return Ok(());
+                    }
                     self.transport = KvmTransport::Vsock;
                     return Ok(());
                 }
