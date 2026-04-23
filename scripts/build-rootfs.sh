@@ -9,7 +9,9 @@ OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
 ENABLE_BOOT_PROFILE="${ENABLE_BOOT_PROFILE:-}"
 ENABLE_VSOCK="${ENABLE_VSOCK:-}"
-PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.36.1-x86_64-linux-musl/busybox"
+# BusyBox 官方 binaries 目录当前可用的最新 x86_64-linux-musl 版本是 1.35.0；
+# 1.36.1 对应链接已失效，因此主下载地址先回退到官方仍可访问的最新版本。
+PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
 TARGET_ALPINE_ARCH="x86_64"

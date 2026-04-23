@@ -95,7 +95,7 @@ impl Default for Config {
             fs_readwrite: vec!["/tmp".into()],
             allow_fork: false,
             vm_vcpu_count: 1,
-            vm_memory_mb: 64,
+            vm_memory_mb: 256,
             kernel_path: None,
             rootfs_path: None,
         }
@@ -264,7 +264,7 @@ mod tests {
         let config = Config::default();
 
         assert_eq!(config.vm_vcpu_count, 1);
-        assert_eq!(config.vm_memory_mb, 64);
+        assert_eq!(config.vm_memory_mb, 256);
         assert_eq!(config.kernel_path, None);
         assert_eq!(config.rootfs_path, None);
     }
