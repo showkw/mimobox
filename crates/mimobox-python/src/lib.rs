@@ -2,7 +2,9 @@
 //!
 //! 通过 PyO3 将 `mimobox-sdk` 暴露为 Python 可调用模块。
 
-use mimobox_sdk::{ErrorCode, ExecuteResult, Sandbox as RustSandbox, SdkError, StreamEvent};
+use mimobox_sdk::{
+    Config, ErrorCode, ExecuteResult, IsolationLevel, Sandbox as RustSandbox, SdkError, StreamEvent,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::{
     PyConnectionError, PyFileNotFoundError, PyNotImplementedError, PyPermissionError,
@@ -85,8 +87,8 @@ impl From<mimobox_sdk::HttpResponse> for PyHttpResponse {
 
 /// Python 侧沙箱对象。
 ///
-/// 该类型直接包装 Rust SDK 的 `Sandbox`，不额外引入配置分支，
-/// 保持 Python 首版 API 简洁稳定。
+/// 该类型直接包装 Rust SDK 的 `Sandbox`，默认保持零配置体验，
+/// 同时只开放少量高频配置，避免把完整 ConfigBuilder 直接搬到 Python。
 #[pyclass(name = "Sandbox", unsendable)]
 struct PySandbox {
     inner: Option<RustSandbox>,
@@ -188,8 +190,11 @@ impl PyStreamIterator {
 #[pymethods]
 impl PySandbox {
     #[new]
-    fn new() -> PyResult<Self> {
-        let sandbox = RustSandbox::new().map_err(map_sdk_error)?;
+    #[pyo3(signature = (*, isolation=None, allowed_http_domains=None))]
+    fn new(isolation: Option<&str>, allowed_http_domains: Option<Vec<String>>) -> PyResult<Self> {
+        let config =
+            build_python_config(isolation, allowed_http_domains).map_err(PyValueError::new_err)?;
+        let sandbox = RustSandbox::with_config(config).map_err(map_sdk_error)?;
         Ok(Self {
             inner: Some(sandbox),
         })
@@ -289,6 +294,35 @@ impl PySandbox {
     }
 }
 
+fn build_python_config(
+    isolation: Option<&str>,
+    allowed_http_domains: Option<Vec<String>>,
+) -> Result<Config, String> {
+    let mut builder = Config::builder();
+
+    if let Some(isolation) = isolation {
+        builder = builder.isolation(parse_python_isolation(isolation)?);
+    }
+
+    if let Some(domains) = allowed_http_domains {
+        builder = builder.allowed_http_domains(domains);
+    }
+
+    Ok(builder.build())
+}
+
+fn parse_python_isolation(value: &str) -> Result<IsolationLevel, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(IsolationLevel::Auto),
+        "os" => Ok(IsolationLevel::Os),
+        "wasm" => Ok(IsolationLevel::Wasm),
+        "microvm" | "micro-vm" | "micro_vm" => Ok(IsolationLevel::MicroVm),
+        other => Err(format!(
+            "未知 isolation 值: {other}。可选值: auto, os, wasm, microvm"
+        )),
+    }
+}
+
 fn map_sdk_error(error: SdkError) -> PyErr {
     match error {
         SdkError::Config(message) => PyValueError::new_err(message),
@@ -360,6 +394,31 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn python_config_builder_accepts_microvm_and_http_domains() {
+        let config = build_python_config(
+            Some("microvm"),
+            Some(vec![
+                "api.github.com".to_string(),
+                "example.com".to_string(),
+            ]),
+        )
+        .expect("构造 Python 配置失败");
+
+        assert_eq!(config.isolation, IsolationLevel::MicroVm);
+        assert_eq!(
+            config.allowed_http_domains,
+            vec!["api.github.com".to_string(), "example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn python_isolation_parser_rejects_unknown_values() {
+        let result = parse_python_isolation("unknown");
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn missing_exit_code_maps_to_negative_one() {

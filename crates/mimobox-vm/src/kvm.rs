@@ -2198,10 +2198,7 @@ mod tests {
 
     #[test]
     fn test_encode_command_payload_uses_length_prefixed_frame() {
-        let command = vec![
-            "/bin/echo".to_string(),
-            "test".to_string(),
-        ];
+        let command = vec!["/bin/echo".to_string(), "test".to_string()];
 
         let payload =
             encode_command_payload(&command, &HashMap::new(), None).expect("编码命令帧必须成功");
@@ -2210,8 +2207,14 @@ mod tests {
         assert!(payload.ends_with(b"\n"));
         let payload_str = String::from_utf8(payload).expect("payload 必须是合法 UTF-8");
         // JSON 格式: {"cmd":"/bin/echo test"}
-        assert!(payload_str.contains(r#""cmd""#), "payload 必须包含 cmd 字段: {payload_str}");
-        assert!(payload_str.contains("echo"), "payload 必须包含命令: {payload_str}");
+        assert!(
+            payload_str.contains(r#""cmd""#),
+            "payload 必须包含 cmd 字段: {payload_str}"
+        );
+        assert!(
+            payload_str.contains("echo"),
+            "payload 必须包含命令: {payload_str}"
+        );
     }
 
     #[test]
@@ -2222,7 +2225,10 @@ mod tests {
         let payload =
             build_guest_exec_payload(&command, &env, Some(10)).expect("构建 EXEC 负载必须成功");
 
-        assert!(payload.contains(r#""cmd""#), "payload 必须包含 cmd: {payload}");
+        assert!(
+            payload.contains(r#""cmd""#),
+            "payload 必须包含 cmd: {payload}"
+        );
         assert!(payload.contains("echo"), "payload 必须包含命令: {payload}");
         assert!(payload.contains(r#""MY_VAR":"value""#));
         assert!(payload.contains(r#""timeout":10"#));
