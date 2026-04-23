@@ -185,6 +185,22 @@ impl BackendHandle {
         }
     }
 
+    fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.read_file(_path),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
+    fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.write_file(_path, _data),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
     fn shutdown(&mut self) -> Result<(), MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -294,6 +310,32 @@ impl MicrovmSandbox {
         sandbox.state = MicrovmState::Ready;
         Ok(sandbox)
     }
+
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可读文件状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.read_file(path);
+        self.state = MicrovmState::Ready;
+        result
+    }
+
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可写文件状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.write_file(path, data);
+        self.state = MicrovmState::Ready;
+        result
+    }
 }
 
 impl Sandbox for MicrovmSandbox {
@@ -325,6 +367,14 @@ impl Sandbox for MicrovmSandbox {
             elapsed: start.elapsed(),
             timed_out: guest.timed_out,
         })
+    }
+
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
+        MicrovmSandbox::read_file(self, path).map_err(SandboxError::from)
+    }
+
+    fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
+        MicrovmSandbox::write_file(self, path, data).map_err(SandboxError::from)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {

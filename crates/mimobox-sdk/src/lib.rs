@@ -182,6 +182,52 @@ impl Sandbox {
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
     }
 
+    #[cfg(feature = "vm")]
+    pub fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SdkError> {
+        self.ensure_backend_for_file_ops()?;
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox
+                .read_file(_path)
+                .map_err(|error| SdkError::ExecutionFailed(error.to_string())),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => sandbox
+                .read_file(_path)
+                .map_err(|error| SdkError::ExecutionFailed(error.to_string())),
+            _ => Err(SdkError::ExecutionFailed(
+                "文件传输仅支持 microVM 后端".to_string(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "vm")]
+    pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), SdkError> {
+        self.ensure_backend_for_file_ops()?;
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SdkError::CreateFailed("后端初始化后缺失实例".to_string()))?;
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox
+                .write_file(_path, _data)
+                .map_err(|error| SdkError::ExecutionFailed(error.to_string())),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => sandbox
+                .write_file(_path, _data)
+                .map_err(|error| SdkError::ExecutionFailed(error.to_string())),
+            _ => Err(SdkError::ExecutionFailed(
+                "文件传输仅支持 microVM 后端".to_string(),
+            )),
+        }
+    }
+
     /// 返回当前实例实际使用的隔离层级。
     ///
     /// 当 `execute()` 成功执行至少一次后，该值应为非 `None`，可用于上层查询
@@ -209,6 +255,35 @@ impl Sandbox {
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
         Ok(())
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
+        let isolation = match self.config.isolation {
+            IsolationLevel::Auto | IsolationLevel::MicroVm => IsolationLevel::MicroVm,
+            IsolationLevel::Os | IsolationLevel::Wasm => {
+                return Err(SdkError::ExecutionFailed(
+                    "文件传输仅支持 microVM 后端".to_string(),
+                ));
+            }
+        };
+
+        if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            return Ok(());
+        }
+
+        if self.inner.is_some() {
+            self.destroy_inner()?;
+        }
+
+        self.inner = Some(self.create_inner(isolation)?);
+        self.active_isolation = Some(isolation);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "vm", not(target_os = "linux")))]
+    fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
+        Err(SdkError::BackendUnavailable("microvm"))
     }
 
     fn new_uninitialized(config: Config) -> Self {

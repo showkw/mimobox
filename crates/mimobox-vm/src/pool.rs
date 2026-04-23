@@ -431,6 +431,20 @@ impl PooledVm {
         );
         result
     }
+
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => read_file_backend(backend, path),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
+
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => write_file_backend(backend, path, data),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
 }
 
 impl Drop for PooledVm {
@@ -530,6 +544,30 @@ fn execute_backend(
     _backend: &mut Backend,
     _cmd: &[String],
 ) -> Result<GuestCommandResult, MicrovmError> {
+    Err(MicrovmError::UnsupportedPlatform)
+}
+
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn read_file_backend(backend: &mut Backend, path: &str) -> Result<Vec<u8>, MicrovmError> {
+    backend.read_file(path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn read_file_backend(_backend: &mut Backend, _path: &str) -> Result<Vec<u8>, MicrovmError> {
+    Err(MicrovmError::UnsupportedPlatform)
+}
+
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn write_file_backend(backend: &mut Backend, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
+    backend.write_file(path, data)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn write_file_backend(
+    _backend: &mut Backend,
+    _path: &str,
+    _data: &[u8],
+) -> Result<(), MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 

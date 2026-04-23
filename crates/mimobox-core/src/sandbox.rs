@@ -100,5 +100,18 @@ pub trait Sandbox {
     where
         Self: Sized;
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError>;
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
+        let _ = path;
+        Err(SandboxError::ExecutionFailed(
+            "当前后端不支持文件读取".into(),
+        ))
+    }
+    fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
+        let _ = path;
+        let _ = data;
+        Err(SandboxError::ExecutionFailed(
+            "当前后端不支持文件写入".into(),
+        ))
+    }
     fn destroy(self) -> Result<(), SandboxError>;
 }
