@@ -71,7 +71,7 @@ fn test_vm_assets_dir_falls_back_to_home_default() {
 
     let actual = resolve_vm_assets_dir(None, Some(home_dir.clone())).expect("默认回退必须成功");
 
-    assert_eq!(actual, home_dir.join("mimobox-poc/vm-assets"));
+    assert_eq!(actual, home_dir.join(".mimobox/assets"));
 }
 
 #[test]

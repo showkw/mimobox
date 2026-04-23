@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use tracing::debug;
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 use crate::snapshot::MicrovmSnapshot;
+use crate::vm_assets::resolve_vm_assets_dir;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::kvm::KvmBackend;
@@ -27,11 +29,17 @@ pub struct MicrovmConfig {
 
 impl Default for MicrovmConfig {
     fn default() -> Self {
+        let assets_dir = resolve_vm_assets_dir(
+            env::var_os("VM_ASSETS_DIR").map(PathBuf::from),
+            env::var_os("HOME").map(PathBuf::from),
+        )
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/mimobox/vm"));
+
         Self {
             vcpu_count: 1,
             memory_mb: 128,
-            kernel_path: PathBuf::from("/var/lib/mimobox/vm/vmlinux"),
-            rootfs_path: PathBuf::from("/var/lib/mimobox/vm/rootfs.cpio.gz"),
+            kernel_path: assets_dir.join("vmlinux"),
+            rootfs_path: assets_dir.join("rootfs.cpio.gz"),
         }
     }
 }

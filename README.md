@@ -8,6 +8,7 @@ Rust 实现的跨平台 Agent Sandbox，为 AI Agent 提供安全隔离的代码
 
 | 版本 | 日期 | 变更摘要 | 变更类型 | 责任人 |
 | --- | --- | --- | --- | --- |
+| v2.1 | 2026-04-23 | 新增 `doctor` 环境诊断与 `setup` 资产引导命令，并统一 microVM 默认资产目录到 `~/.mimobox/assets` | 更新 | Codex |
 | v2.0 | 2026-04-23 | 同步流式输出、HTTP 代理、结构化错误模型、命令级 env/timeout、Getting Started 文档与 GitHub Actions CI 现状 | 更新 | Codex |
 | v1.6 | 2026-04-23 | 同步 GitHub Actions CI 为 5-job 精简版，并补充 KVM 手动触发与 hosted runner 限制说明 | 更新 | Codex |
 | v1.5 | 2026-04-21 | 最终核对 README：同步目录结构、三层隔离现状、SDK/CLI 示例、竞品对比口径与路线图状态 | 更新 | Codex |
@@ -350,9 +351,27 @@ cargo run -p mimobox-cli --features kvm -- \
   --command "/bin/echo hello"
 ```
 
-### 7.4 CLI 输出约定
+### 7.4 环境诊断与资产引导
+
+```bash
+# 输出当前主机环境诊断报告
+cargo run -p mimobox-cli -- doctor
+
+# 首次引导 ~/.mimobox/assets 下的 microVM 资产，并在最后自动复查
+cargo run -p mimobox-cli --features kvm -- setup
+```
+
+`doctor` 会检查操作系统、KVM/Seatbelt、内存、Linux 安全特性、feature flags、
+microVM 资产、Rust 工具链和可选 Python SDK，并返回：
+
+- `0`：无警告、无错误
+- `1`：存在警告，但没有阻断错误
+- `2`：存在错误
+
+### 7.5 CLI 输出约定
 
 CLI 默认输出 JSON，便于上层 Agent 或脚本消费；日志则写入 `logs/`。
+`doctor` 与 `setup` 例外，它们默认输出面向终端的人类可读报告。
 
 microVM 路径当前通过 guest `/init` 驱动串口控制面，当前帧族包括：
 
@@ -384,8 +403,8 @@ scripts/extract-vmlinux.sh <output_path>
 - `scripts/test.sh`：按目标运行 workspace 测试
 - `scripts/test-e2e.sh`：跨后端 e2e 验证
 - `scripts/bench.sh [crate-name] [bench-name|all]`：运行 criterion 基准
-- `scripts/build-rootfs.sh`：构建 KVM rootfs，默认输出到 `VM_ASSETS_DIR/rootfs.cpio.gz`，未设置时回退到 `~/mimobox-poc/vm-assets/rootfs.cpio.gz`
-- `scripts/build-kernel.sh`：构建极简 KVM guest `vmlinux`，默认输出到 `crates/mimobox-vm/vmlinux`
+- `scripts/build-rootfs.sh`：构建 KVM rootfs，默认输出到 `VM_ASSETS_DIR/rootfs.cpio.gz`，未设置时回退到 `~/.mimobox/assets/rootfs.cpio.gz`
+- `scripts/build-kernel.sh`：构建极简 KVM guest `vmlinux`，默认输出到 `VM_ASSETS_DIR/vmlinux`，未设置时回退到 `~/.mimobox/assets/vmlinux`
 - `scripts/extract-vmlinux.sh`：提取可用于 KVM 测试的 `vmlinux`
 
 ## 9. 文档与 CI 状态

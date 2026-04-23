@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::vm::{MicrovmConfig, MicrovmError};
 
-const DEFAULT_VM_ASSETS_SUBDIR: &str = "mimobox-poc/vm-assets";
+const DEFAULT_VM_ASSETS_SUBDIR: &str = ".mimobox/assets";
 
 pub fn resolve_vm_assets_dir(
     vm_assets_override: Option<PathBuf>,
