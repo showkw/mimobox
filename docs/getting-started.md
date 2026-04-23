@@ -364,6 +364,13 @@ if __name__ == "__main__":
 - 不是通用网络放行开关
 - 应与 `IsolationLevel::MicroVm` 配合使用
 
+#### `network`
+
+- `NetworkPolicy::DenyAll`：拒绝所有网络访问
+- `NetworkPolicy::AllowDomains([...])`：保持沙箱内直接网络关闭，仅允许通过 host HTTP 代理访问白名单域名
+- `NetworkPolicy::AllowAll`：允许任意网络访问
+- 当 `trust_level = TrustLevel::Untrusted` 且当前平台不支持 microVM 时，SDK 会直接报错，不会静默降级到 OS
+
 ### 5.2 隔离层级选择
 
 | 选项 | 含义 | 当前行为 |

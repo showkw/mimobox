@@ -10,7 +10,7 @@ use std::process::{self, ExitCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
 #[cfg(target_os = "linux")]
 use mimobox_os::LinuxSandbox;
@@ -95,8 +95,12 @@ struct RunArgs {
     timeout: Option<u64>,
 
     /// 是否拒绝网络访问
-    #[arg(long)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
     deny_network: bool,
+
+    /// 是否允许网络访问
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
+    allow_network: bool,
 
     /// 是否允许子进程 fork/clone
     #[arg(long, default_value_t = false)]
@@ -388,11 +392,12 @@ fn init_tracing() -> Result<(), CliError> {
 }
 
 fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
+    let deny_network = resolve_run_deny_network(&args);
     info!(
         backend = ?args.backend,
         memory_mb = args.memory.unwrap_or(DEFAULT_MEMORY_MB),
         timeout_secs = ?normalize_timeout(args.timeout),
-        deny_network = args.deny_network,
+        deny_network,
         allow_fork = args.allow_fork,
         kernel = args.kernel.as_deref().unwrap_or("default"),
         rootfs = args.rootfs.as_deref().unwrap_or("default"),
@@ -403,7 +408,6 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     let argv = parse_command(&args.command)?;
     let memory_mb = Some(args.memory.unwrap_or(DEFAULT_MEMORY_MB));
     let timeout_secs = normalize_timeout(args.timeout);
-    let deny_network = args.deny_network;
     let allow_fork = args.allow_fork;
 
     let requested_backend = args.backend;
@@ -413,16 +417,12 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
                 &args.command,
                 args.memory,
                 args.timeout,
-                args.deny_network,
+                deny_network,
                 args.allow_fork,
             ),
             RunExecutionMode::Direct => {
-                let config = build_sandbox_config(
-                    args.memory,
-                    args.timeout,
-                    args.deny_network,
-                    args.allow_fork,
-                );
+                let config =
+                    build_sandbox_config(args.memory, args.timeout, deny_network, args.allow_fork);
 
                 match args.backend {
                     Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
@@ -564,7 +564,15 @@ fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
     if deny_network {
         SdkNetworkPolicy::DenyAll
     } else {
-        SdkNetworkPolicy::DenyDomains(Vec::new())
+        SdkNetworkPolicy::AllowAll
+    }
+}
+
+fn resolve_run_deny_network(args: &RunArgs) -> bool {
+    if args.allow_network {
+        false
+    } else {
+        args.deny_network
     }
 }
 
@@ -1124,6 +1132,7 @@ mod tests {
                 assert_eq!(args.memory, Some(128));
                 assert_eq!(args.timeout, Some(5));
                 assert!(args.deny_network);
+                assert!(!args.allow_network);
                 assert!(args.allow_fork);
             }
             _ => panic!("应解析为 run 子命令"),
@@ -1148,6 +1157,7 @@ mod tests {
                 assert_eq!(args.memory, None);
                 assert_eq!(args.timeout, None);
                 assert!(!args.deny_network);
+                assert!(!args.allow_network);
                 assert!(!args.allow_fork);
             }
             _ => panic!("应解析为 run 子命令"),
@@ -1199,6 +1209,54 @@ mod tests {
             mimobox_sdk::NetworkPolicy::DenyAll
         ));
         assert!(config.allow_fork);
+    }
+
+    #[test]
+    fn sdk_config_maps_allow_network_to_allow_all() {
+        let config = build_sdk_config(Some(256), Some(10), false, false);
+
+        assert!(matches!(
+            config.network,
+            mimobox_sdk::NetworkPolicy::AllowAll
+        ));
+    }
+
+    #[test]
+    fn run_subcommand_parses_allow_network_flag() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "run",
+            "--backend",
+            "os",
+            "--command",
+            "/bin/echo hello",
+            "--allow-network",
+        ])
+        .expect("allow-network 参数应解析成功");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert!(!args.deny_network);
+                assert!(args.allow_network);
+                assert!(!resolve_run_deny_network(&args));
+            }
+            _ => panic!("应解析为 run 子命令"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_rejects_conflicting_network_flags() {
+        let error = Cli::try_parse_from([
+            "mimobox",
+            "run",
+            "--command",
+            "/bin/echo hello",
+            "--deny-network",
+            "--allow-network",
+        ])
+        .expect_err("互斥网络参数不应同时出现");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -1352,6 +1410,7 @@ mod tests {
             memory: Some(128),
             timeout: Some(5),
             deny_network: true,
+            allow_network: false,
             allow_fork: false,
             kernel: None,
             rootfs: None,
