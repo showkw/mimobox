@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::IpAddr;
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 use base64::Engine;
@@ -10,8 +11,6 @@ use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
-
-use crate::vm::MicrovmError;
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -62,6 +61,8 @@ pub enum HttpProxyError {
     TlsFail(String),
     #[error("URL 无效: {0}")]
     InvalidUrl(String),
+    #[error("DNS 解析命中内网地址: {0}")]
+    DnsRebind(String),
     #[error("HTTP 代理内部错误: {0}")]
     Internal(String),
 }
@@ -75,14 +76,9 @@ impl HttpProxyError {
             Self::ConnectFail(_) => "CONNECT_FAIL",
             Self::TlsFail(_) => "TLS_FAIL",
             Self::InvalidUrl(_) => "INVALID_URL",
+            Self::DnsRebind(_) => "DNS_REBIND",
             Self::Internal(_) => "INTERNAL",
         }
-    }
-}
-
-impl From<HttpProxyError> for MicrovmError {
-    fn from(value: HttpProxyError) -> Self {
-        MicrovmError::Backend(value.to_string())
     }
 }
 
@@ -156,6 +152,7 @@ pub fn execute_http_request(
     let url = reqwest::Url::parse(&request.url)
         .map_err(|err| HttpProxyError::InvalidUrl(err.to_string()))?;
     validate_http_request(config, &url)?;
+    validate_dns_resolution(&url)?;
 
     let method = Method::from_bytes(request.method.as_bytes())
         .map_err(|err| HttpProxyError::InvalidUrl(format!("HTTP method 无效: {err}")))?;
@@ -244,6 +241,30 @@ fn validate_host(config: &SandboxConfig, host: &str) -> Result<(), HttpProxyErro
 
     if !is_allowed_http_host(config, &normalized_host) {
         return Err(HttpProxyError::DeniedHost(normalized_host));
+    }
+
+    Ok(())
+}
+
+fn validate_dns_resolution(url: &reqwest::Url) -> Result<(), HttpProxyError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL 缺少 host".into()))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL 缺少端口信息".into()))?;
+
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| HttpProxyError::ConnectFail(format!("DNS 解析失败: {err}")))?;
+
+    for addr in addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(HttpProxyError::DnsRebind(format!(
+                "{host} 解析到内网地址 {}",
+                addr.ip()
+            )));
+        }
     }
 
     Ok(())
@@ -348,5 +369,13 @@ mod tests {
 
         let err = validate_http_request(&config, &url).expect_err("白名单外域名必须被拒绝");
         assert!(matches!(err, HttpProxyError::DeniedHost(host) if host == "example.com"));
+    }
+
+    #[test]
+    fn localhost_is_blocked_by_dns_rebind_guard() {
+        let url = reqwest::Url::parse("https://localhost/").expect("URL 必须合法");
+
+        let err = validate_dns_resolution(&url).expect_err("localhost 必须被拒绝");
+        assert!(matches!(err, HttpProxyError::DnsRebind(_)));
     }
 }

@@ -62,6 +62,8 @@ pub struct Config {
     pub fs_readonly: Vec<PathBuf>,
     /// 读写路径
     pub fs_readwrite: Vec<PathBuf>,
+    /// HTTP 代理允许的域名白名单
+    pub allowed_http_domains: Vec<String>,
     /// 是否允许 fork
     pub allow_fork: bool,
     /// microVM vCPU 数量
@@ -93,6 +95,7 @@ impl Default for Config {
                 "/etc".into(),
             ],
             fs_readwrite: vec!["/tmp".into()],
+            allowed_http_domains: Vec::new(),
             allow_fork: false,
             vm_vcpu_count: 1,
             vm_memory_mb: 256,
@@ -119,7 +122,7 @@ impl Config {
             timeout_secs: self.timeout.map(round_up_timeout_secs),
             seccomp_profile: resolve_seccomp_profile(deny_network, self.allow_fork),
             allow_fork: self.allow_fork,
-            allowed_http_domains: Vec::new(),
+            allowed_http_domains: resolve_allowed_http_domains(self),
         }
     }
 
@@ -152,6 +155,18 @@ fn resolve_deny_network(network: &NetworkPolicy) -> bool {
         // deny-list 目前无法下沉到域名级过滤，按“允许网络”保留调用方意图。
         NetworkPolicy::DenyDomains(_) => false,
     }
+}
+
+fn resolve_allowed_http_domains(config: &Config) -> Vec<String> {
+    let mut domains = config.allowed_http_domains.clone();
+    if let NetworkPolicy::AllowDomains(network_domains) = &config.network {
+        for domain in network_domains {
+            if !domains.contains(domain) {
+                domains.push(domain.clone());
+            }
+        }
+    }
+    domains
 }
 
 fn round_up_timeout_secs(timeout: Duration) -> u64 {
@@ -231,6 +246,14 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn allowed_http_domains(
+        mut self,
+        domains: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.inner.allowed_http_domains = domains.into_iter().map(Into::into).collect();
+        self
+    }
+
     pub fn vm_vcpu_count(mut self, count: u8) -> Self {
         self.inner.vm_vcpu_count = count;
         self
@@ -302,6 +325,10 @@ mod tests {
             .build();
 
         assert!(config.to_sandbox_config().deny_network);
+        assert_eq!(
+            config.to_sandbox_config().allowed_http_domains,
+            vec!["example.com".to_string()]
+        );
     }
 
     #[test]
@@ -328,6 +355,19 @@ mod tests {
 
         let config = Config::builder().timeout(Duration::from_millis(1)).build();
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
+    }
+
+    #[test]
+    fn explicit_allowed_http_domains_are_forwarded_to_sandbox_config() {
+        let config = Config::builder()
+            .allowed_http_domains(["api.openai.com", "*.openai.com"])
+            .build();
+        let sandbox_config = config.to_sandbox_config();
+
+        assert_eq!(
+            sandbox_config.allowed_http_domains,
+            vec!["api.openai.com".to_string(), "*.openai.com".to_string()]
+        );
     }
 
     #[cfg(feature = "vm")]

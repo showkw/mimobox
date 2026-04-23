@@ -12,5 +12,5 @@
 mod sandbox;
 mod seccomp;
 
-pub use sandbox::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
+pub use sandbox::{ErrorCode, Sandbox, SandboxConfig, SandboxError, SandboxResult};
 pub use seccomp::SeccompProfile;

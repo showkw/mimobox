@@ -2,11 +2,20 @@
 //!
 //! 通过 PyO3 将 `mimobox-sdk` 暴露为 Python 可调用模块。
 
-use mimobox_sdk::{ExecuteResult, Sandbox as RustSandbox, SdkError, StreamEvent};
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
+use mimobox_sdk::{ErrorCode, ExecuteResult, Sandbox as RustSandbox, SdkError, StreamEvent};
+use pyo3::create_exception;
+use pyo3::exceptions::{
+    PyConnectionError, PyFileNotFoundError, PyNotImplementedError, PyPermissionError,
+    PyRuntimeError, PyTimeoutError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::sync::mpsc;
+
+create_exception!(mimobox, SandboxError, pyo3::exceptions::PyException);
+create_exception!(mimobox, SandboxProcessError, SandboxError);
+create_exception!(mimobox, SandboxHttpError, SandboxError);
+create_exception!(mimobox, SandboxLifecycleError, SandboxError);
 
 /// Python 侧执行结果对象。
 ///
@@ -266,20 +275,56 @@ impl PySandbox {
 fn map_sdk_error(error: SdkError) -> PyErr {
     match error {
         SdkError::Config(message) => PyValueError::new_err(message),
-        SdkError::BackendUnavailable(backend) => {
-            PyNotImplementedError::new_err(format!("后端不可用: {backend}"))
+        SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
+        SdkError::Io(err) => PyRuntimeError::new_err(err.to_string()),
+        SdkError::Sandbox {
+            code,
+            message,
+            suggestion,
+        } => {
+            let detail = match suggestion {
+                Some(suggestion) => format!("{message}。建议: {suggestion}"),
+                None => message,
+            };
+
+            match code {
+                ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => {
+                    PyTimeoutError::new_err(detail)
+                }
+                ErrorCode::FileNotFound => PyFileNotFoundError::new_err(detail),
+                ErrorCode::FilePermissionDenied => PyPermissionError::new_err(detail),
+                ErrorCode::HttpConnectFail | ErrorCode::HttpTlsFail => {
+                    PyConnectionError::new_err(detail)
+                }
+                ErrorCode::InvalidConfig => PyValueError::new_err(detail),
+                ErrorCode::UnsupportedPlatform => PyNotImplementedError::new_err(detail),
+                ErrorCode::CommandExit(_) | ErrorCode::CommandKilled => {
+                    SandboxProcessError::new_err(detail)
+                }
+                ErrorCode::HttpDeniedHost
+                | ErrorCode::HttpBodyTooLarge
+                | ErrorCode::HttpInvalidUrl => SandboxHttpError::new_err(detail),
+                ErrorCode::SandboxNotReady
+                | ErrorCode::SandboxDestroyed
+                | ErrorCode::SandboxCreateFailed => SandboxLifecycleError::new_err(detail),
+                ErrorCode::FileTooLarge => SandboxError::new_err(detail),
+            }
         }
-        other => PyRuntimeError::new_err(other.to_string()),
     }
 }
 
 #[pymodule]
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
     module.add_class::<PySandbox>()?;
     module.add_class::<PyExecuteResult>()?;
     module.add_class::<PyHttpResponse>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
+    module.add("SandboxError", py.get_type::<SandboxError>())?;
+    module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
+    module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
+    module.add("SandboxLifecycleError", py.get_type::<SandboxLifecycleError>())?;
     Ok(())
 }
 
