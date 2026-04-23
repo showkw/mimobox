@@ -9,7 +9,7 @@ use mimobox_vm::{
 };
 
 fn e2e_config() -> MicrovmConfig {
-    microvm_config_from_vm_assets(64).expect("加载 e2e VM assets 配置必须成功")
+    microvm_config_from_vm_assets(256).expect("加载 e2e VM assets 配置必须成功")
 }
 
 fn guest_cmd(args: &[&str]) -> Vec<String> {
