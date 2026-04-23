@@ -13,17 +13,17 @@ use crate::vm::{MicrovmConfig, MicrovmError};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
 const SNAPSHOT_VERSION: u16 = 1;
-const FILE_SNAPSHOT_VERSION: u16 = 1;
+pub(crate) const FILE_SNAPSHOT_VERSION: u16 = 1;
 const SNAPSHOT_MEMORY_FILE_NAME: &str = "memory.bin";
 const SNAPSHOT_STATE_FILE_NAME: &str = "state.json";
 static SNAPSHOT_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SnapshotStateFile {
-    version: u16,
-    sandbox_config: SandboxConfig,
-    microvm_config: MicrovmConfig,
-    vcpu_state_base64: String,
+pub(crate) struct SnapshotStateFile {
+    pub(crate) version: u16,
+    pub(crate) sandbox_config: SandboxConfig,
+    pub(crate) microvm_config: MicrovmConfig,
+    pub(crate) vcpu_state_base64: String,
 }
 
 /// microVM 自描述快照。
@@ -185,7 +185,7 @@ fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
     Ok(home_dir.join(".mimobox").join("snapshots"))
 }
 
-fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
+pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
     let root_dir = snapshot_root_dir()?;
     fs::create_dir_all(&root_dir)?;
 

@@ -630,10 +630,36 @@ impl Sandbox {
         }
     }
 
-    /// 快速 fork：拍摄当前状态并恢复出一个新沙箱。
+    /// 从当前沙箱 fork 一个独立的副本。
+    ///
+    /// 仅 microVM 后端支持。fork 出的沙箱与原沙箱共享未修改的内存页（CoW），
+    /// 写入时各自持有私有副本。
+    #[cfg(all(feature = "vm", target_os = "linux"))]
     pub fn fork(&mut self) -> Result<Self, SdkError> {
-        let snapshot = self.snapshot()?;
-        Self::from_snapshot(&snapshot)
+        self.ensure_backend_for_snapshot()?;
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            SdkError::sandbox(
+                ErrorCode::SandboxCreateFailed,
+                "后端初始化后缺失实例",
+                Some("检查沙箱初始化流程是否被中断".to_string()),
+            )
+        })?;
+
+        match inner {
+            SandboxInner::MicroVm(sandbox) => {
+                let forked = sandbox.fork().map_err(map_microvm_error)?;
+                Ok(Self::from_initialized_inner(
+                    SandboxInner::MicroVm(forked),
+                    self.config.clone(),
+                ))
+            }
+            _ => Err(SdkError::unsupported_backend("fork")),
+        }
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    pub fn fork(&mut self) -> Result<Self, SdkError> {
+        Err(SdkError::unsupported_backend("fork"))
     }
 
     /// 在沙箱中执行命令。
