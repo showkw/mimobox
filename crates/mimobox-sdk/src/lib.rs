@@ -284,8 +284,9 @@ impl Sandbox {
         pool_config: mimobox_vm::VmPoolConfig,
     ) -> Result<Self, SdkError> {
         let mut sandbox = Self::new_uninitialized(config);
+        let sandbox_config = sandbox.config.to_sandbox_config();
         let microvm_config = sandbox.config.to_microvm_config()?;
-        let pool = mimobox_vm::VmPool::new(microvm_config, pool_config)
+        let pool = mimobox_vm::VmPool::new_with_base(sandbox_config, microvm_config, pool_config)
             .map_err(map_pool_error)?;
         sandbox.vm_pool = Some(Arc::new(pool));
         Ok(sandbox)
@@ -658,6 +659,7 @@ fn initialize_default_vm_pool(
     }
 
     let microvm_config = config.to_microvm_config()?;
+    let sandbox_config = config.to_sandbox_config();
     let pool_config = mimobox_vm::VmPoolConfig {
         min_size: 1,
         max_size: 4,
@@ -665,7 +667,7 @@ fn initialize_default_vm_pool(
         health_check_interval: None,
     };
 
-    match mimobox_vm::VmPool::new(microvm_config, pool_config) {
+    match mimobox_vm::VmPool::new_with_base(sandbox_config, microvm_config, pool_config) {
         Ok(pool) => Ok(Some(Arc::new(pool))),
         Err(error) => {
             tracing::warn!("初始化 microVM 预热池失败，回退到冷启动路径: {error}");
