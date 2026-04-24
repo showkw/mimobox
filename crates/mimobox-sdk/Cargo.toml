@@ -18,6 +18,10 @@ thiserror.workspace = true
 tracing.workspace = true
 shlex.workspace = true
 
+[dev-dependencies]
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde_json.workspace = true
+
 [features]
 default = ["os"]
 os = ["dep:mimobox-os"]
@@ -51,6 +55,10 @@ path = "examples/env_vars.rs"
 [[example]]
 name = "file_ops"
 path = "examples/file_ops.rs"
+
+[[example]]
+name = "llm_agent"
+path = "examples/llm_agent.rs"
 
 [lints]
 workspace = true
