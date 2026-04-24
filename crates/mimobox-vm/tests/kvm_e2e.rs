@@ -412,3 +412,46 @@ fn test_kvm_vm_read_nonexistent_file() {
 
     backend.shutdown().expect("关闭 VM 必须成功");
 }
+
+#[test]
+fn test_fork_creates_independent_vm() {
+    let config = e2e_config();
+    let mut sandbox = MicrovmSandbox::new(config).expect("VM 创建必须成功");
+    sandbox
+        .execute(&guest_cmd(&["/bin/echo", "hello_original"]))
+        .expect("执行必须成功");
+
+    let mut forked = sandbox.fork().expect("fork 必须成功");
+    let result = forked
+        .execute(&guest_cmd(&["/bin/echo", "hello_fork"]))
+        .expect("fork VM 执行必须成功");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("hello_fork"));
+
+    let result = sandbox
+        .execute(&guest_cmd(&["/bin/echo", "hello_original_2"]))
+        .expect("原 VM 执行必须成功");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("hello_original_2"));
+
+    sandbox.destroy().expect("销毁原 VM 必须成功");
+    forked.destroy().expect("销毁 fork VM 必须成功");
+}
+
+#[test]
+fn bench_fork_latency() {
+    let config = e2e_config();
+    let mut sandbox = MicrovmSandbox::new(config).expect("VM 创建必须成功");
+
+    let start = std::time::Instant::now();
+    let mut forked = sandbox.fork().expect("fork 必须成功");
+    let fork_time = start.elapsed();
+    eprintln!("fork latency: {:?}", fork_time);
+
+    let result = forked
+        .execute(&guest_cmd(&["/bin/echo", "fork_ok"]))
+        .expect("fork VM 执行必须成功");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("fork_ok"));
+    assert!(fork_time.as_millis() < 500);
+
+    sandbox.destroy().expect("销毁原 VM 必须成功");
+    forked.destroy().expect("销毁 fork VM 必须成功");
+}
