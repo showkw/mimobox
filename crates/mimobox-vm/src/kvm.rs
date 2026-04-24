@@ -69,8 +69,9 @@ use self::devices::{
     SERIAL_HTTPRESP_ERROR_PREFIX, SERIAL_HTTPRESP_HEADERS_PREFIX, SerialDevice,
     SerialProtocolResult, SerialResponseCollector, VsockCommandChannel, VsockMmioAction,
     VsockMmioDevice, activate_vhost_backend, build_guest_command, emulate_boot_legacy_pio_read,
-    encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, handle_serial_read,
-    handle_serial_write, is_boot_legacy_pio_port, is_serial_port, preview_serial_output,
+    encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, encode_ping_payload,
+    handle_serial_read, handle_serial_write, is_boot_legacy_pio_port, is_serial_port,
+    preview_serial_output,
 };
 #[cfg(test)]
 use self::devices::{SerialFrame, parse_serial_line, take_serial_frame};
@@ -87,6 +88,7 @@ pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 #[cfg(test)]
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
+const READINESS_PROBE_TIMEOUT_SECS: u64 = 5;
 const VSOCK_ACCEPT_TIMEOUT_SECS: u64 = 10;
 const VSOCK_PROBE_TIMEOUT_MILLIS: u64 = 500;
 /// `guest-vsock` feature 默认关闭，关闭时 host 不暴露 virtio-vsock 设备。
@@ -631,6 +633,43 @@ impl KvmBackend {
     /// 返回 guest 是否已经进入 READY 状态。
     pub fn is_guest_ready(&self) -> bool {
         self.lifecycle == KvmLifecycle::Ready && self.guest_ready
+    }
+
+    /// 通过串口 `PING\n`/`PONG\n` 探测 guest 命令循环是否仍可响应。
+    pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
+        self.ping_with_timeout(Duration::from_secs(READINESS_PROBE_TIMEOUT_SECS))
+    }
+
+    pub(crate) fn ping_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Duration, MicrovmError> {
+        let span = tracing::info_span!("vm_ping");
+        let _entered = span.enter();
+
+        if timeout.is_zero() {
+            return Err(MicrovmError::InvalidConfig("ping timeout 不能为 0".into()));
+        }
+        self.ensure_guest_ready()?;
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+        }
+
+        let started_at = Instant::now();
+        let payload = encode_ping_payload();
+        self.serial_device.queue_input(&payload);
+        self.lifecycle = KvmLifecycle::Running;
+
+        let result = self.run_until_pong(timeout);
+        if self.lifecycle != KvmLifecycle::Destroyed {
+            self.lifecycle = KvmLifecycle::Ready;
+        }
+
+        result.map(|()| {
+            let duration = started_at.elapsed();
+            info!(elapsed = ?duration, "readiness probe 完成");
+            duration
+        })
     }
 
     /// 清理池化复用时不应泄漏到下一次借出的宿主侧状态。
@@ -1556,6 +1595,9 @@ impl KvmBackend {
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
                     self.run_http_proxy_request(frame.id, frame.request)?;
                 }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
+                    return Err(MicrovmError::Backend("命令执行阶段收到意外 PONG 帧".into()));
+                }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
                     | SerialProtocolResult::StreamStdout(_, _)
@@ -1585,6 +1627,55 @@ impl KvmBackend {
                         exit_code: None,
                         timed_out: true,
                     });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn run_until_pong(&mut self, timeout: Duration) -> Result<(), MicrovmError> {
+        let mut line_buffer = Vec::new();
+        let mut response = SerialResponseCollector::Command(CommandResponse::default());
+        let watchdog = self.start_watchdog(timeout)?;
+
+        loop {
+            match self.run_vcpu_step(&mut line_buffer, Some(&mut response), &watchdog) {
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => return Ok(()),
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
+                    self.run_http_proxy_request(frame.id, frame.request)?;
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "guest 不支持 PING readiness probe: exit_code={:?}, stdout={}",
+                        result.exit_code,
+                        String::from_utf8_lossy(&result.stdout),
+                    )));
+                }
+                Ok(RunLoopOutcome::ResponseDone(
+                    SerialProtocolResult::Fs(_)
+                    | SerialProtocolResult::StreamStart(_)
+                    | SerialProtocolResult::StreamStdout(_, _)
+                    | SerialProtocolResult::StreamStderr(_, _)
+                    | SerialProtocolResult::StreamEnd(_, _)
+                    | SerialProtocolResult::StreamTimeout(_),
+                )) => {
+                    return Err(MicrovmError::Backend(
+                        "readiness probe 阶段收到意外协议帧".into(),
+                    ));
+                }
+                Ok(RunLoopOutcome::Exit(KvmExitReason::Io | KvmExitReason::Hlt)) => {}
+                Ok(RunLoopOutcome::Exit(exit_reason)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "guest 在返回 PONG 前异常退出: {exit_reason:?}"
+                    )));
+                }
+                Err(err) if watchdog.timed_out() => {
+                    self.guest_ready = false;
+                    self.lifecycle = KvmLifecycle::Destroyed;
+                    return Err(MicrovmError::Backend(format!(
+                        "guest readiness probe 超时: {err}; serial={}",
+                        preview_serial_output(&self.serial_buffer),
+                    )));
                 }
                 Err(err) => return Err(err),
             }
@@ -1688,6 +1779,9 @@ impl KvmBackend {
                         "流式执行阶段收到意外 FSRESULT 帧".into(),
                     ));
                 }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
+                    return Err(MicrovmError::Backend("流式执行阶段收到意外 PONG 帧".into()));
+                }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
@@ -1724,6 +1818,9 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
                     self.run_http_proxy_request(frame.id, frame.request)?;
+                }
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
+                    return Err(MicrovmError::Backend("文件操作阶段收到意外 PONG 帧".into()));
                 }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
@@ -2446,8 +2543,8 @@ mod tests {
     };
     use super::{
         DEFAULT_CMDLINE, SerialFrame, SerialProtocolResult, devices::build_guest_exec_payload,
-        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, parse_serial_line,
-        take_serial_frame,
+        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
+        encode_ping_payload, parse_serial_line, take_serial_frame,
     };
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;
@@ -2472,6 +2569,19 @@ mod tests {
             payload_str.contains("echo"),
             "payload 必须包含命令: {payload_str}"
         );
+    }
+
+    #[test]
+    fn test_parse_ping_response() {
+        let payload = encode_ping_payload();
+        assert_eq!(payload, b"PING\n");
+
+        let mut buffer = b"PONG\n".to_vec();
+        let frame = take_serial_frame(&mut buffer)
+            .expect("解析 PONG 行必须成功")
+            .expect("PONG 行必须被识别");
+        assert_eq!(frame, SerialFrame::Line("PONG".to_string()));
+        assert!(buffer.is_empty(), "PONG 行被取出后缓冲区应清空");
     }
 
     #[test]

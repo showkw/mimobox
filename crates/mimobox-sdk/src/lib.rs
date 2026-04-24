@@ -1179,6 +1179,45 @@ impl Sandbox {
         self.active_isolation
     }
 
+    /// 等待当前沙箱后端进入可用状态。
+    ///
+    /// microVM 后端会执行 PING/PONG readiness probe；OS/Wasm 后端初始化后直接视为就绪。
+    pub fn wait_ready(&mut self, timeout: std::time::Duration) -> Result<(), SdkError> {
+        if timeout.is_zero() {
+            return Err(SdkError::Config("wait_ready timeout 不能为 0".to_string()));
+        }
+
+        let isolation = match self.config.isolation {
+            IsolationLevel::Auto => IsolationLevel::Os,
+            other => other,
+        };
+        if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            return self.wait_ready_inner(timeout);
+        }
+
+        if self.inner.is_some() {
+            self.destroy_inner()?;
+        }
+        self.inner = Some(self.create_inner(isolation)?);
+        self.active_isolation = Some(isolation);
+        self.wait_ready_inner(timeout)
+    }
+
+    /// 返回当前 SDK 沙箱是否已经初始化为可用后端。
+    pub fn is_ready(&self) -> bool {
+        let Some(inner) = self.inner.as_ref() else {
+            return false;
+        };
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox.is_ready(),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => true,
+            _ => true,
+        }
+    }
+
     /// Destroys the sandbox and releases all resources.
     ///
     /// If not called explicitly, the `Drop` implementation will attempt
@@ -1205,6 +1244,33 @@ impl Sandbox {
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
         Ok(())
+    }
+
+    fn wait_ready_inner(&mut self, timeout: std::time::Duration) -> Result<(), SdkError> {
+        let _ = timeout;
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            SdkError::sandbox(
+                ErrorCode::SandboxCreateFailed,
+                "后端初始化后缺失实例",
+                Some("检查沙箱初始化流程是否被中断".to_string()),
+            )
+        })?;
+
+        match inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => {
+                sandbox.wait_ready(timeout).map_err(map_microvm_error)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => {
+                sandbox.ping().map(|_| ()).map_err(map_microvm_error)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(sandbox) => {
+                sandbox.ping().map(|_| ()).map_err(map_microvm_error)
+            }
+            _ => Ok(()),
+        }
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -1920,7 +1986,9 @@ mod tests {
                 assert_eq!(code, ErrorCode::UnsupportedPlatform);
                 assert!(message.contains("microVM"));
             }
-            Err(other) => panic!("期望 SDK 将 UnsupportedOperation 映射为 UnsupportedPlatform，实际为: {other}"),
+            Err(other) => panic!(
+                "期望 SDK 将 UnsupportedOperation 映射为 UnsupportedPlatform，实际为: {other}"
+            ),
             Ok(_) => panic!("期望 SDK PTY 在 microVM 下被拒绝，实际却创建成功"),
         }
 

@@ -517,6 +517,14 @@ impl PooledVm {
         }
     }
 
+    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => ping_backend(backend),
+            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+        }
+    }
+
     /// 通过宿主受控 HTTP 代理发起请求。
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
@@ -678,12 +686,22 @@ fn write_file_backend(backend: &mut Backend, path: &str, data: &[u8]) -> Result<
     backend.write_file(path, data)
 }
 
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn ping_backend(backend: &mut Backend) -> Result<Duration, MicrovmError> {
+    backend.ping()
+}
+
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
 fn write_file_backend(
     _backend: &mut Backend,
     _path: &str,
     _data: &[u8],
 ) -> Result<(), MicrovmError> {
+    Err(MicrovmError::UnsupportedPlatform)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "kvm")))]
+fn ping_backend(_backend: &mut Backend) -> Result<Duration, MicrovmError> {
     Err(MicrovmError::UnsupportedPlatform)
 }
 

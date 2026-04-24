@@ -67,6 +67,7 @@ struct sockaddr_vm {
 
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
+static const char *const PONG_LINE = "PONG\n";
 static const char *const INIT_OK_LINE = "mimobox-kvm: init OK\n";
 /* BOOT_PROFILE 由构建脚本通过 -DBOOT_PROFILE 显式启用，默认不定义。 */
 #ifdef BOOT_PROFILE
@@ -220,6 +221,7 @@ static bool is_supported_command_prefix(const char *prefix) {
 
     return strcmp(prefix, "EXEC:") == 0 ||
            strcmp(prefix, "EXECS:") == 0 ||
+           strcmp(prefix, "PING") == 0 ||
            strcmp(prefix, "SIGNAL:KILL:") == 0 ||
            strcmp(prefix, "HTTP:REQUEST:") == 0 ||
            strcmp(prefix, "FS:READ:") == 0 ||
@@ -240,6 +242,7 @@ static int read_command_frame(char *buffer, size_t capacity) {
     if (capacity == 0) {
         return -1;
     }
+    prefix[0] = '\0';
 
     for (;;) {
         if (read_serial_byte(&value) < 0) {
@@ -249,6 +252,9 @@ static int read_command_frame(char *buffer, size_t capacity) {
             payload_len = (size_t)(value - '0');
             saw_digit = true;
             break;
+        }
+        if (value == '\n' && strcmp(prefix, "PING") == 0) {
+            return -4;
         }
         if (value == '\n' || value == '\r') {
             return -3;
@@ -1891,6 +1897,10 @@ static void serial_command_loop(void) {
             static const unsigned char too_long[] = "command frame too long";
             write_escaped_output(OUTPUT_STREAM_STDOUT, too_long, sizeof(too_long) - 1);
             write_exit_code(126);
+            continue;
+        }
+        if (line_status == -4) {
+            write_console_line(PONG_LINE);
             continue;
         }
         if (line_status < 0) {
