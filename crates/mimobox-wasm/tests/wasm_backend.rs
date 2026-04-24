@@ -6,16 +6,16 @@ use mimobox_wasm::WasmSandbox;
 use tempfile::TempDir;
 
 fn wasm_config() -> SandboxConfig {
-    SandboxConfig {
-        timeout_secs: Some(5),
-        memory_limit_mb: Some(64),
-        fs_readonly: vec![],
-        fs_readwrite: vec![],
-        deny_network: true,
-        seccomp_profile: SeccompProfile::Essential,
-        allow_fork: false,
-        allowed_http_domains: vec![],
-    }
+    let mut config = SandboxConfig::default();
+    config.timeout_secs = Some(5);
+    config.memory_limit_mb = Some(64);
+    config.fs_readonly = vec![];
+    config.fs_readwrite = vec![];
+    config.deny_network = true;
+    config.seccomp_profile = SeccompProfile::Essential;
+    config.allow_fork = false;
+    config.allowed_http_domains = vec![];
+    config
 }
 
 fn compile_wat_to_tempfile(
@@ -118,10 +118,8 @@ fn wasm_sandbox_times_out_infinite_loops() -> Result<(), Box<dyn Error>> {
                   br $spin)))
         "#,
     )?;
-    let config = SandboxConfig {
-        timeout_secs: Some(1),
-        ..wasm_config()
-    };
+    let mut config = wasm_config();
+    config.timeout_secs = Some(1);
     let mut sandbox = WasmSandbox::new(config)?;
     let command = vec![wasm_path.to_string_lossy().into_owned()];
     let result = sandbox.execute(&command)?;
@@ -145,10 +143,8 @@ fn wasm_sandbox_enforces_memory_limits() -> Result<(), Box<dyn Error>> {
                 drop))
         "#,
     )?;
-    let config = SandboxConfig {
-        memory_limit_mb: Some(1),
-        ..wasm_config()
-    };
+    let mut config = wasm_config();
+    config.memory_limit_mb = Some(1);
     let mut sandbox = WasmSandbox::new(config)?;
     let command = vec![wasm_path.to_string_lossy().into_owned()];
     let result = sandbox.execute(&command)?;

@@ -421,11 +421,10 @@ mod tests {
 
     /// macOS 默认测试配置（不设内存限制，macOS 不支持）
     fn test_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(10),
-            memory_limit_mb: None,
-            ..Default::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(10);
+        config.memory_limit_mb = None;
+        config
     }
 
     fn should_skip_runtime_tests() -> bool {
@@ -553,10 +552,8 @@ mod tests {
             return;
         }
 
-        let config = SandboxConfig {
-            timeout_secs: Some(1),
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.timeout_secs = Some(1);
         let mut sb = MacOsSandbox::new(config).expect("创建沙箱失败");
 
         let cmd = vec!["/bin/sleep".to_string(), "60".to_string()];
@@ -607,12 +604,10 @@ mod tests {
 
     #[test]
     fn test_policy_generation_uses_explicit_readonly_allowlist() {
-        let config = SandboxConfig {
-            fs_readwrite: vec!["/tmp/mimobox-rw".into()],
-            memory_limit_mb: None,
-            timeout_secs: Some(10),
-            ..Default::default()
-        };
+        let mut config = SandboxConfig::default();
+        config.fs_readwrite = vec!["/tmp/mimobox-rw".into()];
+        config.memory_limit_mb = None;
+        config.timeout_secs = Some(10);
         let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
         let policy = sb.generate_policy();
 
@@ -628,10 +623,8 @@ mod tests {
             return;
         }
 
-        let config = SandboxConfig {
-            deny_network: true,
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.deny_network = true;
         let mut sb = MacOsSandbox::new(config).expect("创建沙箱失败");
 
         // curl 在网络被拒绝时应失败
@@ -656,10 +649,8 @@ mod tests {
             return;
         }
 
-        let config = SandboxConfig {
-            fs_readwrite: vec!["/tmp".into()],
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.fs_readwrite = vec!["/tmp".into()];
         let mut sb = MacOsSandbox::new(config).expect("创建沙箱失败");
 
         // 尝试写入 /usr/local（不在 fs_readwrite 中）
@@ -691,10 +682,8 @@ mod tests {
             return;
         }
 
-        let config = SandboxConfig {
-            fs_readwrite: vec!["/tmp".into()],
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.fs_readwrite = vec!["/tmp".into()];
         let mut sb = MacOsSandbox::new(config).expect("创建沙箱失败");
 
         // 写入 /tmp（在 fs_readwrite 中）应成功
@@ -813,10 +802,8 @@ mod tests {
     #[test]
     fn test_sandbox_create_with_memory_limit_warns() {
         // macOS 不支持内存限制，但创建不应失败（仅记录告警日志）
-        let config = SandboxConfig {
-            memory_limit_mb: Some(256),
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.memory_limit_mb = Some(256);
         let sb = MacOsSandbox::new(config);
         assert!(sb.is_ok(), "macOS 沙箱创建不应因内存限制而失败");
     }

@@ -834,11 +834,10 @@ mod tests {
 
     /// 辅助函数：创建默认测试配置
     fn test_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(10),
-            memory_limit_mb: Some(256),
-            ..Default::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(10);
+        config.memory_limit_mb = Some(256);
+        config
     }
 
     #[test]
@@ -860,10 +859,8 @@ mod tests {
     /// 需要用 release 模式运行：cargo test --release test_sandbox_exit_code
     #[test]
     fn test_sandbox_exit_code() {
-        let config = SandboxConfig {
-            allow_fork: true,
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.allow_fork = true;
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
         let cmd = vec![
             "/bin/sh".to_string(),
@@ -879,18 +876,16 @@ mod tests {
     fn test_network_isolation() {
         // CLONE_NEWNET 在 child_main 中通过 unshare 创建
         // 添加 /proc 到 readonly 以便读取 /proc/net/dev
-        let config = SandboxConfig {
-            deny_network: true,
-            fs_readonly: vec![
-                "/usr".into(),
-                "/lib".into(),
-                "/lib64".into(),
-                "/bin".into(),
-                "/sbin".into(),
-                "/proc".into(),
-            ],
-            ..Default::default()
-        };
+        let mut config = SandboxConfig::default();
+        config.deny_network = true;
+        config.fs_readonly = vec![
+            "/usr".into(),
+            "/lib".into(),
+            "/lib64".into(),
+            "/bin".into(),
+            "/sbin".into(),
+            "/proc".into(),
+        ];
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         let cmd = vec!["/bin/cat".to_string(), "/proc/net/dev".to_string()];
@@ -908,10 +903,8 @@ mod tests {
     /// 测试文件系统读写隔离（需要 release 模式）
     #[test]
     fn test_fs_isolation() {
-        let config = SandboxConfig {
-            allow_fork: true,
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.allow_fork = true;
         let mut sb = LinuxSandbox::new(config.clone()).expect("创建沙箱失败");
 
         // sh -c 用 /bin/echo 写入 /tmp（应成功，因为在 fs_readwrite 中）
@@ -947,11 +940,9 @@ mod tests {
     /// 测试只读路径的文件系统隔离（需要 release 模式）
     #[test]
     fn test_fs_isolation_readonly() {
-        let config = SandboxConfig {
-            allow_fork: true,
-            seccomp_profile: SeccompProfile::Network,
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.allow_fork = true;
+        config.seccomp_profile = SeccompProfile::Network;
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         let cmd = vec![
@@ -973,11 +964,9 @@ mod tests {
 
     #[test]
     fn test_seccomp_deny_fork() {
-        let config = SandboxConfig {
-            allow_fork: false,
-            seccomp_profile: SeccompProfile::Essential,
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.allow_fork = false;
+        config.seccomp_profile = SeccompProfile::Essential;
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         // fork 应被 seccomp 阻止
@@ -998,10 +987,8 @@ mod tests {
 
     #[test]
     fn test_timeout() {
-        let config = SandboxConfig {
-            timeout_secs: Some(1),
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.timeout_secs = Some(1);
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         let cmd = vec!["/bin/sleep".to_string(), "60".to_string()];
@@ -1013,10 +1000,8 @@ mod tests {
     #[test]
     fn test_memory_limit() {
         // 设置极低的内存限制
-        let config = SandboxConfig {
-            memory_limit_mb: Some(8),
-            ..test_config()
-        };
+        let mut config = test_config();
+        config.memory_limit_mb = Some(8);
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         // 尝试分配大量内存（超过 8MB）

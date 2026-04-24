@@ -16,8 +16,7 @@ enum SeccompProfileDef {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(remote = "SandboxConfig")]
-struct SandboxConfigDef {
+struct SandboxConfigJson {
     fs_readonly: Vec<PathBuf>,
     fs_readwrite: Vec<PathBuf>,
     deny_network: bool,
@@ -29,8 +28,35 @@ struct SandboxConfigDef {
     allowed_http_domains: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct SandboxConfigJson(#[serde(with = "SandboxConfigDef")] SandboxConfig);
+impl From<&SandboxConfig> for SandboxConfigJson {
+    fn from(config: &SandboxConfig) -> Self {
+        Self {
+            fs_readonly: config.fs_readonly.clone(),
+            fs_readwrite: config.fs_readwrite.clone(),
+            deny_network: config.deny_network,
+            memory_limit_mb: config.memory_limit_mb,
+            timeout_secs: config.timeout_secs,
+            seccomp_profile: config.seccomp_profile,
+            allow_fork: config.allow_fork,
+            allowed_http_domains: config.allowed_http_domains.clone(),
+        }
+    }
+}
+
+impl From<SandboxConfigJson> for SandboxConfig {
+    fn from(json: SandboxConfigJson) -> Self {
+        let mut config = SandboxConfig::default();
+        config.fs_readonly = json.fs_readonly;
+        config.fs_readwrite = json.fs_readwrite;
+        config.deny_network = json.deny_network;
+        config.memory_limit_mb = json.memory_limit_mb;
+        config.timeout_secs = json.timeout_secs;
+        config.seccomp_profile = json.seccomp_profile;
+        config.allow_fork = json.allow_fork;
+        config.allowed_http_domains = json.allowed_http_domains;
+        config
+    }
+}
 
 fn seccomp_profile_name(profile: SeccompProfile) -> &'static str {
     match profile {
@@ -43,22 +69,21 @@ fn seccomp_profile_name(profile: SeccompProfile) -> &'static str {
 
 #[test]
 fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
-    let config = SandboxConfig {
-        fs_readonly: vec![
-            PathBuf::from("/opt/tools"),
-            PathBuf::from("/var/data/readonly"),
-        ],
-        fs_readwrite: vec![PathBuf::from("/tmp/workdir"), PathBuf::from("/srv/output")],
-        deny_network: false,
-        memory_limit_mb: Some(256),
-        timeout_secs: Some(9),
-        seccomp_profile: SeccompProfile::NetworkWithFork,
-        allow_fork: true,
-        allowed_http_domains: vec!["api.openai.com".to_string(), "*.openai.com".to_string()],
-    };
+    let mut config = SandboxConfig::default();
+    config.fs_readonly = vec![
+        PathBuf::from("/opt/tools"),
+        PathBuf::from("/var/data/readonly"),
+    ];
+    config.fs_readwrite = vec![PathBuf::from("/tmp/workdir"), PathBuf::from("/srv/output")];
+    config.deny_network = false;
+    config.memory_limit_mb = Some(256);
+    config.timeout_secs = Some(9);
+    config.seccomp_profile = SeccompProfile::NetworkWithFork;
+    config.allow_fork = true;
+    config.allowed_http_domains = vec!["api.openai.com".to_string(), "*.openai.com".to_string()];
 
-    let json = serde_json::to_string_pretty(&SandboxConfigJson(config.clone()))?;
-    let SandboxConfigJson(decoded) = serde_json::from_str::<SandboxConfigJson>(&json)?;
+    let json = serde_json::to_string_pretty(&SandboxConfigJson::from(&config))?;
+    let decoded = SandboxConfig::from(serde_json::from_str::<SandboxConfigJson>(&json)?);
 
     assert_eq!(decoded.fs_readonly, config.fs_readonly);
     assert_eq!(decoded.fs_readwrite, config.fs_readwrite);

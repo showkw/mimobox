@@ -24,6 +24,7 @@ use std::time::Duration;
 use tracing::warn;
 
 /// 沙箱执行结果
+#[non_exhaustive]
 pub struct ExecuteResult {
     /// 标准输出字节流。
     pub stdout: Vec<u8>,
@@ -163,6 +164,7 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 }
 
 /// 流式执行事件。
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     /// 一段标准输出数据。

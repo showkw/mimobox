@@ -1,6 +1,7 @@
 use mimobox_core::ErrorCode;
 
 /// SDK 错误类型
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     /// 来自底层沙箱后端的结构化错误。

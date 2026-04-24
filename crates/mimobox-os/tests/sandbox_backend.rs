@@ -8,11 +8,10 @@ mod linux_backend_tests {
     use tempfile::TempDir;
 
     fn linux_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(5),
-            memory_limit_mb: Some(128),
-            ..Default::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(5);
+        config.memory_limit_mb = Some(128);
+        config
     }
 
     fn python_command() -> Option<PathBuf> {
@@ -43,11 +42,9 @@ mod linux_backend_tests {
         let allowed_file = allowed_dir.path().join("allowed.txt");
         let forbidden_file = forbidden_dir.path().join("forbidden.txt");
 
-        let config = SandboxConfig {
-            fs_readwrite: vec![allowed_dir.path().to_path_buf()],
-            allow_fork: false,
-            ..linux_config()
-        };
+        let mut config = linux_config();
+        config.fs_readwrite = vec![allowed_dir.path().to_path_buf()];
+        config.allow_fork = false;
 
         let mut allowed_sandbox = LinuxSandbox::new(config.clone())?;
         let allowed_command = vec![
@@ -96,10 +93,8 @@ mod linux_backend_tests {
             return Ok(());
         };
 
-        let config = SandboxConfig {
-            memory_limit_mb: Some(32),
-            ..linux_config()
-        };
+        let mut config = linux_config();
+        config.memory_limit_mb = Some(32);
         let mut sandbox = LinuxSandbox::new(config)?;
         let command = vec![
             python.to_string_lossy().into_owned(),
@@ -120,11 +115,9 @@ mod linux_backend_tests {
 
     #[test]
     fn linux_sandbox_filters_fork_related_syscalls() -> Result<(), Box<dyn Error>> {
-        let config = SandboxConfig {
-            allow_fork: false,
-            seccomp_profile: SeccompProfile::Essential,
-            ..linux_config()
-        };
+        let mut config = linux_config();
+        config.allow_fork = false;
+        config.seccomp_profile = SeccompProfile::Essential;
         let mut sandbox = LinuxSandbox::new(config)?;
         let command = vec![
             "/bin/sh".to_string(),
@@ -140,10 +133,8 @@ mod linux_backend_tests {
 
     #[test]
     fn linux_sandbox_times_out_long_running_processes() -> Result<(), Box<dyn Error>> {
-        let config = SandboxConfig {
-            timeout_secs: Some(1),
-            ..linux_config()
-        };
+        let mut config = linux_config();
+        config.timeout_secs = Some(1);
         let mut sandbox = LinuxSandbox::new(config)?;
         let command = vec!["/bin/sleep".to_string(), "5".to_string()];
         let result = sandbox.execute(&command)?;
@@ -166,11 +157,10 @@ mod macos_backend_tests {
     use tempfile::TempDir;
 
     fn macos_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(5),
-            memory_limit_mb: None,
-            ..Default::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(5);
+        config.memory_limit_mb = None;
+        config
     }
 
     fn shell_quote(path: &Path) -> String {
@@ -238,10 +228,8 @@ mod macos_backend_tests {
         let allowed_file = allowed_dir.path().join("allowed.txt");
         let forbidden_file = forbidden_dir.path().join("forbidden.txt");
 
-        let config = SandboxConfig {
-            fs_readwrite: vec![allowed_dir.path().to_path_buf()],
-            ..macos_config()
-        };
+        let mut config = macos_config();
+        config.fs_readwrite = vec![allowed_dir.path().to_path_buf()];
 
         let mut allowed_sandbox = MacOsSandbox::new(config.clone())?;
         let allowed_command = vec![
@@ -285,10 +273,8 @@ mod macos_backend_tests {
             return Ok(());
         }
 
-        let config = SandboxConfig {
-            deny_network: true,
-            ..macos_config()
-        };
+        let mut config = macos_config();
+        config.deny_network = true;
         let mut sandbox = MacOsSandbox::new(config)?;
         let command = vec![
             "/usr/bin/curl".to_string(),

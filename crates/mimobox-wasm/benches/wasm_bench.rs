@@ -22,15 +22,15 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
 }
 
 fn benchmark_config() -> SandboxConfig {
-    SandboxConfig {
-        deny_network: true,
-        memory_limit_mb: Some(64),
-        timeout_secs: Some(30),
-        fs_readonly: vec![],
-        fs_readwrite: vec![],
-        seccomp_profile: SeccompProfile::Essential,
-        allow_fork: false,
-    }
+    let mut config = SandboxConfig::default();
+    config.deny_network = true;
+    config.memory_limit_mb = Some(64);
+    config.timeout_secs = Some(30);
+    config.fs_readonly = vec![];
+    config.fs_readwrite = vec![];
+    config.seccomp_profile = SeccompProfile::Essential;
+    config.allow_fork = false;
+    config
 }
 
 fn compile_wat_to_tempfile(

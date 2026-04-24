@@ -183,6 +183,12 @@ impl From<StreamEvent> for PyStreamEvent {
                 exit_code: None,
                 timed_out: true,
             },
+            _ => Self {
+                stdout: None,
+                stderr: None,
+                exit_code: None,
+                timed_out: false,
+            },
         }
     }
 }
@@ -410,8 +416,10 @@ fn map_sdk_error(error: SdkError) -> PyErr {
                 | ErrorCode::SandboxDestroyed
                 | ErrorCode::SandboxCreateFailed => SandboxLifecycleError::new_err(detail),
                 ErrorCode::FileTooLarge => SandboxError::new_err(detail),
+                _ => SandboxError::new_err(detail),
             }
         }
+        error => PyRuntimeError::new_err(error.to_string()),
     }
 }
 

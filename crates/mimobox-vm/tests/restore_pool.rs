@@ -127,10 +127,8 @@ fn test_restore_pool_restore_and_execute() {
 fn test_restore_pool_execute_result_correctness() {
     let config = e2e_config();
     let (memory, vcpu_state) = build_booted_snapshot(&config);
-    let base_config = SandboxConfig {
-        timeout_secs: Some(1),
-        ..SandboxConfig::default()
-    };
+    let mut base_config = SandboxConfig::default();
+    base_config.timeout_secs = Some(1);
     let pool = must(
         create_restore_pool(base_config, config, restore_pool_config(1, 2)),
         "创建带超时配置的 RestorePool 失败",
