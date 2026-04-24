@@ -1012,14 +1012,13 @@ fn build_sandbox_config(
     deny_network: bool,
     allow_fork: bool,
 ) -> SandboxConfig {
-    SandboxConfig {
-        memory_limit_mb: Some(memory.unwrap_or(DEFAULT_MEMORY_MB)),
-        timeout_secs: normalize_timeout(timeout),
-        deny_network,
-        seccomp_profile: resolve_seccomp_profile(deny_network, allow_fork),
-        allow_fork,
-        ..Default::default()
-    }
+    let mut config = SandboxConfig::default();
+    config.memory_limit_mb = Some(memory.unwrap_or(DEFAULT_MEMORY_MB));
+    config.timeout_secs = normalize_timeout(timeout);
+    config.deny_network = deny_network;
+    config.seccomp_profile = resolve_seccomp_profile(deny_network, allow_fork);
+    config.allow_fork = allow_fork;
+    config
 }
 
 fn build_sdk_config(

@@ -24,11 +24,10 @@ mod pool_tests {
     }
 
     fn sandbox_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(5),
-            memory_limit_mb: Some(128),
-            ..Default::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(5);
+        config.memory_limit_mb = Some(128);
+        config
     }
 
     #[cfg(target_os = "linux")]

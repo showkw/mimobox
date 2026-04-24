@@ -239,16 +239,16 @@ fn encode_sandbox_config(out: &mut Vec<u8>, config: &SandboxConfig) -> Result<()
 }
 
 fn decode_sandbox_config(cursor: &mut SnapshotCursor<'_>) -> Result<SandboxConfig, MicrovmError> {
-    Ok(SandboxConfig {
-        fs_readonly: decode_paths(cursor)?,
-        fs_readwrite: decode_paths(cursor)?,
-        deny_network: cursor.read_bool()?,
-        memory_limit_mb: cursor.read_opt_u64()?,
-        timeout_secs: cursor.read_opt_u64()?,
-        seccomp_profile: u8_to_seccomp(cursor.read_u8()?)?,
-        allow_fork: cursor.read_bool()?,
-        allowed_http_domains: decode_strings(cursor)?,
-    })
+    let mut config = SandboxConfig::default();
+    config.fs_readonly = decode_paths(cursor)?;
+    config.fs_readwrite = decode_paths(cursor)?;
+    config.deny_network = cursor.read_bool()?;
+    config.memory_limit_mb = cursor.read_opt_u64()?;
+    config.timeout_secs = cursor.read_opt_u64()?;
+    config.seccomp_profile = u8_to_seccomp(cursor.read_u8()?)?;
+    config.allow_fork = cursor.read_bool()?;
+    config.allowed_http_domains = decode_strings(cursor)?;
+    Ok(config)
 }
 
 fn encode_microvm_config(out: &mut Vec<u8>, config: &MicrovmConfig) -> Result<(), MicrovmError> {

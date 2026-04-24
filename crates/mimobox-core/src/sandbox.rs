@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::seccomp::SeccompProfile;
 
 /// 结构化错误码。
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
     /// 命令执行超过超时时间。
@@ -46,6 +47,7 @@ pub enum ErrorCode {
 impl ErrorCode {
     /// 返回稳定的字符串错误码，便于跨语言传输和日志检索。
     pub fn as_str(&self) -> &'static str {
+        #[allow(unreachable_patterns)]
         match self {
             Self::CommandTimeout => "command_timeout",
             Self::CommandExit(_) => "command_exit",
@@ -64,6 +66,7 @@ impl ErrorCode {
             Self::SandboxCreateFailed => "sandbox_create_failed",
             Self::InvalidConfig => "invalid_config",
             Self::UnsupportedPlatform => "unsupported_platform",
+            _ => "unknown_error",
         }
     }
 }
@@ -72,6 +75,7 @@ impl ErrorCode {
 ///
 /// 该配置描述所有后端共享的最小能力集合，包括文件系统权限、网络策略、
 /// 资源限制和受控 HTTP 代理白名单。
+#[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxConfig {
     /// 只读路径列表
@@ -309,6 +313,7 @@ pub trait PtySession {
 }
 
 /// 沙箱错误类型
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// 当前平台不支持该沙箱实现。

@@ -358,10 +358,9 @@ mod tests {
     use super::*;
 
     fn config(domains: &[&str]) -> SandboxConfig {
-        SandboxConfig {
-            allowed_http_domains: domains.iter().map(|item| (*item).to_string()).collect(),
-            ..SandboxConfig::default()
-        }
+        let mut config = SandboxConfig::default();
+        config.allowed_http_domains = domains.iter().map(|item| (*item).to_string()).collect();
+        config
     }
 
     #[test]

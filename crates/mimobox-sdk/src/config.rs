@@ -113,16 +113,16 @@ impl Config {
     pub(crate) fn to_sandbox_config(&self) -> SandboxConfig {
         let deny_network = resolve_deny_network(&self.network);
 
-        SandboxConfig {
-            fs_readonly: self.fs_readonly.clone(),
-            fs_readwrite: self.fs_readwrite.clone(),
-            deny_network,
-            memory_limit_mb: self.memory_limit_mb,
-            timeout_secs: self.timeout.map(round_up_timeout_secs),
-            seccomp_profile: resolve_seccomp_profile(deny_network, self.allow_fork),
-            allow_fork: self.allow_fork,
-            allowed_http_domains: resolve_allowed_http_domains(self),
-        }
+        let mut config = SandboxConfig::default();
+        config.fs_readonly = self.fs_readonly.clone();
+        config.fs_readwrite = self.fs_readwrite.clone();
+        config.deny_network = deny_network;
+        config.memory_limit_mb = self.memory_limit_mb;
+        config.timeout_secs = self.timeout.map(round_up_timeout_secs);
+        config.seccomp_profile = resolve_seccomp_profile(deny_network, self.allow_fork);
+        config.allow_fork = self.allow_fork;
+        config.allowed_http_domains = resolve_allowed_http_domains(self);
+        config
     }
 
     #[cfg(feature = "vm")]
@@ -281,6 +281,12 @@ impl ConfigBuilder {
     /// 设置 microVM rootfs 路径。
     pub fn rootfs_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.rootfs_path = Some(path.into());
+        self
+    }
+
+    /// 移除默认超时限制，允许命令无限运行。
+    pub fn no_timeout(mut self) -> Self {
+        self.inner.timeout = None;
         self
     }
 

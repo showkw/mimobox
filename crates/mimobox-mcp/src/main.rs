@@ -246,6 +246,7 @@ fn format_sdk_error(error: SdkError) -> String {
         SdkError::BackendUnavailable(message) => format!("后端不可用：{message}"),
         SdkError::Config(message) => format!("配置错误：{message}"),
         SdkError::Io(error) => format!("IO 错误：{error}"),
+        error => format!("SDK 错误：{error}"),
     }
 }
 

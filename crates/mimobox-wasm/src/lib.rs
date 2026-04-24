@@ -609,16 +609,15 @@ pub fn run_wasm_benchmark(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== mimobox Wasm 沙箱性能基准测试 ===\n");
 
-    let config = SandboxConfig {
-        deny_network: true,
-        memory_limit_mb: Some(64),
-        timeout_secs: Some(30),
-        fs_readonly: vec![],
-        fs_readwrite: vec![],
-        seccomp_profile: mimobox_core::SeccompProfile::Essential,
-        allow_fork: false,
-        allowed_http_domains: vec![],
-    };
+    let mut config = SandboxConfig::default();
+    config.deny_network = true;
+    config.memory_limit_mb = Some(64);
+    config.timeout_secs = Some(30);
+    config.fs_readonly = vec![];
+    config.fs_readwrite = vec![];
+    config.seccomp_profile = mimobox_core::SeccompProfile::Essential;
+    config.allow_fork = false;
+    config.allowed_http_domains = vec![];
 
     if !Path::new(wasm_path).exists() {
         return Err(format!("Wasm 文件不存在: {}", wasm_path).into());
@@ -732,16 +731,16 @@ mod tests {
     use wasmtime::{Instance, Store};
 
     fn test_config() -> SandboxConfig {
-        SandboxConfig {
-            timeout_secs: Some(10),
-            memory_limit_mb: Some(64),
-            fs_readonly: vec![],
-            fs_readwrite: vec![],
-            deny_network: true,
-            seccomp_profile: mimobox_core::SeccompProfile::Essential,
-            allow_fork: false,
-            allowed_http_domains: vec![],
-        }
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = Some(10);
+        config.memory_limit_mb = Some(64);
+        config.fs_readonly = vec![];
+        config.fs_readwrite = vec![];
+        config.deny_network = true;
+        config.seccomp_profile = mimobox_core::SeccompProfile::Essential;
+        config.allow_fork = false;
+        config.allowed_http_domains = vec![];
+        config
     }
 
     #[test]

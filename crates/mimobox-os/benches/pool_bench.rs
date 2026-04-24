@@ -44,10 +44,9 @@ fn percentile_us(samples: &mut [f64], percentile: f64) -> f64 {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sandbox_config() -> SandboxConfig {
-    SandboxConfig {
-        memory_limit_mb: Some(256),
-        ..Default::default()
-    }
+    let mut config = SandboxConfig::default();
+    config.memory_limit_mb = Some(256);
+    config
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -22,13 +22,11 @@ fn guest_cmd(args: &[&str]) -> Vec<String> {
 }
 
 fn vm_http_sandbox(allowed_http_domains: &[&str]) -> MicrovmSandbox {
-    let base_config = SandboxConfig {
-        allowed_http_domains: allowed_http_domains
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-        ..SandboxConfig::default()
-    };
+    let mut base_config = SandboxConfig::default();
+    base_config.allowed_http_domains = allowed_http_domains
+        .iter()
+        .map(|item| (*item).to_string())
+        .collect();
     MicrovmSandbox::new_with_base(base_config, e2e_config())
         .expect("创建 microVM HTTP 代理沙箱必须成功")
 }
@@ -252,10 +250,8 @@ fn test_kvm_vm_separates_stdout_and_stderr() {
 
 #[test]
 fn test_kvm_vm_exit_code_124_is_not_timeout() {
-    let base_config = SandboxConfig {
-        timeout_secs: Some(1),
-        ..SandboxConfig::default()
-    };
+    let mut base_config = SandboxConfig::default();
+    base_config.timeout_secs = Some(1);
     let mut sandbox = MicrovmSandbox::new_with_base(base_config, e2e_config())
         .expect("创建带超时的 microVM 沙箱必须成功");
 
@@ -273,10 +269,8 @@ fn test_kvm_vm_exit_code_124_is_not_timeout() {
 
 #[test]
 fn test_kvm_vm_timeout_marks_result() {
-    let base_config = SandboxConfig {
-        timeout_secs: Some(1),
-        ..SandboxConfig::default()
-    };
+    let mut base_config = SandboxConfig::default();
+    base_config.timeout_secs = Some(1);
     let mut sandbox = MicrovmSandbox::new_with_base(base_config, e2e_config())
         .expect("创建带超时的 microVM 沙箱必须成功");
 

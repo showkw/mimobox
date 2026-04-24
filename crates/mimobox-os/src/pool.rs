@@ -477,10 +477,8 @@ pub fn run_pool_benchmark(
     pool_size: usize,
     iterations: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = SandboxConfig {
-        memory_limit_mb: Some(256),
-        ..Default::default()
-    };
+    let mut config = SandboxConfig::default();
+    config.memory_limit_mb = Some(256);
 
     let pool_config = PoolConfig {
         min_size: 0,
