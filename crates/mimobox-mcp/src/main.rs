@@ -1,4 +1,19 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+//! mimobox MCP Server.
+//!
+//! Exposes 7 tools over stdio:
+//! - create_sandbox
+//! - destroy_sandbox
+//! - list_sandboxes
+//! - execute_code
+//! - execute_command
+//! - read_file
+//! - write_file
+
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use mimobox_sdk::{Config, ExecuteResult, IsolationLevel, Sandbox, SdkError};
 use rmcp::handler::server::wrapper::Json;
@@ -15,9 +30,15 @@ use tracing::{error, info};
 
 #[derive(Clone)]
 struct MimoboxServer {
-    sandboxes: Arc<Mutex<HashMap<u64, Sandbox>>>,
+    sandboxes: Arc<Mutex<HashMap<u64, ManagedSandbox>>>,
     next_id: Arc<Mutex<u64>>,
     tool_router: ToolRouter<Self>,
+}
+
+struct ManagedSandbox {
+    sandbox: Sandbox,
+    created_at_ms: u64,
+    created_at_instant: Instant,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -58,6 +79,35 @@ struct ExecuteCommandRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DestroySandboxRequest {
+    /// 要销毁的沙箱 ID。
+    sandbox_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListSandboxesRequest {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+struct ReadFileRequest {
+    /// 目标沙箱 ID。
+    sandbox_id: u64,
+    /// 沙箱内文件路径。
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+struct WriteFileRequest {
+    /// 目标沙箱 ID。
+    sandbox_id: u64,
+    /// 沙箱内文件路径。
+    path: String,
+    /// Base64 编码后的文件内容。
+    content: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 struct ExecuteResponse {
     stdout: String,
@@ -65,6 +115,41 @@ struct ExecuteResponse {
     exit_code: Option<i32>,
     timed_out: bool,
     elapsed_ms: u128,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DestroySandboxResponse {
+    sandbox_id: u64,
+    destroyed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ListSandboxesResponse {
+    sandboxes: Vec<SandboxSummary>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct SandboxSummary {
+    sandbox_id: u64,
+    isolation_level: Option<String>,
+    created_at: u64,
+    uptime_ms: u128,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ReadFileResponse {
+    sandbox_id: u64,
+    path: String,
+    content: String,
+    size_bytes: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WriteFileResponse {
+    sandbox_id: u64,
+    path: String,
+    size_bytes: usize,
+    written: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -84,7 +169,7 @@ impl MimoboxServer {
 
 #[tool_router]
 impl MimoboxServer {
-    #[tool(description = "创建一个可复用的 mimobox 沙箱实例")]
+    #[tool(description = "Create a reusable mimobox sandbox instance")]
     async fn create_sandbox(
         &self,
         Parameters(request): Parameters<CreateSandboxRequest>,
@@ -101,7 +186,14 @@ impl MimoboxServer {
         drop(next_id);
 
         let mut sandboxes = self.sandboxes.lock().await;
-        sandboxes.insert(sandbox_id, sandbox);
+        sandboxes.insert(
+            sandbox_id,
+            ManagedSandbox {
+                sandbox,
+                created_at_ms: unix_timestamp_ms(),
+                created_at_instant: Instant::now(),
+            },
+        );
 
         Ok(Json(CreateSandboxResponse {
             sandbox_id,
@@ -109,7 +201,58 @@ impl MimoboxServer {
         }))
     }
 
-    #[tool(description = "在 mimobox 沙箱中执行指定语言的代码片段")]
+    #[tool(description = "Destroy a reusable mimobox sandbox and release its resources")]
+    async fn destroy_sandbox(
+        &self,
+        Parameters(request): Parameters<DestroySandboxRequest>,
+    ) -> Result<Json<DestroySandboxResponse>, Json<ErrorResponse>> {
+        let mut sandboxes = self.sandboxes.lock().await;
+        let managed = sandboxes
+            .remove(&request.sandbox_id)
+            .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+        drop(sandboxes);
+
+        if let Err(err) = managed.sandbox.destroy() {
+            error!(
+                sandbox_id = request.sandbox_id,
+                error = %format_sdk_error(err),
+                "沙箱销毁失败，实例已从活动列表移除"
+            );
+        }
+
+        Ok(Json(DestroySandboxResponse {
+            sandbox_id: request.sandbox_id,
+            destroyed: true,
+        }))
+    }
+
+    #[tool(description = "List active mimobox sandboxes with their IDs and basic metadata")]
+    async fn list_sandboxes(
+        &self,
+        Parameters(_request): Parameters<ListSandboxesRequest>,
+    ) -> Result<Json<ListSandboxesResponse>, Json<ErrorResponse>> {
+        let sandboxes = self.sandboxes.lock().await;
+        let mut summaries = sandboxes
+            .iter()
+            .map(|(sandbox_id, managed)| SandboxSummary {
+                sandbox_id: *sandbox_id,
+                isolation_level: managed
+                    .sandbox
+                    .active_isolation()
+                    .map(format_isolation_level)
+                    .map(str::to_string),
+                created_at: managed.created_at_ms,
+                uptime_ms: managed.created_at_instant.elapsed().as_millis(),
+            })
+            .collect::<Vec<_>>();
+        summaries.sort_by_key(|summary| summary.sandbox_id);
+
+        Ok(Json(ListSandboxesResponse {
+            sandboxes: summaries,
+        }))
+    }
+
+    #[tool(description = "Execute a code snippet in a mimobox sandbox")]
     async fn execute_code(
         &self,
         Parameters(request): Parameters<ExecuteCodeRequest>,
@@ -124,7 +267,7 @@ impl MimoboxServer {
         Ok(Json(format_execute_result(result)))
     }
 
-    #[tool(description = "在 mimobox 沙箱中执行 shell 命令")]
+    #[tool(description = "Execute a shell command in a mimobox sandbox")]
     async fn execute_command(
         &self,
         Parameters(request): Parameters<ExecuteCommandRequest>,
@@ -137,6 +280,71 @@ impl MimoboxServer {
         Ok(Json(format_execute_result(result)))
     }
 
+    #[tool(description = "Read a file from a microVM-backed mimobox sandbox as base64")]
+    async fn read_file(
+        &self,
+        Parameters(request): Parameters<ReadFileRequest>,
+    ) -> Result<Json<ReadFileResponse>, Json<ErrorResponse>> {
+        #[cfg(feature = "vm")]
+        {
+            let mut sandboxes = self.sandboxes.lock().await;
+            let managed = sandboxes
+                .get_mut(&request.sandbox_id)
+                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            let content = managed
+                .sandbox
+                .read_file(&request.path)
+                .map_err(|error| to_error(format_sdk_error(error)))?;
+            let size_bytes = content.len();
+
+            Ok(Json(ReadFileResponse {
+                sandbox_id: request.sandbox_id,
+                path: request.path,
+                content: encode_base64(&content),
+                size_bytes,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(file_transfer_requires_vm()))
+        }
+    }
+
+    #[tool(description = "Write a base64-encoded file into a microVM-backed mimobox sandbox")]
+    async fn write_file(
+        &self,
+        Parameters(request): Parameters<WriteFileRequest>,
+    ) -> Result<Json<WriteFileResponse>, Json<ErrorResponse>> {
+        #[cfg(feature = "vm")]
+        {
+            let data = decode_base64(&request.content).map_err(to_error)?;
+            let size_bytes = data.len();
+            let mut sandboxes = self.sandboxes.lock().await;
+            let managed = sandboxes
+                .get_mut(&request.sandbox_id)
+                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            managed
+                .sandbox
+                .write_file(&request.path, &data)
+                .map_err(|error| to_error(format_sdk_error(error)))?;
+
+            Ok(Json(WriteFileResponse {
+                sandbox_id: request.sandbox_id,
+                path: request.path,
+                size_bytes,
+                written: true,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(file_transfer_requires_vm()))
+        }
+    }
+
     async fn execute_with_optional_sandbox(
         &self,
         sandbox_id: Option<u64>,
@@ -145,10 +353,10 @@ impl MimoboxServer {
     ) -> Result<ExecuteResult, String> {
         if let Some(sandbox_id) = sandbox_id {
             let mut sandboxes = self.sandboxes.lock().await;
-            let sandbox = sandboxes
+            let managed = sandboxes
                 .get_mut(&sandbox_id)
-                .ok_or_else(|| format!("未找到 sandbox_id={sandbox_id} 的沙箱实例"))?;
-            return sandbox.execute(command).map_err(format_sdk_error);
+                .ok_or_else(|| sandbox_not_found(sandbox_id))?;
+            return managed.sandbox.execute(command).map_err(format_sdk_error);
         }
 
         let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)
@@ -164,9 +372,18 @@ impl MimoboxServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MimoboxServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("mimobox MCP Server：提供隔离沙箱创建与命令/代码执行工具")
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "mimobox MCP Server: sandbox lifecycle, execution, and microVM file transfer tools",
+        )
     }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    millis.min(u128::from(u64::MAX)) as u64
 }
 
 fn create_sandbox_with_options(
@@ -206,6 +423,15 @@ fn format_isolation_level(level: IsolationLevel) -> &'static str {
     }
 }
 
+fn sandbox_not_found(sandbox_id: u64) -> String {
+    format!("未找到 sandbox_id={sandbox_id} 的沙箱实例")
+}
+
+#[cfg(not(feature = "vm"))]
+fn file_transfer_requires_vm() -> String {
+    "文件传输需要 microVM 后端支持，请启用 vm feature 并使用 MicroVm 隔离层级".to_string()
+}
+
 fn build_code_command(language: Option<&str>, code: &str) -> Result<String, String> {
     let escaped_code = shell_single_quote(code);
     match language.unwrap_or("bash").to_ascii_lowercase().as_str() {
@@ -230,6 +456,93 @@ fn format_execute_result(result: ExecuteResult) -> ExecuteResponse {
         exit_code: result.exit_code,
         timed_out: result.timed_out,
         elapsed_ms: result.elapsed.as_millis(),
+    }
+}
+
+#[cfg(feature = "vm")]
+const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+#[cfg(feature = "vm")]
+fn encode_base64(data: &[u8]) -> String {
+    let mut encoded = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+
+        encoded.push(BASE64_TABLE[(first >> 2) as usize] as char);
+        encoded.push(BASE64_TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(
+                BASE64_TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char,
+            );
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(BASE64_TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
+#[cfg(feature = "vm")]
+fn decode_base64(content: &str) -> Result<Vec<u8>, String> {
+    let bytes = content.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err("content 不是合法 base64：长度必须是 4 的倍数".to_string());
+    }
+
+    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
+    let chunk_count = bytes.len() / 4;
+    for (chunk_index, chunk) in bytes.chunks(4).enumerate() {
+        let pad_count = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if pad_count > 2 {
+            return Err("content 不是合法 base64：padding 过长".to_string());
+        }
+        if pad_count > 0 && chunk_index + 1 != chunk_count {
+            return Err("content 不是合法 base64：padding 后存在数据".to_string());
+        }
+
+        let mut values = [0u8; 4];
+        for (index, byte) in chunk.iter().enumerate() {
+            values[index] = if *byte == b'=' {
+                if index < 2 {
+                    return Err("content 不是合法 base64：padding 位置无效".to_string());
+                }
+                0
+            } else if pad_count > 0 && index >= 4 - pad_count {
+                return Err("content 不是合法 base64：padding 后存在数据".to_string());
+            } else {
+                decode_base64_byte(*byte).ok_or_else(|| {
+                    format!("content 不是合法 base64：包含非法字符 `{}`", *byte as char)
+                })?
+            };
+        }
+
+        decoded.push((values[0] << 2) | (values[1] >> 4));
+        if pad_count < 2 {
+            decoded.push((values[1] << 4) | (values[2] >> 2));
+        }
+        if pad_count == 0 {
+            decoded.push((values[2] << 6) | values[3]);
+        }
+    }
+
+    Ok(decoded)
+}
+
+#[cfg(feature = "vm")]
+fn decode_base64_byte(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
     }
 }
 

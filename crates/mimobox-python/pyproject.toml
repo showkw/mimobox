@@ -5,14 +5,41 @@ build-backend = "maturin"
 [project]
 name = "mimobox"
 version = "0.1.0"
-description = "mimobox 的 Python SDK 绑定"
-requires-python = ">=3.9"
+description = "Cross-platform Agent Sandbox — secure code execution for AI agents"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.8"
+authors = [
+    { name = "mimobox contributors" },
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+
+[project.urls]
+Homepage = "https://github.com/showkw/mimobox"
+Repository = "https://github.com/showkw/mimobox"
+Documentation = "https://github.com/showkw/mimobox#readme"
 
 [tool.maturin]
 bindings = "pyo3"
 module-name = "mimobox"
+features = ["os"]
+manifest-path = "Cargo.toml"
+python-source = "python"
