@@ -6,6 +6,8 @@
 
 - `basic.rs`：基本命令执行，演示 `Sandbox::new()` 和 `execute`
 - `streaming.rs`：流式执行，演示 `stream_execute`、`Stdout` / `Stderr` / `Exit` 事件处理
+- `agent_demo.rs`：Agent 集成，演示预设请求、命令生成、沙箱执行和交互模式
+- `agent_streaming.rs`：Agent 流式执行，演示实时处理 `Stdout` / `Stderr` / `Exit` / `TimedOut` 事件
 - `http_proxy.rs`：HTTP 代理，演示 `allowed_http_domains` 和 `http_request`
 - `env_vars.rs`：环境变量注入，演示 `execute_with_env`
 - `file_ops.rs`：文件读写，演示 `write_file` 和 `read_file`
@@ -21,7 +23,8 @@ cargo check --examples --features vm
 说明：
 
 - `basic.rs` 使用默认后端，适合先验证 SDK 基本执行链路
-- `streaming.rs`、`http_proxy.rs`、`env_vars.rs`、`file_ops.rs` 需要 Linux + `vm` feature
+- `agent_demo.rs` 使用 OS 后端，支持 Linux/macOS，添加 `--interactive` 可进入交互模式
+- `streaming.rs`、`agent_streaming.rs`、`http_proxy.rs`、`env_vars.rs`、`file_ops.rs` 需要 Linux + `vm` feature
 - 在不满足 microVM 条件的环境中，上述示例会打印提示信息，但仍可通过默认 `cargo check --examples`
 
 ## Python 示例
