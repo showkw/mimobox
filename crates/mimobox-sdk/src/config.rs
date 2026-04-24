@@ -5,72 +5,146 @@ use std::time::Duration;
 use crate::error::SdkError;
 use mimobox_core::{SandboxConfig, SeccompProfile};
 
-/// 隔离层级选择
+/// Isolation level selection strategy.
+///
+/// Controls which sandboxing backend is used. `Auto` enables smart routing
+/// based on command type and trust level; explicit variants force a specific backend.
+///
+/// # Smart Routing Rules (Auto)
+///
+/// - `.wasm` / `.wat` / `.wast` files → `Wasm`
+/// - `TrustLevel::Untrusted` on Linux + `vm` feature → `MicroVm`
+/// - All other commands → `Os`
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_sdk::IsolationLevel;
+///
+/// let level = IsolationLevel::Auto;
+/// assert_eq!(level, IsolationLevel::default());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationLevel {
-    /// 自动选择：根据命令类型和信任级别智能路由
+    /// Smart routing based on command type and `TrustLevel`.
     #[default]
     Auto,
-    /// OS 级：Landlock + Seccomp + Namespaces（Linux）/ Seatbelt（macOS）
+    /// OS-level isolation: Landlock + Seccomp + Namespaces (Linux) or Seatbelt (macOS).
     Os,
-    /// Wasm 级：Wasmtime 沙箱，亚毫秒冷启动
+    /// Wasm-level isolation via Wasmtime. Sub-millisecond cold start.
     Wasm,
-    /// microVM 级：KVM 硬件隔离
+    /// microVM-level isolation via KVM. Hardware-enforced boundary.
     MicroVm,
 }
 
-/// 信任级别
+/// Trust level for code being executed.
+///
+/// Affects auto-routing decisions when `IsolationLevel::Auto` is used.
+/// `Untrusted` code is always routed to the strongest available isolation.
+///
+/// # Fail-Closed Behavior
+///
+/// When `TrustLevel::Untrusted` is set and the microVM backend is unavailable
+/// (non-Linux platform or `vm` feature not enabled), the SDK returns an error
+/// instead of silently downgrading to OS-level isolation.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_sdk::TrustLevel;
+///
+/// let level = TrustLevel::SemiTrusted;
+/// assert_eq!(level, TrustLevel::default());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustLevel {
-    /// 受信代码：自身编写或已审计的代码
+    /// Trusted code: self-authored or fully audited.
     Trusted,
-    /// 半信代码：第三方库或未经完整审计的代码
+    /// Semi-trusted code: third-party libraries or partially audited code.
     #[default]
     SemiTrusted,
-    /// 不信代码：用户提交、网络下载等不可信代码
+    /// Untrusted code: user-submitted, downloaded, or otherwise unverified.
     Untrusted,
 }
 
-/// 网络策略
+/// Network access policy for the sandbox.
+///
+/// Controls whether the sandbox can access the network and through which channels.
+/// The default policy denies all network access.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_sdk::NetworkPolicy;
+///
+/// let policy = NetworkPolicy::DenyAll;
+/// match policy {
+///     NetworkPolicy::DenyAll => {},
+///     _ => panic!("expected DenyAll"),
+/// }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub enum NetworkPolicy {
-    /// 默认拒绝所有网络访问
+    /// Deny all network access. Default policy.
     #[default]
     DenyAll,
-    /// 保持沙箱内直接网络关闭，仅允许通过受控 HTTP 代理访问指定域名
+    /// Keep direct sandbox network blocked, but allow HTTP requests through the
+    /// host-side controlled proxy to the specified domains.
     AllowDomains(Vec<String>),
-    /// 允许任意网络访问
+    /// Allow unrestricted network access. Uses a permissive Seccomp profile.
     AllowAll,
 }
 
-/// SDK 级配置
+/// SDK-level configuration for sandbox creation and behavior.
+///
+/// Use [`Config::builder()`] to construct a `Config` with the builder pattern.
+/// All fields have sensible defaults that prioritize security.
+///
+/// # Key Behaviors
+///
+/// - **Memory**: For the microVM backend, effective guest memory is
+///   `min(memory_limit_mb, vm_memory_mb)`.
+/// - **Timeout**: Internally rounded up to whole seconds. For example,
+///   `1500ms` becomes `2s`.
+/// - **HTTP domains**: The `allowed_http_domains` list supports glob patterns
+///   like `*.openai.com`. It is combined with `NetworkPolicy::AllowDomains`.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_sdk::Config;
+///
+/// let config = Config::default();
+/// assert_eq!(config.vm_vcpu_count, 1);
+/// assert_eq!(config.vm_memory_mb, 256);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// 隔离层级（Auto = 智能路由）
+    /// Isolation level selection strategy. `Auto` enables smart routing.
     pub isolation: IsolationLevel,
-    /// 信任级别（影响 Auto 路由决策）
+    /// Trust level affecting auto-routing decisions.
     pub trust_level: TrustLevel,
-    /// 网络策略
+    /// Network access policy.
     pub network: NetworkPolicy,
-    /// 超时时间
+    /// Command execution timeout. `None` means no timeout.
     pub timeout: Option<Duration>,
-    /// 内存限制 (MB)
+    /// Memory limit in MiB. Applied via cgroups v2 or setrlimit.
     pub memory_limit_mb: Option<u64>,
-    /// 只读路径
+    /// Read-only mount paths inside the sandbox.
     pub fs_readonly: Vec<PathBuf>,
-    /// 读写路径
+    /// Read-write mount paths inside the sandbox.
     pub fs_readwrite: Vec<PathBuf>,
-    /// HTTP 代理允许的域名白名单
+    /// HTTP proxy domain whitelist (supports glob patterns like `*.openai.com`).
     pub allowed_http_domains: Vec<String>,
-    /// 是否允许 fork
+    /// Whether to allow child process creation (fork/clone) inside the sandbox.
     pub allow_fork: bool,
-    /// microVM vCPU 数量
+    /// microVM vCPU count. Only affects the microVM backend.
     pub vm_vcpu_count: u8,
-    /// microVM Guest 内存大小（MB）；若设置了 memory_limit_mb，则以较小值为准
+    /// microVM guest memory size in MiB. Capped by `memory_limit_mb` if set.
     pub vm_memory_mb: u32,
-    /// microVM 内核镜像路径；未配置时使用后端默认路径
+    /// Custom microVM kernel image path. Falls back to `~/.mimobox/assets/vmlinux` if unset.
     pub kernel_path: Option<PathBuf>,
-    /// microVM rootfs 路径；未配置时使用后端默认路径
+    /// Custom microVM rootfs path. Falls back to `~/.mimobox/assets/rootfs.cpio.gz` if unset.
     pub rootfs_path: Option<PathBuf>,
 }
 
@@ -104,12 +178,26 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 返回 `ConfigBuilder`，用于链式构造 SDK 配置。
+    /// Returns a [`ConfigBuilder`] for constructing a `Config` with the builder pattern.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::{Config, IsolationLevel};
+    /// use std::time::Duration;
+    ///
+    /// let config = Config::builder()
+    ///     .isolation(IsolationLevel::Os)
+    ///     .timeout(Duration::from_secs(10))
+    ///     .build();
+    ///
+    /// assert_eq!(config.isolation, IsolationLevel::Os);
+    /// ```
     pub fn builder() -> ConfigBuilder {
         ConfigBuilder::default()
     }
 
-    /// 转换为 mimibox-core 的 SandboxConfig
+    /// Converts to the internal `mimobox_core::SandboxConfig`.
     pub(crate) fn to_sandbox_config(&self) -> SandboxConfig {
         let deny_network = resolve_deny_network(&self.network);
 
@@ -196,62 +284,205 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
     })
 }
 
-/// Config 构建器
+/// Fluent builder for constructing [`Config`] instances.
+///
+/// All methods consume and return `self`, enabling method chaining.
+/// Call [`build()`](ConfigBuilder::build) to produce the final `Config`.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_sdk::{Config, IsolationLevel, NetworkPolicy};
+/// use std::time::Duration;
+///
+/// let config = Config::builder()
+///     .isolation(IsolationLevel::MicroVm)
+///     .timeout(Duration::from_secs(60))
+///     .memory_limit_mb(256)
+///     .allowed_http_domains(["api.openai.com"])
+///     .build();
+///
+/// assert_eq!(config.isolation, IsolationLevel::MicroVm);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBuilder {
     inner: Config,
 }
 
 impl ConfigBuilder {
-    /// 设置隔离层级选择策略。
+    /// Set the isolation level selection strategy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::{Config, IsolationLevel};
+    ///
+    /// let config = Config::builder()
+    ///     .isolation(IsolationLevel::Wasm)
+    ///     .build();
+    ///
+    /// assert_eq!(config.isolation, IsolationLevel::Wasm);
+    /// ```
     pub fn isolation(mut self, level: IsolationLevel) -> Self {
         self.inner.isolation = level;
         self
     }
 
-    /// 设置信任级别，影响自动路由决策。
+    /// Set the trust level, affecting auto-routing decisions.
+    ///
+    /// When set to `TrustLevel::Untrusted`, the SDK will fail-closed if the
+    /// microVM backend is not available, rather than silently downgrading.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::{Config, TrustLevel};
+    ///
+    /// let config = Config::builder()
+    ///     .trust_level(TrustLevel::Untrusted)
+    ///     .build();
+    ///
+    /// assert_eq!(config.trust_level, TrustLevel::Untrusted);
+    /// ```
     pub fn trust_level(mut self, level: TrustLevel) -> Self {
         self.inner.trust_level = level;
         self
     }
 
-    /// 设置网络访问策略。
+    /// Set the network access policy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::{Config, NetworkPolicy};
+    ///
+    /// let config = Config::builder()
+    ///     .network(NetworkPolicy::AllowDomains(vec!["api.openai.com".to_string()]))
+    ///     .build();
+    ///
+    /// assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
+    /// ```
     pub fn network(mut self, policy: NetworkPolicy) -> Self {
         self.inner.network = policy;
         self
     }
 
-    /// 设置默认命令超时时间。
+    /// Set the default command execution timeout.
+    ///
+    /// Internally rounded up to whole seconds. For example, `1500ms` maps to `2s`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    /// use std::time::Duration;
+    ///
+    /// let config = Config::builder()
+    ///     .timeout(Duration::from_secs(10))
+    ///     .build();
+    ///
+    /// assert_eq!(config.timeout, Some(Duration::from_secs(10)));
+    /// ```
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.inner.timeout = Some(timeout);
         self
     }
 
-    /// 设置沙箱内存上限，单位为 MiB。
+    /// Set the memory limit in MiB.
+    ///
+    /// For the microVM backend, the effective guest memory is
+    /// `min(memory_limit_mb, vm_memory_mb)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .memory_limit_mb(256)
+    ///     .build();
+    ///
+    /// assert_eq!(config.memory_limit_mb, Some(256));
+    /// ```
     pub fn memory_limit_mb(mut self, mb: u64) -> Self {
         self.inner.memory_limit_mb = Some(mb);
         self
     }
 
-    /// 设置只读挂载路径列表。
+    /// Set the read-only mount paths.
+    ///
+    /// Paths listed here are mounted read-only inside the sandbox.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .fs_readonly(["/usr", "/lib"])
+    ///     .build();
+    ///
+    /// assert_eq!(config.fs_readonly.len(), 2);
+    /// ```
     pub fn fs_readonly(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.inner.fs_readonly = paths.into_iter().map(Into::into).collect();
         self
     }
 
-    /// 设置可读写挂载路径列表。
+    /// Set the read-write mount paths.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .fs_readwrite(["/tmp", "/workspace"])
+    ///     .build();
+    ///
+    /// assert_eq!(config.fs_readwrite.len(), 2);
+    /// ```
     pub fn fs_readwrite(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.inner.fs_readwrite = paths.into_iter().map(Into::into).collect();
         self
     }
 
-    /// 设置是否允许沙箱内创建子进程。
+    /// Set whether child process creation (fork/clone) is allowed inside the sandbox.
+    ///
+    /// Default is `false`. Set to `true` for shell or interpreter workloads.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .allow_fork(true)
+    ///     .build();
+    ///
+    /// assert!(config.allow_fork);
+    /// ```
     pub fn allow_fork(mut self, allow: bool) -> Self {
         self.inner.allow_fork = allow;
         self
     }
 
-    /// 设置受控 HTTP 代理允许访问的域名白名单。
+    /// Set the HTTP proxy domain whitelist.
+    ///
+    /// Supports glob patterns like `*.openai.com`. Combined with
+    /// `NetworkPolicy::AllowDomains` without duplicates.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .allowed_http_domains(["api.openai.com", "*.openai.com"])
+    ///     .build();
+    ///
+    /// assert_eq!(config.allowed_http_domains.len(), 2);
+    /// ```
     pub fn allowed_http_domains(
         mut self,
         domains: impl IntoIterator<Item = impl Into<String>>,
@@ -260,37 +491,114 @@ impl ConfigBuilder {
         self
     }
 
-    /// 设置 microVM vCPU 数量。
+    /// Set the microVM vCPU count.
+    ///
+    /// Only affects the microVM backend. Default is `1`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .vm_vcpu_count(4)
+    ///     .build();
+    ///
+    /// assert_eq!(config.vm_vcpu_count, 4);
+    /// ```
     pub fn vm_vcpu_count(mut self, count: u8) -> Self {
         self.inner.vm_vcpu_count = count;
         self
     }
 
-    /// 设置 microVM guest 内存大小，单位为 MiB。
+    /// Set the microVM guest memory size in MiB.
+    ///
+    /// Capped by `memory_limit_mb` if set. Default is `256` MiB.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .vm_memory_mb(512)
+    ///     .build();
+    ///
+    /// assert_eq!(config.vm_memory_mb, 512);
+    /// ```
     pub fn vm_memory_mb(mut self, mb: u32) -> Self {
         self.inner.vm_memory_mb = mb;
         self
     }
 
-    /// 设置 microVM 内核镜像路径。
+    /// Set the microVM kernel image path.
+    ///
+    /// If unset, falls back to `$VM_ASSETS_DIR/vmlinux` or `~/.mimobox/assets/vmlinux`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .kernel_path("/opt/mimobox/vmlinux")
+    ///     .build();
+    ///
+    /// assert_eq!(config.kernel_path, Some(std::path::PathBuf::from("/opt/mimobox/vmlinux")));
+    /// ```
     pub fn kernel_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.kernel_path = Some(path.into());
         self
     }
 
-    /// 设置 microVM rootfs 路径。
+    /// Set the microVM rootfs path.
+    ///
+    /// If unset, falls back to `$VM_ASSETS_DIR/rootfs.cpio.gz` or `~/.mimobox/assets/rootfs.cpio.gz`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
+    ///     .build();
+    ///
+    /// assert_eq!(config.rootfs_path, Some(std::path::PathBuf::from("/opt/mimobox/rootfs.cpio.gz")));
+    /// ```
     pub fn rootfs_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.rootfs_path = Some(path.into());
         self
     }
 
-    /// 移除默认超时限制，允许命令无限运行。
+    /// Remove the default timeout, allowing commands to run indefinitely.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .no_timeout()
+    ///     .build();
+    ///
+    /// assert_eq!(config.timeout, None);
+    /// ```
     pub fn no_timeout(mut self) -> Self {
         self.inner.timeout = None;
         self
     }
 
-    /// 构建最终的 SDK 配置对象。
+    /// Produce the final `Config`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    ///
+    /// let config = Config::builder().build();
+    /// assert_eq!(config.isolation, mimobox_sdk::IsolationLevel::Auto);
+    /// ```
     pub fn build(self) -> Config {
         self.inner
     }

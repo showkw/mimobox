@@ -2025,7 +2025,7 @@ mod tests {
             .expect_err("SDK 配置错误应映射为 CLI 错误");
 
         assert_eq!(error.code(), "sdk_error");
-        assert!(error.to_string().contains("配置错误"));
+        assert!(error.to_string().contains("config error") || error.to_string().contains("配置错误"));
         assert!(error.to_string().contains("shell 风格引号不匹配"));
     }
 

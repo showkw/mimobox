@@ -1,7 +1,41 @@
-//! mimobox-sdk: 统一 Agent Sandbox API
+//! mimobox-sdk: Unified Agent Sandbox API
 //!
-//! 默认智能路由，高级用户完全可控。零配置即可安全执行代码，
-//! 同时暴露完整三层配置供精细控制。
+//! **Smart routing by default, full control for advanced users.**
+//!
+//! Zero-config sandbox creation with automatic backend selection, plus
+//! complete configuration control via [`Config::builder()`].
+//!
+//! # Quick Start
+//!
+//! ```rust,no_run
+//! use mimobox_sdk::Sandbox;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut sandbox = Sandbox::new()?;
+//! let result = sandbox.execute("/bin/echo hello")?;
+//! println!("exit: {:?}", result.exit_code);
+//! sandbox.destroy()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Feature Gates
+//!
+//! | Feature | Backend | Default |
+//! |---------|---------|---------|
+//! | `os`    | OS-level (Linux/macOS) | Yes |
+//! | `vm`    | microVM (Linux + KVM) | No |
+//! | `wasm`  | Wasm (Wasmtime) | No |
+//!
+//! # Key Types
+//!
+//! - [`Sandbox`] — Primary entry point for all sandbox operations
+//! - [`Config`] / [`ConfigBuilder`] — SDK configuration with builder pattern
+//! - [`ExecuteResult`] — Command execution result (stdout, stderr, exit code, timing)
+//! - [`StreamEvent`] — Streaming output event enum
+//! - [`SdkError`] / [`ErrorCode`] — Structured error model
+//! - [`SandboxSnapshot`] — Opaque snapshot handle
+//! - [`PtySession`] — Interactive terminal session
 
 mod config;
 mod error;
@@ -23,7 +57,25 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::warn;
 
-/// 沙箱执行结果
+/// Result of a sandbox command execution.
+///
+/// Contains raw stdout/stderr bytes, exit code, timeout flag, and wall-clock elapsed time.
+/// Use `String::from_utf8_lossy()` to convert stdout/stderr to text.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use mimobox_sdk::Sandbox;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut sandbox = Sandbox::new()?;
+/// let result = sandbox.execute("/bin/echo hello")?;
+/// println!("exit: {:?}", result.exit_code);
+/// println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
+/// println!("elapsed: {:?}", result.elapsed);
+/// # Ok(())
+/// # }
+/// ```
 #[non_exhaustive]
 pub struct ExecuteResult {
     /// 标准输出字节流。
@@ -38,7 +90,25 @@ pub struct ExecuteResult {
     pub elapsed: std::time::Duration,
 }
 
-/// HTTP 代理响应结果。
+/// HTTP response from the controlled host-side proxy.
+///
+/// Returned by [`Sandbox::http_request()`]. Only available with the `vm` feature on Linux.
+///
+/// # Examples
+///
+/// ```text
+/// // Requires `vm` feature + Linux
+/// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+/// use std::collections::HashMap;
+///
+/// let config = Config::builder()
+///     .isolation(IsolationLevel::MicroVm)
+///     .allowed_http_domains(["example.com"])
+///     .build();
+/// let mut sandbox = Sandbox::with_config(config)?;
+/// let resp = sandbox.http_request("GET", "https://example.com", HashMap::new(), None)?;
+/// println!("status: {}", resp.status);
+/// ```
 pub struct HttpResponse {
     /// HTTP 状态码。
     pub status: u16,
@@ -48,9 +118,26 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-/// 沙箱快照。
+/// Opaque handle to a sandbox memory snapshot.
 ///
-/// 该类型对外保持不透明，只暴露字节级访问方法。
+/// Supports both in-memory bytes and file-backed storage modes.
+/// Create via [`Sandbox::snapshot()`] or restore from bytes/file.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = Config::builder()
+///     .isolation(IsolationLevel::MicroVm)
+///     .build();
+/// let mut sandbox = Sandbox::with_config(config)?;
+/// let snapshot = sandbox.snapshot()?;
+/// println!("snapshot size: {} bytes", snapshot.size());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSnapshot {
     inner: mimobox_core::SandboxSnapshot,
@@ -123,7 +210,9 @@ impl SandboxSnapshot {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 #[derive(Debug, Clone)]
-/// 基于快照恢复池创建恢复态 microVM 的配置。
+/// Configuration for creating a snapshot-based restore pool.
+///
+/// Requires `vm` feature + Linux.
 pub struct RestorePoolConfig {
     /// 恢复池目标大小。
     pub pool_size: usize,
@@ -133,9 +222,13 @@ pub struct RestorePoolConfig {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 #[derive(Clone)]
-/// 基于快照的恢复池。
+/// Snapshot-based restore pool for sub-millisecond VM restore-to-ready latency.
 ///
-/// 该类型会预热一组可恢复的空壳 microVM，用于缩短 snapshot restore 到 ready 的延迟。
+/// Pre-creates a pool of empty microVM shells. When a sandbox is needed,
+/// a snapshot is restored into one of the pre-warmed shells, avoiding
+/// the full VM boot sequence.
+///
+/// Requires `vm` feature + Linux.
 pub struct RestorePool {
     inner: Arc<mimobox_vm::RestorePool>,
 }
@@ -163,7 +256,33 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
     }
 }
 
-/// 流式执行事件。
+/// Streaming output event from [`Sandbox::stream_execute()`].
+///
+/// Events are delivered via a `std::sync::mpsc::Receiver`. `Exit` or `TimedOut`
+/// is always the last event in the stream.
+///
+/// Requires `vm` feature + Linux.
+///
+/// # Examples
+///
+/// ```text
+/// // Requires `vm` feature + Linux
+/// use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
+///
+/// let config = Config::builder()
+///     .isolation(IsolationLevel::MicroVm)
+///     .build();
+/// let mut sandbox = Sandbox::with_config(config)?;
+/// let rx = sandbox.stream_execute("/bin/echo hello")?;
+/// for event in rx.iter() {
+///     match event {
+///         StreamEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
+///         StreamEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
+///         StreamEvent::Exit(code) => println!("exit = {code}"),
+///         StreamEvent::TimedOut => println!("timed out"),
+///     }
+/// }
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
@@ -177,9 +296,27 @@ pub enum StreamEvent {
     TimedOut,
 }
 
-/// 交互式 PTY 会话。
+/// Interactive PTY terminal session.
 ///
-/// 该类型封装底层后端提供的终端句柄，并暴露统一的输入、尺寸调整、事件接收与回收接口。
+/// Wraps a backend-provided terminal handle with a unified interface for
+/// input, resize, output events, and lifecycle control.
+///
+/// Currently supported on OS-level backends only (not microVM).
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use mimobox_sdk::Sandbox;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut sandbox = Sandbox::new()?;
+/// let mut pty = sandbox.create_pty("/bin/sh")?;
+/// pty.send_input(b"echo hello\n")?;
+/// let exit_code = pty.wait()?;
+/// println!("exited with {exit_code}");
+/// # Ok(())
+/// # }
+/// ```
 pub struct PtySession {
     inner: Box<dyn mimobox_core::PtySession>,
 }
@@ -418,7 +555,10 @@ impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
     }
 }
 
-/// 后端实例枚举
+/// Internal backend instance enum.
+///
+/// Each variant wraps a specific sandbox backend. The SDK dispatches
+/// method calls to the active variant.
 enum SandboxInner {
     #[cfg(all(feature = "os", target_os = "linux"))]
     Os(mimobox_os::LinuxSandbox),
@@ -434,9 +574,32 @@ enum SandboxInner {
     Wasm(mimobox_wasm::WasmSandbox),
 }
 
-/// 统一沙箱入口
+/// Primary entry point for all sandbox operations.
 ///
-/// 支持零配置默认（智能路由）和完整配置两种模式。
+/// Supports zero-config creation with smart routing ([`Sandbox::new()`])
+/// and full configuration via [`Sandbox::with_config()`].
+///
+/// The backend is initialized lazily on the first operation, not at construction time.
+/// Subsequent operations reuse the same backend until the isolation level changes.
+///
+/// # Resource Cleanup
+///
+/// Call [`destroy()`](Sandbox::destroy) explicitly when done, or rely on the `Drop`
+/// implementation which logs warnings on failure.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use mimobox_sdk::Sandbox;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut sandbox = Sandbox::new()?;
+/// let result = sandbox.execute("/bin/echo hello")?;
+/// assert_eq!(result.exit_code, Some(0));
+/// sandbox.destroy()?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Sandbox {
     config: Config,
     inner: Option<SandboxInner>,
@@ -509,12 +672,55 @@ macro_rules! dispatch_execute {
 }
 
 impl Sandbox {
-    /// 零配置创建沙箱，自动路由到最优隔离层级。
+    /// Creates a sandbox with default configuration.
+    ///
+    /// Smart routing automatically selects the optimal isolation level based on
+    /// each command and the default `TrustLevel::SemiTrusted`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::BackendUnavailable` if no backend feature is enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::Sandbox;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let result = sandbox.execute("/bin/echo hello")?;
+    /// assert_eq!(result.exit_code, Some(0));
+    /// sandbox.destroy()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new() -> Result<Self, SdkError> {
         Self::with_config(Config::default())
     }
 
-    /// 使用完整配置创建沙箱。
+    /// Creates a sandbox with explicit configuration.
+    ///
+    /// Use [`Config::builder()`] to construct a `Config` with the builder pattern.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::BackendUnavailable` if the configured isolation level
+    /// requires a backend feature that is not enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = Config::builder()
+    ///     .isolation(IsolationLevel::Os)
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .build();
+    /// let mut sandbox = Sandbox::with_config(config)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(unused_mut)]
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
         let sandbox = Self::new_uninitialized(config);
@@ -530,7 +736,14 @@ impl Sandbox {
         Ok(sandbox)
     }
 
-    /// 使用显式 microVM 预热池配置创建沙箱。
+    /// Creates a sandbox with an explicit microVM warm pool configuration.
+    ///
+    /// The pool pre-creates VM instances for sub-millisecond acquisition.
+    /// Requires `vm` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Sandbox` if the pool cannot be initialized.
     #[cfg(feature = "vm")]
     pub fn with_pool(
         config: Config,
@@ -659,6 +872,7 @@ impl Sandbox {
         }
     }
 
+    /// Fork stub for platforms without microVM support. Always returns `BackendUnavailable`.
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     pub fn fork(&mut self) -> Result<Self, SdkError> {
         Err(SdkError::unsupported_backend("fork"))
@@ -943,15 +1157,36 @@ impl Sandbox {
         }
     }
 
-    /// 返回当前实例实际使用的隔离层级。
+    /// Returns the isolation level of the currently active backend.
     ///
-    /// 当 `execute()` 成功执行至少一次后，该值应为非 `None`，可用于上层查询
-    /// Auto 路由后的真实后端。
+    /// Returns `None` before the first operation triggers backend initialization.
+    /// Useful for querying the result of `Auto` routing after the first execute.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::{IsolationLevel, Sandbox};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// assert_eq!(sandbox.active_isolation(), None);
+    /// sandbox.execute("/bin/echo hello")?;
+    /// assert!(sandbox.active_isolation().is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn active_isolation(&self) -> Option<IsolationLevel> {
         self.active_isolation
     }
 
-    /// 销毁沙箱并释放资源。
+    /// Destroys the sandbox and releases all resources.
+    ///
+    /// If not called explicitly, the `Drop` implementation will attempt
+    /// cleanup automatically with warnings logged on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError` if the backend fails to clean up resources.
     pub fn destroy(mut self) -> Result<(), SdkError> {
         self.destroy_inner()
     }
