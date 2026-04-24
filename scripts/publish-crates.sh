@@ -15,7 +15,6 @@ CRATES=(
     "mimobox-wasm"
     "mimobox-vm"
     "mimobox-sdk"
-    "mimobox-cli"
     "mimobox-mcp"
 )
 
