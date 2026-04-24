@@ -288,6 +288,22 @@ impl BackendHandle {
         }
     }
 
+    fn ping(&mut self) -> Result<Duration, MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.ping(),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
+    fn ping_with_timeout(&mut self, _timeout: Duration) -> Result<Duration, MicrovmError> {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.ping_with_timeout(_timeout),
+            Self::Unsupported => Err(MicrovmError::UnsupportedPlatform),
+        }
+    }
+
     fn http_request(&mut self, _request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -309,6 +325,14 @@ impl BackendHandle {
             #[cfg(all(target_os = "linux", feature = "kvm"))]
             Self::Kvm(backend) => backend.lifecycle() == crate::kvm::KvmLifecycle::Destroyed,
             Self::Unsupported => true,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "kvm"))]
+            Self::Kvm(backend) => backend.is_guest_ready(),
+            Self::Unsupported => false,
         }
     }
 
@@ -583,6 +607,52 @@ impl MicrovmSandbox {
         self.state = MicrovmState::Running;
         let result = self.backend.write_file(path, data);
         self.state = MicrovmState::Ready;
+        result
+    }
+
+    /// 等待 microVM 进入可响应状态，并通过 PING/PONG 验证命令循环。
+    pub fn wait_ready(&mut self, timeout: Duration) -> Result<(), MicrovmError> {
+        if timeout.is_zero() {
+            return Err(MicrovmError::InvalidConfig(
+                "wait_ready timeout 不能为 0".into(),
+            ));
+        }
+        if self.state == MicrovmState::Destroyed {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 已销毁，不能等待就绪".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.ping_with_timeout(timeout);
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
+        result.map(|_| ())
+    }
+
+    /// 返回 microVM 是否处于 Ready 状态。
+    pub fn is_ready(&self) -> bool {
+        self.state == MicrovmState::Ready && self.backend.is_ready()
+    }
+
+    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
+        if self.state != MicrovmState::Ready {
+            return Err(MicrovmError::Lifecycle(
+                "microVM 当前不处于可探测状态".into(),
+            ));
+        }
+
+        self.state = MicrovmState::Running;
+        let result = self.backend.ping();
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
         result
     }
 

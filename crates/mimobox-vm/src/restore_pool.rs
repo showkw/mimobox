@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
@@ -505,6 +505,14 @@ impl PooledRestoreVm {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
+            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+        }
+    }
+
+    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
+        match self.backend.as_mut() {
+            Some(backend) => backend.ping(),
             None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
         }
     }

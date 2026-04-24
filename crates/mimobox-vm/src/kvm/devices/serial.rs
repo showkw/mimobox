@@ -35,6 +35,8 @@ pub(super) const UART_LSR_DATA_READY: u8 = 0x01;
 pub(super) const UART_LSR_THR_EMPTY: u8 = 0x20;
 pub(super) const UART_LSR_TRANSMITTER_EMPTY: u8 = 0x40;
 pub(in crate::kvm) const SERIAL_READY_LINE: &str = "READY";
+pub(in crate::kvm) const SERIAL_PING_PREFIX: &str = "PING";
+pub(in crate::kvm) const SERIAL_PONG_LINE: &str = "PONG";
 pub(in crate::kvm) const SERIAL_EXEC_PREFIX: &str = "EXEC:";
 #[allow(dead_code)] // Phase A 先落常量与解析，Phase B 再接 host 发送路径。
 pub(in crate::kvm) const SERIAL_EXECS_PREFIX: &str = "EXECS:";
@@ -236,6 +238,7 @@ pub(in crate::kvm) struct HttpRequestFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::kvm) enum SerialProtocolResult {
+    PingPong,
     Command(GuestCommandResult),
     Fs(FsResult),
     HttpRequest(HttpRequestFrame),
@@ -268,6 +271,10 @@ pub(in crate::kvm) fn encode_command_payload(
 ) -> Result<Vec<u8>, MicrovmError> {
     let payload = build_guest_exec_payload(cmd, env, timeout_secs)?;
     encode_text_frame(SERIAL_EXEC_PREFIX, payload.as_bytes())
+}
+
+pub(in crate::kvm) fn encode_ping_payload() -> Vec<u8> {
+    format!("{SERIAL_PING_PREFIX}\n").into_bytes()
 }
 
 pub(in crate::kvm) fn encode_fs_read_payload(path: &str) -> Result<Vec<u8>, MicrovmError> {
@@ -347,6 +354,10 @@ pub(in crate::kvm) fn parse_serial_line(
     line: &str,
     response: &mut CommandResponse,
 ) -> Result<Option<GuestCommandResult>, MicrovmError> {
+    if line == SERIAL_PONG_LINE {
+        return Ok(None);
+    }
+
     if line == SERIAL_EXIT_TIMEOUT {
         return Ok(Some(GuestCommandResult {
             stdout: std::mem::take(&mut response.stdout),

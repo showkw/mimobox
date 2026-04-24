@@ -17,9 +17,10 @@ pub(in crate::kvm) use self::serial::{
     PCI_CONFIG_DATA_REG_START, SERIAL_EXEC_PREFIX, SERIAL_EXECS_PREFIX, SERIAL_FS_READ_PREFIX,
     SERIAL_FS_WRITE_PREFIX, SERIAL_HTTP_REQUEST_PREFIX, SERIAL_HTTPRESP_BODY_PREFIX,
     SERIAL_HTTPRESP_END_PREFIX, SERIAL_HTTPRESP_ERROR_PREFIX, SERIAL_HTTPRESP_HEADERS_PREFIX,
-    SERIAL_READY_LINE, SerialDevice, SerialFrame, SerialProtocolResult, SerialResponseCollector,
-    build_guest_command, build_guest_exec_payload, encode_command_payload,
-    encode_fs_read_payload, encode_fs_write_payload, parse_serial_line, preview_serial_output,
+    SERIAL_PONG_LINE, SERIAL_READY_LINE, SerialDevice, SerialFrame, SerialProtocolResult,
+    SerialResponseCollector, build_guest_command, build_guest_exec_payload, encode_command_payload,
+    encode_fs_read_payload, encode_fs_write_payload, encode_ping_payload, parse_serial_line,
+    preview_serial_output,
 };
 pub(in crate::kvm) use self::vsock::{VsockMmioAction, VsockMmioDevice, activate_vhost_backend};
 pub(in crate::kvm) use self::vsock_channel::VsockCommandChannel;
@@ -88,6 +89,9 @@ pub(super) fn handle_serial_write(
                             *guest_ready = true;
                             boot_profile.mark_boot_ready();
                             continue;
+                        }
+                        if line == SERIAL_PONG_LINE {
+                            return Ok(Some(SerialProtocolResult::PingPong));
                         }
 
                         if let Some(response) = response.as_deref_mut() {
@@ -185,6 +189,9 @@ pub(super) fn handle_serial_write(
                         if line == SERIAL_READY_LINE {
                             *guest_ready = true;
                             continue;
+                        }
+                        if line == SERIAL_PONG_LINE {
+                            return Ok(Some(SerialProtocolResult::PingPong));
                         }
 
                         if let Some(response) = response.as_deref_mut() {
