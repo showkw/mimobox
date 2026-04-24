@@ -118,3 +118,71 @@ jobs:
 
       - name: Cargo Doc Workspace
         run: cargo doc --workspace --no-deps
+
+      - name: Cargo Doc Tests
+        run: cargo test --workspace --doc
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cargo Audit
+        uses: rustsec/audit-action@v2.6.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          advisory-server: https://github.com/RustSec/advisory-db
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo Test mimobox-os
+        run: cargo test --package mimobox-os
+
+      - name: Cargo Test mimobox-wasm
+        run: cargo test --package mimobox-wasm --features wasm
+
+  check-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo Check mimobox-mcp
+        run: cargo check -p mimobox-mcp
+
+  check-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python Headers
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Cargo Check mimobox-python
+        env:
+          PYO3_PYTHON: python3
+        run: cargo check -p mimobox-python
