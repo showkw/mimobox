@@ -14,6 +14,7 @@ fn wasm_config() -> SandboxConfig {
         deny_network: true,
         seccomp_profile: SeccompProfile::Essential,
         allow_fork: false,
+        allowed_http_domains: vec![],
     }
 }
 

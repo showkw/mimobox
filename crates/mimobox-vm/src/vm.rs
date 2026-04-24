@@ -10,6 +10,9 @@ use tracing::debug;
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 use crate::snapshot::MicrovmSnapshot;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+use crate::snapshot::load_state_from_memory_file;
+
+#[cfg(all(target_os = "linux", feature = "kvm", not(feature = "zerocopy-fork")))]
 use crate::snapshot::{FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir};
 use crate::vm_assets::resolve_vm_assets_dir;
 
@@ -337,6 +340,9 @@ impl BackendHandle {
                 let mut restore_profile = backend.take_or_seed_restore_profile();
 
                 let restore_memory_started_at = Instant::now();
+                #[cfg(feature = "zerocopy-fork")]
+                backend.restore_from_file_zerocopy(memory_path)?;
+                #[cfg(not(feature = "zerocopy-fork"))]
                 backend.restore_from_file(memory_path)?;
                 restore_profile.memory_state_write = restore_memory_started_at.elapsed();
 
@@ -439,43 +445,16 @@ impl MicrovmSandbox {
     /// 从文件化快照恢复，memory 通过 mmap(MAP_PRIVATE) 加载。
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     fn restore_from_file_snapshot(memory_path: &Path) -> Result<Self, MicrovmError> {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+        let (sandbox_config, microvm_config, vcpu_state) =
+            load_state_from_memory_file(memory_path)?;
 
-        let snapshot_dir = memory_path.parent().ok_or_else(|| {
-            MicrovmError::SnapshotFormat(format!(
-                "快照文件路径缺少父目录: {}",
-                memory_path.display()
-            ))
-        })?;
-        let state_path = snapshot_dir.join("state.json");
-        let state_bytes = std::fs::read(&state_path)?;
-        let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
-            MicrovmError::SnapshotFormat(format!("解析 state.json 失败: {error}"))
-        })?;
-
-        if state.version != FILE_SNAPSHOT_VERSION {
-            return Err(MicrovmError::SnapshotFormat(format!(
-                "不支持的文件快照版本: {}",
-                state.version
-            )));
-        }
-
-        let vcpu_state = BASE64_STANDARD
-            .decode(state.vcpu_state_base64.as_bytes())
-            .map_err(|error| {
-                MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}"))
-            })?;
-
-        let mut backend = BackendHandle::create_for_restore(
-            state.sandbox_config.clone(),
-            state.microvm_config.clone(),
-        )?;
+        let mut backend =
+            BackendHandle::create_for_restore(sandbox_config.clone(), microvm_config.clone())?;
         backend.restore_from_file_parts(memory_path, &vcpu_state)?;
 
         Ok(Self {
-            base_config: state.sandbox_config,
-            microvm_config: state.microvm_config,
+            base_config: sandbox_config,
+            microvm_config,
             state: MicrovmState::Ready,
             backend,
         })
@@ -489,41 +468,71 @@ impl MicrovmSandbox {
 
     /// 从当前 microVM 创建一个独立的副本。
     ///
-    /// 实现方式：复用文件快照恢复链路，先把当前 memory/vCPU state
-    /// 写入临时目录，再从该文件化快照恢复出新的 VM 实例。
+    /// zerocopy-fork feature 开启时直接共享 guest memory 并依赖 MAP_PRIVATE CoW；
+    /// 未开启时保留文件快照恢复链路作为回退。
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
-        use base64::Engine as _;
-
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle("仅 Ready 状态允许 fork".into()));
         }
 
-        let (memory, vcpu_state) = self.backend.snapshot_parts()?;
-        let snapshot_dir = create_snapshot_dir()?;
-        let memory_path = snapshot_dir.join("memory.bin");
-        let state_path = snapshot_dir.join("state.json");
-
-        let fork_result = (|| {
-            std::fs::write(&memory_path, &memory)?;
-
-            let state = SnapshotStateFile {
-                version: FILE_SNAPSHOT_VERSION,
-                sandbox_config: self.base_config.clone(),
-                microvm_config: self.microvm_config.clone(),
-                vcpu_state_base64: base64::engine::general_purpose::STANDARD
-                    .encode(&vcpu_state),
+        #[cfg(feature = "zerocopy-fork")]
+        {
+            let (shared_memory, vcpu_state) = match &self.backend {
+                BackendHandle::Kvm(backend) => backend.snapshot_for_fork()?,
+                BackendHandle::Unsupported => return Err(MicrovmError::UnsupportedPlatform),
             };
-            let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
-                MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
-            })?;
-            std::fs::write(&state_path, state_bytes)?;
 
-            Self::restore_from_file_snapshot(&memory_path)
-        })();
+            let mut backend_handle = BackendHandle::create_for_restore(
+                self.base_config.clone(),
+                self.microvm_config.clone(),
+            )?;
 
-        let _ = std::fs::remove_dir_all(snapshot_dir);
-        fork_result
+            match &mut backend_handle {
+                BackendHandle::Kvm(backend) => {
+                    backend.restore_from_shared_memory(shared_memory, &vcpu_state)?;
+                }
+                BackendHandle::Unsupported => return Err(MicrovmError::UnsupportedPlatform),
+            }
+
+            return Ok(Self {
+                base_config: self.base_config.clone(),
+                microvm_config: self.microvm_config.clone(),
+                state: MicrovmState::Ready,
+                backend: backend_handle,
+            });
+        }
+
+        #[cfg(not(feature = "zerocopy-fork"))]
+        {
+            use base64::Engine as _;
+
+            let (memory, vcpu_state) = self.backend.snapshot_parts()?;
+            let snapshot_dir = create_snapshot_dir()?;
+            let memory_path = snapshot_dir.join("memory.bin");
+            let state_path = snapshot_dir.join("state.json");
+
+            let fork_result = (|| {
+                std::fs::write(&memory_path, &memory)?;
+
+                let state = SnapshotStateFile {
+                    version: FILE_SNAPSHOT_VERSION,
+                    sandbox_config: self.base_config.clone(),
+                    microvm_config: self.microvm_config.clone(),
+                    vcpu_state_base64: base64::engine::general_purpose::STANDARD
+                        .encode(&vcpu_state),
+                };
+                let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+                    MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
+                })?;
+                std::fs::write(&state_path, state_bytes)?;
+
+                Self::restore_from_file_snapshot(&memory_path)
+            })();
+
+            let _ = std::fs::remove_dir_all(snapshot_dir);
+            return fork_result;
+        }
     }
 
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
