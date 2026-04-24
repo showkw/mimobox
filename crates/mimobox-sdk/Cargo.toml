@@ -60,6 +60,30 @@ path = "examples/file_ops.rs"
 name = "llm_agent"
 path = "examples/llm_agent.rs"
 
+[[example]]
+name = "basic_sandbox"
+path = "examples/basic_sandbox.rs"
+
+[[example]]
+name = "timeout_and_memory"
+path = "examples/timeout_and_memory.rs"
+
+[[example]]
+name = "filesystem_isolation"
+path = "examples/filesystem_isolation.rs"
+
+[[example]]
+name = "network_policy"
+path = "examples/network_policy.rs"
+
+[[example]]
+name = "sandbox_pool"
+path = "examples/sandbox_pool.rs"
+
+[[example]]
+name = "fork_demo"
+path = "examples/fork_demo.rs"
+
 [lints]
 workspace = true
 
