@@ -1726,6 +1726,8 @@ dependencies = [
  "mimobox-os",
  "mimobox-vm",
  "mimobox-wasm",
+ "reqwest",
+ "serde_json",
  "shlex",
  "thiserror 2.0.18",
  "tracing",
