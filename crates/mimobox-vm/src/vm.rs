@@ -428,6 +428,7 @@ impl MicrovmSandbox {
 
     /// 从快照恢复 microVM。
     pub fn restore(snapshot: &SandboxSnapshot) -> Result<Self, MicrovmError> {
+        let _span = tracing::info_span!("vm_restore").entered();
         if let Some(memory_path) = snapshot.memory_file_path() {
             return Self::restore_from_file_snapshot(memory_path);
         }
@@ -472,6 +473,7 @@ impl MicrovmSandbox {
     /// 未开启时保留文件快照恢复链路作为回退。
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
+        let _span = tracing::info_span!("vm_fork").entered();
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle("仅 Ready 状态允许 fork".into()));
         }
@@ -537,6 +539,7 @@ impl MicrovmSandbox {
 
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
+        let _span = tracing::info_span!("vm_fork").entered();
         Err(MicrovmError::Backend("fork 仅支持 Linux + KVM".into()))
     }
 
