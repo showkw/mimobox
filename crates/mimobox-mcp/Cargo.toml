@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 schemars = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-mimobox-sdk = { path = "../mimobox-sdk" }
+mimobox-sdk.workspace = true
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

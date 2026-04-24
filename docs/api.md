@@ -16,7 +16,7 @@ Add features in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mimobox-sdk = { version = "0.7", features = ["vm", "wasm"] }
+mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 ```
 
 ## Table of Contents
