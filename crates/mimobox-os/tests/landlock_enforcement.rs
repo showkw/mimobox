@@ -58,7 +58,10 @@ mod landlock_enforcement_tests {
 
     #[test]
     fn test_landlock_unauthorized_path_denies_read() -> Result<(), Box<dyn Error>> {
-        let unauthorized_dir = TempDir::new()?;
+        // 使用 /var/tmp 创建临时目录，因为 Landlock 内置的 default_ro 包含 /tmp（只读），
+        // 导致 /tmp 下的读操作始终被允许。/var/tmp 不在 default_ro 中，
+        // 能正确验证"用户未授权路径的读操作被拒绝"。
+        let unauthorized_dir = TempDir::new_in("/var/tmp")?;
         let test_file = unauthorized_dir.path().join("secret.txt");
         std::fs::write(&test_file, "secret")?;
 

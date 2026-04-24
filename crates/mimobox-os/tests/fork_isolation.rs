@@ -120,12 +120,23 @@ mod fork_isolation_tests {
 
     #[test]
     fn test_sandbox_process_visibility_isolation() -> Result<(), Box<dyn Error>> {
+        // 需要 /proc 只读访问以便 awk 读取 /proc/self/status。
+        // Landlock 内置的 default_ro 仅包含 /proc/self（符号链接路径），
+        // 在 unshare(CLONE_NEWPID)+fork 后路径解析可能不匹配，
+        // 导致 gawk 无法读取 /proc/self/maps 进而 fallback 到 mincore (syscall 27)，
+        // 被 Seccomp 阻止 (SIGSYS)。显式授权整个 /proc 只读可解决此问题。
+        let config_with_proc = {
+            let mut c = isolated_config(vec![]);
+            c.fs_readonly = vec!["/proc".into()];
+            c
+        };
+
         let result_a = run_shell(
-            isolated_config(vec![]),
+            config_with_proc.clone(),
             "awk '/^NSpid:/ { print $NF }' /proc/self/status".to_string(),
         )?;
         let result_b = run_shell(
-            isolated_config(vec![]),
+            config_with_proc,
             "awk '/^NSpid:/ { print $NF }' /proc/self/status".to_string(),
         )?;
 
