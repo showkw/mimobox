@@ -1,6 +1,8 @@
-//! mimobox Python SDK 绑定
+//! mimobox Python SDK bindings.
 //!
-//! 通过 PyO3 将 `mimobox-sdk` 暴露为 Python 可调用模块。
+//! Exposes `mimobox-sdk` as a Python-callable module via PyO3.
+//! Provides sandboxed code execution for AI agents with support for
+//! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
     Config, ErrorCode, ExecuteResult, IsolationLevel, Sandbox as RustSandbox,
@@ -20,10 +22,18 @@ create_exception!(mimobox, SandboxProcessError, SandboxError);
 create_exception!(mimobox, SandboxHttpError, SandboxError);
 create_exception!(mimobox, SandboxLifecycleError, SandboxError);
 
-/// Python 侧执行结果对象。
+/// Result of a sandbox command execution.
 ///
-/// 由于 Python API 约定 `stdout` / `stderr` 为 `str`，
-/// 这里对底层字节流采用 UTF-8 lossy 解码，避免二进制输出直接报错。
+/// Wraps the Rust SDK `ExecuteResult` with UTF-8 lossy decoded strings
+/// for Python compatibility. Binary output is converted using lossy UTF-8
+/// decoding to avoid encoding errors.
+///
+/// # Attributes
+///
+/// * `stdout` - Standard output as a UTF-8 string (lossy decoded).
+/// * `stderr` - Standard error as a UTF-8 string (lossy decoded).
+/// * `exit_code` - Process exit code. `-1` when unavailable (e.g., timeout).
+/// * `timed_out` - Whether the command exceeded its time limit.
 #[pyclass(name = "ExecuteResult")]
 #[derive(Debug, Clone)]
 struct PyExecuteResult {
@@ -50,6 +60,16 @@ impl From<ExecuteResult> for PyExecuteResult {
     }
 }
 
+/// HTTP response from the host-side proxy.
+///
+/// Returned by `Sandbox.http_request()`. The body is exposed as raw bytes;
+/// headers are exposed as a Python dict.
+///
+/// # Attributes
+///
+/// * `status` - HTTP status code (e.g., 200, 404).
+/// * `headers` - Response headers as a Python dict.
+/// * `body` - Response body as raw bytes.
 #[pyclass(name = "HttpResponse")]
 #[derive(Debug, Clone)]
 struct PyHttpResponse {
@@ -61,6 +81,7 @@ struct PyHttpResponse {
 
 #[pymethods]
 impl PyHttpResponse {
+    /// Returns response headers as a Python dictionary.
     #[getter]
     fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
@@ -70,6 +91,7 @@ impl PyHttpResponse {
         Ok(dict)
     }
 
+    /// Returns the response body as raw bytes.
     #[getter]
     fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, self.body.as_slice())
@@ -86,6 +108,11 @@ impl From<mimobox_sdk::HttpResponse> for PyHttpResponse {
     }
 }
 
+/// An immutable sandbox snapshot that can be serialized and restored.
+///
+/// Snapshots capture the complete sandbox state and can be used to create
+/// new sandbox instances via `Sandbox.from_snapshot()` or saved to disk
+/// for later restoration.
 #[pyclass(name = "Snapshot")]
 #[derive(Debug, Clone)]
 struct PySnapshot {
@@ -94,32 +121,73 @@ struct PySnapshot {
 
 #[pymethods]
 impl PySnapshot {
+    /// Reconstruct a snapshot from its serialized byte representation.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw bytes previously obtained via `to_bytes()`.
+    ///
+    /// # Returns
+    ///
+    /// A restored `Snapshot` instance.
     #[classmethod]
     fn from_bytes(_cls: &Bound<'_, PyType>, data: &[u8]) -> PyResult<Self> {
         let snapshot = RustSnapshot::from_bytes(data).map_err(map_sdk_error)?;
         Ok(Self { inner: snapshot })
     }
 
+    /// Serialize the snapshot to raw bytes.
+    ///
+    /// # Returns
+    ///
+    /// The snapshot data as a bytes object.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.inner.to_bytes().map_err(map_sdk_error)?;
         Ok(PyBytes::new(py, bytes.as_slice()))
     }
 
+    /// Returns the size of the snapshot data in bytes.
     #[getter]
     fn size(&self) -> usize {
         self.inner.size()
     }
 }
 
-/// Python 侧沙箱对象。
+/// A secure sandbox for executing commands.
 ///
-/// 该类型直接包装 Rust SDK 的 `Sandbox`，默认保持零配置体验，
-/// 同时只开放少量高频配置，避免把完整 ConfigBuilder 直接搬到 Python。
+/// Wraps the Rust SDK `Sandbox` and provides a Pythonic interface.
+/// Supports context manager protocol (`with` statement) for automatic
+/// resource cleanup.
+///
+/// # Example
+///
+/// ```python
+/// with Sandbox(isolation="os") as sb:
+///     result = sb.execute("echo hello", timeout=5.0)
+///     print(result.stdout)
+/// ```
+///
+/// # Arguments
+///
+/// * `isolation` - Isolation level: `"auto"`, `"os"`, `"wasm"`, or `"microvm"`.
+/// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
+///   Supports glob patterns like `"*.openai.com"`.
 #[pyclass(name = "Sandbox", unsendable)]
 struct PySandbox {
     inner: Option<RustSandbox>,
 }
 
+/// A single event from a streaming sandbox execution.
+///
+/// Each event carries at most one type of data: a stdout chunk, a stderr chunk,
+/// an exit code, or a timeout notification.
+///
+/// # Attributes
+///
+/// * `stdout` - Stdout bytes chunk, or `None` if this event carries no stdout data.
+/// * `stderr` - Stderr bytes chunk, or `None` if this event carries no stderr data.
+/// * `exit_code` - Process exit code, or `None` if the process has not exited yet.
+/// * `timed_out` - `True` if the command exceeded its time limit.
 #[pyclass(name = "StreamEvent")]
 #[derive(Debug, Clone)]
 struct PyStreamEvent {
@@ -131,6 +199,7 @@ struct PyStreamEvent {
 
 #[pymethods]
 impl PyStreamEvent {
+    /// Returns stdout bytes chunk, if present.
     #[getter]
     fn stdout<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         self.stdout
@@ -138,6 +207,7 @@ impl PyStreamEvent {
             .map(|data| PyBytes::new(py, data.as_slice()))
     }
 
+    /// Returns stderr bytes chunk, if present.
     #[getter]
     fn stderr<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         self.stderr
@@ -145,11 +215,13 @@ impl PyStreamEvent {
             .map(|data| PyBytes::new(py, data.as_slice()))
     }
 
+    /// Returns the process exit code, if available.
     #[getter]
     fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
 
+    /// Returns whether the command timed out.
     #[getter]
     fn timed_out(&self) -> bool {
         self.timed_out
@@ -193,6 +265,10 @@ impl From<StreamEvent> for PyStreamEvent {
     }
 }
 
+/// Python iterator over `StreamEvent` objects from a streaming execution.
+///
+/// Created by `Sandbox.stream_execute()`. Yields `StreamEvent` objects
+/// until the stream is exhausted.
 #[pyclass(name = "StreamIterator", unsendable)]
 struct PyStreamIterator {
     receiver: Option<mpsc::Receiver<StreamEvent>>,
@@ -200,10 +276,12 @@ struct PyStreamIterator {
 
 #[pymethods]
 impl PyStreamIterator {
+    /// Returns self as the iterator object.
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
+    /// Returns the next `StreamEvent`, or `None` when the stream is exhausted.
     fn __next__(&mut self) -> PyResult<Option<PyStreamEvent>> {
         let Some(receiver) = self.receiver.as_ref() else {
             return Ok(None);
@@ -221,6 +299,23 @@ impl PyStreamIterator {
 
 #[pymethods]
 impl PySandbox {
+    /// Create a new sandbox instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `isolation` - Isolation level: `"auto"`, `"os"`, `"wasm"`, or `"microvm"`.
+    ///   Defaults to `"auto"` (smart routing) when `None`.
+    /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
+    ///   Supports glob patterns like `"*.openai.com"`. Defaults to empty when `None`.
+    ///
+    /// # Returns
+    ///
+    /// A new `Sandbox` instance ready for command execution.
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If `isolation` is not a recognized level.
+    /// * `SandboxError` - If sandbox creation fails.
     #[new]
     #[pyo3(signature = (*, isolation=None, allowed_http_domains=None))]
     fn new(isolation: Option<&str>, allowed_http_domains: Option<Vec<String>>) -> PyResult<Self> {
@@ -232,7 +327,23 @@ impl PySandbox {
         })
     }
 
-    /// 在沙箱中执行一条 shell 风格命令。
+    /// Execute a shell-style command inside the sandbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - Shell command to execute.
+    /// * `env` - Optional environment variables to set for the command.
+    /// * `timeout` - Optional timeout in seconds (float). Must be > 0 and finite.
+    ///
+    /// # Returns
+    ///
+    /// An `ExecuteResult` with stdout, stderr, exit_code, and timed_out.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If the sandbox is destroyed or execution fails.
+    /// * `SandboxProcessError` - If the command exits non-zero or is killed.
+    /// * `TimeoutError` - If the command exceeds the specified timeout.
     #[pyo3(signature = (command, env=None, timeout=None))]
     fn execute(
         &mut self,
@@ -256,7 +367,16 @@ impl PySandbox {
         Ok(result.into())
     }
 
-    /// 以 Python 迭代器形式返回流式执行事件。
+    /// Execute a command and return a streaming iterator of events.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - Shell command to execute.
+    ///
+    /// # Returns
+    ///
+    /// A `StreamIterator` yielding `StreamEvent` objects for stdout,
+    /// stderr chunks and the final exit event.
     fn stream_execute(&mut self, command: &str) -> PyResult<PyStreamIterator> {
         let sandbox = self.inner_mut()?;
         let receiver = sandbox.stream_execute(command).map_err(map_sdk_error)?;
@@ -265,26 +385,69 @@ impl PySandbox {
         })
     }
 
-    /// 从沙箱内读取文件内容，返回 Python `bytes`。
+    /// Read a file from inside the sandbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path inside the sandbox filesystem.
+    ///
+    /// # Returns
+    ///
+    /// File contents as raw bytes.
+    ///
+    /// # Raises
+    ///
+    /// * `FileNotFoundError` - If the file does not exist.
+    /// * `PermissionError` - If access is denied.
+    /// * `SandboxError` - If the read operation fails.
     fn read_file(&mut self, path: &str) -> PyResult<Vec<u8>> {
         let sandbox = self.inner_mut()?;
         sandbox.read_file(path).map_err(map_sdk_error)
     }
 
-    /// 将 Python `bytes` 写入沙箱内指定路径。
+    /// Write bytes to a file inside the sandbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path inside the sandbox filesystem.
+    /// * `data` - Raw bytes to write.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If the write operation fails.
     fn write_file(&mut self, path: &str, data: Vec<u8>) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
         sandbox.write_file(path, &data).map_err(map_sdk_error)
     }
 
-    /// 拍摄当前沙箱快照。
+    /// Capture a snapshot of the current sandbox state.
+    ///
+    /// # Returns
+    ///
+    /// A `Snapshot` that can be used to restore or fork sandboxes.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If snapshotting fails.
     fn snapshot(&mut self) -> PyResult<PySnapshot> {
         let sandbox = self.inner_mut()?;
         let snapshot = sandbox.snapshot().map_err(map_sdk_error)?;
         Ok(PySnapshot { inner: snapshot })
     }
 
-    /// 从快照恢复一个新的沙箱实例。
+    /// Create a new sandbox by restoring from a snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot` - A previously captured `Snapshot`.
+    ///
+    /// # Returns
+    ///
+    /// A new `Sandbox` instance with the restored state.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If restoration fails.
     #[classmethod]
     fn from_snapshot(_cls: &Bound<'_, PyType>, snapshot: PyRef<'_, PySnapshot>) -> PyResult<Self> {
         let sandbox = RustSandbox::from_snapshot(&snapshot.inner).map_err(map_sdk_error)?;
@@ -293,7 +456,17 @@ impl PySandbox {
         })
     }
 
-    /// 基于当前状态创建一个独立的新沙箱。
+    /// Create an independent sandbox that inherits the current state.
+    ///
+    /// Uses copy-on-write (CoW) for efficient memory sharing.
+    ///
+    /// # Returns
+    ///
+    /// A new `Sandbox` instance with a copy of the current state.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If forking fails.
     fn fork(&mut self) -> PyResult<Self> {
         let sandbox = self.inner_mut()?;
         let forked = sandbox.fork().map_err(map_sdk_error)?;
@@ -302,7 +475,25 @@ impl PySandbox {
         })
     }
 
-    /// 通过 host HTTP 代理执行 HTTPS 请求。
+    /// Perform an HTTPS request through the host-side proxy.
+    ///
+    /// The request is subject to the domain whitelist configured at sandbox creation.
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - HTTP method (`"GET"`, `"POST"`, etc.).
+    /// * `url` - Full HTTPS URL.
+    /// * `headers` - Optional request headers.
+    /// * `body` - Optional request body as raw bytes.
+    ///
+    /// # Returns
+    ///
+    /// An `HttpResponse` with status, headers, and body.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxHttpError` - If the domain is not whitelisted or the request fails.
+    /// * `ConnectionError` - If the connection cannot be established.
     #[pyo3(signature = (method, url, headers=None, body=None))]
     fn http_request(
         &mut self,
@@ -318,12 +509,14 @@ impl PySandbox {
         Ok(response.into())
     }
 
-    /// 支持 `with Sandbox() as sandbox:` 用法。
+    /// Support `with Sandbox() as sandbox:` usage. Returns self.
     fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
     }
 
-    /// 退出上下文时主动释放底层资源，但不吞掉 Python 异常。
+    /// Release sandbox resources on context manager exit.
+    ///
+    /// Does not suppress exceptions (always returns `False`).
     fn __exit__(
         &mut self,
         _exc_type: Option<&Bound<'_, PyAny>>,
