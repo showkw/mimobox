@@ -8,6 +8,7 @@ members = [
     "crates/mimobox-vm",
     "crates/mimobox-sdk",
     "crates/mimobox-python",
+    "crates/mimobox-mcp",
 ]
 
 # 默认排除 mimobox-wasm（需要 Rust >= 1.91 或 Linux 环境）
