@@ -1997,6 +1997,84 @@ impl KvmBackend {
         Ok(memory)
     }
 
+    /// 导出 vCPU 状态，同时 clone 共享 guest memory（零拷贝 fork 用）。
+    ///
+    /// GuestMemoryMmap 内部使用 Arc，clone 只增加引用计数，不拷贝数据。
+    /// 两个 KVM VM fd 各自注册自己的 KVM_SET_USER_MEMORY_REGION 指向同一块
+    /// mmap 区域时，由于映射是 MAP_PRIVATE，内核对写入页自动执行 CoW，
+    /// 保证两个 VM 的内存修改互不影响。
+    #[cfg(feature = "zerocopy-fork")]
+    pub(crate) fn snapshot_for_fork(&self) -> Result<(GuestMemoryMmap, Vec<u8>), MicrovmError> {
+        let vcpu_state = encode_runtime_state(self)?;
+        Ok((self.guest_memory.clone(), vcpu_state))
+    }
+
+    /// 零拷贝 fork restore：用共享的 GuestMemoryMmap 注册到当前 VM 的 KVM slot。
+    ///
+    /// 此方法替代 restore_from_file_zerocopy，跳过文件 mmap，直接复用已有的
+    /// mmap 区域。新 VM 的 vm_fd 会注册自己的 KVM_SET_USER_MEMORY_REGION，
+    /// userspace_addr 指向共享映射。由于 MAP_PRIVATE，内核自动 CoW 隔离。
+    #[cfg(feature = "zerocopy-fork")]
+    pub(crate) fn restore_from_shared_memory(
+        &mut self,
+        shared_memory: GuestMemoryMmap,
+        vcpu_state: &[u8],
+    ) -> Result<(), MicrovmError> {
+        let old_region = kvm_userspace_memory_region {
+            slot: 0,
+            guest_phys_addr: 0,
+            memory_size: 0,
+            userspace_addr: 0,
+            flags: 0,
+        };
+        // SAFETY: KVM 约定 memory_size=0 表示注销指定 slot。slot 0 是本后端
+        // 唯一注册的 guest memory region，注销后立即注册等长新映射。
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(old_region)
+                .map_err(to_backend_error)?;
+        }
+
+        let host_addr = shared_memory
+            .get_host_address(GuestAddress(0))
+            .map_err(to_backend_error)? as u64;
+        let memory_size = u64::try_from(self.config.memory_bytes()?)
+            .map_err(|_| MicrovmError::Backend("memory size 无法转换为 u64".into()))?;
+
+        let new_region = kvm_userspace_memory_region {
+            slot: 0,
+            guest_phys_addr: 0,
+            memory_size,
+            userspace_addr: host_addr,
+            flags: 0,
+        };
+        // SAFETY: userspace_addr 来自共享的 GuestMemoryMmap 映射，映射长度与
+        // memory_size 一致。替换前已注销旧 slot 0，不存在重叠。MAP_PRIVATE
+        // 保证两个 VM 的 KVM 写入触发 CoW，互不影响。
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(new_region)
+                .map_err(to_backend_error)?;
+        }
+
+        self.guest_memory = shared_memory;
+
+        let mut restore_profile = self.take_or_seed_restore_profile();
+        let restore_memory_started_at = Instant::now();
+        // 共享内存直接挂载，无数据拷贝。
+        restore_profile.memory_state_write = restore_memory_started_at.elapsed();
+
+        restore_profile.cpuid_config = self.prepare_restored_vcpus()?;
+        let runtime_restore_profile = restore_runtime_state(self, vcpu_state)?;
+        restore_profile.vcpu_state_restore = runtime_restore_profile.vcpu_state_restore;
+        restore_profile.device_state_restore = runtime_restore_profile.device_state_restore;
+
+        self.lifecycle = KvmLifecycle::Ready;
+        self.emit_restore_profile_without_resume(&restore_profile);
+        self.set_pending_restore_profile(restore_profile);
+        Ok(())
+    }
+
     pub(crate) fn restore_guest_memory(&self, memory: &[u8]) -> Result<(), MicrovmError> {
         let expected_len = self.config.memory_bytes()?;
         if memory.len() != expected_len {
@@ -2012,11 +2090,91 @@ impl KvmBackend {
             .map_err(to_backend_error)
     }
 
+    /// 零拷贝 restore：直接将 snapshot 文件映射为 guest memory，
+    /// 替换当前 KVM memory region，跳过 write_slice 数据拷贝。
+    #[cfg(feature = "zerocopy-fork")]
+    pub(crate) fn restore_from_file_zerocopy(
+        &mut self,
+        memory_path: &Path,
+    ) -> Result<(), MicrovmError> {
+        use std::fs::File;
+        use vm_memory::{FileOffset, GuestRegionMmap, MmapRegion};
+
+        let file = File::open(memory_path)?;
+        let metadata = file.metadata()?;
+        let file_size = usize::try_from(metadata.len())
+            .map_err(|_| MicrovmError::SnapshotFormat("快照文件大小超出 usize 范围".into()))?;
+
+        let expected_len = self.config.memory_bytes()?;
+        if file_size != expected_len {
+            return Err(MicrovmError::SnapshotFormat(format!(
+                "guest memory 文件大小不匹配: 文件为 {}，期望为 {}",
+                file_size, expected_len
+            )));
+        }
+
+        let old_region = kvm_userspace_memory_region {
+            slot: 0,
+            guest_phys_addr: 0,
+            memory_size: 0,
+            userspace_addr: 0,
+            flags: 0,
+        };
+        // SAFETY: KVM 约定 memory_size=0 表示注销指定 slot。slot 0 是本后端唯一
+        // 注册的 guest memory region，注销后会立即注册等长的新映射。
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(old_region)
+                .map_err(to_backend_error)?;
+        }
+
+        let file_offset = FileOffset::new(file, 0);
+        let region = MmapRegion::<()>::build(
+            Some(file_offset),
+            file_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+        )
+        .map_err(|error| MicrovmError::Backend(format!("零拷贝 mmap 失败: {error}")))?;
+
+        let guest_region = GuestRegionMmap::new(region, GuestAddress(0)).map_err(|error| {
+            MicrovmError::Backend(format!("创建 GuestRegionMmap 失败: {error}"))
+        })?;
+        let new_guest_memory =
+            GuestMemoryMmap::from_regions(vec![guest_region]).map_err(|error| {
+                MicrovmError::Backend(format!("创建 GuestMemoryMmap 失败: {error}"))
+            })?;
+
+        let host_addr = new_guest_memory
+            .get_host_address(GuestAddress(0))
+            .map_err(to_backend_error)? as u64;
+        let memory_size = u64::try_from(file_size)
+            .map_err(|_| MicrovmError::Backend("memory size 无法转换为 u64".into()))?;
+
+        let new_region = kvm_userspace_memory_region {
+            slot: 0,
+            guest_phys_addr: 0,
+            memory_size,
+            userspace_addr: host_addr,
+            flags: 0,
+        };
+        // SAFETY: `userspace_addr` 来自新的 `GuestMemoryMmap` 映射，映射长度已与
+        // `memory_size` 一致，且替换前已经注销旧的 slot 0，不存在重叠 region。
+        unsafe {
+            self.vm_fd
+                .set_user_memory_region(new_region)
+                .map_err(to_backend_error)?;
+        }
+
+        self.guest_memory = new_guest_memory;
+        Ok(())
+    }
+
     /// 从快照文件 mmap(MAP_PRIVATE) 恢复 guest memory。
     ///
     /// 相比 restore_guest_memory 接受 &[u8]，此方法直接 mmap 文件，
     /// 避免了将整个快照文件读入 Vec<u8> 的内存分配开销。
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(feature = "zerocopy-fork")))]
     pub(crate) fn restore_from_file(&self, memory_path: &Path) -> Result<(), MicrovmError> {
         use std::fs::File;
         use std::os::unix::io::AsRawFd;
@@ -2268,8 +2426,8 @@ mod tests {
     };
     use super::{
         DEFAULT_CMDLINE, SerialFrame, SerialProtocolResult, devices::build_guest_exec_payload,
-        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
-        parse_serial_line, take_serial_frame,
+        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload, parse_serial_line,
+        take_serial_frame,
     };
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;

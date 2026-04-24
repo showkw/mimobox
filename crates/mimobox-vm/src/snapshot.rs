@@ -129,32 +129,13 @@ impl MicrovmSnapshot {
 
     /// 从文件化快照的 `memory.bin` 恢复完整快照对象。
     pub fn from_memory_file(memory_path: &Path) -> Result<Self, MicrovmError> {
-        let state_path = state_file_path(memory_path)?;
-        let state_bytes = fs::read(&state_path)?;
-        let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
-            MicrovmError::SnapshotFormat(format!(
-                "解析 state.json 失败 ({}): {error}",
-                state_path.display()
-            ))
-        })?;
-
-        if state.version != FILE_SNAPSHOT_VERSION {
-            return Err(MicrovmError::SnapshotFormat(format!(
-                "不支持的文件快照版本: {}",
-                state.version
-            )));
-        }
-
-        let vcpu_state = BASE64_STANDARD
-            .decode(state.vcpu_state_base64.as_bytes())
-            .map_err(|error| {
-                MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}"))
-            })?;
+        let (sandbox_config, microvm_config, vcpu_state) =
+            load_state_from_memory_file(memory_path)?;
         let memory = fs::read(memory_path)?;
 
         Ok(Self {
-            sandbox_config: state.sandbox_config,
-            microvm_config: state.microvm_config,
+            sandbox_config,
+            microvm_config,
             memory,
             vcpu_state,
         })
@@ -216,6 +197,33 @@ fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
         MicrovmError::SnapshotFormat(format!("快照文件路径缺少父目录: {}", memory_path.display()))
     })?;
     Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
+}
+
+/// 读取文件化快照的配置与 vCPU 状态，不加载 guest memory 文件。
+pub(crate) fn load_state_from_memory_file(
+    memory_path: &Path,
+) -> Result<(SandboxConfig, MicrovmConfig, Vec<u8>), MicrovmError> {
+    let state_path = state_file_path(memory_path)?;
+    let state_bytes = fs::read(&state_path)?;
+    let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
+        MicrovmError::SnapshotFormat(format!(
+            "解析 state.json 失败 ({}): {error}",
+            state_path.display()
+        ))
+    })?;
+
+    if state.version != FILE_SNAPSHOT_VERSION {
+        return Err(MicrovmError::SnapshotFormat(format!(
+            "不支持的文件快照版本: {}",
+            state.version
+        )));
+    }
+
+    let vcpu_state = BASE64_STANDARD
+        .decode(state.vcpu_state_base64.as_bytes())
+        .map_err(|error| MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}")))?;
+
+    Ok((state.sandbox_config, state.microvm_config, vcpu_state))
 }
 
 fn encode_sandbox_config(out: &mut Vec<u8>, config: &SandboxConfig) -> Result<(), MicrovmError> {
