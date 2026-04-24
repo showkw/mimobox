@@ -1,35 +1,79 @@
 use mimobox_core::ErrorCode;
 
-/// SDK 错误类型
+/// SDK error type.
+///
+/// All errors produced by the mimobox SDK fall into one of four categories:
+///
+/// - **`Sandbox`**: Structured errors from the sandbox backend with a stable
+///   [`ErrorCode`], human-readable message, and optional suggestion.
+/// - **`BackendUnavailable`**: The required backend feature (e.g., `vm`, `wasm`)
+///   is not enabled in the current build.
+/// - **`Config`**: Invalid SDK configuration or malformed input.
+/// - **`Io`**: Standard library I/O errors propagated from the OS.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use mimobox_sdk::Sandbox;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut sandbox = Sandbox::new()?;
+/// let result = sandbox.execute("/nonexistent/command");
+/// match result {
+///     Err(e) => println!("error: {e}"),
+///     Ok(_) => println!("success"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
-    /// 来自底层沙箱后端的结构化错误。
+    /// Structured error from the sandbox backend.
+    ///
+    /// Contains a stable [`ErrorCode`] for programmatic matching, a human-readable
+    /// message describing what went wrong, and an optional suggestion for how to
+    /// resolve the error.
     #[error("[{code_str}] {message}", code_str = code.as_str())]
     Sandbox {
-        /// 归一化后的稳定错误码。
+        /// Stable, normalized error code for cross-language transport and log indexing.
         code: ErrorCode,
-        /// 面向调用方的主错误信息。
+        /// Primary error message for the caller.
         message: String,
-        /// 建议调用方采取的修复动作。
+        /// Suggested action the caller can take to resolve the error.
         suggestion: Option<String>,
     },
 
-    /// 当前构建未启用所需后端 feature。
-    #[error("后端不可用: {0}（请启用对应 feature）")]
+    /// The required backend feature is not enabled in the current build.
+    ///
+    /// Enable the corresponding Cargo feature (e.g., `vm`, `wasm`, `os`) to resolve.
+    #[error("backend unavailable: {0} (enable the corresponding feature)")]
     BackendUnavailable(&'static str),
 
-    /// SDK 配置或内部状态不合法。
-    #[error("配置错误: {0}")]
+    /// Invalid SDK configuration or internal state.
+    #[error("config error: {0}")]
     Config(String),
 
-    /// 来自标准库的 I/O 错误。
-    #[error("IO 错误: {0}")]
+    /// Standard library I/O error.
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 
 impl SdkError {
-    /// 构造带错误码和建议的沙箱错误。
+    /// Constructs a structured sandbox error with code, message, and optional suggestion.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::SdkError;
+    /// use mimobox_core::ErrorCode;
+    ///
+    /// let err = SdkError::sandbox(
+    ///     ErrorCode::CommandTimeout,
+    ///     "command timed out",
+    ///     Some("increase Config.timeout".to_string()),
+    /// );
+    /// ```
     pub fn sandbox(
         code: ErrorCode,
         message: impl Into<String>,
@@ -42,7 +86,7 @@ impl SdkError {
         }
     }
 
-    /// 将执行阶段的 `SandboxError` 映射为 SDK 错误。
+    /// Maps an execution-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_execute_error(err: mimobox_core::SandboxError) -> Self {
         match err {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
@@ -68,7 +112,7 @@ impl SdkError {
         }
     }
 
-    /// 将创建阶段的 `SandboxError` 映射为 SDK 错误。
+    /// Maps a creation-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_create_error(err: mimobox_core::SandboxError) -> Self {
         match err {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
@@ -84,7 +128,7 @@ impl SdkError {
         }
     }
 
-    /// 将销毁阶段的 `SandboxError` 映射为 SDK 错误。
+    /// Maps a destroy-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_destroy_error(err: mimobox_core::SandboxError) -> Self {
         Self::Sandbox {
             code: ErrorCode::SandboxDestroyed,
@@ -93,12 +137,21 @@ impl SdkError {
         }
     }
 
-    /// 构造“后端不可用”错误。
+    /// Constructs a "backend unavailable" error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mimobox_sdk::SdkError;
+    ///
+    /// let err = SdkError::unsupported_backend("microvm");
+    /// assert!(matches!(err, SdkError::BackendUnavailable("microvm")));
+    /// ```
     pub fn unsupported_backend(msg: &'static str) -> Self {
         Self::BackendUnavailable(msg)
     }
 
-    /// 构造 SDK 内部配置错误。
+    /// Constructs an SDK internal configuration error.
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Config(msg.into())
     }

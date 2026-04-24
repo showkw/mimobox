@@ -4,7 +4,19 @@ use std::time::Duration;
 
 use crate::seccomp::SeccompProfile;
 
-/// 结构化错误码。
+/// Structured error code for programmatic error matching.
+///
+/// Each variant has a stable string representation via [`ErrorCode::as_str()`],
+/// suitable for cross-language transport and log indexing.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_core::ErrorCode;
+///
+/// assert_eq!(ErrorCode::CommandTimeout.as_str(), "command_timeout");
+/// assert_eq!(ErrorCode::HttpDeniedHost.as_str(), "http_denied_host");
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -71,10 +83,21 @@ impl ErrorCode {
     }
 }
 
-/// 沙箱配置。
+/// Sandbox configuration shared across all backends.
 ///
-/// 该配置描述所有后端共享的最小能力集合，包括文件系统权限、网络策略、
-/// 资源限制和受控 HTTP 代理白名单。
+/// This struct describes the minimum capability set used by all sandbox
+/// implementations, including filesystem permissions, network policy,
+/// resource limits, and controlled HTTP proxy whitelist.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_core::SandboxConfig;
+///
+/// let config = SandboxConfig::default();
+/// assert!(config.deny_network);
+/// assert_eq!(config.timeout_secs, Some(30));
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxConfig {
@@ -122,7 +145,10 @@ impl Default for SandboxConfig {
     }
 }
 
-/// 沙箱执行结果。
+/// Result of a sandbox command execution.
+///
+/// Contains raw stdout/stderr bytes, exit code, wall-clock elapsed time,
+/// and a timeout flag.
 #[derive(Debug)]
 pub struct SandboxResult {
     /// 标准输出内容。
@@ -155,10 +181,20 @@ enum SnapshotInner {
     },
 }
 
-/// 沙箱快照。
+/// Opaque sandbox snapshot handle.
 ///
-/// 该类型负责承载后端生成的快照句柄，不解析内部格式。
-/// 当前支持内存字节和文件引用两种存储模式。
+/// Carries a backend-generated snapshot without parsing the internal format.
+/// Supports two storage modes: in-memory bytes and file-backed references.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_core::SandboxSnapshot;
+///
+/// let snapshot = SandboxSnapshot::from_bytes(b"snapshot-data").unwrap();
+/// assert_eq!(snapshot.size(), 13);
+/// assert_eq!(snapshot.as_bytes().unwrap(), b"snapshot-data");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSnapshot {
     inner: SnapshotInner,
@@ -259,7 +295,17 @@ impl SandboxSnapshot {
     }
 }
 
-/// PTY 终端尺寸
+/// PTY terminal dimensions.
+///
+/// # Examples
+///
+/// ```
+/// use mimobox_core::PtySize;
+///
+/// let size = PtySize::default();
+/// assert_eq!(size.cols, 80);
+/// assert_eq!(size.rows, 24);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
     /// 终端列数。
@@ -274,7 +320,9 @@ impl Default for PtySize {
     }
 }
 
-/// PTY 会话事件
+/// PTY session event.
+///
+/// Events delivered via the PTY output channel.
 #[derive(Debug)]
 pub enum PtyEvent {
     /// 终端输出数据
@@ -283,7 +331,10 @@ pub enum PtyEvent {
     Exit(i32),
 }
 
-/// PTY 会话配置
+/// PTY session configuration.
+///
+/// Specifies the command to run, terminal size, environment variables,
+/// working directory, and timeout for an interactive PTY session.
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
     /// 启动 PTY 会话时执行的命令及参数。
@@ -298,7 +349,10 @@ pub struct PtyConfig {
     pub timeout: Option<Duration>,
 }
 
-/// PTY 会话 trait
+/// PTY session trait for interactive terminal control.
+///
+/// Backend implementations provide concrete types satisfying this trait.
+/// SDK users interact with [`mimobox_sdk::PtySession`] instead.
 pub trait PtySession {
     /// 向终端发送输入（stdin）
     fn send_input(&mut self, data: &[u8]) -> Result<(), SandboxError>;
@@ -312,7 +366,10 @@ pub trait PtySession {
     fn wait(&mut self) -> Result<i32, SandboxError>;
 }
 
-/// 沙箱错误类型
+/// Sandbox error type.
+///
+/// Low-level backend errors. The SDK maps these to [`mimobox_sdk::SdkError`]
+/// with structured [`ErrorCode`] values.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
@@ -369,9 +426,25 @@ pub enum SandboxError {
     Io(#[from] std::io::Error),
 }
 
-/// 沙箱生命周期 trait。
+/// Sandbox lifecycle trait.
 ///
-/// 各后端通过该 trait 提供统一的创建、执行、文件传输、快照和销毁能力。
+/// Each backend implements this trait to provide unified creation, execution,
+/// file transfer, snapshot, and destruction capabilities.
+///
+/// Most users should use [`mimobox_sdk::Sandbox`] instead of implementing
+/// this trait directly.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use mimobox_core::{Sandbox, SandboxConfig};
+/// use mimobox_os::LinuxSandbox;
+///
+/// let mut sandbox = LinuxSandbox::new(SandboxConfig::default())?;
+/// let result = sandbox.execute(&["/bin/echo".into(), "hello".into()])?;
+/// assert_eq!(result.exit_code, Some(0));
+/// sandbox.destroy()?;
+/// ```
 pub trait Sandbox {
     /// 使用给定配置创建新的沙箱实例。
     fn new(config: SandboxConfig) -> Result<Self, SandboxError>
