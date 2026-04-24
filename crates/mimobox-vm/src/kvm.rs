@@ -321,6 +321,7 @@ impl KvmBackend {
         base_config: SandboxConfig,
         config: MicrovmConfig,
     ) -> Result<Self, MicrovmError> {
+        let _span = tracing::info_span!("vm_create").entered();
         Self::create_vm_with_mode(base_config, config, BackendCreateMode::ColdStart)
     }
 
@@ -651,33 +652,40 @@ impl KvmBackend {
             return;
         };
 
-        eprintln!(
-            "[mimobox-vm][create_vm] total={:?} cold_start_total={:?} boot_wait={:?}",
-            profile.create_vm_total,
-            profile.cold_start_total(),
-            profile.boot_wait,
+        info!(
+            total = ?profile.create_vm_total,
+            cold_start_total = ?profile.cold_start_total(),
+            boot_wait = ?profile.boot_wait,
+            "[create_vm] 性能概览"
         );
-        eprintln!(
-            "[mimobox-vm][create_vm] 1.kvm_fd_open={:?} 2.kvm_create_vm={:?} arch_setup={:?}",
-            profile.kvm_fd_open, profile.kvm_create_vm, profile.vm_arch_setup,
+        info!(
+            kvm_fd_open = ?profile.kvm_fd_open,
+            kvm_create_vm = ?profile.kvm_create_vm,
+            arch_setup = ?profile.vm_arch_setup,
+            "[create_vm] KVM 初始化耗时"
         );
-        eprintln!(
-            "[mimobox-vm][create_vm] 3.guest_memory_mmap={:?} 4.kernel_elf_load={:?} 5.rootfs_write={:?}",
-            profile.guest_memory_mmap, profile.kernel_elf_load, profile.rootfs_write,
+        info!(
+            guest_memory_mmap = ?profile.guest_memory_mmap,
+            kernel_elf_load = ?profile.kernel_elf_load,
+            rootfs_write = ?profile.rootfs_write,
+            "[create_vm] guest 资源加载耗时"
         );
-        eprintln!(
-            "[mimobox-vm][create_vm] 6.kvm_set_user_memory_region={:?} 7.vcpu_creation={:?}",
-            profile.kvm_set_user_memory_region, profile.vcpu_creation,
+        info!(
+            kvm_set_user_memory_region = ?profile.kvm_set_user_memory_region,
+            vcpu_creation = ?profile.vcpu_creation,
+            "[create_vm] 内存注册与 vCPU 创建耗时"
         );
-        eprintln!(
-            "[mimobox-vm][create_vm] 8.vcpu_register_config={:?} 9.cpuid_config={:?} 10.boot_params={:?}",
-            profile.vcpu_register_config, profile.cpuid_config, profile.boot_params,
+        info!(
+            vcpu_register_config = ?profile.vcpu_register_config,
+            cpuid_config = ?profile.cpuid_config,
+            boot_params = ?profile.boot_params,
+            "[create_vm] vCPU 与启动参数配置耗时"
         );
-        eprintln!(
-            "[mimobox-vm][create_vm] asset_read: kernel={:?} rootfs={:?} create_vm_misc={:?}",
-            profile.kernel_asset_read,
-            profile.rootfs_asset_read,
-            profile.create_vm_misc(),
+        info!(
+            kernel = ?profile.kernel_asset_read,
+            rootfs = ?profile.rootfs_asset_read,
+            create_vm_misc = ?profile.create_vm_misc(),
+            "[create_vm] 资产读取与其他耗时"
         );
     }
 
@@ -699,27 +707,36 @@ impl KvmBackend {
     }
 
     pub(crate) fn emit_restore_profile_without_resume(&self, profile: &RestoreProfile) {
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] total_without_resume={:?}",
-            profile.total_without_resume(),
+        info!(
+            total_without_resume = ?profile.total_without_resume(),
+            "[snapshot-restore] 恢复性能概览"
         );
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] kvm_fd_open={:?} 1.kvm_create_vm={:?} arch_setup={:?}",
-            profile.kvm_fd_open, profile.kvm_create_vm, profile.vm_arch_setup,
+        info!(
+            kvm_fd_open = ?profile.kvm_fd_open,
+            kvm_create_vm = ?profile.kvm_create_vm,
+            arch_setup = ?profile.vm_arch_setup,
+            "[snapshot-restore] KVM 初始化耗时"
         );
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] 2.guest_memory_mmap={:?} kvm_set_user_memory_region={:?} vcpu_creation={:?}",
-            profile.guest_memory_mmap, profile.kvm_set_user_memory_region, profile.vcpu_creation,
+        info!(
+            guest_memory_mmap = ?profile.guest_memory_mmap,
+            kvm_set_user_memory_region = ?profile.kvm_set_user_memory_region,
+            vcpu_creation = ?profile.vcpu_creation,
+            "[snapshot-restore] 内存注册与 vCPU 创建耗时"
         );
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] 3.memory_state_write={:?} cpuid_config={:?}",
-            profile.memory_state_write, profile.cpuid_config,
+        info!(
+            memory_state_write = ?profile.memory_state_write,
+            cpuid_config = ?profile.cpuid_config,
+            "[snapshot-restore] 内存状态与 CPUID 恢复耗时"
         );
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] 4.vcpu_state_restore={:?} 5.device_state_restore={:?}",
-            profile.vcpu_state_restore, profile.device_state_restore,
+        info!(
+            vcpu_state_restore = ?profile.vcpu_state_restore,
+            device_state_restore = ?profile.device_state_restore,
+            "[snapshot-restore] vCPU 与设备状态恢复耗时"
         );
-        eprintln!("[mimobox-vm][snapshot-restore] 6.resume_kvm_run=待首个 KVM_RUN 实测");
+        info!(
+            resume_kvm_run = "待首个 KVM_RUN 实测",
+            "[snapshot-restore] KVM_RUN 恢复耗时待测"
+        );
     }
 
     fn finish_restore_resume_profile(&mut self, resume_kvm_run: Duration) {
@@ -731,10 +748,10 @@ impl KvmBackend {
             return;
         }
         profile.resume_kvm_run = Some(resume_kvm_run);
-        eprintln!(
-            "[mimobox-vm][snapshot-restore] 6.resume_kvm_run={:?} total_with_resume={:?}",
-            resume_kvm_run,
-            profile.total_with_resume(),
+        info!(
+            resume_kvm_run = ?resume_kvm_run,
+            total_with_resume = ?profile.total_with_resume(),
+            "[snapshot-restore] KVM_RUN 恢复完成"
         );
     }
 
@@ -1349,6 +1366,7 @@ impl KvmBackend {
 
     /// 从快照恢复 guest memory 和 vCPU 状态。
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
+        let _span = tracing::info_span!("vm_restore").entered();
         let mut restore_profile = self.take_or_seed_restore_profile();
 
         let restore_memory_started_at = Instant::now();
@@ -2005,6 +2023,7 @@ impl KvmBackend {
     /// 保证两个 VM 的内存修改互不影响。
     #[cfg(feature = "zerocopy-fork")]
     pub(crate) fn snapshot_for_fork(&self) -> Result<(GuestMemoryMmap, Vec<u8>), MicrovmError> {
+        let _span = tracing::info_span!("vm_fork").entered();
         let vcpu_state = encode_runtime_state(self)?;
         Ok((self.guest_memory.clone(), vcpu_state))
     }
@@ -2020,6 +2039,7 @@ impl KvmBackend {
         shared_memory: GuestMemoryMmap,
         vcpu_state: &[u8],
     ) -> Result<(), MicrovmError> {
+        let _span = tracing::info_span!("vm_restore").entered();
         let old_region = kvm_userspace_memory_region {
             slot: 0,
             guest_phys_addr: 0,

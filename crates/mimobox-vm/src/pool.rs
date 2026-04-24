@@ -331,6 +331,7 @@ impl VmPool {
 
     /// 从池中获取一个可执行的 microVM 实例。
     pub fn acquire(&self) -> Result<PooledVm, PoolError> {
+        let _span = tracing::info_span!("pool_acquire").entered();
         #[cfg(feature = "boot-profile")]
         let acquire_started_at = Instant::now();
         #[cfg(feature = "boot-profile")]
@@ -377,13 +378,13 @@ impl VmPool {
         let backend_prepare = backend_prepare_started_at.elapsed();
 
         #[cfg(feature = "boot-profile")]
-        eprintln!(
-            "[mimobox-vm][pool.acquire] expired_idle_cleanup={:?} state_checkout={:?} backend_prepare={:?} reused={} total={:?}",
-            expired_idle_cleanup,
-            state_checkout,
-            backend_prepare,
-            reused_hit,
-            acquire_started_at.elapsed(),
+        tracing::info!(
+            expired_idle_cleanup = ?expired_idle_cleanup,
+            state_checkout = ?state_checkout,
+            backend_prepare = ?backend_prepare,
+            reused = reused_hit,
+            total = ?acquire_started_at.elapsed(),
+            "[pool.acquire] 性能概览"
         );
 
         Ok(PooledVm {
@@ -452,6 +453,7 @@ pub struct PooledVm {
 impl PooledVm {
     /// 执行命令并等待完成。
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
+        let _span = tracing::info_span!("pool_execute").entered();
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
@@ -461,6 +463,7 @@ impl PooledVm {
         cmd: &[String],
         options: GuestExecOptions,
     ) -> Result<GuestCommandResult, MicrovmError> {
+        let _span = tracing::info_span!("pool_execute").entered();
         #[cfg(feature = "boot-profile")]
         let execute_started_at = Instant::now();
         let result = match self.backend.as_mut() {
@@ -468,10 +471,10 @@ impl PooledVm {
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
         };
         #[cfg(feature = "boot-profile")]
-        eprintln!(
-            "[mimobox-vm][pool.execute] total={:?} success={}",
-            execute_started_at.elapsed(),
-            result.is_ok(),
+        tracing::info!(
+            total = ?execute_started_at.elapsed(),
+            success = result.is_ok(),
+            "[pool.execute] 性能概览"
         );
         result
     }
@@ -481,6 +484,7 @@ impl PooledVm {
         &mut self,
         cmd: &[String],
     ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        let _span = tracing::info_span!("pool_execute").entered();
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
@@ -490,6 +494,7 @@ impl PooledVm {
         cmd: &[String],
         options: GuestExecOptions,
     ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
+        let _span = tracing::info_span!("pool_execute").entered();
         match self.backend.as_mut() {
             Some(backend) => stream_execute_backend(backend, cmd, &options),
             None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
@@ -540,9 +545,9 @@ impl Drop for PooledVm {
             self.pool.recycle(backend);
         }
         #[cfg(feature = "boot-profile")]
-        eprintln!(
-            "[mimobox-vm][pool.drop] total={:?}",
-            drop_started_at.elapsed(),
+        tracing::info!(
+            total = ?drop_started_at.elapsed(),
+            "[pool.drop] 性能概览"
         );
     }
 }
