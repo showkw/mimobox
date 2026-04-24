@@ -33,6 +33,14 @@ name = "streaming"
 path = "examples/streaming.rs"
 
 [[example]]
+name = "agent_demo"
+path = "examples/agent_demo.rs"
+
+[[example]]
+name = "agent_streaming"
+path = "examples/agent_streaming.rs"
+
+[[example]]
 name = "http_proxy"
 path = "examples/http_proxy.rs"
 
