@@ -12,7 +12,9 @@ async fn setup_client() -> Result<rmcp::service::RunningService<rmcp::RoleClient
     let (server_read, client_write) = duplex(4096);
 
     tokio::spawn(async move {
-        let service = MimoboxServer::new().serve((server_read, server_write)).await;
+        let service = MimoboxServer::new()
+            .serve((server_read, server_write))
+            .await;
         if let Ok(service) = service {
             let _ = service.waiting().await;
         }
@@ -59,7 +61,10 @@ async fn test_list_tools_via_duplex() -> Result<()> {
     let client = setup_client().await?;
 
     let tools = client.peer().list_all_tools().await?;
-    let tool_names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+    let tool_names = tools
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<Vec<_>>();
 
     assert!(tool_names.len() >= 7, "工具数量不足: {tool_names:?}");
     assert!(tool_names.contains(&"execute_code"));

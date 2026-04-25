@@ -352,7 +352,7 @@ pub struct PtyConfig {
 /// PTY session trait for interactive terminal control.
 ///
 /// Backend implementations provide concrete types satisfying this trait.
-/// SDK users interact with [`mimobox_sdk::PtySession`] instead.
+/// SDK users interact with `mimobox_sdk::PtySession` instead.
 pub trait PtySession {
     /// Sends input to the terminal (`stdin`).
     fn send_input(&mut self, data: &[u8]) -> Result<(), SandboxError>;
@@ -368,7 +368,7 @@ pub trait PtySession {
 
 /// Sandbox error type.
 ///
-/// Low-level backend errors. The SDK maps these to [`mimobox_sdk::SdkError`]
+/// Low-level backend errors. The SDK maps these to `mimobox_sdk::SdkError`
 /// with structured [`ErrorCode`] values.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -431,7 +431,7 @@ pub enum SandboxError {
 /// Each backend implements this trait to provide unified creation, execution,
 /// file transfer, snapshot, and destruction capabilities.
 ///
-/// Most users should use [`mimobox_sdk::Sandbox`] instead of implementing
+/// Most users should use `mimobox_sdk::Sandbox` instead of implementing
 /// this trait directly.
 ///
 /// # Examples

@@ -216,6 +216,12 @@ impl MimoboxServer {
     }
 }
 
+impl Default for MimoboxServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl MimoboxServer {
     #[tool(description = "Create a reusable mimobox sandbox instance")]
