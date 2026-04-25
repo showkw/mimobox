@@ -49,7 +49,7 @@ const DEFAULT_POOL_SIZE: usize = 16;
 #[command(
     name = "mimobox",
     version,
-    about = "跨平台 Agent Sandbox CLI",
+    about = "Cross-platform Agent Sandbox CLI",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -59,21 +59,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    /// 在指定后端沙箱中执行命令
+    /// Execute a command in the specified backend sandbox
     Run(RunArgs),
-    /// 启动交互式终端会话
+    /// Start an interactive terminal session
     Shell(ShellArgs),
-    /// 创建 microVM 快照文件
+    /// Create a microVM snapshot file
     Snapshot(SnapshotArgs),
-    /// 从快照文件恢复并执行命令
+    /// Restore from a snapshot file and execute a command
     Restore(RestoreArgs),
-    /// 运行预热池相关基准
+    /// Run pool-related benchmarks
     Bench(BenchArgs),
-    /// 诊断当前运行环境
+    /// Diagnose the current runtime environment
     Doctor,
-    /// 初始化 mimobox 本地资产与目录
+    /// Initialize mimobox local assets and directories
     Setup,
-    /// 输出版本信息
+    /// Print version information
     Version,
 }
 
@@ -97,131 +97,131 @@ enum BenchTarget {
 
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// 选择后端
+    /// Select backend
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     backend: Backend,
 
-    /// 待执行命令，使用 shell 风格字符串，例如："/bin/echo hello"
+    /// Command to execute (shell-style string, e.g. "/bin/echo hello")
     #[arg(long, value_name = "cmd")]
     command: String,
 
-    /// 内存上限（MB）
+    /// Memory limit in MB
     #[arg(long)]
     memory: Option<u64>,
 
-    /// 超时时间（秒），传 0 表示不设置超时
+    /// Timeout in seconds; pass 0 for no timeout
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// 是否拒绝网络访问
+    /// Deny network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
     deny_network: bool,
 
-    /// 是否允许网络访问
+    /// Allow network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
     allow_network: bool,
 
-    /// 是否允许子进程 fork/clone
+    /// Allow child process fork/clone
     #[arg(long, default_value_t = false)]
     allow_fork: bool,
 
-    /// KVM 内核镜像路径
+    /// Path to the KVM kernel image
     #[arg(long)]
     kernel: Option<String>,
 
-    /// KVM rootfs 路径
+    /// Path to the KVM rootfs
     #[arg(long)]
     rootfs: Option<String>,
 
-    /// KVM vCPU 数量
+    /// Number of KVM vCPUs
     #[arg(long, default_value_t = 1)]
     vcpu_count: u8,
 }
 
 #[derive(Debug, Args)]
 struct ShellArgs {
-    /// 选择后端
+    /// Select backend
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     backend: Backend,
 
-    /// 待执行命令，默认启动 /bin/sh
+    /// Command to run; defaults to /bin/sh
     #[arg(long, value_name = "cmd", default_value = "/bin/sh")]
     command: String,
 
-    /// 内存上限（MB）
+    /// Memory limit in MB
     #[arg(long)]
     memory: Option<u64>,
 
-    /// 超时时间（秒），传 0 表示不设置超时
+    /// Timeout in seconds; pass 0 for no timeout
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// 是否拒绝网络访问
+    /// Deny network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
     deny_network: bool,
 
-    /// 是否允许网络访问
+    /// Allow network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
     allow_network: bool,
 }
 
 #[derive(Debug, Args)]
 struct SnapshotArgs {
-    /// 快照输出文件路径
+    /// Snapshot output file path
     #[arg(long, value_name = "path")]
     output: String,
 
-    /// 快照前执行的初始化命令
+    /// Initialization command to run before snapshotting
     #[arg(long, value_name = "cmd")]
     init_command: Option<String>,
 
-    /// 内存上限（MB）
+    /// Memory limit in MB
     #[arg(long)]
     memory: Option<u64>,
 
-    /// 超时时间（秒），传 0 表示不设置超时
+    /// Timeout in seconds; pass 0 for no timeout
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// 是否拒绝网络访问
+    /// Deny network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "allow_network")]
     deny_network: bool,
 
-    /// 是否允许网络访问
+    /// Allow network access
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "deny_network")]
     allow_network: bool,
 
-    /// 是否允许子进程 fork/clone
+    /// Allow child process fork/clone
     #[arg(long, default_value_t = false)]
     allow_fork: bool,
 
-    /// KVM 内核镜像路径
+    /// Path to the KVM kernel image
     #[arg(long)]
     kernel: Option<String>,
 
-    /// KVM rootfs 路径
+    /// Path to the KVM rootfs
     #[arg(long)]
     rootfs: Option<String>,
 
-    /// KVM vCPU 数量
+    /// Number of KVM vCPUs
     #[arg(long, default_value_t = 1)]
     vcpu_count: u8,
 }
 
 #[derive(Debug, Args)]
 struct RestoreArgs {
-    /// 快照文件路径
+    /// Snapshot file path
     #[arg(long, value_name = "path")]
     snapshot: String,
 
-    /// 恢复后执行的命令
+    /// Command to execute after restoration
     #[arg(long, value_name = "cmd")]
     command: String,
 }
 
 #[derive(Debug, Args)]
 struct BenchArgs {
-    /// 基准目标
+    /// Benchmark target
     #[arg(long, value_enum)]
     target: BenchTarget,
 }
@@ -412,7 +412,7 @@ struct RunExecution {
 }
 
 thread_local! {
-    /// 在需要捕获进程级 stderr 时，临时关闭终端日志，避免日志污染兜底输出。
+    /// Temporarily disable terminal logging when capturing process-level stderr, to avoid log output polluting fallback output.
     static STDERR_LOGGING_ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
@@ -453,7 +453,7 @@ fn run_with_panic_guard() -> ExitCode {
         Ok(Some(exit_code)) => process::exit(exit_code),
         Ok(None) => ExitCode::SUCCESS,
         Err(error) => {
-            error!(code = error.code(), message = %error, "CLI 执行失败");
+            error!(code = error.code(), message = %error, "CLI execution failed");
             if let Err(print_error) = emit_error_json(&error) {
                 eprintln!(
                     "{{\"ok\":false,\"code\":\"json_error\",\"message\":\"{}\"}}",
@@ -470,15 +470,15 @@ fn run() -> Result<Option<i32>, CliError> {
     let is_human_readable_command = matches!(cli.command, CliCommand::Doctor | CliCommand::Setup);
 
     if !is_human_readable_command {
-        info!("mimobox CLI 启动");
-        info!(command = ?cli.command, "CLI 参数解析完成");
+        info!("mimobox CLI starting");
+        info!(command = ?cli.command, "CLI arguments parsed");
     }
 
     let response = match cli.command {
         CliCommand::Run(args) => CommandResponse::Run(handle_run(args)?),
         CliCommand::Shell(args) => {
             let exit_code = handle_shell(args)?;
-            info!(exit_code, "shell 子命令执行完成");
+            info!(exit_code, "shell subcommand completed");
             return Ok(Some(exit_code));
         }
         CliCommand::Snapshot(args) => CommandResponse::Snapshot(handle_snapshot(args)?),
@@ -487,14 +487,14 @@ fn run() -> Result<Option<i32>, CliError> {
         CliCommand::Doctor => {
             let exit_code = doctor::run_doctor();
             if !is_human_readable_command {
-                info!(exit_code, "doctor 子命令执行完成");
+                info!(exit_code, "doctor subcommand completed");
             }
             return Ok(Some(exit_code));
         }
         CliCommand::Setup => {
             let exit_code = doctor::run_setup();
             if !is_human_readable_command {
-                info!(exit_code, "setup 子命令执行完成");
+                info!(exit_code, "setup subcommand completed");
             }
             return Ok(Some(exit_code));
         }
@@ -504,7 +504,7 @@ fn run() -> Result<Option<i32>, CliError> {
     let exit_code = success_exit_code(&response);
     emit_success_json(&response)?;
     if !is_human_readable_command {
-        info!("CLI 执行完成");
+        info!("CLI execution completed");
     }
     Ok(exit_code)
 }
@@ -556,7 +556,7 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
         kernel = args.kernel.as_deref().unwrap_or("default"),
         rootfs = args.rootfs.as_deref().unwrap_or("default"),
         vcpu_count = args.vcpu_count,
-        "准备执行 run 子命令"
+        "preparing to execute run subcommand"
     );
 
     let argv = parse_command(&args.command)?;
@@ -579,7 +579,7 @@ fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
                     build_sandbox_config(args.memory, args.timeout, deny_network, args.allow_fork);
 
                 match args.backend {
-                    Backend::Auto => unreachable!("Auto 后端已在 SDK 路径处理"),
+                    Backend::Auto => unreachable!("Auto backend is handled in SDK path"),
                     Backend::Os => Ok(RunExecution {
                         backend: Backend::Os,
                         result: execute_os_backend(config, &argv)?,
@@ -648,7 +648,7 @@ fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
             command = %args.command,
             timeout_secs = sdk_config.timeout.as_ref().map(Duration::as_secs),
             deny_network,
-            "准备执行 shell 子命令"
+            "preparing to execute shell subcommand"
         );
 
         install_shell_signal_handlers();
@@ -658,7 +658,7 @@ fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
             Ok(session) => session,
             Err(error) => {
                 if let Err(destroy_error) = sandbox.destroy() {
-                    warn!(message = %destroy_error, "shell 初始化失败后销毁沙箱也失败");
+                    warn!(message = %destroy_error, "failed to destroy sandbox after shell initialization failure");
                 }
                 return Err(map_sdk_error(error));
             }
@@ -668,7 +668,7 @@ fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
         drop(session);
 
         if let Err(destroy_error) = sandbox.destroy() {
-            warn!(message = %destroy_error, "shell 会话结束后销毁沙箱失败");
+            warn!(message = %destroy_error, "failed to destroy sandbox after shell session");
         }
 
         shell_result
@@ -701,7 +701,7 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
             kernel = args.kernel.as_deref().unwrap_or("default"),
             rootfs = args.rootfs.as_deref().unwrap_or("default"),
             vcpu_count = args.vcpu_count,
-            "准备执行 snapshot 子命令"
+            "preparing to execute snapshot subcommand"
         );
 
         let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
@@ -712,7 +712,7 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
                 error!(
                     code = cli_error.code(),
                     message = %cli_error,
-                    "snapshot 初始化命令执行失败"
+                    "snapshot init command execution failed"
                 );
                 cli_error
             })?;
@@ -720,10 +720,10 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
             if init_result.timed_out || init_result.exit_code != Some(0) {
                 let stderr = String::from_utf8_lossy(&init_result.stderr);
                 let cli_error = CliError::Sdk(format!(
-                    "初始化命令执行失败: exit_code={:?}, timed_out={}, stderr={stderr}",
+                    "init command failed: exit_code={:?}, timed_out={}, stderr={stderr}",
                     init_result.exit_code, init_result.timed_out,
                 ));
-                destroy_sdk_sandbox_quietly(sandbox, "snapshot 初始化失败后清理沙箱");
+                destroy_sdk_sandbox_quietly(sandbox, "cleaning up sandbox after snapshot init failure");
                 return Err(cli_error);
             }
         }
@@ -732,7 +732,7 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let cli_error = map_sdk_error(error);
-                destroy_sdk_sandbox_quietly(sandbox, "snapshot 失败后清理沙箱");
+                destroy_sdk_sandbox_quietly(sandbox, "cleaning up sandbox after snapshot failure");
                 return Err(cli_error);
             }
         };
@@ -762,7 +762,7 @@ fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliError> {
         info!(
             snapshot = %args.snapshot,
             command = %args.command,
-            "准备执行 restore 子命令"
+            "preparing to execute restore subcommand"
         );
 
         let snapshot_bytes = fs::read(&args.snapshot)?;
@@ -775,7 +775,7 @@ fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliError> {
             Ok(result) => result,
             Err(error) => {
                 let cli_error = map_sdk_error(error);
-                destroy_sdk_sandbox_quietly(sandbox, "restore 执行失败后清理沙箱");
+                destroy_sdk_sandbox_quietly(sandbox, "cleaning up sandbox after restore execution failure");
                 return Err(cli_error);
             }
         };
@@ -884,7 +884,7 @@ fn spawn_stdin_forwarder(input_tx: mpsc::Sender<Vec<u8>>) {
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    warn!(message = %error, "读取本地 stdin 失败，终止输入转发");
+                    warn!(message = %error, "failed to read local stdin, stopping input forwarding");
                     break;
                 }
             }
@@ -894,9 +894,9 @@ fn spawn_stdin_forwarder(input_tx: mpsc::Sender<Vec<u8>>) {
 
 #[cfg(unix)]
 fn current_terminal_size() -> Option<SdkPtySize> {
-    // SAFETY: `winsize` 在当前函数栈上分配，`ioctl` 仅写入该结构体。
+    // SAFETY: `winsize` is allocated on this stack frame, and `ioctl` only writes to this struct.
     let mut winsize = unsafe { std::mem::zeroed::<libc::winsize>() };
-    // SAFETY: `STDOUT_FILENO` 是当前进程的标准输出 fd，若不是终端会返回错误。
+    // SAFETY: `STDOUT_FILENO` is the current process stdout fd; `ioctl` returns an error if it is not a terminal.
     let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut winsize) };
     if result != 0 || winsize.ws_col == 0 || winsize.ws_row == 0 {
         return None;
@@ -913,7 +913,7 @@ fn install_shell_signal_handlers() {
     SHELL_SIGINT_RECEIVED.store(false, Ordering::SeqCst);
     SHELL_SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
 
-    // SAFETY: 为当前 CLI 进程安装简单信号处理器，仅写原子标记，不执行非异步信号安全操作。
+    // SAFETY: Installs a simple signal handler for the current CLI process; it only writes an atomic flag and performs no async-signal-unsafe operations.
     unsafe {
         libc::signal(
             libc::SIGINT,
@@ -951,7 +951,7 @@ fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
         target = ?args.target,
         pool_size = DEFAULT_POOL_SIZE,
         iterations = DEFAULT_BENCH_ITERATIONS,
-        "准备执行 bench 子命令"
+        "preparing to execute bench subcommand"
     );
 
     let raw_output = capture_benchmark_output(|| {
@@ -969,13 +969,13 @@ fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
 
     let note = match args.target {
         BenchTarget::ColdStart => {
-            "当前 bench 子命令复用 run_pool_benchmark，输出同时包含冷启动与热获取摘要。"
+            "The bench subcommand reuses run_pool_benchmark; output includes both cold start and hot acquire summaries."
         }
         BenchTarget::HotAcquire => {
-            "当前 bench 子命令复用 run_pool_benchmark，重点请关注热获取 acquire 指标。"
+            "The bench subcommand reuses run_pool_benchmark; focus on the hot acquire metrics."
         }
         BenchTarget::WarmThroughput => {
-            "当前公共 API 仅暴露综合预热池基准；warm-throughput 如需更细粒度分析，请结合 criterion bench。"
+            "The public API only exposes a combined pool benchmark; for finer-grained warm-throughput analysis, use criterion benchmarks directly."
         }
     };
 
@@ -989,7 +989,7 @@ fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
 }
 
 fn handle_version() -> VersionResponse {
-    info!("准备输出版本信息");
+    info!("preparing to print version info");
 
     let mut enabled_features = Vec::new();
     if cfg!(feature = "wasm") {
@@ -1118,12 +1118,12 @@ fn handle_run_via_sdk(
         timeout_secs = config.timeout.as_ref().map(Duration::as_secs),
         deny_network,
         allow_fork,
-        "使用 SDK 智能路由执行命令"
+        "executing command via SDK smart routing"
     );
 
     let mut sandbox = SdkSandbox::with_config(config).map_err(|error| {
         let cli_error = map_sdk_error(error);
-        error!(code = cli_error.code(), message = %cli_error, "SDK 沙箱初始化失败");
+        error!(code = cli_error.code(), message = %cli_error, "SDK sandbox initialization failed");
         cli_error
     })?;
 
@@ -1141,7 +1141,7 @@ fn handle_run_via_sdk(
                     error!(
                         code = error.code(),
                         message = %error,
-                        "SDK 执行成功后无法解析实际后端"
+                        "failed to resolve actual backend after SDK execution succeeded"
                     );
                     error
                 })?;
@@ -1152,12 +1152,12 @@ fn handle_run_via_sdk(
                     code = cli_error.code(),
                     message = %cli_error,
                     backend = ?backend,
-                    "SDK 执行成功后销毁沙箱失败"
+                    "failed to destroy sandbox after SDK execution succeeded"
                 );
                 cli_error
             })?;
 
-            info!(backend = ?backend, "SDK 执行成功并完成沙箱销毁");
+            info!(backend = ?backend, "SDK execution succeeded, sandbox destroyed");
             Ok(RunExecution {
                 backend,
                 result: sdk_result_into_sandbox_result(result),
@@ -1168,7 +1168,7 @@ fn handle_run_via_sdk(
             error!(
                 code = cli_error.code(),
                 message = %cli_error,
-                "SDK 执行命令失败"
+                "SDK command execution failed"
             );
 
             if let Err(destroy_error) = sandbox.destroy() {
@@ -1176,10 +1176,10 @@ fn handle_run_via_sdk(
                 error!(
                     code = destroy_cli_error.code(),
                     message = %destroy_cli_error,
-                    "SDK 执行失败后销毁沙箱也失败"
+                    "failed to destroy sandbox after SDK execution failure"
                 );
             } else {
-                warn!("SDK 执行失败后已完成沙箱销毁");
+                warn!("sandbox destroyed after SDK execution failure");
             }
             Err(cli_error)
         }
@@ -1213,7 +1213,7 @@ fn destroy_sdk_sandbox_quietly(sandbox: SdkSandbox, context: &str) {
 }
 
 fn apply_stderr_fallback(stderr: &mut Vec<u8>, fallback: Vec<u8>) {
-    // 优先使用后端显式返回的 stderr；只有后端遗漏时才使用进程级兜底捕获。
+    // Prefer stderr explicitly returned by the backend; use process-level fallback capture only when missing.
     if stderr.is_empty() && !fallback.is_empty() {
         *stderr = fallback;
     }
@@ -1271,13 +1271,13 @@ fn emit_error_json(error: &CliError) -> Result<(), CliError> {
 
 #[cfg(target_os = "linux")]
 fn execute_os_backend(config: SandboxConfig, argv: &[String]) -> Result<SandboxResult, CliError> {
-    info!("使用 Linux OS 后端执行命令");
+    info!("executing command via Linux OS backend");
     execute_with_sandbox::<LinuxSandbox>(config, argv)
 }
 
 #[cfg(target_os = "macos")]
 fn execute_os_backend(config: SandboxConfig, argv: &[String]) -> Result<SandboxResult, CliError> {
-    info!("使用 macOS OS 后端执行命令");
+    info!("executing command via macOS OS backend");
     execute_with_sandbox::<MacOsSandbox>(config, argv)
 }
 
@@ -1288,7 +1288,7 @@ fn execute_os_backend(_config: SandboxConfig, _argv: &[String]) -> Result<Sandbo
 
 #[cfg(feature = "wasm")]
 fn execute_wasm_backend(config: SandboxConfig, argv: &[String]) -> Result<SandboxResult, CliError> {
-    info!("使用 Wasm 后端执行命令");
+    info!("executing command via Wasm backend");
     execute_with_sandbox::<WasmSandbox>(config, argv)
 }
 
@@ -1306,7 +1306,7 @@ fn execute_kvm_backend(
     argv: &[String],
     args: &RunArgs,
 ) -> Result<SandboxResult, CliError> {
-    info!("使用 KVM microVM 后端执行命令");
+    info!("executing command via KVM microVM backend");
 
     let memory_limit_mb = config.memory_limit_mb.unwrap_or(DEFAULT_MEMORY_MB);
     let memory_mb = u32::try_from(memory_limit_mb).map_err(|_| {
@@ -1379,7 +1379,7 @@ where
         }
         Err(error) => {
             if let Err(destroy_error) = sandbox.destroy() {
-                warn!(message = %destroy_error, "执行失败后销毁沙箱也失败");
+                warn!(message = %destroy_error, "failed to destroy sandbox after execution failure");
             }
             Err(error.into())
         }
@@ -1396,7 +1396,7 @@ where
     String::from_utf8(output).map_err(|error| {
         CliError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("stdout 捕获结果不是有效 UTF-8: {error}"),
+            format!("captured stdout is not valid UTF-8: {error}"),
         ))
     })
 }
@@ -1432,7 +1432,7 @@ where
 {
     let _capture_guard = fd_capture_lock()
         .lock()
-        .map_err(|_| CliError::Io(io::Error::other("fd 捕获锁已中毒")))?;
+        .map_err(|_| CliError::Io(io::Error::other("fd capture lock poisoned")))?;
     let mut capture = FdCapture::start(target_fd)?;
     let outcome = if target_fd == libc::STDERR_FILENO {
         let _guard = StderrLoggingGuard::suspend();
@@ -1463,26 +1463,26 @@ impl FdCapture {
         flush_standard_fd(target_fd)?;
 
         let mut pipe_fds = [-1; 2];
-        // SAFETY: `pipe_fds` 指向两个有效的 `c_int` 槽位，`pipe` 会在成功时写入读写端。
+        // SAFETY: `pipe_fds` points to two valid `c_int` slots; `pipe` writes the read and write ends on success.
         let pipe_result = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
         if pipe_result != 0 {
             return Err(CliError::Io(io::Error::last_os_error()));
         }
 
-        // SAFETY: `pipe` 成功后返回的 fd 所有权转移到 `File` / `OwnedFd`，且只接管一次。
+        // SAFETY: Ownership of fds returned by `pipe` is transferred to `File` / `OwnedFd` exactly once.
         let read_file = unsafe { File::from_raw_fd(pipe_fds[0]) };
-        // SAFETY: `pipe` 成功后返回的 fd 所有权转移到 `OwnedFd`，且只接管一次。
+        // SAFETY: Ownership of fds returned by `pipe` is transferred to `OwnedFd` exactly once.
         let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
 
-        // SAFETY: `dup` 复制当前目标 fd，返回一个新的独立 fd。
+        // SAFETY: `dup` duplicates the current target fd and returns a new independent fd.
         let saved_fd_raw = unsafe { libc::dup(target_fd) };
         if saved_fd_raw < 0 {
             return Err(CliError::Io(io::Error::last_os_error()));
         }
-        // SAFETY: `dup` 成功返回的新 fd 在此转交给 `OwnedFd` 独占管理。
+        // SAFETY: The fd returned by successful `dup` is transferred here to exclusive `OwnedFd` ownership.
         let saved_fd = unsafe { OwnedFd::from_raw_fd(saved_fd_raw) };
 
-        // SAFETY: 将目标 fd 重定向到管道写端。两个 fd 都是当前进程中有效的打开文件描述符。
+        // SAFETY: Redirects the target fd to the pipe write end. Both fds are valid open descriptors in this process.
         let dup_result = unsafe { libc::dup2(write_fd.as_raw_fd(), target_fd) };
         if dup_result < 0 {
             return Err(CliError::Io(io::Error::last_os_error()));
@@ -1509,7 +1509,7 @@ impl FdCapture {
         flush_standard_fd(self.target_fd)?;
 
         if let Some(saved_fd) = self.saved_fd.as_ref() {
-            // SAFETY: `saved_fd` 是前面通过 `dup` 复制出的合法 fd，可安全恢复到原始标准流。
+            // SAFETY: `saved_fd` is a valid fd duplicated earlier via `dup`, so it can safely restore the original standard stream.
             let restore_result = unsafe { libc::dup2(saved_fd.as_raw_fd(), self.target_fd) };
             if restore_result < 0 {
                 return Err(CliError::Io(io::Error::last_os_error()));
@@ -1544,7 +1544,7 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     } else if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
     } else {
-        "未知 panic".to_string()
+        "unknown panic".to_string()
     }
 }
 
@@ -1600,7 +1600,7 @@ impl Write for SharedFileGuard {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::other("日志文件锁已中毒"))?;
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.write(buf)
     }
 
@@ -1608,7 +1608,7 @@ impl Write for SharedFileGuard {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::other("日志文件锁已中毒"))?;
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.flush()
     }
 }
@@ -1652,7 +1652,7 @@ mod tests {
             "--deny-network",
             "--allow-fork",
         ])
-        .expect("run 子命令应解析成功");
+        .expect("run subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Run(args) => {
@@ -1664,7 +1664,7 @@ mod tests {
                 assert!(!args.allow_network);
                 assert!(args.allow_fork);
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
@@ -1678,7 +1678,7 @@ mod tests {
             "--command",
             "/bin/echo hello",
         ])
-        .expect("最小 run 子命令应解析成功");
+        .expect("minimal run subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Run(args) => {
@@ -1689,27 +1689,27 @@ mod tests {
                 assert!(!args.allow_network);
                 assert!(!args.allow_fork);
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
     #[test]
     fn run_subcommand_defaults_to_auto_backend() {
         let cli = Cli::try_parse_from(["mimobox", "run", "--command", "/bin/echo hello"])
-            .expect("未显式指定 backend 时应默认走 auto");
+            .expect("should default to auto when backend is not specified");
 
         match cli.command {
             CliCommand::Run(args) => {
                 assert_eq!(args.backend, Backend::Auto);
                 assert_eq!(args.command, "/bin/echo hello");
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
     #[test]
     fn shell_subcommand_parses_expected_defaults() {
-        let cli = Cli::try_parse_from(["mimobox", "shell"]).expect("shell 子命令应解析成功");
+        let cli = Cli::try_parse_from(["mimobox", "shell"]).expect("shell subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Shell(args) => {
@@ -1720,7 +1720,7 @@ mod tests {
                 assert!(!args.deny_network);
                 assert!(!args.allow_network);
             }
-            _ => panic!("应解析为 shell 子命令"),
+            _ => panic!("expected shell subcommand"),
         }
     }
 
@@ -1746,7 +1746,7 @@ mod tests {
             "--vcpu-count",
             "2",
         ])
-        .expect("snapshot 子命令应解析成功");
+        .expect("snapshot subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Snapshot(args) => {
@@ -1760,7 +1760,7 @@ mod tests {
                 assert_eq!(args.rootfs.as_deref(), Some("/tmp/rootfs.cpio.gz"));
                 assert_eq!(args.vcpu_count, 2);
             }
-            _ => panic!("应解析为 snapshot 子命令"),
+            _ => panic!("expected snapshot subcommand"),
         }
     }
 
@@ -1774,14 +1774,14 @@ mod tests {
             "--command",
             "/bin/echo hello",
         ])
-        .expect("restore 子命令应解析成功");
+        .expect("restore subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Restore(args) => {
                 assert_eq!(args.snapshot, "/tmp/base.snap");
                 assert_eq!(args.command, "/bin/echo hello");
             }
-            _ => panic!("应解析为 restore 子命令"),
+            _ => panic!("expected restore subcommand"),
         }
     }
 
@@ -1856,7 +1856,7 @@ mod tests {
             "/bin/echo hello",
             "--allow-network",
         ])
-        .expect("allow-network 参数应解析成功");
+        .expect("allow-network flag should parse successfully");
 
         match cli.command {
             CliCommand::Run(args) => {
@@ -1864,7 +1864,7 @@ mod tests {
                 assert!(args.allow_network);
                 assert!(!resolve_run_deny_network(&args));
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
@@ -1878,7 +1878,7 @@ mod tests {
             "--deny-network",
             "--allow-network",
         ])
-        .expect_err("互斥网络参数不应同时出现");
+        .expect_err("conflicting network flags should not both be present");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
@@ -1899,7 +1899,7 @@ mod tests {
             "--vcpu-count",
             "2",
         ])
-        .expect("kvm run 子命令应解析成功");
+        .expect("kvm run subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Run(args) => {
@@ -1908,7 +1908,7 @@ mod tests {
                 assert_eq!(args.rootfs.as_deref(), Some("/tmp/rootfs.cpio.gz"));
                 assert_eq!(args.vcpu_count, 2);
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
@@ -1922,7 +1922,7 @@ mod tests {
             "--command",
             "/bin/echo hello",
         ])
-        .expect("最小 kvm run 子命令应解析成功");
+        .expect("minimal kvm run subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Run(args) => {
@@ -1931,20 +1931,20 @@ mod tests {
                 assert_eq!(args.rootfs, None);
                 assert_eq!(args.vcpu_count, 1);
             }
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
     #[test]
     fn bench_subcommand_parses_target() {
         let cli = Cli::try_parse_from(["mimobox", "bench", "--target", "hot-acquire"])
-            .expect("bench 子命令应解析成功");
+            .expect("bench subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Bench(args) => {
                 assert_eq!(args.target, BenchTarget::HotAcquire);
             }
-            _ => panic!("应解析为 bench 子命令"),
+            _ => panic!("expected bench subcommand"),
         }
     }
 
@@ -1958,28 +1958,28 @@ mod tests {
             "--pool-size",
             "8",
         ])
-        .expect_err("bench 子命令不应再接受 pool 参数");
+        .expect_err("bench subcommand should no longer accept pool flags");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
     fn doctor_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "doctor"]).expect("doctor 子命令应解析成功");
+        let cli = Cli::try_parse_from(["mimobox", "doctor"]).expect("doctor subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Doctor));
     }
 
     #[test]
     fn setup_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "setup"]).expect("setup 子命令应解析成功");
+        let cli = Cli::try_parse_from(["mimobox", "setup"]).expect("setup subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Setup));
     }
 
     #[test]
     fn version_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "version"]).expect("version 子命令应解析成功");
+        let cli = Cli::try_parse_from(["mimobox", "version"]).expect("version subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Version));
     }
@@ -1994,11 +1994,11 @@ mod tests {
             "--command",
             "/bin/echo hello",
         ])
-        .expect("run 子命令应接受 kvm 后端");
+        .expect("run subcommand should accept kvm backend");
 
         match cli.command {
             CliCommand::Run(args) => assert_eq!(args.backend, Backend::Kvm),
-            _ => panic!("应解析为 run 子命令"),
+            _ => panic!("expected run subcommand"),
         }
     }
 
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn command_parser_rejects_unbalanced_quotes() {
-        let error = parse_command("/bin/sh -c 'echo").expect_err("未闭合引号应返回错误");
+        let error = parse_command("/bin/sh -c 'echo").expect_err("unclosed quotes should return error");
 
         assert_eq!(error.code(), "command_parse_error");
     }
@@ -2026,7 +2026,7 @@ mod tests {
     #[test]
     fn sdk_config_error_is_preserved_in_cli_error() {
         let error = handle_run_via_sdk("/bin/sh -c 'echo", Some(128), Some(5), true, false)
-            .expect_err("SDK 配置错误应映射为 CLI 错误");
+            .expect_err("SDK config error should map to CLI error");
 
         assert_eq!(error.code(), "sdk_error");
         assert!(error.to_string().contains("config error"));
@@ -2054,7 +2054,7 @@ mod tests {
             rootfs: None,
             vcpu_count: 1,
         })
-        .expect("auto 路由执行应成功");
+        .expect("auto routing execution should succeed");
 
         assert_eq!(response.backend, Backend::Os);
         assert_eq!(response.requested_backend, Backend::Auto);
@@ -2160,13 +2160,13 @@ mod tests {
     #[test]
     fn capture_stderr_bytes_reads_process_stderr() {
         let (value, stderr) = capture_stderr_bytes(|| {
-            // 直接写入并刷新标准错误，避免 eprint! 的缓冲层绕过底层 fd 2 捕获。
+            // Write and flush stderr directly so eprint!'s buffering layer does not bypass fd 2 capture.
             let mut stderr = io::stderr();
-            write!(stderr, "fail").expect("写入 stderr 应成功");
-            stderr.flush().expect("刷新 stderr 应成功");
+            write!(stderr, "fail").expect("writing to stderr should succeed");
+            stderr.flush().expect("flushing stderr should succeed");
             7
         })
-        .expect("stderr 捕获应成功");
+        .expect("stderr capture should succeed");
 
         assert_eq!(value, 7);
         assert_eq!(stderr, b"fail");

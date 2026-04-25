@@ -270,6 +270,16 @@ class Sandbox:
         """
         ...
 
+    def close(self) -> None:
+        """Explicitly release sandbox resources.
+
+        Calling this method multiple times is safe; subsequent calls are no-ops.
+
+        Raises:
+            SandboxError: If sandbox destruction fails.
+        """
+        ...
+
     def __enter__(self) -> "Sandbox": ...
     def __exit__(
         self,

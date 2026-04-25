@@ -529,6 +529,18 @@ impl PySandbox {
         Ok(response.into())
     }
 
+    /// Release sandbox resources.
+    ///
+    /// Safe to call multiple times; subsequent calls after the first are no-ops.
+    /// Also called automatically by the context manager exit.
+    fn close(&mut self) -> PyResult<()> {
+        if let Some(sandbox) = self.inner.take() {
+            sandbox.destroy().map_err(map_sdk_error)?;
+        }
+
+        Ok(())
+    }
+
     /// Support `with Sandbox() as sandbox:` usage. Returns self.
     fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
@@ -543,7 +555,7 @@ impl PySandbox {
         _exc: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.close().map_err(map_sdk_error)?;
+        self.close()?;
         Ok(false)
     }
 }
@@ -555,13 +567,6 @@ impl PySandbox {
             .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))
     }
 
-    fn close(&mut self) -> Result<(), SdkError> {
-        if let Some(sandbox) = self.inner.take() {
-            sandbox.destroy()?;
-        }
-
-        Ok(())
-    }
 }
 
 fn build_python_config(

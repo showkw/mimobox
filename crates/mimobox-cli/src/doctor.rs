@@ -51,7 +51,7 @@ pub fn run_doctor() -> i32 {
     let mut handle = stdout.lock();
 
     if let Err(error) = render_doctor_report(&mut handle, &results) {
-        eprintln!("doctor 输出失败: {error}");
+        eprintln!("doctor output failed: {error}");
         return 2;
     }
 
@@ -63,7 +63,7 @@ pub fn run_setup() -> i32 {
     let mut handle = stdout.lock();
 
     if let Err(error) = render_setup_header(&mut handle) {
-        eprintln!("setup 输出失败: {error}");
+        eprintln!("setup output failed: {error}");
         return 2;
     }
 
@@ -84,10 +84,10 @@ pub fn run_setup() -> i32 {
 
     if let Err(error) = ensure_directory_exists(&app_home) {
         let result = CheckResult {
-            name: "mimobox 目录".to_string(),
+            name: "mimobox directory".to_string(),
             status: CheckStatus::Fail,
-            message: format!("创建目录失败: {} ({error})", app_home.display()),
-            hint: Some("请检查 HOME 目录权限后重试".to_string()),
+            message: format!("failed to create directory: {} ({error})", app_home.display()),
+            hint: Some("check HOME directory permissions and retry".to_string()),
         };
         let _ = render_check(&mut handle, &result);
         return 2;
@@ -95,10 +95,10 @@ pub fn run_setup() -> i32 {
 
     if let Err(error) = ensure_directory_exists(&assets_dir) {
         let result = CheckResult {
-            name: "资产目录".to_string(),
+            name: "assets directory".to_string(),
             status: CheckStatus::Fail,
-            message: format!("创建目录失败: {} ({error})", assets_dir.display()),
-            hint: Some("请检查 HOME 目录权限后重试".to_string()),
+            message: format!("failed to create directory: {} ({error})", assets_dir.display()),
+            hint: Some("check HOME directory permissions and retry".to_string()),
         };
         let _ = render_check(&mut handle, &result);
         return 2;
@@ -111,12 +111,12 @@ pub fn run_setup() -> i32 {
         if writeln!(&mut handle).is_err() {
             return 2;
         }
-        if writeln!(&mut handle, "正在准备 VM 资产...").is_err() {
+        if writeln!(&mut handle, "Preparing VM assets...").is_err() {
             return 2;
         }
         if writeln!(
             &mut handle,
-            "默认资产目录: {}",
+            "Default assets directory: {}",
             vm_asset_paths.assets_dir.display()
         )
         .is_err()
@@ -126,16 +126,16 @@ pub fn run_setup() -> i32 {
 
         match crate::asset_download::download_vm_assets(&vm_asset_paths.assets_dir, &mut handle) {
             Ok(true) => {
-                let _ = writeln!(&mut handle, "  预构建资产下载完成");
+                let _ = writeln!(&mut handle, "  Pre-built assets downloaded");
             }
             Ok(false) => {
-                let _ = writeln!(&mut handle, "  预构建资产不可用，回退本地构建...");
+                let _ = writeln!(&mut handle, "  Pre-built assets unavailable, falling back to local build...");
                 if let Err(exit_code) = build_missing_vm_assets(&mut handle, &vm_asset_paths) {
                     return exit_code;
                 }
             }
             Err(error) => {
-                let _ = writeln!(&mut handle, "  预构建资产下载失败: {error}");
+                let _ = writeln!(&mut handle, "  Pre-built asset download failed: {error}");
                 if let Err(exit_code) = build_missing_vm_assets(&mut handle, &vm_asset_paths) {
                     return exit_code;
                 }
@@ -144,7 +144,7 @@ pub fn run_setup() -> i32 {
 
         if writeln!(
             &mut handle,
-            "资产已安装到 {}",
+            "Assets installed to {}",
             vm_asset_paths.assets_dir.display()
         )
         .is_err()
@@ -153,25 +153,25 @@ pub fn run_setup() -> i32 {
         }
     } else if !is_linux {
         let result = CheckResult {
-            name: "VM 资产引导".to_string(),
+            name: "VM asset bootstrap".to_string(),
             status: CheckStatus::Skip,
-            message: "当前平台不是 Linux，跳过 microVM 资产构建".to_string(),
+            message: "Not on Linux; skipping microVM asset build".to_string(),
             hint: None,
         };
         let _ = render_check(&mut handle, &result);
     } else if !kvm_feature_enabled {
         let result = CheckResult {
-            name: "VM 资产引导".to_string(),
+            name: "VM asset bootstrap".to_string(),
             status: CheckStatus::Skip,
-            message: "当前构建未启用 VM feature（Cargo feature: kvm）".to_string(),
-            hint: Some("如需 microVM，请使用 `--features kvm` 重新编译 mimobox-cli".to_string()),
+            message: "VM feature not enabled in current build (Cargo feature: kvm)".to_string(),
+            hint: Some("For microVM support, rebuild mimobox-cli with `--features kvm`".to_string()),
         };
         let _ = render_check(&mut handle, &result);
     } else {
         let result = CheckResult {
-            name: "VM 资产引导".to_string(),
+            name: "VM asset bootstrap".to_string(),
             status: CheckStatus::Ok,
-            message: format!("资产已就绪: {}", vm_asset_paths.assets_dir.display()),
+            message: format!("Assets ready: {}", vm_asset_paths.assets_dir.display()),
             hint: None,
         };
         let _ = render_check(&mut handle, &result);
@@ -180,14 +180,14 @@ pub fn run_setup() -> i32 {
     if writeln!(&mut handle).is_err() {
         return 2;
     }
-    if writeln!(&mut handle, "重新运行 doctor 验证环境...").is_err() {
+    if writeln!(&mut handle, "Re-running doctor to verify environment...").is_err() {
         return 2;
     }
 
     let results = collect_doctor_results();
     let exit_code = exit_code_for_results(&results);
     if let Err(error) = render_doctor_report(&mut handle, &results) {
-        eprintln!("setup 验证输出失败: {error}");
+        eprintln!("setup verification output failed: {error}");
         return 2;
     }
 
@@ -195,7 +195,7 @@ pub fn run_setup() -> i32 {
 }
 
 fn render_setup_header(writer: &mut impl Write) -> io::Result<()> {
-    writeln!(writer, "检查 mimobox 运行环境...")
+    writeln!(writer, "Checking mimobox runtime environment...")
 }
 
 fn collect_doctor_results() -> Vec<CheckResult> {
@@ -229,7 +229,7 @@ fn render_doctor_report(writer: &mut impl Write, results: &[CheckResult]) -> io:
         .count();
 
     writeln!(writer)?;
-    writeln!(writer, "{warnings} 个警告，{errors} 个错误")
+    writeln!(writer, "{warnings} warning(s), {errors} error(s)")
 }
 
 fn render_check(writer: &mut impl Write, result: &CheckResult) -> io::Result<()> {
@@ -242,7 +242,7 @@ fn render_check(writer: &mut impl Write, result: &CheckResult) -> io::Result<()>
     )?;
 
     if let Some(hint) = result.hint.as_deref() {
-        writeln!(writer, "   建议: {hint}")?;
+        writeln!(writer, "   hint: {hint}")?;
     }
 
     Ok(())
@@ -280,12 +280,12 @@ impl CheckStatus {
 fn check_os() -> CheckResult {
     let os_name =
         run_command_output("uname", &["-s"]).unwrap_or_else(|| env::consts::OS.to_string());
-    let version = run_command_output("uname", &["-r"]).unwrap_or_else(|| "未知版本".to_string());
+    let version = run_command_output("uname", &["-r"]).unwrap_or_else(|| "unknown version".to_string());
     let arch =
         run_command_output("uname", &["-m"]).unwrap_or_else(|| env::consts::ARCH.to_string());
 
     CheckResult {
-        name: "操作系统".to_string(),
+        name: "Operating System".to_string(),
         status: CheckStatus::Ok,
         message: format!("{os_name} {version} ({arch})"),
         hint: None,
@@ -305,9 +305,9 @@ fn check_kvm_or_seatbelt() -> CheckResult {
 
     #[allow(unreachable_code)]
     CheckResult {
-        name: "平台依赖".to_string(),
+        name: "Platform dependencies".to_string(),
         status: CheckStatus::Skip,
-        message: "当前平台暂无额外运行时探测".to_string(),
+        message: "No additional runtime probes for this platform".to_string(),
         hint: None,
     }
 }
@@ -321,16 +321,16 @@ fn check_kvm() -> CheckResult {
             return CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
-                message: "未找到 /dev/kvm".to_string(),
-                hint: Some("请确认宿主机已启用硬件虚拟化，并安装 KVM 内核模块".to_string()),
+                message: "/dev/kvm not found".to_string(),
+                hint: Some("Ensure hardware virtualization is enabled on the host and the KVM kernel module is installed".to_string()),
             };
         }
         Err(error) => {
             return CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("读取 /dev/kvm 失败: {error}"),
-                hint: Some("请检查 /dev/kvm 是否存在且当前用户有访问权限".to_string()),
+                message: format!("Failed to read /dev/kvm: {error}"),
+                hint: Some("Check that /dev/kvm exists and the current user has access".to_string()),
             };
         }
     };
@@ -344,16 +344,16 @@ fn check_kvm() -> CheckResult {
             return CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("/dev/kvm 存在，但当前用户无读写权限 ({permissions})"),
-                hint: Some("请将当前用户加入 `kvm` 组，或调整 /dev/kvm 权限后重试".to_string()),
+                message: format!("/dev/kvm exists but current user lacks read/write permissions ({permissions})"),
+                hint: Some("Add the current user to the kvm group or adjust /dev/kvm permissions".to_string()),
             };
         }
         Err(error) => {
             return CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("打开 /dev/kvm 失败: {error}"),
-                hint: Some("请确认宿主机支持 KVM，且当前容器/虚机已透传 /dev/kvm".to_string()),
+                message: format!("Failed to open /dev/kvm: {error}"),
+                hint: Some("Ensure the host supports KVM and /dev/kvm is passed through to the container/VM".to_string()),
             };
         }
     };
@@ -362,14 +362,14 @@ fn check_kvm() -> CheckResult {
         Ok(version) => CheckResult {
             name: "KVM".to_string(),
             status: CheckStatus::Ok,
-            message: format!("/dev/kvm 可访问 ({permissions}, API v{version})"),
+            message: format!("/dev/kvm accessible ({permissions}, API v{version})"),
             hint: None,
         },
         Err(error) => CheckResult {
             name: "KVM".to_string(),
             status: CheckStatus::Warn,
-            message: format!("/dev/kvm 可访问 ({permissions})，但读取 API 版本失败: {error}"),
-            hint: Some("请确认内核 KVM 接口可用，或在宿主机上重新加载 KVM 模块".to_string()),
+            message: format!("/dev/kvm accessible ({permissions}) but failed to read API version: {error}"),
+            hint: Some("Ensure the kernel KVM interface is available or reload the KVM module on the host".to_string()),
         },
     }
 }
@@ -379,7 +379,7 @@ fn check_kvm() -> CheckResult {
     CheckResult {
         name: "KVM".to_string(),
         status: CheckStatus::Skip,
-        message: "当前平台不是 Linux，跳过 /dev/kvm 检查".to_string(),
+        message: "Not on Linux; skipping /dev/kvm check".to_string(),
         hint: None,
     }
 }
@@ -395,9 +395,9 @@ fn check_seatbelt() -> CheckResult {
             return CheckResult {
                 name: "Seatbelt".to_string(),
                 status: CheckStatus::Fail,
-                message: "未找到 sandbox-exec".to_string(),
+                message: "sandbox-exec not found".to_string(),
                 hint: Some(
-                    "当前 macOS 环境缺少 Seatbelt 入口，mimobox OS 后端将不可用".to_string(),
+                    "Seatbelt entry point missing in current macOS environment; mimobox OS backend will be unavailable".to_string(),
                 ),
             };
         }
@@ -405,8 +405,8 @@ fn check_seatbelt() -> CheckResult {
             return CheckResult {
                 name: "Seatbelt".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("执行 sandbox-exec 探测失败: {error}"),
-                hint: Some("请检查系统策略或终端权限，确认 sandbox-exec 可执行".to_string()),
+                message: format!("sandbox-exec probe failed: {error}"),
+                hint: Some("Check system policy or terminal permissions to ensure sandbox-exec is executable".to_string()),
             };
         }
     };
@@ -415,20 +415,20 @@ fn check_seatbelt() -> CheckResult {
         return CheckResult {
             name: "Seatbelt".to_string(),
             status: CheckStatus::Ok,
-            message: "sandbox-exec 可用".to_string(),
+            message: "sandbox-exec available".to_string(),
             hint: None,
         };
     }
 
     let stderr = first_non_empty_line(&String::from_utf8_lossy(&output.stderr))
-        .unwrap_or("sandbox-exec 返回非零退出码")
+        .unwrap_or("sandbox-exec returned non-zero exit code")
         .to_string();
     CheckResult {
         name: "Seatbelt".to_string(),
         status: CheckStatus::Warn,
-        message: format!("sandbox-exec 探测返回异常: {stderr}"),
+        message: format!("sandbox-exec probe returned unexpected result: {stderr}"),
         hint: Some(
-            "如当前系统已弃用 sandbox-exec，请改用支持的 macOS 版本或调整后端策略".to_string(),
+            "If sandbox-exec is deprecated on this system, use a supported macOS version or adjust backend strategy".to_string(),
         ),
     }
 }
@@ -439,7 +439,7 @@ fn check_seatbelt() -> CheckResult {
     CheckResult {
         name: "Seatbelt".to_string(),
         status: CheckStatus::Skip,
-        message: "当前平台不是 macOS，跳过 sandbox-exec 检查".to_string(),
+        message: "Not on macOS; skipping sandbox-exec check".to_string(),
         hint: None,
     }
 }
@@ -447,25 +447,25 @@ fn check_seatbelt() -> CheckResult {
 fn check_memory() -> CheckResult {
     match detect_memory_bytes() {
         Ok(memory_bytes) if memory_bytes >= MIN_VM_MEMORY_BYTES => CheckResult {
-            name: "内存".to_string(),
+            name: "Memory".to_string(),
             status: CheckStatus::Ok,
-            message: format!("{} 可用，建议 4GB+ 用于 VM", human_bytes(memory_bytes)),
+            message: format!("{} available (4GB+ recommended for VM)", human_bytes(memory_bytes)),
             hint: None,
         },
         Ok(memory_bytes) => CheckResult {
-            name: "内存".to_string(),
+            name: "Memory".to_string(),
             status: CheckStatus::Warn,
             message: format!(
-                "{} 可用，低于建议的 4GB VM 运行门槛",
+                "{} available, below the recommended 4GB threshold for VM",
                 human_bytes(memory_bytes)
             ),
-            hint: Some("建议释放内存或提升主机可用内存后再运行 microVM".to_string()),
+            hint: Some("Free up memory or increase host memory before running microVM".to_string()),
         },
         Err(error) => CheckResult {
-            name: "内存".to_string(),
+            name: "Memory".to_string(),
             status: CheckStatus::Warn,
-            message: format!("读取内存信息失败: {error}"),
-            hint: Some("请确认当前系统允许读取内存统计信息".to_string()),
+            message: format!("Failed to read memory info: {error}"),
+            hint: Some("Ensure the system allows reading memory statistics".to_string()),
         },
     }
 }
@@ -477,14 +477,14 @@ fn check_seccomp() -> CheckResult {
             Ok(mode) => CheckResult {
                 name: "seccomp".to_string(),
                 status: CheckStatus::Ok,
-                message: format!("内核支持（当前进程模式 {mode}）"),
+                message: format!("kernel supported (current process mode {mode})"),
                 hint: None,
             },
             Err(error) => CheckResult {
                 name: "seccomp".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("不可用: {error}"),
-                hint: Some("请确认宿主机内核启用了 seccomp 支持".to_string()),
+                message: format!("unavailable: {error}"),
+                hint: Some("Ensure the host kernel has seccomp support enabled".to_string()),
             },
         };
     }
@@ -493,7 +493,7 @@ fn check_seccomp() -> CheckResult {
     CheckResult {
         name: "seccomp".to_string(),
         status: CheckStatus::Skip,
-        message: "仅 Linux 支持 seccomp 检查".to_string(),
+        message: "seccomp check only supported on Linux".to_string(),
         hint: None,
     }
 }
@@ -505,14 +505,14 @@ fn check_landlock() -> CheckResult {
             Ok(abi) => CheckResult {
                 name: "Landlock".to_string(),
                 status: CheckStatus::Ok,
-                message: format!("ABI v{abi} 已支持"),
+                message: format!("ABI v{abi} supported"),
                 hint: None,
             },
             Err(error) => CheckResult {
                 name: "Landlock".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("不可用: {error}"),
-                hint: Some("请确认宿主机内核版本 >= 5.13，并启用了 Landlock LSM".to_string()),
+                message: format!("unavailable: {error}"),
+                hint: Some("Ensure host kernel >= 5.13 with Landlock LSM enabled".to_string()),
             },
         };
     }
@@ -521,7 +521,7 @@ fn check_landlock() -> CheckResult {
     CheckResult {
         name: "Landlock".to_string(),
         status: CheckStatus::Skip,
-        message: "仅 Linux 支持 Landlock 检查".to_string(),
+        message: "Landlock check only supported on Linux".to_string(),
         hint: None,
     }
 }
@@ -533,23 +533,23 @@ fn check_huge_pages() -> CheckResult {
             Ok(mode) if mode == "always" || mode == "madvise" => CheckResult {
                 name: "Huge Pages".to_string(),
                 status: CheckStatus::Ok,
-                message: format!("Transparent Huge Pages 已启用（{mode}）"),
+                message: format!("Transparent Huge Pages enabled ({mode})"),
                 hint: None,
             },
             Ok(mode) => CheckResult {
                 name: "Huge Pages".to_string(),
                 status: CheckStatus::Warn,
-                message: format!("Transparent Huge Pages 当前模式为 {mode}"),
+                message: format!("Transparent Huge Pages current mode: {mode}"),
                 hint: Some(
-                    "建议将 `/sys/kernel/mm/transparent_hugepage/enabled` 调整为 `madvise` 或 `always`"
+                    "Set `/sys/kernel/mm/transparent_hugepage/enabled` to `madvise` or `always`"
                         .to_string(),
                 ),
             },
             Err(error) => CheckResult {
                 name: "Huge Pages".to_string(),
                 status: CheckStatus::Warn,
-                message: format!("读取 Transparent Huge Pages 状态失败: {error}"),
-                hint: Some("请手动检查 `/sys/kernel/mm/transparent_hugepage/enabled`".to_string()),
+                message: format!("Failed to read Transparent Huge Pages status: {error}"),
+                hint: Some("Check `/sys/kernel/mm/transparent_hugepage/enabled` manually".to_string()),
             },
         };
     }
@@ -558,27 +558,27 @@ fn check_huge_pages() -> CheckResult {
     CheckResult {
         name: "Huge Pages".to_string(),
         status: CheckStatus::Skip,
-        message: "仅 Linux 支持 Huge Pages 检查".to_string(),
+        message: "Huge Pages check only supported on Linux".to_string(),
         hint: None,
     }
 }
 
 fn check_features() -> CheckResult {
     let vm = if cfg!(feature = "kvm") {
-        "已启用"
+        "enabled"
     } else {
-        "未启用"
+        "disabled"
     };
     let wasm = if cfg!(feature = "wasm") {
-        "已启用"
+        "enabled"
     } else {
-        "未启用"
+        "disabled"
     };
 
     CheckResult {
         name: "Feature Flags".to_string(),
         status: CheckStatus::Ok,
-        message: format!("vm（Cargo feature: kvm）{vm}，wasm {wasm}"),
+        message: format!("vm (Cargo feature: kvm) {vm}, wasm {wasm}"),
         hint: None,
     }
 }
@@ -586,18 +586,18 @@ fn check_features() -> CheckResult {
 fn check_kernel_asset() -> CheckResult {
     if !cfg!(target_os = "linux") {
         return CheckResult {
-            name: "kernel 镜像".to_string(),
+            name: "kernel image".to_string(),
             status: CheckStatus::Skip,
-            message: "当前平台不是 Linux，跳过 microVM kernel 检查".to_string(),
+            message: "Not on Linux; skipping microVM kernel check".to_string(),
             hint: None,
         };
     }
 
     if !cfg!(feature = "kvm") {
         return CheckResult {
-            name: "kernel 镜像".to_string(),
+            name: "kernel image".to_string(),
             status: CheckStatus::Skip,
-            message: "当前构建未启用 VM feature（Cargo feature: kvm）".to_string(),
+            message: "VM feature not enabled in current build (Cargo feature: kvm)".to_string(),
             hint: None,
         };
     }
@@ -605,7 +605,7 @@ fn check_kernel_asset() -> CheckResult {
     let paths = default_vm_asset_paths();
     match fs::metadata(&paths.kernel_path) {
         Ok(metadata) => CheckResult {
-            name: "kernel 镜像".to_string(),
+            name: "kernel image".to_string(),
             status: CheckStatus::Ok,
             message: format!(
                 "{} ({})",
@@ -615,19 +615,19 @@ fn check_kernel_asset() -> CheckResult {
             hint: None,
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => CheckResult {
-            name: "kernel 镜像".to_string(),
+            name: "kernel image".to_string(),
             status: CheckStatus::Fail,
-            message: format!("缺少 {}", paths.kernel_path.display()),
+            message: format!("missing {}", paths.kernel_path.display()),
             hint: Some(
-                "请执行 `mimobox setup`，或手动运行 `scripts/build-kernel.sh` 生成 vmlinux"
+                "Run `mimobox setup`, or manually run `scripts/build-kernel.sh` to generate vmlinux"
                     .to_string(),
             ),
         },
         Err(error) => CheckResult {
-            name: "kernel 镜像".to_string(),
+            name: "kernel image".to_string(),
             status: CheckStatus::Fail,
-            message: format!("读取失败: {} ({error})", paths.kernel_path.display()),
-            hint: Some("请检查 kernel 镜像权限和路径配置".to_string()),
+            message: format!("read failed: {} ({error})", paths.kernel_path.display()),
+            hint: Some("Check kernel image permissions and path configuration".to_string()),
         },
     }
 }
@@ -637,7 +637,7 @@ fn check_rootfs_asset() -> CheckResult {
         return CheckResult {
             name: "rootfs".to_string(),
             status: CheckStatus::Skip,
-            message: "当前平台不是 Linux，跳过 microVM rootfs 检查".to_string(),
+            message: "Not on Linux; skipping microVM rootfs check".to_string(),
             hint: None,
         };
     }
@@ -646,7 +646,7 @@ fn check_rootfs_asset() -> CheckResult {
         return CheckResult {
             name: "rootfs".to_string(),
             status: CheckStatus::Skip,
-            message: "当前构建未启用 VM feature（Cargo feature: kvm）".to_string(),
+            message: "VM feature not enabled in current build (Cargo feature: kvm)".to_string(),
             hint: None,
         };
     }
@@ -666,17 +666,17 @@ fn check_rootfs_asset() -> CheckResult {
         Err(error) if error.kind() == io::ErrorKind::NotFound => CheckResult {
             name: "rootfs".to_string(),
             status: CheckStatus::Fail,
-            message: format!("缺少 {}", paths.rootfs_path.display()),
+            message: format!("missing {}", paths.rootfs_path.display()),
             hint: Some(
-                "请执行 `mimobox setup`，或手动运行 `scripts/build-rootfs.sh` 生成 rootfs.cpio.gz"
+                "Run `mimobox setup`, or manually run `scripts/build-rootfs.sh` to generate rootfs.cpio.gz"
                     .to_string(),
             ),
         },
         Err(error) => CheckResult {
             name: "rootfs".to_string(),
             status: CheckStatus::Fail,
-            message: format!("读取失败: {} ({error})", paths.rootfs_path.display()),
-            hint: Some("请检查 rootfs 权限和路径配置".to_string()),
+            message: format!("read failed: {} ({error})", paths.rootfs_path.display()),
+            hint: Some("Check rootfs permissions and path configuration".to_string()),
         },
     }
 }
@@ -687,28 +687,28 @@ fn check_toolchain() -> CheckResult {
 
     match (rustc, cargo) {
         (Some(rustc), Some(cargo)) => CheckResult {
-            name: "Rust 工具链".to_string(),
+            name: "Rust toolchain".to_string(),
             status: CheckStatus::Ok,
             message: format!("{rustc}，{cargo}"),
             hint: None,
         },
         (None, Some(cargo)) => CheckResult {
-            name: "Rust 工具链".to_string(),
+            name: "Rust toolchain".to_string(),
             status: CheckStatus::Fail,
-            message: format!("cargo 可用，但未找到 rustc ({cargo})"),
-            hint: Some("请确认 Rust toolchain 已完整安装".to_string()),
+            message: format!("cargo available but rustc not found ({cargo})"),
+            hint: Some("Ensure the Rust toolchain is fully installed".to_string()),
         },
         (Some(rustc), None) => CheckResult {
-            name: "Rust 工具链".to_string(),
+            name: "Rust toolchain".to_string(),
             status: CheckStatus::Fail,
-            message: format!("rustc 可用，但未找到 cargo ({rustc})"),
-            hint: Some("请确认 `cargo` 已加入 PATH".to_string()),
+            message: format!("rustc available but cargo not found ({rustc})"),
+            hint: Some("Ensure `cargo` is on PATH".to_string()),
         },
         (None, None) => CheckResult {
-            name: "Rust 工具链".to_string(),
+            name: "Rust toolchain".to_string(),
             status: CheckStatus::Fail,
-            message: "未找到 rustc/cargo".to_string(),
-            hint: Some("请先运行 `scripts/setup.sh` 安装 Rust 开发环境".to_string()),
+            message: "rustc/cargo not found".to_string(),
+            hint: Some("Run `scripts/setup.sh` to install the Rust development environment".to_string()),
         },
     }
 }
@@ -727,23 +727,23 @@ fn check_python_sdk() -> CheckResult {
         (Some(python), None) => CheckResult {
             name: "Python SDK".to_string(),
             status: CheckStatus::Warn,
-            message: format!("检测到 {python}，但未找到 maturin"),
+            message: format!("Detected {python} but maturin not found"),
             hint: Some(
-                "如需构建 mimobox-python，请执行 `pipx install maturin` 或 `cargo install maturin`"
+                "To build mimobox-python, run `pipx install maturin` or `cargo install maturin`"
                     .to_string(),
             ),
         },
         (None, Some(maturin)) => CheckResult {
             name: "Python SDK".to_string(),
             status: CheckStatus::Warn,
-            message: format!("检测到 {maturin}，但未找到 python3"),
-            hint: Some("如需构建 mimobox-python，请先安装 Python 3".to_string()),
+            message: format!("Detected {maturin} but python3 not found"),
+            hint: Some("To build mimobox-python, install Python 3 first".to_string()),
         },
         (None, None) => CheckResult {
             name: "Python SDK".to_string(),
             status: CheckStatus::Warn,
-            message: "未检测到 python3 / maturin（可选）".to_string(),
-            hint: Some("如果需要 Python SDK，请安装 Python 3 和 maturin".to_string()),
+            message: "python3 / maturin not detected (optional)".to_string(),
+            hint: Some("For Python SDK support, install Python 3 and maturin".to_string()),
         },
     }
 }
@@ -752,10 +752,10 @@ fn resolve_app_home_dir(home_dir: Option<PathBuf>) -> Result<PathBuf, CheckResul
     home_dir
         .map(|home| home.join(APP_HOME_SUBDIR))
         .ok_or_else(|| CheckResult {
-            name: "mimobox 目录".to_string(),
+            name: "mimobox directory".to_string(),
             status: CheckStatus::Fail,
-            message: "未找到 HOME 环境变量".to_string(),
-            hint: Some("请先设置 HOME，再执行 `mimobox setup`".to_string()),
+            message: "HOME environment variable not found".to_string(),
+            hint: Some("Set HOME first, then run `mimobox setup`".to_string()),
         })
 }
 
@@ -788,18 +788,18 @@ fn default_vm_asset_paths_for(
 fn summarize_vm_assets_for_setup() -> CheckResult {
     if !cfg!(target_os = "linux") {
         return CheckResult {
-            name: "VM 资产".to_string(),
+            name: "VM assets".to_string(),
             status: CheckStatus::Skip,
-            message: "当前平台不是 Linux，跳过资产检查".to_string(),
+            message: "Not on Linux; skipping asset check".to_string(),
             hint: None,
         };
     }
 
     if !cfg!(feature = "kvm") {
         return CheckResult {
-            name: "VM 资产".to_string(),
+            name: "VM assets".to_string(),
             status: CheckStatus::Skip,
-            message: "当前构建未启用 VM feature（Cargo feature: kvm）".to_string(),
+            message: "VM feature not enabled in current build (Cargo feature: kvm)".to_string(),
             hint: None,
         };
     }
@@ -807,9 +807,9 @@ fn summarize_vm_assets_for_setup() -> CheckResult {
     let paths = default_vm_asset_paths();
     if !missing_any_vm_asset(&paths) {
         return CheckResult {
-            name: "VM 资产".to_string(),
+            name: "VM assets".to_string(),
             status: CheckStatus::Ok,
-            message: format!("已就绪: {}", paths.assets_dir.display()),
+            message: format!("Ready: {}", paths.assets_dir.display()),
             hint: None,
         };
     }
@@ -823,10 +823,10 @@ fn summarize_vm_assets_for_setup() -> CheckResult {
     }
 
     CheckResult {
-        name: "VM 资产".to_string(),
+        name: "VM assets".to_string(),
         status: CheckStatus::Warn,
-        message: format!("缺少 {}", missing.join("、")),
-        hint: Some("setup 将尝试自动构建缺失资产".to_string()),
+        message: format!("missing {}", missing.join(", ")),
+        hint: Some("setup will attempt to build missing assets automatically".to_string()),
     }
 }
 
@@ -839,7 +839,7 @@ fn build_missing_vm_assets(writer: &mut impl Write, paths: &VmAssetPaths) -> Res
         match build_missing_kernel(writer, &paths.kernel_path) {
             Ok(()) => {}
             Err(error) => {
-                let _ = writeln!(writer, "❌ kernel 构建失败: {error}");
+                let _ = writeln!(writer, "❌ kernel build failed: {error}");
                 return Err(2);
             }
         }
@@ -849,7 +849,7 @@ fn build_missing_vm_assets(writer: &mut impl Write, paths: &VmAssetPaths) -> Res
         match build_missing_rootfs(writer, &paths.rootfs_path) {
             Ok(()) => {}
             Err(error) => {
-                let _ = writeln!(writer, "❌ rootfs 构建失败: {error}");
+                let _ = writeln!(writer, "❌ rootfs build failed: {error}");
                 return Err(2);
             }
         }
@@ -864,24 +864,24 @@ fn ensure_directory_exists(path: &Path) -> io::Result<()> {
 
 fn build_missing_kernel(writer: &mut impl Write, output_path: &Path) -> Result<(), String> {
     let script = find_script("build-kernel.sh").ok_or_else(|| {
-        "未找到 scripts/build-kernel.sh，请在仓库根目录执行 `scripts/build-kernel.sh --output <path>`"
+        "scripts/build-kernel.sh not found; run `scripts/build-kernel.sh --output <path>` from the repo root"
             .to_string()
     })?;
 
-    writeln!(writer, "  kernel (vmlinux): 构建中...").map_err(|error| error.to_string())?;
-    info!(script = %script.display(), output = %output_path.display(), "开始构建 kernel 资产");
+    writeln!(writer, "  kernel (vmlinux): building...").map_err(|error| error.to_string())?;
+    info!(script = %script.display(), output = %output_path.display(), "building kernel asset");
     run_script(&script, &[("--output", output_path.as_os_str())])?;
     writeln!(writer, "  kernel (vmlinux): ✅").map_err(|error| error.to_string())
 }
 
 fn build_missing_rootfs(writer: &mut impl Write, output_path: &Path) -> Result<(), String> {
     let script = find_script("build-rootfs.sh").ok_or_else(|| {
-        "未找到 scripts/build-rootfs.sh，请在仓库根目录执行 `scripts/build-rootfs.sh` 或自行准备 rootfs"
+        "scripts/build-rootfs.sh not found; run `scripts/build-rootfs.sh` from the repo root or prepare rootfs manually"
             .to_string()
     })?;
 
-    writeln!(writer, "  rootfs (rootfs.cpio.gz): 构建中...").map_err(|error| error.to_string())?;
-    info!(script = %script.display(), output = %output_path.display(), "开始构建 rootfs 资产");
+    writeln!(writer, "  rootfs (rootfs.cpio.gz): building...").map_err(|error| error.to_string())?;
+    info!(script = %script.display(), output = %output_path.display(), "building rootfs asset");
     run_script_with_env(&script, &[], &[("OUTPUT", output_path.as_os_str())])?;
     writeln!(writer, "  rootfs (rootfs.cpio.gz): ✅").map_err(|error| error.to_string())
 }
@@ -930,13 +930,13 @@ fn run_script_with_env(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|error| format!("启动脚本失败: {error}"))?;
+        .map_err(|error| format!("failed to start script: {error}"))?;
 
     if status.success() {
         return Ok(());
     }
 
-    Err(format!("脚本退出码异常: {status}"))
+    Err(format!("script exited with non-zero code: {status}"))
 }
 
 fn run_command_output(program: &str, args: &[&str]) -> Option<String> {
@@ -992,8 +992,8 @@ fn permission_string_from_mode(mode: u32) -> String {
 
 #[cfg(target_os = "linux")]
 fn read_kvm_api_version(file: &File) -> io::Result<i32> {
-    // SAFETY: `file` 是当前进程持有的有效 `/dev/kvm` fd，`KVM_GET_API_VERSION`
-    // 不读写用户态缓冲区，只返回一个整数版本号。
+    // SAFETY: `file` is a valid `/dev/kvm` fd held by the current process. `KVM_GET_API_VERSION`
+    // does not read or write user-space buffers and only returns an integer version.
     let version = unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_API_VERSION_IOCTL) };
     if version < 0 {
         return Err(io::Error::last_os_error());
@@ -1005,7 +1005,7 @@ fn read_kvm_api_version(file: &File) -> io::Result<i32> {
 #[cfg(target_os = "linux")]
 fn detect_memory_bytes() -> Result<u64, String> {
     let meminfo = fs::read_to_string("/proc/meminfo")
-        .map_err(|error| format!("读取 /proc/meminfo 失败: {error}"))?;
+        .map_err(|error| format!("failed to read /proc/meminfo: {error}"))?;
     parse_linux_memory_bytes(&meminfo)
 }
 
@@ -1014,22 +1014,22 @@ fn detect_memory_bytes() -> Result<u64, String> {
     let output = Command::new("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
-        .map_err(|error| format!("执行 sysctl 失败: {error}"))?;
+        .map_err(|error| format!("sysctl execution failed: {error}"))?;
 
     if !output.status.success() {
-        return Err(format!("sysctl 返回异常状态: {}", output.status));
+        return Err(format!("sysctl returned unexpected status: {}", output.status));
     }
 
     let value = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse::<u64>()
-        .map_err(|error| format!("解析 hw.memsize 失败: {error}"))?;
+        .map_err(|error| format!("failed to parse hw.memsize: {error}"))?;
     Ok(value)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn detect_memory_bytes() -> Result<u64, String> {
-    Err("当前平台暂未实现内存探测".to_string())
+    Err("memory detection not implemented for this platform".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -1045,19 +1045,19 @@ fn parse_meminfo_value(meminfo: &str, key: &str) -> Result<u64, String> {
     let line = meminfo
         .lines()
         .find(|line| line.starts_with(&prefix))
-        .ok_or_else(|| format!("未找到 {key}"))?;
+        .ok_or_else(|| format!("{key} not found"))?;
     let value = line[prefix.len()..]
         .split_whitespace()
         .next()
-        .ok_or_else(|| format!("未找到 {key} 数值"))?;
+        .ok_or_else(|| format!("{key} value not found"))?;
     value
         .parse::<u64>()
-        .map_err(|error| format!("解析 {key} 失败: {error}"))
+        .map_err(|error| format!("failed to parse {key}: {error}"))
 }
 
 #[cfg(target_os = "linux")]
 fn probe_seccomp() -> Result<i32, String> {
-    // SAFETY: `PR_GET_SECCOMP` 是纯读取操作，不修改进程状态。
+    // SAFETY: `PR_GET_SECCOMP` is a read-only operation and does not modify process state.
     let mode = unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) };
     if mode < 0 {
         return Err(io::Error::last_os_error().to_string());
@@ -1068,8 +1068,8 @@ fn probe_seccomp() -> Result<i32, String> {
 
 #[cfg(target_os = "linux")]
 fn probe_landlock_abi() -> Result<i32, String> {
-    // SAFETY: 以 `LANDLOCK_CREATE_RULESET_VERSION` 标志调用时仅探测 ABI 版本，
-    // 不创建 ruleset，也不会修改当前进程安全状态。
+    // SAFETY: With `LANDLOCK_CREATE_RULESET_VERSION`, this only probes the ABI version;
+    // it does not create a ruleset or modify the current process security state.
     let abi = unsafe {
         libc::syscall(
             libc::SYS_landlock_create_ruleset,
@@ -1089,7 +1089,7 @@ fn probe_landlock_abi() -> Result<i32, String> {
 #[cfg(target_os = "linux")]
 fn read_transparent_huge_pages() -> Result<String, String> {
     let content = fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
-        .map_err(|error| format!("读取 THP 状态失败: {error}"))?;
+        .map_err(|error| format!("failed to read THP status: {error}"))?;
 
     for token in content.split_whitespace() {
         if let Some(stripped) = token
@@ -1100,7 +1100,7 @@ fn read_transparent_huge_pages() -> Result<String, String> {
         }
     }
 
-    Err("无法解析当前 THP 模式".to_string())
+    Err("failed to parse current THP mode".to_string())
 }
 
 #[cfg(test)]
@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     fn resolve_app_home_dir_uses_hidden_directory() {
         let home_dir = PathBuf::from("/tmp/demo-home");
-        let app_home = resolve_app_home_dir(Some(home_dir.clone())).expect("应生成默认应用目录");
+        let app_home = resolve_app_home_dir(Some(home_dir.clone())).expect("should generate default app directory");
 
         assert_eq!(app_home, home_dir.join(".mimobox"));
     }
@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn parse_linux_memory_bytes_prefers_memavailable() {
         let meminfo = "MemTotal:       32768000 kB\nMemAvailable:   16384000 kB\n";
-        let bytes = parse_linux_memory_bytes(meminfo).expect("应成功解析 MemAvailable");
+        let bytes = parse_linux_memory_bytes(meminfo).expect("should successfully parse MemAvailable");
 
         assert_eq!(bytes, 16_384_000 * 1024);
     }
