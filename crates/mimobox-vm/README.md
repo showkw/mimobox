@@ -1,13 +1,58 @@
 # mimobox-vm
 
-`mimobox-vm` 提供 mimobox 的 microVM 沙箱后端，当前聚焦 Linux + KVM：
+KVM microVM sandbox backend for mimobox Agent Sandbox.
 
-- `MicrovmSandbox`
-- 快照与恢复
-- microVM 预热池与恢复池
-- 受控 HTTP 代理
-- guest 文件传输与流式执行
+`mimobox-vm` provides high-isolation Linux sandboxing using a lightweight microVM backend. It is designed for workloads that need stronger isolation than an OS-level sandbox while still keeping startup and restore latency low.
 
-该 crate 是 `mimobox-sdk` 的高级隔离后端。
+Repository: <https://github.com/showkw/mimobox>
 
-完整项目说明、示例与架构背景见仓库根目录 `README.md`。
+## Performance
+
+| Path | P50 |
+| --- | ---: |
+| Cold start | 253ms |
+| Snapshot restore, pooled | 28ms |
+| Warm pool acquire | 773us |
+
+## Features
+
+- Linux + KVM microVM lifecycle management.
+- Guest command execution through a serial command protocol.
+- Snapshot, restore, and fork workflows.
+- Warm VM pools and restore pools for lower latency.
+- Guest file transfer.
+- Streaming execution output.
+- Controlled HTTP proxy support.
+
+## Quick Start
+
+```rust
+use mimobox_core::Sandbox;
+use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = MicrovmConfig::default();
+    let mut sandbox = MicrovmSandbox::new(config)?;
+
+    let result = sandbox.execute("/bin/echo hello from microvm")?;
+    println!("{}", String::from_utf8_lossy(&result.stdout));
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+Most applications should use `mimobox-sdk` and select `IsolationLevel::MicroVm` instead of depending on this backend directly.
+
+## Feature Flags
+
+| Feature | Default | Description |
+| --- | --- | --- |
+| `kvm` | No | Enables the Linux KVM backend and virtio/vhost dependencies. |
+| `zerocopy-fork` | No | Enables experimental zero-copy fork support. |
+| `boot-profile` | No | Enables boot profiling instrumentation. |
+| `guest-vsock` | No | Enables guest vsock data-plane experiments. |
+
+## License
+
+MIT OR Apache-2.0

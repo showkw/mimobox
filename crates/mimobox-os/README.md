@@ -1,11 +1,54 @@
 # mimobox-os
 
-`mimobox-os` 提供 mimobox 的 OS 级沙箱后端实现：
+OS-level sandbox backend for mimobox Agent Sandbox.
 
-- Linux：Landlock + Seccomp + Namespaces + 资源限制
-- macOS：Seatbelt / `sandbox-exec`
-- 预热池与 PTY 会话支持
+`mimobox-os` provides low-latency process isolation for Linux and macOS. It is typically used through `mimobox-sdk`, but can also be used directly by backend integrators.
 
-该 crate 主要作为 `mimobox-sdk` 的底层后端使用。
+Repository: <https://github.com/showkw/mimobox>
 
-完整项目说明、示例与架构背景见仓库根目录 `README.md`。
+## Platform Support
+
+- Linux: Landlock, Seccomp, Namespaces, and `setrlimit`.
+- macOS: Seatbelt through `sandbox-exec`.
+- PTY support for interactive terminal sessions.
+- `SandboxPool` for extremely fast reuse.
+
+## Performance
+
+| Path | P50 |
+| --- | ---: |
+| Cold start | 8.24ms |
+| `SandboxPool` reuse | 0.19us |
+
+## Quick Start
+
+```rust
+use mimobox_core::{Sandbox, SandboxConfig};
+
+#[cfg(target_os = "linux")]
+use mimobox_os::LinuxSandbox as OsSandbox;
+
+#[cfg(target_os = "macos")]
+use mimobox_os::MacOsSandbox as OsSandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = SandboxConfig::default();
+    let mut sandbox = OsSandbox::new(config)?;
+
+    let result = sandbox.execute("/bin/echo hello from os sandbox")?;
+    println!("{}", String::from_utf8_lossy(&result.stdout));
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+For application code, prefer `mimobox-sdk` and let smart routing select the OS backend automatically.
+
+## Feature Flags
+
+This crate does not define public feature flags. Platform-specific code is selected with Rust target configuration.
+
+## License
+
+MIT OR Apache-2.0

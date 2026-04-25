@@ -1,11 +1,62 @@
 # mimobox-wasm
 
-`mimobox-wasm` 提供基于 Wasmtime 的 Wasm 沙箱后端。
+Wasm sandbox backend for mimobox Agent Sandbox, powered by Wasmtime.
 
-适用场景：
+`mimobox-wasm` provides fast startup and strong capability-oriented isolation for WebAssembly workloads. It is suitable for running trusted or untrusted Wasm modules with explicit WASI capabilities.
 
-- 受限的 Wasm / WASI 模块执行
-- 需要更快冷启动的轻量隔离场景
-- 作为 `mimobox-sdk` 的可选后端
+Repository: <https://github.com/showkw/mimobox>
 
-完整项目说明、示例与架构背景见仓库根目录 `README.md`。
+## Features
+
+- Wasmtime with Cranelift JIT.
+- WASI Preview 2 support.
+- Component Model support.
+- Content-hash-based module cache.
+- Cold start P50: 1.01ms.
+
+The SDK auto-routes `.wasm`, `.wat`, and `.wast` files to this backend when the Wasm backend is enabled.
+
+## Quick Start
+
+```rust
+use mimobox_core::{Sandbox, SandboxConfig};
+use mimobox_wasm::WasmSandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = SandboxConfig::default();
+    let mut sandbox = WasmSandbox::new(config)?;
+
+    let result = sandbox.execute("./module.wasm")?;
+    println!("exit: {:?}", result.exit_code);
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+Via `mimobox-sdk`:
+
+```rust
+use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .isolation(IsolationLevel::Wasm)
+        .build();
+
+    let mut sandbox = Sandbox::with_config(config)?;
+    let result = sandbox.execute("./module.wasm")?;
+    println!("exit: {:?}", result.exit_code);
+    Ok(())
+}
+```
+
+## Feature Flags
+
+| Feature | Default | Description |
+| --- | --- | --- |
+| `wasm` | No | Enables the public Wasm backend feature gate for downstream selection. |
+
+## License
+
+MIT OR Apache-2.0
