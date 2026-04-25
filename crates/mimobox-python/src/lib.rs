@@ -45,6 +45,8 @@ struct PyExecuteResult {
     exit_code: i32,
     #[pyo3(get)]
     timed_out: bool,
+    #[pyo3(get)]
+    elapsed: Option<f64>,
 }
 
 impl From<ExecuteResult> for PyExecuteResult {
@@ -56,6 +58,11 @@ impl From<ExecuteResult> for PyExecuteResult {
             // 并通过 timed_out 字段让调用方区分超时与正常退出。
             exit_code: result.exit_code.unwrap_or(-1),
             timed_out: result.timed_out,
+            elapsed: if result.elapsed.is_zero() {
+                None
+            } else {
+                Some(result.elapsed.as_secs_f64())
+            },
         }
     }
 }
@@ -385,6 +392,19 @@ impl PySandbox {
         })
     }
 
+    /// Wait until the sandbox is ready to accept commands.
+    #[pyo3(signature = (timeout_secs=None))]
+    fn wait_ready(&mut self, timeout_secs: Option<f64>) -> PyResult<()> {
+        let sandbox = self.inner_mut()?;
+        let timeout = parse_python_timeout(timeout_secs.unwrap_or(30.0))?;
+        sandbox.wait_ready(timeout).map_err(map_sdk_error)
+    }
+
+    /// Return whether the sandbox is currently ready.
+    fn is_ready(&self) -> bool {
+        self.inner.as_ref().map_or(false, |s| s.is_ready())
+    }
+
     /// Read a file from inside the sandbox.
     ///
     /// # Arguments
@@ -685,6 +705,7 @@ mod tests {
 
         assert_eq!(result.exit_code, -1);
         assert!(result.timed_out);
+        assert_eq!(result.elapsed, None);
     }
 
     #[test]
@@ -701,6 +722,7 @@ mod tests {
         assert_eq!(result.stderr, "\u{fffd}");
         assert_eq!(result.exit_code, 7);
         assert!(!result.timed_out);
+        assert_eq!(result.elapsed, None);
     }
 
     #[test]
