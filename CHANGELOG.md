@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Getting Started documentation
 - Competitor analysis and product strategy documents
 - rust-toolchain.toml pinning Rust edition 2024
+- MCP Server: expanded from 3 to 10 tools (create_sandbox, execute_code, execute_command, destroy_sandbox, list_sandboxes, read_file, write_file, snapshot, fork, http_request) with 28 unit tests
+- Python .pyi type stubs (293 lines) for all public classes and methods
+- SDK 5 criterion benchmarks covering cold start, pool acquire, execute, stream, and HTTP paths
+- Error messages fully translated to English across all 7 crates
+- MicrovmConfig default memory_mb unified to 256 MB across SDK and CLI
 
 ### Changed
 - Default VM memory adjusted to 256 MB for SDK configurations
