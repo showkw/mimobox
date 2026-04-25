@@ -55,6 +55,25 @@ class Snapshot:
         """
         ...
 
+    @classmethod
+    def from_file(cls, path: str) -> "Snapshot":
+        """从文件化快照创建 Snapshot 实例。
+
+        直接从磁盘文件路径构造快照引用，无需将整个文件读入内存。
+        适用于之前通过 ``to_bytes()`` 保存到磁盘的大快照文件。
+
+        Args:
+            path: 快照文件的磁盘路径。
+
+        Returns:
+            A restored ``Snapshot`` instance.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            SandboxError: If the snapshot file is invalid.
+        """
+        ...
+
     def to_bytes(self) -> bytes:
         """Serialize the snapshot to raw bytes.
 
