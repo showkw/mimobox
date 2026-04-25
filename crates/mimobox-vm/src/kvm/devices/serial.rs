@@ -126,11 +126,9 @@ impl SerialDevice {
             UART_REG_LINE_STATUS => self.line_status(),
             UART_REG_MODEM_STATUS => self.modem_status,
             UART_REG_SCRATCH => self.scratch,
-            other => {
-                return Err(MicrovmError::Backend(format!(
-                    "未实现的串口读寄存器: {other:#x}"
-                )));
-            }
+            other => Err(MicrovmError::Backend(format!(
+                "未实现的串口读寄存器: {other:#x}"
+            )))?,
         };
 
         Ok(value)
@@ -291,10 +289,10 @@ pub(in crate::kvm) fn encode_fs_write_payload(
     data: &[u8],
 ) -> Result<Vec<u8>, MicrovmError> {
     if data.len() > MAX_FS_TRANSFER_BYTES {
-        return Err(MicrovmError::InvalidConfig(format!(
+        Err(MicrovmError::InvalidConfig(format!(
             "FS:WRITE 数据超过 10MB 限制: {} bytes",
             data.len()
-        )));
+        )))?
     }
 
     let mut frame = encode_text_frame(SERIAL_FS_WRITE_PREFIX, path.as_bytes())?;
@@ -306,9 +304,9 @@ pub(in crate::kvm) fn encode_fs_write_payload(
 
 pub(in crate::kvm) fn build_guest_command(cmd: &[String]) -> Result<String, MicrovmError> {
     if cmd.is_empty() {
-        return Err(MicrovmError::InvalidConfig(
+        Err(MicrovmError::InvalidConfig(
             "command must not be empty".into(),
-        ));
+        ))?
     }
 
     Ok(join_shell_command(cmd))
@@ -322,9 +320,9 @@ pub(in crate::kvm) fn build_guest_exec_payload(
     if let Some(timeout_secs) = timeout_secs
         && timeout_secs == 0
     {
-        return Err(MicrovmError::InvalidConfig(
+        Err(MicrovmError::InvalidConfig(
             "timeout_secs must not be zero".into(),
-        ));
+        ))?
     }
 
     let command = build_guest_command(cmd)?;
@@ -360,57 +358,51 @@ pub(in crate::kvm) fn parse_serial_line(
     response: &mut CommandResponse,
 ) -> Result<Option<GuestCommandResult>, MicrovmError> {
     if line == SERIAL_PONG_LINE {
-        return Ok(None);
-    }
-
-    if line == SERIAL_EXIT_TIMEOUT {
-        return Ok(Some(GuestCommandResult {
+        Ok(None)
+    } else if line == SERIAL_EXIT_TIMEOUT {
+        Ok(Some(GuestCommandResult {
             stdout: std::mem::take(&mut response.stdout),
             stderr: std::mem::take(&mut response.stderr),
             exit_code: None,
             timed_out: true,
-        }));
-    }
-
-    if let Some(payload) = line.strip_prefix(SERIAL_OUTPUT_PREFIX) {
+        }))
+    } else if let Some(payload) = line.strip_prefix(SERIAL_OUTPUT_PREFIX) {
         let (stream, encoded) = parse_output_payload(payload);
         let decoded = decode_guest_output(encoded)?;
         match stream {
             OutputStream::Stdout => response.stdout.extend(decoded),
             OutputStream::Stderr => response.stderr.extend(decoded),
         }
-        return Ok(None);
-    }
-
-    if let Some(payload) = line.strip_prefix(SERIAL_EXIT_PREFIX) {
+        Ok(None)
+    } else if let Some(payload) = line.strip_prefix(SERIAL_EXIT_PREFIX) {
         let exit_code = payload.parse::<i32>().map_err(|err| {
             MicrovmError::Backend(format!(
                 "guest EXIT frame is not a valid integer: {payload}: {err}"
             ))
         })?;
-        return Ok(Some(GuestCommandResult {
+        Ok(Some(GuestCommandResult {
             stdout: std::mem::take(&mut response.stdout),
             stderr: std::mem::take(&mut response.stderr),
             exit_code: Some(exit_code),
             timed_out: false,
-        }));
+        }))
+    } else {
+        Ok(None)
     }
-
-    Ok(None)
 }
 
 pub(in crate::kvm) fn preview_serial_output(serial: &[u8]) -> String {
     if serial.is_empty() {
-        return "<empty>".to_string();
-    }
-
-    let max_len = 4096usize;
-    let start = serial.len().saturating_sub(max_len);
-    let snippet = String::from_utf8_lossy(&serial[start..]).replace('\n', "\\n");
-    if start == 0 {
-        snippet
+        "<empty>".to_string()
     } else {
-        format!("...{snippet}")
+        let max_len = 4096usize;
+        let start = serial.len().saturating_sub(max_len);
+        let snippet = String::from_utf8_lossy(&serial[start..]).replace('\n', "\\n");
+        if start == 0 {
+            snippet
+        } else {
+            format!("...{snippet}")
+        }
     }
 }
 
@@ -418,31 +410,29 @@ pub(in crate::kvm) fn take_serial_frame(
     frame_buffer: &mut Vec<u8>,
 ) -> Result<Option<SerialFrame>, MicrovmError> {
     if frame_buffer.is_empty() {
-        return Ok(None);
-    }
-
-    if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
-        return try_take_fs_result_frame(frame_buffer);
-    }
-    if frame_buffer.starts_with(SERIAL_HTTP_REQUEST_PREFIX.as_bytes()) {
+        Ok(None)
+    } else if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
+        try_take_fs_result_frame(frame_buffer)
+    } else if frame_buffer.starts_with(SERIAL_HTTP_REQUEST_PREFIX.as_bytes()) {
         if is_partial_http_prefix(frame_buffer) {
-            return Ok(None);
+            Ok(None)
+        } else {
+            try_take_http_request_frame(frame_buffer)
         }
-        return try_take_http_request_frame(frame_buffer);
-    }
-    if frame_buffer.starts_with(b"STREAM:") {
+    } else if frame_buffer.starts_with(b"STREAM:") {
         if is_partial_stream_prefix(frame_buffer) {
-            return Ok(None);
+            Ok(None)
+        } else {
+            try_take_stream_frame(frame_buffer)
         }
-        return try_take_stream_frame(frame_buffer);
+    } else {
+        let Some(newline_index) = frame_buffer.iter().position(|&byte| byte == b'\n') else {
+            return Ok(None);
+        };
+        let line = String::from_utf8_lossy(&frame_buffer[..newline_index]).into_owned();
+        frame_buffer.drain(..=newline_index);
+        Ok(Some(SerialFrame::Line(line)))
     }
-
-    let Some(newline_index) = frame_buffer.iter().position(|&byte| byte == b'\n') else {
-        return Ok(None);
-    };
-    let line = String::from_utf8_lossy(&frame_buffer[..newline_index]).into_owned();
-    frame_buffer.drain(..=newline_index);
-    Ok(Some(SerialFrame::Line(line)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,14 +443,13 @@ enum OutputStream {
 
 fn parse_output_payload(payload: &str) -> (OutputStream, &str) {
     if let Some(encoded) = payload.strip_prefix("1:") {
-        return (OutputStream::Stdout, encoded);
+        (OutputStream::Stdout, encoded)
+    } else if let Some(encoded) = payload.strip_prefix("2:") {
+        (OutputStream::Stderr, encoded)
+    } else {
+        // Backward compatibility for old guests: without an fd marker, default to stdout.
+        (OutputStream::Stdout, payload)
     }
-    if let Some(encoded) = payload.strip_prefix("2:") {
-        return (OutputStream::Stderr, encoded);
-    }
-
-    // Backward compatibility for old guests: without an fd marker, default to stdout.
-    (OutputStream::Stdout, payload)
 }
 
 fn decode_guest_output(payload: &str) -> Result<Vec<u8>, MicrovmError> {
