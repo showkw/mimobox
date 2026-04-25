@@ -162,6 +162,7 @@ class Sandbox:
         command: str,
         env: Optional[Dict[str, str]] = ...,
         timeout: Optional[float] = ...,
+        cwd: Optional[str] = ...,
     ) -> ExecuteResult:
         """Execute a shell-style command inside the sandbox.
 
@@ -169,6 +170,7 @@ class Sandbox:
             command: Shell command to execute.
             env: Optional environment variables to set for the command.
             timeout: Optional timeout in seconds (float). Must be > 0 and finite.
+            cwd: Optional working directory for the command.
 
         Returns:
             An ``ExecuteResult`` with stdout, stderr, exit_code, and timed_out.
@@ -186,6 +188,7 @@ class Sandbox:
         *,
         env: Optional[Dict[str, str]] = ...,
         timeout: Optional[float] = ...,
+        cwd: Optional[str] = ...,
     ) -> ExecuteResult:
         """Execute code in the given language inside the sandbox.
 
@@ -197,6 +200,7 @@ class Sandbox:
             code: Source code to execute.
             env: Optional environment variables to set for the command.
             timeout: Optional timeout in seconds (float). Must be > 0 and finite.
+            cwd: Optional working directory for the command.
 
         Returns:
             An ``ExecuteResult`` with stdout, stderr, exit_code, and timed_out.

@@ -1021,7 +1021,14 @@ impl Sandbox {
         command: &str,
         env: HashMap<String, String>,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(command, env, None)
+        self.execute_with_vm_options(
+            command,
+            mimobox_vm::GuestExecOptions {
+                env,
+                timeout: None,
+                cwd: None,
+            },
+        )
     }
 
     #[cfg(feature = "vm")]
@@ -1031,7 +1038,14 @@ impl Sandbox {
         command: &str,
         timeout: Duration,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(command, HashMap::new(), Some(timeout))
+        self.execute_with_vm_options(
+            command,
+            mimobox_vm::GuestExecOptions {
+                env: HashMap::new(),
+                timeout: Some(timeout),
+                cwd: None,
+            },
+        )
     }
 
     #[cfg(feature = "vm")]
@@ -1042,7 +1056,36 @@ impl Sandbox {
         env: HashMap<String, String>,
         timeout: Duration,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(command, env, Some(timeout))
+        self.execute_with_vm_options(
+            command,
+            mimobox_vm::GuestExecOptions {
+                env,
+                timeout: Some(timeout),
+                cwd: None,
+            },
+        )
+    }
+
+    #[cfg(feature = "vm")]
+    /// 在 microVM 后端中执行命令，并覆写本次调用的工作目录。
+    pub fn execute_with_cwd(
+        &mut self,
+        command: &str,
+        cwd: &str,
+    ) -> Result<ExecuteResult, SdkError> {
+        let mut options = mimobox_vm::GuestExecOptions::default();
+        options.cwd = Some(cwd.to_string());
+        self.execute_with_vm_options_full(command, options)
+    }
+
+    #[cfg(feature = "vm")]
+    /// 在 microVM 后端中执行命令，并使用完整的单命令执行选项。
+    pub fn execute_with_vm_options_full(
+        &mut self,
+        command: &str,
+        options: mimobox_vm::GuestExecOptions,
+    ) -> Result<ExecuteResult, SdkError> {
+        self.execute_with_vm_options_full_inner(command, options)
     }
 
     /// 以流式事件形式执行命令。
@@ -1266,13 +1309,20 @@ impl Sandbox {
     fn execute_with_vm_options(
         &mut self,
         command: &str,
-        env: HashMap<String, String>,
-        timeout: Option<Duration>,
+        options: mimobox_vm::GuestExecOptions,
+    ) -> Result<ExecuteResult, SdkError> {
+        self.execute_with_vm_options_full_inner(command, options)
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    fn execute_with_vm_options_full_inner(
+        &mut self,
+        command: &str,
+        options: mimobox_vm::GuestExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
         let args = parse_command(command)?;
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
-        let options = mimobox_vm::GuestExecOptions { env, timeout };
 
         dispatch_vm!(
             inner,
@@ -1292,7 +1342,7 @@ impl Sandbox {
             },
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "per-command env/timeout only supports microVM backend",
+                "per-command VM options only support microVM backend",
                 Some(
                     "set isolation to `MicroVm` and run on Linux with vm feature enabled"
                         .to_string()
@@ -1305,8 +1355,16 @@ impl Sandbox {
     fn execute_with_vm_options(
         &mut self,
         _command: &str,
-        _env: HashMap<String, String>,
-        _timeout: Option<Duration>,
+        _options: mimobox_vm::GuestExecOptions,
+    ) -> Result<ExecuteResult, SdkError> {
+        Err(SdkError::unsupported_backend("microvm"))
+    }
+
+    #[cfg(all(feature = "vm", not(target_os = "linux")))]
+    fn execute_with_vm_options_full_inner(
+        &mut self,
+        _command: &str,
+        _options: mimobox_vm::GuestExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
         Err(SdkError::unsupported_backend("microvm"))
     }
