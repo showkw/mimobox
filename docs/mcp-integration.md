@@ -43,8 +43,8 @@ Configuration file paths:
 
 Notes:
 - The `command` value must be an absolute path or a binary available in your $PATH.
-- Build the binary first: `cargo build --release -p mimobox-mcp`
-- For VM capabilities: `cargo build --release -p mimobox-mcp --features vm`
+- Download the precompiled `mimobox-mcp` binary from the latest GitHub Release.
+- For VM capabilities, use the VM binary variant or build from source with `--features vm` as a fallback.
 - Claude Desktop requires a full restart for configuration changes to take effect.
 - MCP communication uses stdio: stdout is reserved for the MCP protocol, and logs are written to stderr.
 
@@ -73,21 +73,24 @@ Notes:
 
 ## 3. Installation Steps
 
-1. **Build the MCP binary**:
+1. **Install the mimobox CLI helper**:
    ```bash
-   cargo build --release -p mimobox-mcp
-   # Or with VM support:
-   # cargo build --release -p mimobox-mcp --features vm
+   curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
    ```
+   This helper currently installs the `mimobox` CLI only. Download the
+   `mimobox-mcp` server binary separately from GitHub Releases.
 
-2. **Install to PATH**:
-   ```bash
-   cp target/release/mimobox-mcp /usr/local/bin/
-   ```
+2. **Download `mimobox-mcp` manually** from the
+   [latest GitHub Release](https://github.com/showkw/mimobox/releases/latest).
+   Choose the binary for your platform. Use the default binary for OS-level
+   sandboxing, or the VM binary variant for microVM capabilities.
 
-3. **Configure your MCP client** using the JSON examples above.
+3. **Install to PATH** by placing the downloaded `mimobox-mcp` binary in a
+   directory such as `/usr/local/bin/`, and ensure it is executable.
 
-4. **Verify the installation**:
+4. **Configure your MCP client** using the JSON examples above.
+
+5. **Verify the installation**:
    ```bash
    echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | mimobox-mcp
    ```
@@ -111,7 +114,7 @@ These require Linux with KVM hardware support. macOS users can only use the defa
 | Problem | Cause | Solution |
 | --- | --- | --- |
 | Claude Desktop shows "MCP server not responding" | Binary not found or not executable | Verify the `command` path is correct and the binary is in $PATH |
-| VM tools return "backend unavailable" | Built without `--features vm` | Rebuild with `cargo build --release -p mimobox-mcp --features vm` |
+| VM tools return "backend unavailable" | Running the default binary without VM support | Download the VM binary variant, or build from source with `--features vm` as a fallback |
 | VM tools return "KVM not available" | Running on a system without KVM | Requires Linux with KVM hardware support |
 | No output from MCP server | Binary crashed on startup | Set `RUST_LOG=debug` to see detailed logs on stderr |
 

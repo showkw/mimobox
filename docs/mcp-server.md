@@ -213,27 +213,47 @@ Note: This tool requires the `vm` feature.
 
 ## 4. Claude Desktop Integration Configuration
 
+Install `mimobox-mcp` before configuring Claude Desktop. Download the
+precompiled `mimobox-mcp` binary from the
+[latest GitHub Release](https://github.com/showkw/mimobox/releases/latest) and
+place it in a directory available in your `PATH`, such as `/usr/local/bin/`.
+
+Two binary variants may be published:
+
+- Default binary: OS-level sandbox backend, suitable for standard local usage.
+- VM binary: built with `--features vm`, required for microVM-specific tools.
+
+The `scripts/install.sh` helper installs the `mimobox` CLI only. If you need the
+MCP server, download `mimobox-mcp` separately from GitHub Releases, or build it
+from source as a fallback.
+
 Add the following to the MCP configuration in Claude Desktop:
 
 ```json
 {
   "mcpServers": {
     "mimobox": {
-      "command": "cargo",
-      "args": ["run", "-p", "mimobox-mcp", "--features", "vm"]
+      "command": "mimobox-mcp",
+      "args": [],
+      "env": {
+        "RUST_LOG": "info"
+      }
     }
   }
 }
 ```
 
-If you only need the OS-level backend, remove `--features` and `vm`:
+Use the same command shape for the OS-level backend:
 
 ```json
 {
   "mcpServers": {
     "mimobox": {
-      "command": "cargo",
-      "args": ["run", "-p", "mimobox-mcp"]
+      "command": "mimobox-mcp",
+      "args": [],
+      "env": {
+        "RUST_LOG": "info"
+      }
     }
   }
 }
@@ -244,14 +264,20 @@ If you only need the OS-level backend, remove `--features` and `vm`:
 OS-level backend:
 
 ```bash
-cargo run -p mimobox-mcp
+mimobox-mcp
 ```
 
 microVM backend:
 
 ```bash
-cargo run -p mimobox-mcp --features vm
+mimobox-mcp
 ```
+
+Install the binary by downloading `mimobox-mcp` from the
+[latest GitHub Release](https://github.com/showkw/mimobox/releases/latest) and
+placing it in `PATH`. `scripts/install.sh` installs the `mimobox` CLI only; use
+the release page to obtain the MCP server binary. If a precompiled binary is not
+available for your platform, build from source as a fallback.
 
 ## 6. Feature Gates
 
