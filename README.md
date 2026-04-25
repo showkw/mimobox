@@ -2,24 +2,17 @@
 
 # mimobox
 
-[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-**mimobox** — A cross-platform Agent Sandbox in Rust with OS-level, Wasm, and microVM isolation, smart routing by default, and full control for advanced users.
+**mimobox** — Run AI-generated code in secure isolated sandboxes. Locally. No API keys, no Docker, no cloud.
+
+> **No API keys. No Docker. No cloud required.** Download a single binary and start executing code safely. OS-level + Wasm sandboxes work everywhere; microVM isolation available on Linux with KVM.
 
 `mimobox` provides secure, self-hosted code execution for AI Agent workloads through one SDK, CLI, MCP server, and Python binding surface.
 
-## Platform Support
+## Quick Start
 
-| Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
-| --- | --- | --- | --- |
-| Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
-| macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
-
-> **Status**: mimobox is in **alpha** (v0.1.x). It has not undergone a formal security audit. See [SECURITY.md](SECURITY.md) for threat model and known limitations.
-
-## Installation
-
-### Binary (Recommended)
+### Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
@@ -45,9 +38,7 @@ git clone https://github.com/showkw/mimobox.git && cd mimobox
 cargo build --release -p mimobox-cli --features mimobox-cli/wasm
 ```
 
-## Quick Start
-
-### CLI
+### Run
 
 ```bash
 mimobox run --backend auto --command "/bin/echo hello"
@@ -78,6 +69,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For streaming, file operations, HTTP proxy, snapshot/fork, CLI examples, and advanced SDK usage, see [docs/getting-started.md](docs/getting-started.md).
+
+> **Status**: mimobox is in **alpha** (v0.1.x). It has not undergone a formal security audit. See [SECURITY.md](SECURITY.md) for threat model and known limitations.
+
+## Platform Support
+
+| Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
+| --- | --- | --- | --- |
+| Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
+| macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
 
 ## Three-Layer Isolation
 

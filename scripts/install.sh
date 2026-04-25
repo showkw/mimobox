@@ -36,7 +36,7 @@ warn() {
 }
 
 error() {
-  printf '%b错误：%s%b\n' "$COLOR_RED" "$*" "$COLOR_RESET" >&2
+  printf '%bError: %s%b\n' "$COLOR_RED" "$*" "$COLOR_RESET" >&2
 }
 
 die() {
@@ -50,18 +50,18 @@ cleanup() {
 
 usage() {
   cat <<'EOF'
-用法：bash scripts/install.sh [选项]
+Usage: bash scripts/install.sh [options]
 
-从 GitHub Release 下载并安装 mimobox CLI。
+Download and install mimobox CLI from GitHub Releases.
 
-选项：
-  --help              显示帮助信息
-  --version VERSION   安装指定版本，而不是 latest
+Options:
+  --help              Show this help message
+  --version VERSION   Install a specific version instead of latest
 
-环境变量：
-  INSTALL_DIR         安装目录，默认 /usr/local/bin
+Environment variables:
+  INSTALL_DIR         Installation directory (default: /usr/local/bin)
 
-示例：
+Examples:
   bash scripts/install.sh
   INSTALL_DIR=/opt/bin bash scripts/install.sh
   bash scripts/install.sh --version v0.1.0
@@ -76,12 +76,12 @@ parse_args() {
         exit 0
         ;;
       --version)
-        [ "$#" -ge 2 ] || die "--version 需要提供版本号"
+        [ "$#" -ge 2 ] || die "--version requires a version argument"
         VERSION="$2"
         shift 2
         ;;
       *)
-        die "未知参数：$1。使用 --help 查看用法"
+        die "Unknown argument: $1. Use --help for usage"
         ;;
     esac
   done
@@ -99,7 +99,7 @@ detect_platform() {
       os="Linux"
       ;;
     *)
-      die "不支持的操作系统：$os_name"
+      die "Unsupported OS: $os_name"
       ;;
   esac
 
@@ -111,7 +111,7 @@ detect_platform() {
       arch="aarch64"
       ;;
     *)
-      die "不支持的 CPU 架构：$arch_name"
+      die "Unsupported CPU architecture: $arch_name"
       ;;
   esac
 
@@ -126,7 +126,7 @@ detect_platform() {
       TARGET="aarch64-apple-darwin"
       ;;
     *)
-      die "不支持的平台组合：$os / $arch"
+      die "Unsupported platform combination: $os / $arch"
       ;;
   esac
 }
@@ -140,14 +140,14 @@ build_url() {
 }
 
 download() {
-  info "下载 mimobox CLI：$DOWNLOAD_URL"
+  info "Downloading mimobox CLI: $DOWNLOAD_URL"
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fSL "$DOWNLOAD_URL" -o "$TMP_FILE" || die "下载失败：$DOWNLOAD_URL"
+    curl -fSL "$DOWNLOAD_URL" -o "$TMP_FILE" || die "Download failed: $DOWNLOAD_URL"
   elif command -v wget >/dev/null 2>&1; then
-    wget -O "$TMP_FILE" "$DOWNLOAD_URL" || die "下载失败：$DOWNLOAD_URL"
+    wget -O "$TMP_FILE" "$DOWNLOAD_URL" || die "Download failed: $DOWNLOAD_URL"
   else
-    die "需要 curl 或 wget 才能下载 mimobox CLI"
+    die "curl or wget is required to download mimobox CLI"
   fi
 
   chmod +x "$TMP_FILE"
@@ -162,8 +162,8 @@ ensure_install_dir() {
     return 0
   fi
 
-  warn "安装目录不存在且当前用户无法创建：$INSTALL_DIR，将尝试使用 sudo"
-  command -v sudo >/dev/null 2>&1 || die "需要 sudo 创建安装目录：$INSTALL_DIR"
+  warn "Install directory does not exist and cannot be created: $INSTALL_DIR. Trying with sudo"
+  command -v sudo >/dev/null 2>&1 || die "sudo is required to create install directory: $INSTALL_DIR"
   sudo mkdir -p "$INSTALL_DIR"
 }
 
@@ -172,15 +172,15 @@ install_binary() {
   ensure_install_dir
 
   if [ -e "$DEST" ]; then
-    warn "检测到已有安装，将覆盖：$DEST"
+    warn "Existing installation detected, will overwrite: $DEST"
   fi
 
   if [ -w "$INSTALL_DIR" ]; then
     cp "$TMP_FILE" "$DEST"
     chmod +x "$DEST"
   else
-    warn "目标目录不可写，需要 sudo 安装到：$DEST"
-    command -v sudo >/dev/null 2>&1 || die "目标目录不可写且未找到 sudo：$INSTALL_DIR"
+    warn "Target directory is not writable. Trying with sudo: $DEST"
+    command -v sudo >/dev/null 2>&1 || die "Target directory is not writable and sudo not found: $INSTALL_DIR"
     sudo cp "$TMP_FILE" "$DEST"
     sudo chmod +x "$DEST"
   fi
@@ -188,18 +188,26 @@ install_binary() {
 
 verify() {
   if version_output="$($DEST --version 2>&1)"; then
-    success "安装成功：$DEST"
-    success "版本信息：$version_output"
+    success "Installed: $DEST"
+    success "Version: $version_output"
+    info ''
+    info 'Next steps:'
+    info "  Run 'mimobox doctor' to check supported backends"
+    info "  Run 'mimobox run --backend auto --command \"/bin/echo hello\"' to get started"
     return 0
   fi
 
   if version_output="$($DEST version 2>&1)"; then
-    success "安装成功：$DEST"
-    success "版本信息：$version_output"
+    success "Installed: $DEST"
+    success "Version: $version_output"
+    info ''
+    info 'Next steps:'
+    info "  Run 'mimobox doctor' to check supported backends"
+    info "  Run 'mimobox run --backend auto --command \"/bin/echo hello\"' to get started"
     return 0
   fi
 
-  die "安装后验证失败：无法执行 '$DEST --version' 或 '$DEST version'"
+  die "Post-install verification failed: could not run '$DEST --version' or '$DEST version'"
 }
 
 main() {
@@ -209,8 +217,8 @@ main() {
   detect_platform
   build_url
 
-  info "目标平台：$TARGET"
-  info "安装目录：$INSTALL_DIR"
+  info "Target platform: $TARGET"
+  info "Install directory: $INSTALL_DIR"
 
   download
   install_binary
