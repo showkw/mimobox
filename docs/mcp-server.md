@@ -273,3 +273,5 @@ In this case, the MCP Server will:
 3. Automatically call `destroy()` to release resources.
 
 Temporary sandboxes are suitable for one-off tool calls. If multi-turn file state, snapshots, or fork are needed, call `create_sandbox` first to obtain a reusable `sandbox_id`.
+
+See [MCP Client Integration Guide](mcp-integration.md) for Claude Desktop and Cursor setup.
