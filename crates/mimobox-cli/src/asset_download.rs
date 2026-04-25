@@ -31,14 +31,14 @@ pub fn download_vm_assets(assets_dir: &Path, writer: &mut impl Write) -> Result<
         Ok(Some(manifest)) => manifest,
         Ok(None) => return Ok(false),
         Err(error) => {
-            warn!(%error, "预构建 VM 资产 manifest 不可用");
+            warn!(%error, "pre-built VM asset manifest unavailable");
             return Ok(false);
         }
     };
 
     fs::create_dir_all(assets_dir).map_err(|error| {
-        warn!(path = %assets_dir.display(), %error, "创建 VM 资产目录失败");
-        format!("创建 VM 资产目录失败: {error}")
+        warn!(path = %assets_dir.display(), %error, "failed to create VM asset directory");
+        format!("failed to create VM asset directory: {error}")
     })?;
 
     for asset in manifest.assets {
@@ -57,8 +57,8 @@ fn build_client() -> Result<reqwest::blocking::Client, String> {
         .user_agent(format!("mimobox/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| {
-            warn!(%error, "创建 VM 资产下载客户端失败");
-            format!("创建下载客户端失败: {error}")
+            warn!(%error, "failed to create VM asset download client");
+            format!("failed to create download client: {error}")
         })
 }
 
@@ -66,26 +66,26 @@ fn fetch_manifest(client: &reqwest::blocking::Client) -> Result<Option<AssetMani
     let response = match client.get(ASSET_MANIFEST_URL).send() {
         Ok(response) => response,
         Err(error) => {
-            warn!(%error, "下载 VM 资产 manifest 失败");
+            warn!(%error, "failed to download VM asset manifest");
             return Ok(None);
         }
     };
 
     if !response.status().is_success() {
-        warn!(status = %response.status(), "VM 资产 manifest 返回非成功状态");
+        warn!(status = %response.status(), "VM asset manifest returned non-success status");
         return Ok(None);
     }
 
     let manifest_text = response.text().map_err(|error| {
-        warn!(%error, "读取 VM 资产 manifest 响应失败");
-        format!("读取 manifest 失败: {error}")
+        warn!(%error, "failed to read VM asset manifest response");
+        format!("failed to read manifest: {error}")
     })?;
 
     serde_json::from_str::<AssetManifest>(&manifest_text)
         .map(Some)
         .map_err(|error| {
-            warn!(%error, "解析 VM 资产 manifest 失败");
-            format!("解析 manifest 失败: {error}")
+            warn!(%error, "failed to parse VM asset manifest");
+            format!("failed to parse manifest: {error}")
         })
 }
 
@@ -98,8 +98,8 @@ fn ensure_asset_ready(
     let target_path = target_asset_path(assets_dir, &asset.name)?;
     if target_path.exists() {
         let actual_hash = sha256_file(&target_path).map_err(|error| {
-            warn!(path = %target_path.display(), %error, "计算本地 VM 资产 SHA256 失败");
-            format!("计算 SHA256 失败: {} ({error})", asset.name)
+            warn!(path = %target_path.display(), %error, "failed to compute local VM asset SHA256");
+            format!("SHA256 computation failed: {} ({error})", asset.name)
         })?;
 
         if actual_hash.eq_ignore_ascii_case(&asset.sha256) {
@@ -109,12 +109,12 @@ fn ensure_asset_ready(
 
     writeln!(
         writer,
-        "  下载 {}: {}...",
+        "  Downloading {}: {}...",
         asset.name,
         human_bytes(asset.size)
     )
     .map_err(|error| {
-        warn!(name = %asset.name, %error, "输出 VM 资产下载进度失败");
+        warn!(name = %asset.name, %error, "failed to output VM asset download progress");
         error.to_string()
     })?;
 
@@ -124,8 +124,8 @@ fn ensure_asset_ready(
     }
 
     let actual_hash = sha256_file(&temporary_path).map_err(|error| {
-        warn!(path = %temporary_path.display(), %error, "计算已下载 VM 资产 SHA256 失败");
-        format!("计算 SHA256 失败: {} ({error})", asset.name)
+        warn!(path = %temporary_path.display(), %error, "failed to compute SHA256 of downloaded VM asset");
+        format!("SHA256 computation failed: {} ({error})", asset.name)
     })?;
 
     if !actual_hash.eq_ignore_ascii_case(&asset.sha256) {
@@ -134,14 +134,14 @@ fn ensure_asset_ready(
             name = %asset.name,
             expected = %asset.sha256,
             actual = %actual_hash,
-            "VM 资产 SHA256 校验失败"
+            "VM asset SHA256 verification failed"
         );
-        return Err(format!("SHA256 校验失败: {}", asset.name));
+        return Err(format!("SHA256 verification failed: {}", asset.name));
     }
 
     fs::rename(&temporary_path, &target_path).map_err(|error| {
-        warn!(from = %temporary_path.display(), to = %target_path.display(), %error, "安装 VM 资产失败");
-        format!("安装资产失败: {} ({error})", asset.name)
+        warn!(from = %temporary_path.display(), to = %target_path.display(), %error, "failed to install VM asset");
+        format!("asset installation failed: {} ({error})", asset.name)
     })?;
 
     Ok(true)
@@ -163,8 +163,8 @@ fn validate_asset_name(name: &str) -> Result<(), String> {
     let valid = matches!(components.next(), Some(std::path::Component::Normal(component)) if component == std::ffi::OsStr::new(name))
         && components.next().is_none();
     if !valid {
-        warn!(%name, "VM 资产名称非法");
-        return Err(format!("资产名称非法: {name}"));
+        warn!(%name, "invalid VM asset name");
+        return Err(format!("invalid asset name: {name}"));
     }
 
     Ok(())
@@ -178,32 +178,32 @@ fn download_asset(
     let mut response = match client.get(&asset.url).send() {
         Ok(response) => response,
         Err(error) => {
-            warn!(name = %asset.name, %error, "下载 VM 资产失败");
+            warn!(name = %asset.name, %error, "failed to download VM asset");
             let _ = fs::remove_file(temporary_path);
             return Ok(false);
         }
     };
 
     if !response.status().is_success() {
-        warn!(name = %asset.name, status = %response.status(), "VM 资产返回非成功状态");
+        warn!(name = %asset.name, status = %response.status(), "VM asset returned non-success status");
         let _ = fs::remove_file(temporary_path);
         return Ok(false);
     }
 
     let mut file = File::create(temporary_path).map_err(|error| {
-        warn!(path = %temporary_path.display(), %error, "创建 VM 资产临时文件失败");
-        format!("创建临时文件失败: {} ({error})", asset.name)
+        warn!(path = %temporary_path.display(), %error, "failed to create VM asset temporary file");
+        format!("failed to create temporary file: {} ({error})", asset.name)
     })?;
 
     io::copy(&mut response, &mut file).map_err(|error| {
-        warn!(name = %asset.name, %error, "写入 VM 资产临时文件失败");
+        warn!(name = %asset.name, %error, "failed to write VM asset temporary file");
         let _ = fs::remove_file(temporary_path);
-        format!("写入资产失败: {} ({error})", asset.name)
+        format!("asset write failed: {} ({error})", asset.name)
     })?;
 
     file.sync_all().map_err(|error| {
-        warn!(path = %temporary_path.display(), %error, "同步 VM 资产临时文件失败");
-        format!("同步资产失败: {} ({error})", asset.name)
+        warn!(path = %temporary_path.display(), %error, "failed to sync VM asset temporary file");
+        format!("asset sync failed: {} ({error})", asset.name)
     })?;
 
     Ok(true)
