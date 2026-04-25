@@ -1,6 +1,6 @@
 use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
-#[cfg(any(not(all(feature = "vm", target_os = "linux")), test))]
+#[cfg(not(all(feature = "vm", target_os = "linux")))]
 use mimobox_core::ErrorCode;
 
 /// 智能路由器：根据命令内容和信任级别自动选择最优隔离层级
