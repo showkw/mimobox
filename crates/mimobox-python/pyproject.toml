@@ -40,6 +40,5 @@ Documentation = "https://github.com/showkw/mimobox#readme"
 [tool.maturin]
 bindings = "pyo3"
 module-name = "mimobox"
-features = ["os"]
 manifest-path = "Cargo.toml"
 python-source = "python"

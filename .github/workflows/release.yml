@@ -27,7 +27,7 @@ jobs:
             cli_features: wasm,kvm
             build_mcp: true
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             cli_features: wasm
             build_mcp: false
           - target: aarch64-apple-darwin
