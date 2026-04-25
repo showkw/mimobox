@@ -1,12 +1,13 @@
-//! mimobox-wasm: Wasm 沙箱后端
+#![cfg_attr(docsrs, feature(doc_cfg))]
+//! mimobox-wasm: Wasm sandbox backend.
 //!
-//! 基于 Wasmtime 运行时实现 Wasm 沙箱，支持 WASI Preview 1。
-//! 核心设计：
-//! - Engine 全局共享（WasmSandbox 持有，跨多次 execute 复用）
-//! - Module 编译缓存（基于文件内容 SHA256 哈希，避免重复编译）
-//! - Store 独立（每次 execute 创建新 Store + WASI 上下文 + 资源限制）
-//! - stdout/stderr 通过 MemoryOutputPipe 捕获到内存缓冲区（内置容量上限）
-//! - Fuel 机制 + Epoch Interruption 双重执行时间限制
+//! Implements a Wasm sandbox on top of the Wasmtime runtime with WASI Preview 1 support.
+//! Core design:
+//! - Globally shared Engine, owned by `WasmSandbox` and reused across multiple `execute` calls.
+//! - Module compilation cache based on SHA256 hashes of file content to avoid repeated compilation.
+//! - Independent Store per `execute`, with a fresh WASI context and resource limits.
+//! - stdout/stderr captured into in-memory buffers through `MemoryOutputPipe` with a built-in capacity limit.
+//! - Dual execution-time limits with fuel and epoch interruption.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,17 +25,17 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 
-/// 沙箱 Store 数据：组合 WASI 上下文和资源限制
+/// Sandbox Store data combining the WASI context and resource limits.
 ///
-/// [FATAL-01 修复] 通过将 StoreLimits 嵌入 Store data type，
-/// 使 store.limiter() 回调能正确返回 &mut dyn ResourceLimiter，
-/// 从而将 memory_limit_mb 配置实际应用到 Wasm 运行时。
+/// [FATAL-01 fix] Embeds `StoreLimits` in the Store data type so that the `store.limiter()`
+/// callback correctly returns `&mut dyn ResourceLimiter`, allowing `memory_limit_mb` to be
+/// applied to the Wasm runtime.
 struct StoreData {
     wasi: WasiP1Ctx,
     limits: StoreLimits,
 }
 
-/// 日志宏
+/// Logging macro.
 fn wasm_logging_enabled() -> bool {
     std::env::var_os("MIMOBOX_WASM_QUIET").is_none()
 }
@@ -55,34 +56,35 @@ macro_rules! log_warn {
     };
 }
 
-/// Fuel 估算系数：每秒约 1500 万条 Wasm 指令（fuel），含 50% 余量
+/// Fuel estimation factor: about 15 million Wasm instructions (fuel) per second, including 50% headroom.
 const FUEL_PER_SECOND: u64 = 15_000_000;
 
-/// 无 timeout 时的默认 fuel 上限（约等价于 1000 万条 Wasm 指令）
+/// Default fuel limit when no timeout is configured, roughly equivalent to 10 million Wasm instructions.
 const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
 
-/// stdout/stderr 缓冲区最大容量：1MB
-/// MemoryOutputPipe 的 capacity 参数同时作为写入上限，
-/// 超过此容量后 write 会返回 StreamError::Closed。
+/// Maximum stdout/stderr buffer capacity: 1 MB.
+/// The `MemoryOutputPipe` capacity parameter also acts as the write limit;
+/// writes beyond this capacity return `StreamError::Closed`.
 const OUTPUT_MAX_CAPACITY: usize = 1024 * 1024;
 
-/// 单个输出流的最大返回大小：4MB（超出部分截断并记录警告）
+/// Maximum returned size for a single output stream: 4 MB; excess data is truncated and logged as a warning.
 const MAX_OUTPUT_SIZE: usize = 4 * 1024 * 1024;
 
-/// Wasm 模块文件大小上限：100MB
+/// Maximum Wasm module file size: 100 MB.
 const MAX_WASM_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
-/// 默认内存限制：64MB（当 config 未指定时使用）
+/// Default memory limit: 64 MB, used when the config does not specify one.
 const DEFAULT_MEMORY_LIMIT_MB: u64 = 64;
 
-/// Epoch tick 间隔：10ms
+/// Epoch tick interval: 10 ms.
 const EPOCH_TICK_INTERVAL_MS: u64 = 10;
 
-/// 根据 timeout_secs 动态计算 fuel 上限
+/// Dynamically calculates the fuel limit from `timeout_secs`.
 ///
-/// [IMPORTANT-01 修复] 粗略映射 timeout_secs 到 fuel 配额。
-/// Fuel 仅在 Wasm 纯指令执行时消耗，WASI I/O 操作期间的等待时间不计入。
-/// 因此 fuel 是超时的近似机制，配合 epoch_interruption 实现墙钟超时。
+/// [IMPORTANT-01 fix] Roughly maps `timeout_secs` to a fuel quota.
+/// Fuel is consumed only while executing pure Wasm instructions; wait time during WASI I/O does
+/// not count. Therefore, fuel is an approximate timeout mechanism paired with epoch interruption
+/// to enforce wall-clock timeout.
 fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
     match timeout_secs {
         Some(secs) => secs.saturating_mul(FUEL_PER_SECOND),
@@ -90,7 +92,7 @@ fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
     }
 }
 
-/// 读取并截断输出到最大大小
+/// Reads output and truncates it to the maximum size.
 fn truncate_output(data: Vec<u8>, label: &str) -> Vec<u8> {
     if data.len() > MAX_OUTPUT_SIZE {
         log_warn!(
@@ -105,27 +107,29 @@ fn truncate_output(data: Vec<u8>, label: &str) -> Vec<u8> {
     }
 }
 
-/// Wasm 沙箱后端
+/// Wasm sandbox backend.
 ///
-/// 持有全局共享的 Engine 和模块缓存目录路径，每次 execute 创建独立的 Store。
+/// Holds the globally shared Engine and module cache directory path, and creates an independent
+/// Store for each `execute` call.
 pub struct WasmSandbox {
     engine: Arc<Engine>,
     config: SandboxConfig,
     cache_dir: PathBuf,
 }
 
-/// 计算文件内容的 SHA256 哈希
+/// Calculates the SHA256 hash of file content.
 ///
-/// [IMPORTANT-02 修复] 使用 SHA256 替代 DefaultHasher，
-/// 基于文件内容而非路径+修改时间生成缓存键，消除 TOCTOU 竞态条件。
+/// [IMPORTANT-02 fix] Uses SHA256 instead of `DefaultHasher`, generating cache keys from file
+/// content rather than path plus modification time to eliminate TOCTOU race conditions.
 fn content_hash(data: &[u8]) -> String {
     let hash = Sha256::digest(data);
     format!("{:x}", hash)
 }
 
-/// 获取文件的轻量级元数据指纹（大小 + 修改时间）
+/// Gets a lightweight metadata fingerprint for a file: size plus modification time.
 ///
-/// 用于快速判断文件是否可能变更，避免每次 execute 都读取文件内容计算 SHA256。
+/// Used to quickly determine whether a file may have changed, avoiding a full file read and
+/// SHA256 calculation on every `execute` call.
 fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let size = meta.len();
@@ -150,14 +154,14 @@ fn compile_module_from_bytes(
     })
 }
 
-/// 获取或编译模块（带磁盘缓存）
+/// Gets or compiles a module with a disk cache.
 ///
-/// 使用混合缓存策略：
-/// 1. 先用轻量级元数据指纹（大小+修改时间）查找缓存映射文件
-/// 2. 缓存映射命中时，直接使用对应的 SHA256 缓存键加载
-/// 3. 缓存映射未命中时，计算文件内容 SHA256 并更新缓存
+/// Uses a hybrid cache strategy:
+/// 1. First looks up the cache mapping file using the lightweight metadata fingerprint (size plus modification time).
+/// 2. When the cache mapping hits, loads directly with the corresponding SHA256 cache key.
+/// 3. When the cache mapping misses, calculates the file content SHA256 and updates the cache.
 ///
-/// 这样在缓存命中的热路径上无需读取整个文件计算哈希。
+/// This avoids reading the whole file to calculate a hash on the cache-hit hot path.
 fn get_cached_module(
     engine: &Engine,
     wasm_path: &Path,
@@ -250,7 +254,7 @@ fn get_cached_module(
     Ok(module)
 }
 
-/// 创建沙箱专用的 Wasmtime Engine 配置
+/// Creates the Wasmtime Engine configuration for sandbox execution.
 fn create_engine_config() -> Config {
     let mut config = Config::new();
     config.cranelift_opt_level(OptLevel::Speed);
@@ -261,10 +265,10 @@ fn create_engine_config() -> Config {
     config
 }
 
-/// 构建 WASI Preview 1 上下文
+/// Builds a WASI Preview 1 context.
 ///
-/// 根据 SandboxConfig 配置文件系统访问、环境变量等。
-/// stdout/stderr 通过 MemoryOutputPipe 捕获到内存缓冲区。
+/// Configures filesystem access, environment variables, and related settings from `SandboxConfig`.
+/// stdout/stderr are captured into in-memory buffers through `MemoryOutputPipe`.
 fn build_wasi_ctx(
     config: &SandboxConfig,
     args: &[String],
@@ -554,12 +558,12 @@ impl Sandbox for WasmSandbox {
     }
 }
 
-/// 检查 Store 中的 fuel 是否已耗尽
+/// Checks whether the Store fuel is exhausted.
 fn is_fuel_exhausted(store: &Store<StoreData>) -> bool {
     store.get_fuel().is_ok_and(|f| f == 0)
 }
 
-/// 检查错误是否为 epoch 中断（墙钟超时）
+/// Checks whether an error is an epoch interruption, indicating wall-clock timeout.
 fn is_epoch_interrupt(error: &wasmtime::Error) -> bool {
     if let Some(trap) = error.downcast_ref::<Trap>() {
         matches!(trap, Trap::Interrupt)
@@ -568,10 +572,10 @@ fn is_epoch_interrupt(error: &wasmtime::Error) -> bool {
     }
 }
 
-/// 从 wasmtime Error chain 中查找 WASI I32Exit 退出码
+/// Finds a WASI `I32Exit` exit code in the wasmtime error chain.
 ///
-/// WASI proc_exit 通过 I32Exit 错误传播退出码，但可能被
-/// WasmBacktrace 等中间层包装。此函数遍历整个错误链查找。
+/// WASI `proc_exit` propagates the exit code through an `I32Exit` error, but it may be wrapped
+/// by intermediate layers such as `WasmBacktrace`. This function walks the entire error chain.
 fn find_exit_code(error: &wasmtime::Error) -> Option<i32> {
     // 直接 downcast
     if let Some(exit) = error.downcast_ref::<I32Exit>() {
@@ -602,7 +606,7 @@ fn find_exit_code(error: &wasmtime::Error) -> Option<i32> {
     None
 }
 
-/// 运行 Wasm 沙箱冷启动基准测试
+/// Runs the Wasm sandbox cold-start benchmark.
 pub fn run_wasm_benchmark(
     wasm_path: &str,
     iterations: usize,

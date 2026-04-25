@@ -1,9 +1,9 @@
-//! Seccomp-bpf 系统调用过滤
+//! Seccomp-bpf system call filtering.
 //!
-//! 实现基于 BPF 的系统调用白名单过滤，在 fork 后 exec 前应用。
-//! 提供两档 Profile：
-//! - Essential：仅允许 ~40 个核心系统调用
-//! - Network：Essential + 网络相关系统调用
+//! Implements BPF-based allowlist system call filtering, applied after `fork` and before `exec`.
+//! Provides two profiles:
+//! - Essential: allows only about 40 core system calls.
+//! - Network: Essential plus network-related system calls.
 
 use mimobox_core::{SandboxError, SeccompProfile};
 
@@ -190,25 +190,25 @@ mod syscall_nr {
     pub const FACCESSAT2: u32 = 439;
 }
 
-/// 构建 Essential profile 的系统调用白名单（最小权限原则）
+/// Builds the system call allowlist for the Essential profile using least privilege.
 ///
-/// 已明确排除的危险系统调用及排除原因：
-/// - 进程创建: fork(57), vfork(58), clone(56), clone3(435) — 防止 fork 炸弹/子进程逃逸
-/// - 权限变更: setuid(105), setgid(106), setgroups(116), setresuid(117), setresgid(119)
-/// - 设备控制: ioctl(16) — 攻击面过大（TIOCSTI 终端注入等）
-/// - 进程控制: prctl(157) — 可修改进程安全属性
-/// - 信号发送: kill(62), tkill(200), tgkill(234) — 禁止向其他进程发信号
-/// - 会话/进程组逃逸: setpgid(109), setsid(112) — 防止超时清理绕过
-/// - 符号链接: symlink(88), symlinkat(266) — 防止路径遍历
-/// - 权限/所有权: chmod(90), fchmod(91), fchmodat(268), chown(92), fchown(93),
+/// Dangerous system calls that are explicitly excluded and why:
+/// - Process creation: fork(57), vfork(58), clone(56), clone3(435) — prevents fork bombs and child-process escapes.
+/// - Privilege changes: setuid(105), setgid(106), setgroups(116), setresuid(117), setresgid(119).
+/// - Device control: ioctl(16) — too large an attack surface, including TIOCSTI terminal injection.
+/// - Process control: prctl(157) — can modify process security attributes.
+/// - Signal sending: kill(62), tkill(200), tgkill(234) — prevents sending signals to other processes.
+/// - Session/process-group escape: setpgid(109), setsid(112) — prevents bypassing timeout cleanup.
+/// - Symbolic links: symlink(88), symlinkat(266) — prevents path traversal.
+/// - Permissions/ownership: chmod(90), fchmod(91), fchmodat(268), chown(92), fchown(93),
 ///   lchown(94), fchownat(260)
-/// - 根目录切换: chroot(161)
-/// - 进程跟踪: ptrace(101) — 防止调试/注入
-/// - 文件系统挂载: mount(165), umount2(166)
-/// - BPF 加载: bpf(321)
-/// - 性能监控: perf_event_open(298)
-/// - 进程人格: personality(135)
-/// - 内核日志: syslog(103) — 信息泄露
+/// - Root directory changes: chroot(161).
+/// - Process tracing: ptrace(101) — prevents debugging and injection.
+/// - Filesystem mounting: mount(165), umount2(166).
+/// - BPF loading: bpf(321).
+/// - Performance monitoring: perf_event_open(298).
+/// - Process personality: personality(135).
+/// - Kernel logs: syslog(103) — prevents information disclosure.
 fn essential_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     vec![
@@ -324,12 +324,13 @@ fn essential_syscalls() -> Vec<u32> {
     ]
 }
 
-/// 构建 allow_fork 模式的系统调用白名单
+/// Builds the system call allowlist for `allow_fork` mode.
 ///
-/// 在 Essential 基础上增加进程创建相关系统调用，用于需要 shell 等会 fork 子进程的场景。
-/// 同时允许 ioctl（shell 启动时需要 TCGETS 等终端 ioctl）。
-/// 仍然排除 setpgid/setsid（防止迁出 supervisor 进程组）、kill/tkill（不允许发送信号给其他进程）、
-/// prctl（防止修改安全属性）等。
+/// Adds process-creation system calls on top of Essential for workloads such as shells that fork
+/// child processes. Also allows `ioctl` because shells need terminal ioctls such as `TCGETS`
+/// during startup. Still excludes `setpgid`/`setsid` to prevent escaping the supervisor process
+/// group, `kill`/`tkill` to prevent signaling other processes, `prctl` to prevent modifying
+/// security attributes, and similar calls.
 pub fn fork_allowed_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     let mut syscalls = essential_syscalls();
@@ -349,9 +350,9 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
     syscalls
 }
 
-/// 构建 Network profile 的系统调用白名单
+/// Builds the system call allowlist for the Network profile.
 ///
-/// 在 Essential 基础上增加网络相关系统调用。
+/// Adds network-related system calls on top of Essential.
 fn network_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     let mut syscalls = essential_syscalls();
@@ -374,24 +375,24 @@ fn network_syscalls() -> Vec<u32> {
     syscalls
 }
 
-/// 生成 BPF 系统调用白名单过滤器
+/// Generates a BPF system call allowlist filter.
 ///
-/// BPF 程序结构（共 N+3 条指令，N = allowed.len()）：
+/// BPF program structure, with `N + 3` instructions where `N = allowed.len()`:
 ///
 /// ```text
-/// [0]     BPF_LD:   加载 seccomp_data.nr 到累加器 A
-/// [1]     BPF_JEQ:  如果 A == allowed[0]，跳过 (N-0) 条指令 → ALLOW
-/// [2]     BPF_JEQ:  如果 A == allowed[1]，跳过 (N-1) 条指令 → ALLOW
+/// [0]     BPF_LD:   Load seccomp_data.nr into accumulator A
+/// [1]     BPF_JEQ:  If A == allowed[0], skip (N-0) instructions -> ALLOW
+/// [2]     BPF_JEQ:  If A == allowed[1], skip (N-1) instructions -> ALLOW
 /// ...
-/// [i+1]   BPF_JEQ:  如果 A == allowed[i]，跳过 (N-i) 条指令 → ALLOW
+/// [i+1]   BPF_JEQ:  If A == allowed[i], skip (N-i) instructions -> ALLOW
 /// ...
-/// [N]     BPF_JEQ:  如果 A == allowed[N-1]，跳过 1 条指令 → ALLOW
-/// [N+1]   BPF_RET:  SECCOMP_RET_KILL_PROCESS（不匹配任何白名单）
-/// [N+2]   BPF_RET:  SECCOMP_RET_ALLOW（白名单命中）
+/// [N]     BPF_JEQ:  If A == allowed[N-1], skip 1 instruction -> ALLOW
+/// [N+1]   BPF_RET:  SECCOMP_RET_KILL_PROCESS (does not match any allowlist entry)
+/// [N+2]   BPF_RET:  SECCOMP_RET_ALLOW (allowlist hit)
 /// ```
 ///
-/// 跳转偏移计算：对于第 i 条 JEQ（0-indexed），后面还有：
-///   - (N - i - 1) 条 JEQ 指令 + 1 条 KILL 指令
+/// Jump offset calculation: for the `i`th JEQ (0-indexed), the following instructions remain:
+///   - (N - i - 1) JEQ instructions + 1 KILL instruction
 ///   - jt = (N - i - 1) + 1 = N - i
 fn build_bpf_program(allowed: &[u32]) -> Vec<SockFilter> {
     // FATAL-01 / IMPORTANT-07 修复：防御性断言，防止 BPF jt 偏移 u8 溢出
@@ -444,12 +445,12 @@ fn build_bpf_program(allowed: &[u32]) -> Vec<SockFilter> {
     prog
 }
 
-/// 应用 seccomp-bpf 过滤器
+/// Applies the seccomp-bpf filter.
 ///
 /// # Safety
 ///
-/// 此函数使用 unsafe 调用 prctl 系统调用。必须在 fork 后的子进程中调用，
-/// 且在 exec 之前调用。调用前必须确保 PR_SET_NO_NEW_PRIVS 已设置。
+/// This function uses `unsafe` to call the `prctl` system call. It must be called in the child
+/// process after `fork` and before `exec`. `PR_SET_NO_NEW_PRIVS` must be set before calling it.
 pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     let allowed = match profile {
         SeccompProfile::Essential => essential_syscalls(),

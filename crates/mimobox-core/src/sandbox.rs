@@ -20,44 +20,44 @@ use crate::seccomp::SeccompProfile;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
-    /// 命令执行超过超时时间。
+    /// The command exceeds its timeout.
     CommandTimeout,
-    /// 命令以非零状态码退出。
+    /// The command exits with a non-zero status code.
     CommandExit(i32),
-    /// 命令被宿主侧强制终止。
+    /// The command is forcibly terminated by the host.
     CommandKilled,
-    /// 目标文件不存在。
+    /// The target file does not exist.
     FileNotFound,
-    /// 目标文件缺少访问权限。
+    /// The target file lacks the required access permission.
     FilePermissionDenied,
-    /// 目标文件或传输内容超出大小限制。
+    /// The target file or transferred content exceeds the size limit.
     FileTooLarge,
-    /// HTTP 代理访问的域名不在白名单内。
+    /// The HTTP proxy target host is not in the allowlist.
     HttpDeniedHost,
-    /// HTTP 代理请求超时。
+    /// The HTTP proxy request times out.
     HttpTimeout,
-    /// HTTP 响应体超过允许大小。
+    /// The HTTP response body exceeds the allowed size.
     HttpBodyTooLarge,
-    /// HTTP 代理建立连接失败。
+    /// The HTTP proxy fails to establish a connection.
     HttpConnectFail,
-    /// HTTP 代理 TLS 握手失败。
+    /// The HTTP proxy TLS handshake fails.
     HttpTlsFail,
-    /// HTTP 请求 URL 非法。
+    /// The HTTP request URL is invalid.
     HttpInvalidUrl,
-    /// 沙箱尚未进入可执行状态。
+    /// The sandbox is not ready to execute commands.
     SandboxNotReady,
-    /// 沙箱已销毁，不能再复用。
+    /// The sandbox has been destroyed and cannot be reused.
     SandboxDestroyed,
-    /// 沙箱创建流程失败。
+    /// The sandbox creation flow fails.
     SandboxCreateFailed,
-    /// 传入配置不合法。
+    /// The provided configuration is invalid.
     InvalidConfig,
-    /// 当前平台或后端不支持该能力。
+    /// The current platform or backend does not support this capability.
     UnsupportedPlatform,
 }
 
 impl ErrorCode {
-    /// 返回稳定的字符串错误码，便于跨语言传输和日志检索。
+    /// Returns the stable string error code for cross-language transport and log indexing.
     pub fn as_str(&self) -> &'static str {
         #[allow(unreachable_patterns)]
         match self {
@@ -101,23 +101,23 @@ impl ErrorCode {
 #[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxConfig {
-    /// 只读路径列表
+    /// Read-only path list.
     pub fs_readonly: Vec<PathBuf>,
-    /// 读写路径列表
+    /// Read-write path list.
     pub fs_readwrite: Vec<PathBuf>,
-    /// 是否拒绝沙箱内进程的直接网络访问
+    /// Whether direct network access from sandboxed processes is denied.
     pub deny_network: bool,
-    /// 内存限制 (MB) — 通过 cgroups v2 或 setrlimit 实施
+    /// Memory limit in MB, enforced through cgroups v2 or `setrlimit`.
     pub memory_limit_mb: Option<u64>,
-    /// 超时时间 (秒)
+    /// Timeout in seconds.
     pub timeout_secs: Option<u64>,
-    /// Seccomp 过滤策略
+    /// Seccomp filter policy.
     pub seccomp_profile: SeccompProfile,
-    /// 是否允许沙箱内进程创建子进程（fork/clone）
-    /// 默认 false，仅 shell 等需要子进程的场景设为 true
+    /// Whether sandboxed processes may create child processes (`fork`/`clone`).
+    /// Defaults to `false`; set to `true` only for shells and other child-process workloads.
     pub allow_fork: bool,
-    /// HTTP 代理允许的域名白名单（支持通配符如 *.openai.com）
-    /// 即使 `deny_network = true`，仍可通过受控代理访问这些域名
+    /// HTTP proxy domain allowlist, including wildcards such as `*.openai.com`.
+    /// These domains remain reachable through the controlled proxy even when `deny_network = true`.
     pub allowed_http_domains: Vec<String>,
 }
 
@@ -151,32 +151,32 @@ impl Default for SandboxConfig {
 /// and a timeout flag.
 #[derive(Debug)]
 pub struct SandboxResult {
-    /// 标准输出内容。
+    /// Captured standard output.
     pub stdout: Vec<u8>,
-    /// 标准错误输出内容。
+    /// Captured standard error output.
     pub stderr: Vec<u8>,
-    /// 子进程退出码；若进程未正常退出则可能为 `None`。
+    /// Child process exit code; may be `None` when the process does not exit normally.
     pub exit_code: Option<i32>,
-    /// 本次执行消耗的总时长。
+    /// Total elapsed time for this execution.
     pub elapsed: Duration,
-    /// 是否因超时被终止
+    /// Whether the execution was terminated because of a timeout.
     pub timed_out: bool,
 }
 
-/// 沙箱快照内部存储。
+/// Internal storage for sandbox snapshots.
 ///
-/// 该枚举支持两种快照承载模式：
-/// 1. 直接以内存字节形式保存快照内容；
-/// 2. 仅保存快照文件路径与大小，由外部按文件方式管理真实数据。
+/// This enum supports two snapshot storage modes:
+/// 1. Stores snapshot content directly as in-memory bytes.
+/// 2. Stores only the snapshot file path and size, with the actual data managed externally as a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SnapshotInner {
-    /// 内存中的快照字节。
+    /// In-memory snapshot bytes.
     Bytes(Vec<u8>),
-    /// 文件形式保存的快照引用。
+    /// File-backed snapshot reference.
     File {
-        /// 快照文件路径。
+        /// Snapshot file path.
         path: PathBuf,
-        /// 快照文件大小（字节）。
+        /// Snapshot file size in bytes.
         size: usize,
     },
 }
@@ -201,7 +201,7 @@ pub struct SandboxSnapshot {
 }
 
 impl SandboxSnapshot {
-    /// 从原始字节创建快照。
+    /// Creates a snapshot from raw bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SandboxError> {
         if data.is_empty() {
             return Err(SandboxError::ExecutionFailed(
@@ -214,7 +214,7 @@ impl SandboxSnapshot {
         })
     }
 
-    /// 从已拥有所有权的字节创建快照，避免额外复制。
+    /// Creates a snapshot from owned bytes without an extra copy.
     pub fn from_owned_bytes(data: Vec<u8>) -> Result<Self, SandboxError> {
         if data.is_empty() {
             return Err(SandboxError::ExecutionFailed(
@@ -227,9 +227,9 @@ impl SandboxSnapshot {
         })
     }
 
-    /// 从快照文件创建快照引用。
+    /// Creates a snapshot reference from a snapshot file.
     ///
-    /// 该构造函数只记录路径和文件大小，不会把文件内容读入内存。
+    /// This constructor records only the path and file size without reading file content into memory.
     pub fn from_file(path: PathBuf) -> Result<Self, SandboxError> {
         let metadata = std::fs::metadata(&path)?;
         if !metadata.is_file() {
@@ -246,9 +246,9 @@ impl SandboxSnapshot {
         })
     }
 
-    /// 返回内存文件路径。
+    /// Returns the memory file path.
     ///
-    /// 当快照由文件承载时返回对应路径，否则返回 `None`。
+    /// Returns the corresponding path for file-backed snapshots, or `None` otherwise.
     pub fn memory_file_path(&self) -> Option<&Path> {
         match &self.inner {
             SnapshotInner::Bytes(_) => None,
@@ -256,9 +256,9 @@ impl SandboxSnapshot {
         }
     }
 
-    /// 返回快照字节切片，避免不必要拷贝。
+    /// Returns the snapshot byte slice without unnecessary copying.
     ///
-    /// 仅内存模式支持该操作；文件模式会返回错误。
+    /// This operation is supported only for in-memory snapshots; file-backed snapshots return an error.
     pub fn as_bytes(&self) -> Result<&[u8], SandboxError> {
         match &self.inner {
             SnapshotInner::Bytes(data) => Ok(data.as_slice()),
@@ -266,9 +266,9 @@ impl SandboxSnapshot {
         }
     }
 
-    /// 序列化为字节副本。
+    /// Serializes the snapshot into a byte copy.
     ///
-    /// 文件模式会从磁盘重新读取文件内容。
+    /// File-backed snapshots read file content from disk again.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SandboxError> {
         match &self.inner {
             SnapshotInner::Bytes(data) => Ok(data.clone()),
@@ -276,9 +276,9 @@ impl SandboxSnapshot {
         }
     }
 
-    /// 消费快照并返回底层字节，避免额外复制。
+    /// Consumes the snapshot and returns the underlying bytes without an extra copy.
     ///
-    /// 文件模式会从磁盘重新读取文件内容。
+    /// File-backed snapshots read file content from disk again.
     pub fn into_bytes(self) -> Result<Vec<u8>, SandboxError> {
         match self.inner {
             SnapshotInner::Bytes(data) => Ok(data),
@@ -286,7 +286,7 @@ impl SandboxSnapshot {
         }
     }
 
-    /// 返回快照大小（字节）。
+    /// Returns the snapshot size in bytes.
     pub fn size(&self) -> usize {
         match &self.inner {
             SnapshotInner::Bytes(data) => data.len(),
@@ -308,9 +308,9 @@ impl SandboxSnapshot {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
-    /// 终端列数。
+    /// Terminal column count.
     pub cols: u16,
-    /// 终端行数。
+    /// Terminal row count.
     pub rows: u16,
 }
 
@@ -325,9 +325,9 @@ impl Default for PtySize {
 /// Events delivered via the PTY output channel.
 #[derive(Debug)]
 pub enum PtyEvent {
-    /// 终端输出数据
+    /// Terminal output data.
     Output(Vec<u8>),
-    /// 进程退出
+    /// Process exit event.
     Exit(i32),
 }
 
@@ -337,15 +337,15 @@ pub enum PtyEvent {
 /// working directory, and timeout for an interactive PTY session.
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
-    /// 启动 PTY 会话时执行的命令及参数。
+    /// Command and arguments executed when starting the PTY session.
     pub command: Vec<String>,
-    /// 初始终端尺寸。
+    /// Initial terminal size.
     pub size: PtySize,
-    /// 额外注入到会话中的环境变量。
+    /// Additional environment variables injected into the session.
     pub env: std::collections::HashMap<String, String>,
-    /// 会话工作目录。
+    /// Session working directory.
     pub cwd: Option<String>,
-    /// 会话超时时间。
+    /// Session timeout.
     pub timeout: Option<Duration>,
 }
 
@@ -354,15 +354,15 @@ pub struct PtyConfig {
 /// Backend implementations provide concrete types satisfying this trait.
 /// SDK users interact with [`mimobox_sdk::PtySession`] instead.
 pub trait PtySession {
-    /// 向终端发送输入（stdin）
+    /// Sends input to the terminal (`stdin`).
     fn send_input(&mut self, data: &[u8]) -> Result<(), SandboxError>;
-    /// 调整终端尺寸
+    /// Resizes the terminal.
     fn resize(&mut self, size: PtySize) -> Result<(), SandboxError>;
-    /// 获取输出事件接收端
+    /// Returns the output event receiver.
     fn output_rx(&self) -> &Receiver<PtyEvent>;
-    /// 终止会话
+    /// Terminates the session.
     fn kill(&mut self) -> Result<(), SandboxError>;
-    /// 等待进程退出，返回 exit code
+    /// Waits for the process to exit and returns the exit code.
     fn wait(&mut self) -> Result<i32, SandboxError>;
 }
 
@@ -373,55 +373,55 @@ pub trait PtySession {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    /// 当前平台不支持该沙箱实现。
+    /// The current platform does not support this sandbox implementation.
     #[error("sandbox backend not supported on current platform")]
     Unsupported,
 
-    /// 当前后端不支持指定操作。
+    /// The current backend does not support the requested operation.
     #[error("operation not supported: {0}")]
     UnsupportedOperation(String),
 
-    /// 命名空间初始化失败。
+    /// Namespace initialization fails.
     #[error("namespace creation failed: {0}")]
     NamespaceFailed(String),
 
-    /// `pivot_root` 调用失败。
+    /// The `pivot_root` call fails.
     #[error("pivot_root failed: {0}")]
     PivotRootFailed(String),
 
-    /// 挂载文件系统失败。
+    /// Filesystem mounting fails.
     #[error("mount failed: {0}")]
     MountFailed(String),
 
-    /// Landlock 规则应用失败。
+    /// Landlock rule enforcement fails.
     #[error("Landlock rule enforcement failed: {0}")]
     LandlockFailed(String),
 
-    /// Seccomp 规则应用失败。
+    /// Seccomp rule enforcement fails.
     #[error("Seccomp filter enforcement failed: {0}")]
     SeccompFailed(String),
 
-    /// 命令执行或协议处理失败。
+    /// Command execution or protocol handling fails.
     #[error("command execution failed: {0}")]
     ExecutionFailed(String),
 
-    /// 快照内容或访问模式无效。
+    /// The snapshot content or access mode is invalid.
     #[error("invalid sandbox snapshot")]
     InvalidSnapshot,
 
-    /// 子进程执行超时。
+    /// The child process execution times out.
     #[error("child process timed out")]
     Timeout,
 
-    /// 管道读写失败。
+    /// Pipe I/O fails.
     #[error("pipe I/O error: {0}")]
     PipeError(String),
 
-    /// 系统调用失败。
+    /// A system call fails.
     #[error("syscall error: {0}")]
     Syscall(String),
 
-    /// 标准库 I/O 错误。
+    /// A standard library I/O error occurs.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -446,12 +446,12 @@ pub enum SandboxError {
 /// sandbox.destroy()?;
 /// ```
 pub trait Sandbox {
-    /// 使用给定配置创建新的沙箱实例。
+    /// Creates a new sandbox instance with the given configuration.
     fn new(config: SandboxConfig) -> Result<Self, SandboxError>
     where
         Self: Sized;
 
-    /// 在沙箱内执行命令并等待完成。
+    /// Executes a command inside the sandbox and waits for completion.
     ///
     /// # Examples
     ///
@@ -466,7 +466,7 @@ pub trait Sandbox {
     /// ```
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError>;
 
-    /// 创建交互式 PTY 会话。
+    /// Creates an interactive PTY session.
     ///
     /// # Examples
     ///
@@ -494,7 +494,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 读取沙箱内文件内容。
+    /// Reads file content from inside the sandbox.
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
         Err(SandboxError::ExecutionFailed(
@@ -502,7 +502,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 向沙箱内写入文件内容。
+    /// Writes file content inside the sandbox.
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         let _ = path;
         let _ = data;
@@ -511,7 +511,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 导出当前沙箱状态快照。
+    /// Exports a snapshot of the current sandbox state.
     ///
     /// # Examples
     ///
@@ -531,9 +531,9 @@ pub trait Sandbox {
         ))
     }
 
-    /// 从当前沙箱 fork 一个独立的副本。
+    /// Forks an independent copy from the current sandbox.
     ///
-    /// 默认返回 `UnsupportedOperation`，仅 microVM 后端支持。
+    /// Returns `UnsupportedOperation` by default; only the microVM backend supports this operation.
     fn fork(&mut self) -> Result<Self, SandboxError>
     where
         Self: Sized,
@@ -543,7 +543,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 销毁沙箱并释放底层资源。
+    /// Destroys the sandbox and releases underlying resources.
     fn destroy(self) -> Result<(), SandboxError>;
 }
 

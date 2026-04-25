@@ -16,9 +16,10 @@ use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompP
 use crate::pty::{allocate_pty, build_child_env, build_session};
 use crate::seccomp;
 
-/// 使用 pipe2 + O_CLOEXEC 创建管道
+/// Creates a pipe with `pipe2` and `O_CLOEXEC`.
 ///
-/// O_CLOEXEC 确保 fork+exec 后管道 fd 自动关闭，避免泄漏到沙箱进程。
+/// `O_CLOEXEC` ensures pipe file descriptors close automatically after `fork`+`exec`,
+/// preventing leaks into sandboxed processes.
 fn create_pipe_cloexec() -> Result<(RawFd, RawFd), SandboxError> {
     let mut fds: [libc::c_int; 2] = [-1, -1];
     // SAFETY: pipe2 系统调用，fds 是有效的输出缓冲区
@@ -80,11 +81,11 @@ pub struct LinuxSandbox {
     config: SandboxConfig,
 }
 
-/// 在子进程中写入 fd（无 Rust std 依赖，fork 后安全使用）
+/// Writes to a file descriptor in the child process without depending on Rust `std`, making it safe after `fork`.
 ///
 /// # Safety
 ///
-/// 仅在 fork 后的子进程中使用，此时只有当前线程存活。
+/// Use only in the child process after `fork`, when only the current thread remains alive.
 unsafe fn write_msg(fd: RawFd, msg: &[u8]) {
     // SAFETY: 仅在 fork 后子进程单线程环境中调用，fd 有效。
     unsafe {
@@ -92,11 +93,11 @@ unsafe fn write_msg(fd: RawFd, msg: &[u8]) {
     }
 }
 
-/// 在子进程中写入格式化错误消息
+/// Writes a formatted error message in the child process.
 ///
 /// # Safety
 ///
-/// 仅在 fork 后的子进程中使用。
+/// Use only in the child process after `fork`.
 unsafe fn write_error(fd: RawFd, msg: &str) {
     let full = format!("[mimobox:error] {msg}\n");
     // SAFETY: 仅在 fork 后子进程单线程环境中调用。
@@ -105,9 +106,9 @@ unsafe fn write_error(fd: RawFd, msg: &str) {
     }
 }
 
-/// 在子进程中设置内存限制
+/// Sets the memory limit in the child process.
 ///
-/// 优先使用 setrlimit(RLIMIT_AS) 实施，无需 root 权限。
+/// Uses `setrlimit(RLIMIT_AS)` first, which does not require root privileges.
 fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
     let limit_bytes = limit_mb * 1024 * 1024;
     // IMPORTANT-03 修复：rlim_max 设为与 rlim_cur 相同，防止子进程提高内存限制
@@ -127,15 +128,15 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
 }
 
 impl LinuxSandbox {
-    /// 子进程主逻辑：应用安全策略后执行命令
+    /// Runs the child-process main flow by applying security policies before executing the command.
     ///
-    /// 执行顺序（安全策略最早应用，最小化竞态窗口）：
-    /// 1. 重定向 fd
-    /// 2. 设置内存限制 (setrlimit)
-    /// 3. 应用 Landlock 文件系统隔离
-    /// 4. unshare 命名空间
-    /// 5. 应用 Seccomp-bpf 系统调用过滤（在 exec 之前最后应用）
-    /// 6. execvp 执行命令
+    /// Execution order (security policies are applied as early as possible to minimize race windows):
+    /// 1. Redirect file descriptors.
+    /// 2. Set the memory limit (`setrlimit`).
+    /// 3. Apply Landlock filesystem isolation.
+    /// 4. Unshare namespaces.
+    /// 5. Apply Seccomp-bpf system call filtering as the final step before `exec`.
+    /// 6. Execute the command with `execvp`.
     fn child_main(
         cmd: &[String],
         config: &SandboxConfig,
@@ -845,7 +846,7 @@ mod tests {
     use mimobox_core::SeccompProfile;
     use mimobox_core::{Sandbox, SandboxConfig};
 
-    /// 辅助函数：创建默认测试配置
+    /// Creates the default test configuration.
     fn test_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
@@ -868,8 +869,8 @@ mod tests {
         );
     }
 
-    /// 测试非零退出码
-    /// 需要用 release 模式运行：cargo test --release test_sandbox_exit_code
+    /// Tests non-zero exit codes.
+    /// Requires release mode: `cargo test --release test_sandbox_exit_code`.
     #[test]
     fn test_sandbox_exit_code() {
         let mut config = test_config();
@@ -913,7 +914,7 @@ mod tests {
         );
     }
 
-    /// 测试文件系统读写隔离（需要 release 模式）
+    /// Tests read-write filesystem isolation; requires release mode.
     #[test]
     fn test_fs_isolation() {
         let mut config = test_config();
@@ -950,7 +951,7 @@ mod tests {
         ]);
     }
 
-    /// 测试只读路径的文件系统隔离（需要 release 模式）
+    /// Tests filesystem isolation for read-only paths; requires release mode.
     #[test]
     fn test_fs_isolation_readonly() {
         let mut config = test_config();
@@ -1182,9 +1183,9 @@ mod tests {
     }
 }
 
-/// 使用 WNOHANG 轮询等待子进程，超时后发送 SIGKILL
+/// Polls the child process with `WNOHANG` and sends `SIGKILL` after timeout.
 ///
-/// 返回 (WaitStatus, timed_out)
+/// Returns `(WaitStatus, timed_out)`.
 fn waitpid_with_timeout(
     child: nix::unistd::Pid,
     timeout: Duration,

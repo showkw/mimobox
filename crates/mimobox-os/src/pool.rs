@@ -1,11 +1,11 @@
-//! 沙箱预热池
+//! Sandbox warm pool.
 //!
-//! 提供线程安全的沙箱对象池，实现以下目标：
-//! - 预热创建，降低热路径上的创建成本
-//! - `acquire()` 微秒级获取空闲沙箱
-//! - RAII 自动回收
-//! - 命中/未命中/驱逐统计
-//! - 基于空闲时长和 LRU 的回收策略
+//! Provides a thread-safe sandbox object pool with the following goals:
+//! - Pre-warmed creation to reduce creation cost on the hot path.
+//! - Microsecond-level idle sandbox acquisition through `acquire()`.
+//! - Automatic RAII-based recycling.
+//! - Hit, miss, and eviction statistics.
+//! - Reclamation based on idle duration and LRU behavior.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,16 +29,16 @@ fn default_health_check_command() -> Vec<String> {
     vec!["/usr/bin/true".to_string()]
 }
 
-/// 预热池配置。
+/// Warm pool configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolConfig {
-    /// 初始化时预热的最小空闲沙箱数量。
+    /// Minimum number of idle sandboxes pre-warmed during initialization.
     pub min_size: usize,
-    /// 池允许保留的最大空闲沙箱数量。
+    /// Maximum number of idle sandboxes the pool may retain.
     pub max_size: usize,
-    /// 空闲沙箱允许保留的最长时长。
+    /// Maximum duration an idle sandbox may be retained.
     pub max_idle_duration: Duration,
-    /// 回收多少次后执行一次健康检查；`None` 表示禁用健康检查。
+    /// Number of recycles after which a health check runs; `None` disables health checks.
     pub health_check_interval: Option<u32>,
 }
 
@@ -53,38 +53,38 @@ impl Default for PoolConfig {
     }
 }
 
-/// 预热池统计快照。
+/// Warm pool statistics snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PoolStats {
-    /// `acquire()` 命中空闲池的次数。
+    /// Number of times `acquire()` hits the idle pool.
     pub hit_count: u64,
-    /// `acquire()` 未命中并新建沙箱的次数。
+    /// Number of times `acquire()` misses and creates a new sandbox.
     pub miss_count: u64,
-    /// 因超时、健康检查失败或容量淘汰被驱逐的次数。
+    /// Number of evictions due to timeout, failed health checks, or capacity pressure.
     pub evict_count: u64,
-    /// 当前空闲沙箱数量。
+    /// Current number of idle sandboxes.
     pub idle_count: usize,
-    /// 当前借出的沙箱数量。
+    /// Current number of checked-out sandboxes.
     pub in_use_count: usize,
 }
 
-/// 预热池错误。
+/// Warm pool error.
 #[derive(Debug, Error)]
 pub enum PoolError {
-    /// 池配置不合法。
+    /// The pool configuration is invalid.
     #[error("invalid pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
-        /// 非法的最小预热数量。
+        /// Invalid minimum pre-warmed count.
         min_size: usize,
-        /// 非法的最大容量。
+        /// Invalid maximum capacity.
         max_size: usize,
     },
 
-    /// 共享状态锁已中毒。
+    /// The shared state lock is poisoned.
     #[error("warm pool state lock poisoned")]
     StatePoisoned,
 
-    /// 底层沙箱错误。
+    /// Underlying sandbox error.
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
 }
@@ -302,16 +302,17 @@ impl PoolInner {
     }
 }
 
-/// 线程安全的沙箱预热池。
+/// Thread-safe sandbox warm pool.
 ///
-/// `SandboxPool` 可以被克隆到多个线程中共享，热路径仅在获取空闲沙箱时持有互斥锁。
+/// `SandboxPool` can be cloned and shared across multiple threads. The hot path holds the mutex
+/// only while acquiring an idle sandbox.
 #[derive(Clone)]
 pub struct SandboxPool {
     inner: Arc<PoolInner>,
 }
 
 impl SandboxPool {
-    /// 创建新的预热池，并按 `min_size` 自动预热。
+    /// Creates a new warm pool and automatically warms it to `min_size`.
     pub fn new(config: SandboxConfig, pool_config: PoolConfig) -> Result<Self, PoolError> {
         if pool_config.max_size == 0 || pool_config.min_size > pool_config.max_size {
             return Err(PoolError::InvalidConfig {
@@ -336,24 +337,24 @@ impl SandboxPool {
         Ok(pool)
     }
 
-    /// 返回池配置。
+    /// Returns the pool configuration.
     pub fn pool_config(&self) -> PoolConfig {
         self.inner.pool_config
     }
 
-    /// 获取统计快照。
+    /// Returns a statistics snapshot.
     pub fn stats(&self) -> Result<PoolStats, PoolError> {
         Ok(self.inner.lock_state()?.snapshot())
     }
 
-    /// 当前空闲沙箱数量。
+    /// Returns the current number of idle sandboxes.
     pub fn idle_len(&self) -> Result<usize, PoolError> {
         Ok(self.inner.lock_state()?.idle.len())
     }
 
-    /// 预热到指定的空闲沙箱数量。
+    /// Warms the pool to the specified number of idle sandboxes.
     ///
-    /// 返回本次实际创建的沙箱数量。
+    /// Returns the number of sandboxes actually created by this call.
     pub fn warm(&self, target_idle_size: usize) -> Result<usize, PoolError> {
         let target_idle_size = target_idle_size.min(self.inner.pool_config.max_size);
         let expired = self.inner.take_expired_idle()?;
@@ -400,9 +401,9 @@ impl SandboxPool {
         Ok(inserted)
     }
 
-    /// 获取一个预热沙箱。
+    /// Acquires a pre-warmed sandbox.
     ///
-    /// 命中空闲池时不会重新创建对象；若池为空，则按需创建新沙箱。
+    /// Reuses an idle object on pool hit; creates a new sandbox on demand when the pool is empty.
     pub fn acquire(&self) -> Result<PooledSandbox, PoolError> {
         let reused = {
             let mut state = self.inner.lock_state()?;
@@ -435,16 +436,17 @@ impl SandboxPool {
     }
 }
 
-/// 池中借出的沙箱句柄。
+/// Handle for a sandbox checked out from the pool.
 ///
-/// Drop 时会按池配置回收沙箱；默认仅执行内存回收，不做健康检查。
+/// Recycles the sandbox according to pool configuration on drop; by default, only memory cleanup
+/// runs and no health check is performed.
 pub struct PooledSandbox {
     sandbox: Option<PlatformSandbox>,
     pool: Arc<PoolInner>,
 }
 
 impl PooledSandbox {
-    /// 在沙箱中执行命令。
+    /// Executes a command in the sandbox.
     pub fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         match self.sandbox.as_mut() {
             Some(sandbox) => sandbox.execute(cmd),
@@ -474,7 +476,7 @@ fn percentile_us(samples: &[f64], percentile: f64) -> f64 {
     samples[index]
 }
 
-/// 运行简单的池性能基准，对比冷启动与热获取延迟。
+/// Runs a simple pool benchmark comparing cold-start and hot-acquire latency.
 pub fn run_pool_benchmark(
     pool_size: usize,
     iterations: usize,
