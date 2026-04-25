@@ -26,6 +26,9 @@ pub struct MicrovmConfig {
     pub vcpu_count: u8,
     /// Guest memory size in MiB.
     pub memory_mb: u32,
+    /// Optional CPU time quota in microseconds.
+    #[serde(default)]
+    pub cpu_quota_us: Option<u64>,
     /// Guest kernel image path.
     pub kernel_path: PathBuf,
     /// Guest rootfs path.
@@ -43,6 +46,7 @@ impl Default for MicrovmConfig {
         Self {
             vcpu_count: 1,
             memory_mb: 256,
+            cpu_quota_us: None,
             kernel_path: assets_dir.join("vmlinux"),
             rootfs_path: assets_dir.join("rootfs.cpio.gz"),
         }

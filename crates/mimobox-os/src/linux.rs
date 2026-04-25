@@ -1,8 +1,9 @@
 use std::ffi::CString;
+use std::fs;
 use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,9 @@ use mimobox_core::{
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 use crate::seccomp;
+
+#[cfg(target_os = "linux")]
+const CGROUP_V2_ROOT: &str = "/sys/fs/cgroup";
 
 /// Creates a pipe with `pipe2` and `O_CLOEXEC`.
 ///
@@ -128,6 +132,47 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_cgroup_path(root: &Path, pid: libc::pid_t) -> PathBuf {
+    root.join("mimobox").join(format!("sandbox-{pid}"))
+}
+
+#[cfg(target_os = "linux")]
+fn format_cpu_max(config: &SandboxConfig) -> String {
+    let period = config.cpu_period_us;
+    match config.cpu_quota_us {
+        Some(quota) => format!("{quota} {period}"),
+        None => format!("max {period}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_cpu_cgroup(
+    root: &Path,
+    pid: libc::pid_t,
+    config: &SandboxConfig,
+) -> Result<PathBuf, SandboxError> {
+    let cgroup_path = sandbox_cgroup_path(root, pid);
+    fs::create_dir_all(&cgroup_path)?;
+
+    // 写入 cpu.max，格式为 "quota period"；"max period" 表示不限制。
+    fs::write(cgroup_path.join("cpu.max"), format_cpu_max(config))?;
+    fs::write(cgroup_path.join("cgroup.procs"), pid.to_string())?;
+
+    Ok(cgroup_path)
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_cgroup(path: &Path) {
+    if let Err(error) = fs::remove_dir(path) {
+        tracing::debug!("清理 cgroup 失败: path={}, error={error}", path.display());
+    }
+}
+
+fn kill_process_group(pid: libc::pid_t, signal: Signal) {
+    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal);
 }
 
 impl LinuxSandbox {
@@ -624,6 +669,29 @@ impl Sandbox for LinuxSandbox {
                     libc::close(stderr_write_fd);
                 }
 
+                #[cfg(target_os = "linux")]
+                let cgroup_path = if self.config.cpu_quota_us.is_some() {
+                    match configure_cpu_cgroup(
+                        Path::new(CGROUP_V2_ROOT),
+                        child.as_raw(),
+                        &self.config,
+                    ) {
+                        Ok(path) => Some(path),
+                        Err(error) => {
+                            kill_process_group(child.as_raw(), Signal::SIGKILL);
+                            let _ = waitpid(child, None);
+                            // SAFETY: fd 有效且不再需要，避免 cgroup 配置失败时泄漏管道读端。
+                            unsafe {
+                                libc::close(stdout_read_fd);
+                                libc::close(stderr_read_fd);
+                            }
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 // 使用 WNOHANG 轮询实现超时
                 let (wait_result, timed_out) = if let Some(dur) = timeout {
                     waitpid_with_timeout(child, dur)?
@@ -657,6 +725,11 @@ impl Sandbox for LinuxSandbox {
                 }
 
                 let elapsed = start.elapsed();
+
+                #[cfg(target_os = "linux")]
+                if let Some(path) = cgroup_path.as_deref() {
+                    cleanup_cgroup(path);
+                }
 
                 match wait_result {
                     WaitStatus::Exited(_, code) => {
@@ -877,6 +950,20 @@ mod tests {
         config.timeout_secs = Some(10);
         config.memory_limit_mb = Some(256);
         config
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_cgroup_helpers_generate_expected_path_and_cpu_max() {
+        let limited = SandboxConfig::default()
+            .cpu_quota(50_000)
+            .cpu_period(100_000);
+        let unlimited = SandboxConfig::default().cpu_period(100_000);
+        let path = sandbox_cgroup_path(Path::new("/sys/fs/cgroup"), 42);
+
+        assert_eq!(path, PathBuf::from("/sys/fs/cgroup/mimobox/sandbox-42"));
+        assert_eq!(format_cpu_max(&limited), "50000 100000");
+        assert_eq!(format_cpu_max(&unlimited), "max 100000");
     }
 
     #[test]
@@ -1230,10 +1317,7 @@ fn waitpid_with_timeout(
             tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
             // SECURITY: 以负 PID 发送 SIGKILL，确保整个沙箱进程组（含 re-exec 孙进程）被回收，
             // 避免 supervisor 超时后留下孤儿子进程或 zombie 清理链。
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(-child.as_raw()),
-                Signal::SIGKILL,
-            );
+            kill_process_group(child.as_raw(), Signal::SIGKILL);
 
             let status = rx.recv().map_err(|_| {
                 SandboxError::ExecutionFailed(

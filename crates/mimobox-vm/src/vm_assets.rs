@@ -58,6 +58,7 @@ pub fn microvm_config_from_assets_dir(
     Ok(MicrovmConfig {
         vcpu_count: 1,
         memory_mb,
+        cpu_quota_us: None,
         kernel_path,
         rootfs_path,
     })
