@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 default = []
 wasm = ["dep:mimobox-wasm"]
 kvm = ["dep:mimobox-vm", "mimobox-vm/kvm", "mimobox-sdk/vm"]
+full = ["kvm", "wasm"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mimobox-vm = { workspace = true, optional = true }

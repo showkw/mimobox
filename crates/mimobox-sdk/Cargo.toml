@@ -28,6 +28,7 @@ default = ["os"]
 os = ["dep:mimobox-os"]
 vm = ["dep:mimobox-vm"]
 wasm = ["dep:mimobox-wasm"]
+full = ["os", "vm", "wasm"]
 
 [[example]]
 name = "basic"

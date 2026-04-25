@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 default = ["os"]
 os = ["mimobox-sdk/os"]
 vm = ["mimobox-sdk/vm"]
+full = ["os", "vm"]
 
 [lints]
 workspace = true
