@@ -214,6 +214,23 @@ impl MimoboxServer {
             tool_router: Self::tool_router(),
         }
     }
+
+    /// 清理所有活跃的 sandbox 实例，在收到 SIGTERM/SIGINT 时调用。
+    pub async fn cleanup_all(&self) {
+        let mut sandboxes = self.sandboxes.lock().await;
+        let count = sandboxes.len();
+        for (id, managed) in sandboxes.drain() {
+            tracing::debug!(sandbox_id = id, "信号清理：销毁 sandbox");
+            if let Err(err) = managed.sandbox.destroy() {
+                tracing::warn!(
+                    sandbox_id = id,
+                    error = %format_sdk_error(err),
+                    "信号清理时 sandbox 销毁失败"
+                );
+            }
+        }
+        tracing::info!(count, "信号清理完成");
+    }
 }
 
 impl Default for MimoboxServer {

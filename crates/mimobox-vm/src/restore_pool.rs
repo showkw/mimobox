@@ -287,6 +287,24 @@ impl RestorePoolInner {
     }
 }
 
+impl Drop for RestorePoolInner {
+    fn drop(&mut self) {
+        // 获取 idle 队列中所有空壳 VM 并丢弃，释放 KVM/VmFd/VcpuFd 资源。
+        let idle = match self.state.lock() {
+            Ok(mut state) => std::mem::take(&mut state.idle),
+            Err(_) => {
+                warn!("RestorePool drop 时状态锁已中毒，无法清理 idle slot");
+                return;
+            }
+        };
+        let count = idle.len();
+        drop(idle);
+        if count > 0 {
+            tracing::debug!(count, "RestorePool drop 清理完成");
+        }
+    }
+}
+
 /// microVM restore pool based on snapshot restoration.
 #[derive(Clone)]
 pub struct RestorePool {
