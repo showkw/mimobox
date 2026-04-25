@@ -18,6 +18,7 @@ use crate::kvm::{KVM_IDENTITY_MAP_ADDR, KVM_TSS_ADDR};
 use crate::kvm::{KvmBackend, RestoreProfile, restore_runtime_state};
 #[cfg(feature = "zerocopy-fork")]
 use crate::snapshot::load_state_from_memory_file;
+use crate::vm::LifecycleError;
 use crate::{
     GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
     MicrovmSnapshot, StreamEvent,
@@ -487,9 +488,9 @@ impl PooledRestoreVm {
     ) -> Result<GuestCommandResult, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.run_command_with_options(cmd, &options),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -509,9 +510,9 @@ impl PooledRestoreVm {
     ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.run_command_streaming_with_options(cmd, &options),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -519,9 +520,9 @@ impl PooledRestoreVm {
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.read_file(path),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -529,9 +530,9 @@ impl PooledRestoreVm {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -539,9 +540,9 @@ impl PooledRestoreVm {
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.ping(),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -549,9 +550,9 @@ impl PooledRestoreVm {
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.http_request(request),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 
@@ -559,9 +560,9 @@ impl PooledRestoreVm {
     pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             Some(backend) => backend.snapshot_to_file(),
-            None => Err(MicrovmError::Lifecycle(
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
                 "restored VM has been released".into(),
-            )),
+            ))),
         }
     }
 }

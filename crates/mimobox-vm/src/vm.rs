@@ -161,6 +161,45 @@ pub enum StreamEvent {
 }
 
 /// microVM-level error.
+/// microVM 生命周期错误的具体语义分类。
+///
+/// 用于替代原来的字符串匹配模式，提供编译期穷尽检查。
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum LifecycleError {
+    /// 当前状态不允许请求的操作。
+    #[error("{message}")]
+    InvalidState {
+        /// 操作要求的生命周期状态。
+        expected: String,
+        /// 当前实际生命周期状态描述。
+        current: String,
+        /// 对外展示的原始错误消息。
+        message: String,
+    },
+    /// 沙箱已被销毁，无法复用。
+    #[error("{0}")]
+    Destroyed(String),
+    /// VM 实例已归还池中，无法再使用。
+    #[error("{0}")]
+    Released(String),
+    /// 仅 Ready 状态允许快照。
+    #[error("snapshot only allowed in Ready state")]
+    NotReady,
+    /// 仅 Ready 状态允许 fork。
+    #[error("fork only allowed in Ready state")]
+    NotReadyForFork,
+    /// vsock 命令通道未连接。
+    #[error("vsock command channel is not connected")]
+    VsockNotConnected,
+    /// vsock 命令通道不可用。
+    #[error("vsock command channel unavailable")]
+    VsockUnavailable,
+    /// 其他生命周期错误。
+    #[error("{0}")]
+    Other(String),
+}
+
+/// microVM-level error.
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
     /// KVM microVMs are not supported on the current platform or build configuration.
@@ -173,7 +212,7 @@ pub enum MicrovmError {
 
     /// Current lifecycle state does not allow the requested operation.
     #[error("microVM lifecycle error: {0}")]
-    Lifecycle(String),
+    Lifecycle(LifecycleError),
 
     /// KVM or guest protocol error.
     #[error("KVM backend error: {0}")]
@@ -197,10 +236,10 @@ impl From<MicrovmError> for SandboxError {
         match value {
             MicrovmError::UnsupportedPlatform => SandboxError::Unsupported,
             MicrovmError::InvalidConfig(message)
-            | MicrovmError::Lifecycle(message)
             | MicrovmError::Backend(message)
             | MicrovmError::HttpProxy(crate::http_proxy::HttpProxyError::Internal(message))
             | MicrovmError::SnapshotFormat(message) => SandboxError::ExecutionFailed(message),
+            MicrovmError::Lifecycle(error) => SandboxError::ExecutionFailed(error.to_string()),
             MicrovmError::HttpProxy(error) => SandboxError::ExecutionFailed(error.to_string()),
             MicrovmError::Io(error) => SandboxError::Io(error),
         }
@@ -454,9 +493,7 @@ impl MicrovmSandbox {
     /// Exports a snapshot of the current microVM.
     pub fn snapshot(&mut self) -> Result<SandboxSnapshot, MicrovmError> {
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "snapshot only allowed in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::NotReady));
         }
 
         let (memory, vcpu_state) = self.backend.snapshot_parts()?;
@@ -522,9 +559,7 @@ impl MicrovmSandbox {
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "fork only allowed in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::NotReadyForFork));
         }
 
         #[cfg(feature = "zerocopy-fork")]
@@ -615,9 +650,11 @@ impl MicrovmSandbox {
         F: FnOnce(&mut BackendHandle) -> Result<T, MicrovmError>,
     {
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(format!(
-                "microVM not ready for {op_name}"
-            )));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: format!("not Ready for {op_name}"),
+                message: format!("microVM not ready for {op_name}"),
+            }));
         }
 
         self.state = MicrovmState::Running;
@@ -648,9 +685,9 @@ impl MicrovmSandbox {
             ));
         }
         if self.state == MicrovmState::Destroyed {
-            return Err(MicrovmError::Lifecycle(
+            return Err(MicrovmError::Lifecycle(LifecycleError::Destroyed(
                 "microVM destroyed, cannot wait for ready".into(),
-            ));
+            )));
         }
 
         self.with_ready_state("wait_ready", |backend| {

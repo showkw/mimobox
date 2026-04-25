@@ -6,6 +6,7 @@ use std::os::fd::RawFd;
 use std::ptr;
 use std::time::Duration;
 
+use crate::vm::LifecycleError;
 use crate::{GuestCommandResult, MicrovmError};
 
 /// Linux AF_VSOCK address family constant.
@@ -312,9 +313,10 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn send_command(&self, cmd: &[u8]) -> Result<(), MicrovmError> {
-        let stream = self.stream.as_ref().ok_or_else(|| {
-            MicrovmError::Lifecycle("vsock command channel is not connected".into())
-        })?;
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| MicrovmError::Lifecycle(LifecycleError::VsockNotConnected))?;
         let cmd_len = u32::try_from(cmd.len()).map_err(|_| {
             MicrovmError::InvalidConfig("vsock command length exceeds u32 limit".into())
         })?;
@@ -325,9 +327,10 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn recv_result(&self) -> Result<GuestCommandResult, MicrovmError> {
-        let stream = self.stream.as_ref().ok_or_else(|| {
-            MicrovmError::Lifecycle("vsock command channel is not connected".into())
-        })?;
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| MicrovmError::Lifecycle(LifecycleError::VsockNotConnected))?;
 
         let stdout = read_length_prefixed_bytes(stream)?;
         let stderr = read_length_prefixed_bytes(stream)?;
@@ -344,9 +347,10 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn probe_round_trip(&self, timeout: Duration) -> Result<(), MicrovmError> {
-        let stream = self.stream.as_ref().ok_or_else(|| {
-            MicrovmError::Lifecycle("vsock command channel is not connected".into())
-        })?;
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| MicrovmError::Lifecycle(LifecycleError::VsockNotConnected))?;
         let default_timeout = Duration::from_secs(STREAM_RECV_TIMEOUT_SECS);
 
         stream.set_recv_timeout(timeout)?;

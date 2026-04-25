@@ -30,8 +30,8 @@ use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
 use crate::snapshot::MicrovmSnapshot;
-use crate::vm::GuestExecOptions;
 use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
+use crate::vm::{GuestExecOptions, LifecycleError};
 
 mod boot;
 mod devices;
@@ -683,9 +683,11 @@ impl KvmBackend {
         }
         self.ensure_guest_ready()?;
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
 
         let started_at = Instant::now();
@@ -830,9 +832,11 @@ impl KvmBackend {
     /// Initializes vCPU boot registers and enters the real `KVM_RUN` loop.
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
         if self.guest_ready {
             return Ok(KvmExitReason::Io);
@@ -1102,9 +1106,11 @@ impl KvmBackend {
         options: &GuestExecOptions,
     ) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
         if cmd.is_empty() {
             return Err(MicrovmError::InvalidConfig(
@@ -1162,9 +1168,11 @@ impl KvmBackend {
         options: &GuestExecOptions,
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
         if cmd.is_empty() {
             return Err(MicrovmError::InvalidConfig(
@@ -1196,9 +1204,11 @@ impl KvmBackend {
     /// Reads a file from the guest filesystem.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
 
         self.ensure_guest_ready()?;
@@ -1230,9 +1240,11 @@ impl KvmBackend {
     /// Writes a file into the guest filesystem.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
 
         self.ensure_guest_ready()?;
@@ -1264,9 +1276,11 @@ impl KvmBackend {
     /// Executes an allowlisted host-side HTTP request for the guest.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "KVM backend is not in Ready state".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
         }
 
         execute_http_request(&self.base_config, &request).map_err(Into::into)
@@ -1276,7 +1290,7 @@ impl KvmBackend {
         let channel = self
             .vsock_channel
             .as_ref()
-            .ok_or_else(|| MicrovmError::Lifecycle("vsock command channel unavailable".into()))?;
+            .ok_or_else(|| MicrovmError::Lifecycle(LifecycleError::VsockUnavailable))?;
         channel.send_command(cmd)?;
         let result = channel.recv_result()?;
         self.transport = KvmTransport::Vsock;
@@ -1509,9 +1523,9 @@ impl KvmBackend {
 
     fn ensure_guest_ready(&mut self) -> Result<(), MicrovmError> {
         if self.lifecycle == KvmLifecycle::Destroyed {
-            return Err(MicrovmError::Lifecycle(
+            return Err(MicrovmError::Lifecycle(LifecycleError::Destroyed(
                 "KVM backend destroyed, cannot reuse guest state".into(),
-            ));
+            )));
         }
         if self.guest_ready {
             return Ok(());
