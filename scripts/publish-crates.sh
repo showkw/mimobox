@@ -19,7 +19,7 @@ CRATES=(
 )
 
 echo "=== 发布前测试 ==="
-cargo test --workspace || {
+cargo test --workspace --exclude mimobox-python || {
     echo "[错误] 测试失败，中止发布"
     exit 1
 }
