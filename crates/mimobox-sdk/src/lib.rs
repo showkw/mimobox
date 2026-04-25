@@ -1453,7 +1453,9 @@ impl Drop for Sandbox {
                         error = %error,
                         "Sandbox drop 自动清理失败，重试中"
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(100 * u64::from(attempt + 1)));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        100 * u64::from(attempt + 1),
+                    ));
                 }
                 Err(error) => {
                     tracing::error!(
