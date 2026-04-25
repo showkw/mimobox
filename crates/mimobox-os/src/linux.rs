@@ -77,6 +77,7 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
     Ok(())
 }
 
+/// Linux OS-level sandbox backend.
 pub struct LinuxSandbox {
     config: SandboxConfig,
 }

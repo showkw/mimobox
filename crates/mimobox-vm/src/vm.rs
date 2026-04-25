@@ -582,6 +582,7 @@ impl MicrovmSandbox {
         }
     }
 
+    /// Attempts to fork the microVM or returns an unsupported-backend error.
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();

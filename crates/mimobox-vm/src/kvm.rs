@@ -177,25 +177,35 @@ impl AssetCache {
 /// Command channel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmTransport {
+    /// Serial port command transport.
     Serial,
+    /// Virtio-vsock command transport.
     Vsock,
 }
 
 /// KVM backend lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmLifecycle {
+    /// Backend has been constructed but the guest is not ready.
     Created,
+    /// Guest is booted and ready to accept commands.
     Ready,
+    /// Guest command execution is currently in progress.
     Running,
+    /// Backend has been destroyed and cannot be reused.
     Destroyed,
 }
 
 /// Exit reason after the `KVM_RUN` loop is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmExitReason {
+    /// The vCPU exited due to port I/O.
     Io,
+    /// The guest executed `hlt`.
     Hlt,
+    /// The VM reported shutdown.
     Shutdown,
+    /// KVM reported an internal error exit.
     InternalError,
 }
 
@@ -338,6 +348,7 @@ impl KvmBackend {
         Self::create_vm_with_mode(base_config, config, BackendCreateMode::ColdStart)
     }
 
+    /// Creates an empty VM shell intended for snapshot restoration.
     pub fn create_vm_for_restore(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -1143,6 +1154,7 @@ impl KvmBackend {
         self.run_command_streaming_with_options(cmd, &GuestExecOptions::default())
     }
 
+    /// Runs a command and streams guest output using explicit execution options.
     pub fn run_command_streaming_with_options(
         &mut self,
         cmd: &[String],
@@ -1175,10 +1187,12 @@ impl KvmBackend {
         result
     }
 
+    /// Returns the current KVM backend lifecycle state.
     pub fn lifecycle(&self) -> KvmLifecycle {
         self.lifecycle
     }
 
+    /// Reads a file from the guest filesystem.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -1212,6 +1226,7 @@ impl KvmBackend {
         result
     }
 
+    /// Writes a file into the guest filesystem.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -1245,6 +1260,7 @@ impl KvmBackend {
         result
     }
 
+    /// Executes an allowlisted host-side HTTP request for the guest.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(
