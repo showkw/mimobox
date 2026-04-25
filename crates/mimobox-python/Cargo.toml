@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mimobox-sdk = { workspace = true, features = ["os", "vm"] }
+mimobox-vm = { workspace = true, features = ["kvm"] }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 
 [build-dependencies]

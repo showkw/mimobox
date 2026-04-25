@@ -403,6 +403,7 @@ impl PySandbox {
     /// * `command` - Shell command to execute.
     /// * `env` - Optional environment variables to set for the command.
     /// * `timeout` - Optional timeout in seconds (float). Must be > 0 and finite.
+    /// * `cwd` - Optional working directory for this command.
     ///
     /// # Returns
     ///
@@ -413,25 +414,28 @@ impl PySandbox {
     /// * `SandboxError` - If the sandbox is destroyed or execution fails.
     /// * `SandboxProcessError` - If the command exits non-zero or is killed.
     /// * `TimeoutError` - If the command exceeds the specified timeout.
-    #[pyo3(signature = (command, env=None, timeout=None))]
+    #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
     fn execute(
         &mut self,
         command: &str,
         env: Option<std::collections::HashMap<String, String>>,
         timeout: Option<f64>,
+        cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
-        let result = match (env, timeout) {
-            (Some(env), Some(timeout)) => sandbox
-                .execute_with_env_and_timeout(command, env, parse_python_timeout(timeout)?)
-                .map_err(map_sdk_error)?,
-            (Some(env), None) => sandbox
-                .execute_with_env(command, env)
-                .map_err(map_sdk_error)?,
-            (None, Some(timeout)) => sandbox
-                .execute_with_timeout(command, parse_python_timeout(timeout)?)
-                .map_err(map_sdk_error)?,
-            (None, None) => sandbox.execute(command).map_err(map_sdk_error)?,
+        let result = if env.is_some() || timeout.is_some() || cwd.is_some() {
+            sandbox
+                .execute_with_vm_options_full(
+                    command,
+                    mimobox_vm::GuestExecOptions {
+                        env: env.unwrap_or_default(),
+                        timeout: timeout.map(parse_python_timeout).transpose()?,
+                        cwd: cwd.map(str::to_string),
+                    },
+                )
+                .map_err(map_sdk_error)?
+        } else {
+            sandbox.execute(command).map_err(map_sdk_error)?
         };
         Ok(result.into())
     }
