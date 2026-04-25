@@ -1095,8 +1095,9 @@ fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfi
 }
 
 fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
-    let argv = shlex::split(command)
-        .ok_or_else(|| CliError::CommandParse("command string contains unclosed quotes".to_string()))?;
+    let argv = shlex::split(command).ok_or_else(|| {
+        CliError::CommandParse("command string contains unclosed quotes".to_string())
+    })?;
     if argv.is_empty() {
         return Err(CliError::EmptyCommand);
     }
@@ -1133,7 +1134,9 @@ fn handle_run_via_sdk(
                 .active_isolation()
                 .and_then(backend_from_sdk_isolation)
                 .ok_or_else(|| {
-                    let error = CliError::Sdk("SDK execution succeeded but actual backend not recorded".to_string());
+                    let error = CliError::Sdk(
+                        "SDK execution succeeded but actual backend not recorded".to_string(),
+                    );
                     error!(
                         code = error.code(),
                         message = %error,

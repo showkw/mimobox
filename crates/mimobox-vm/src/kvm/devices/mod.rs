@@ -133,7 +133,8 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Http => {
                                     return Err(MicrovmError::Backend(
-                                        "unexpected FSRESULT frame while waiting for HTTP response".into(),
+                                        "unexpected FSRESULT frame while waiting for HTTP response"
+                                            .into(),
                                     ));
                                 }
                             }
@@ -233,7 +234,8 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Http => {
                                     return Err(MicrovmError::Backend(
-                                        "unexpected FSRESULT frame while waiting for HTTP response".into(),
+                                        "unexpected FSRESULT frame while waiting for HTTP response"
+                                            .into(),
                                     ));
                                 }
                             }

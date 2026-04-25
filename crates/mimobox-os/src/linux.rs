@@ -477,10 +477,7 @@ impl LinuxSandbox {
 
             if let Err(error) = result {
                 unsafe {
-                    write_error(
-                        2,
-                        &format!("Landlock enforcement failed (fatal): {error}"),
-                    );
+                    write_error(2, &format!("Landlock enforcement failed (fatal): {error}"));
                     libc::_exit(122);
                 }
             }
@@ -505,9 +502,7 @@ impl LinuxSandbox {
                 unsafe {
                     write_error(
                         2,
-                        &format!(
-                            "unshare(ns_flags) also failed (fatal): {fallback_error}"
-                        ),
+                        &format!("unshare(ns_flags) also failed (fatal): {fallback_error}"),
                     );
                     libc::_exit(121);
                 }
@@ -831,7 +826,8 @@ fn attach_pty_stdio(slave_path: &Path) -> Result<(), String> {
 }
 
 fn change_child_cwd(cwd: &str) -> Result<(), String> {
-    let cwd = CString::new(cwd).map_err(|_| "working directory contains embedded NUL".to_string())?;
+    let cwd =
+        CString::new(cwd).map_err(|_| "working directory contains embedded NUL".to_string())?;
     // SAFETY: `cwd` 是当前函数中构造的有效 C 字符串。
     let result = unsafe { libc::chdir(cwd.as_ptr()) };
     if result == 0 {

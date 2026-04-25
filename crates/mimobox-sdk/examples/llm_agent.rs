@@ -133,7 +133,11 @@ impl LlmBackend {
             let model = std::env::var("ANTHROPIC_MODEL")?;
             let base_url = std::env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".into());
-            return Ok(Self::Anthropic { api_key, base_url, model });
+            return Ok(Self::Anthropic {
+                api_key,
+                base_url,
+                model,
+            });
         }
 
         Ok(Self::OpenAI {
@@ -150,9 +154,11 @@ impl LlmBackend {
                 base_url,
                 model,
             } => call_openai(base_url, model, api_key, prompt),
-            Self::Anthropic { api_key, base_url, model } => {
-                call_anthropic(base_url, api_key, model, prompt)
-            }
+            Self::Anthropic {
+                api_key,
+                base_url,
+                model,
+            } => call_anthropic(base_url, api_key, model, prompt),
         }
     }
 }
@@ -236,7 +242,13 @@ fn normalize_command(command: &str) -> String {
     let command = command.strip_prefix("```").unwrap_or(command);
     let command = command.strip_suffix("```").unwrap_or(command);
 
-    command.trim().lines().next().unwrap_or_default().trim().to_string()
+    command
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[cfg(not(all(feature = "os", any(target_os = "linux", target_os = "macos"))))]
