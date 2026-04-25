@@ -97,7 +97,7 @@ impl SerialDevice {
     pub(in crate::kvm) fn read(&mut self, port: u16) -> Result<u8, MicrovmError> {
         let register = port
             .checked_sub(SERIAL_PORT_COM1)
-            .ok_or_else(|| MicrovmError::Backend(format!("非法串口读端口: {port:#x}")))?;
+            .ok_or_else(|| MicrovmError::Backend(format!("invalid serial read port: {port:#x}")))?;
 
         let value = match register {
             UART_REG_DATA => {
@@ -141,9 +141,9 @@ impl SerialDevice {
         port: u16,
         value: u8,
     ) -> Result<Option<u8>, MicrovmError> {
-        let register = port
-            .checked_sub(SERIAL_PORT_COM1)
-            .ok_or_else(|| MicrovmError::Backend(format!("非法串口写端口: {port:#x}")))?;
+        let register = port.checked_sub(SERIAL_PORT_COM1).ok_or_else(|| {
+            MicrovmError::Backend(format!("invalid serial write port: {port:#x}"))
+        })?;
 
         match register {
             UART_REG_DATA => {
@@ -306,7 +306,9 @@ pub(in crate::kvm) fn encode_fs_write_payload(
 
 pub(in crate::kvm) fn build_guest_command(cmd: &[String]) -> Result<String, MicrovmError> {
     if cmd.is_empty() {
-        return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
+        return Err(MicrovmError::InvalidConfig(
+            "command must not be empty".into(),
+        ));
     }
 
     Ok(join_shell_command(cmd))
@@ -320,7 +322,9 @@ pub(in crate::kvm) fn build_guest_exec_payload(
     if let Some(timeout_secs) = timeout_secs
         && timeout_secs == 0
     {
-        return Err(MicrovmError::InvalidConfig("timeout_secs 不能为 0".into()));
+        return Err(MicrovmError::InvalidConfig(
+            "timeout_secs must not be zero".into(),
+        ));
     }
 
     let command = build_guest_command(cmd)?;
@@ -329,8 +333,9 @@ pub(in crate::kvm) fn build_guest_exec_payload(
         env,
         timeout: timeout_secs,
     };
-    serde_json::to_string(&payload)
-        .map_err(|err| MicrovmError::Backend(format!("序列化 guest EXEC 负载失败: {err}")))
+    serde_json::to_string(&payload).map_err(|err| {
+        MicrovmError::Backend(format!("failed to serialize guest EXEC payload: {err}"))
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -379,7 +384,9 @@ pub(in crate::kvm) fn parse_serial_line(
 
     if let Some(payload) = line.strip_prefix(SERIAL_EXIT_PREFIX) {
         let exit_code = payload.parse::<i32>().map_err(|err| {
-            MicrovmError::Backend(format!("guest EXIT 帧不是合法整数: {payload}: {err}"))
+            MicrovmError::Backend(format!(
+                "guest EXIT frame is not a valid integer: {payload}: {err}"
+            ))
         })?;
         return Ok(Some(GuestCommandResult {
             stdout: std::mem::take(&mut response.stdout),
@@ -470,9 +477,9 @@ fn decode_guest_output(payload: &str) -> Result<Vec<u8>, MicrovmError> {
         }
 
         index += 1;
-        let escaped = *bytes
-            .get(index)
-            .ok_or_else(|| MicrovmError::Backend("guest OUTPUT 帧以不完整转义结尾".into()))?;
+        let escaped = *bytes.get(index).ok_or_else(|| {
+            MicrovmError::Backend("guest OUTPUT frame ends with incomplete escape".into())
+        })?;
         match escaped {
             b'\\' => decoded.push(b'\\'),
             b'n' => decoded.push(b'\n'),
@@ -480,10 +487,10 @@ fn decode_guest_output(payload: &str) -> Result<Vec<u8>, MicrovmError> {
             b't' => decoded.push(b'\t'),
             b'x' => {
                 let hi = *bytes.get(index + 1).ok_or_else(|| {
-                    MicrovmError::Backend("guest OUTPUT 帧缺少十六进制高位".into())
+                    MicrovmError::Backend("guest OUTPUT frame missing high hex digit".into())
                 })?;
                 let lo = *bytes.get(index + 2).ok_or_else(|| {
-                    MicrovmError::Backend("guest OUTPUT 帧缺少十六进制低位".into())
+                    MicrovmError::Backend("guest OUTPUT frame missing low hex digit".into())
                 })?;
                 decoded.push((parse_hex_digit(hi)? << 4) | parse_hex_digit(lo)?);
                 index += 2;
@@ -526,7 +533,9 @@ fn try_take_fs_result_frame(
         return Ok(None);
     };
     let status = u8::try_from(status).map_err(|_| {
-        MicrovmError::Backend(format!("guest FSRESULT 状态码超出 u8 范围: {status}"))
+        MicrovmError::Backend(format!(
+            "guest FSRESULT status code exceeds u8 range: {status}"
+        ))
     })?;
 
     match bytes.get(status_delim_index) {
@@ -566,18 +575,18 @@ fn try_take_fs_result_frame(
     let data_start = data_len_delim_index + 1;
     let data_end = data_start
         .checked_add(data_len)
-        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 数据长度溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT data length overflow".into()))?;
     if frame_buffer.len() < data_end + 1 {
         return Ok(None);
     }
     if bytes
         .get(data_end)
         .copied()
-        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 缺少结尾换行".into()))?
+        .ok_or_else(|| MicrovmError::Backend("guest FSRESULT missing trailing newline".into()))?
         != b'\n'
     {
         return Err(MicrovmError::Backend(
-            "guest FSRESULT 数据帧未以换行结束".into(),
+            "guest FSRESULT frame does not end with newline".into(),
         ));
     }
 
@@ -595,7 +604,9 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             return Ok(None);
         };
         let stream_id = u32::try_from(stream_id).map_err(|_| {
-            MicrovmError::Backend(format!("guest STREAM:START id 超出 u32 范围: {stream_id}"))
+            MicrovmError::Backend(format!(
+                "guest STREAM:START id exceeds u32 range: {stream_id}"
+            ))
         })?;
         match bytes.get(delimiter_index) {
             Some(b'\n') => {
@@ -621,7 +632,9 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             return Ok(None);
         };
         let stream_id = u32::try_from(stream_id).map_err(|_| {
-            MicrovmError::Backend(format!("guest STREAM:END id 超出 u32 范围: {stream_id}"))
+            MicrovmError::Backend(format!(
+                "guest STREAM:END id exceeds u32 range: {stream_id}"
+            ))
         })?;
         match bytes.get(stream_delimiter_index) {
             Some(b':') => {}
@@ -689,7 +702,9 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
     } else if bytes.starts_with(SERIAL_STREAM_STDERR_PREFIX.as_bytes()) {
         (SERIAL_STREAM_STDERR_PREFIX, false)
     } else {
-        return Err(MicrovmError::Backend("guest STREAM 帧类型未知".into()));
+        return Err(MicrovmError::Backend(
+            "unknown guest STREAM frame type".into(),
+        ));
     };
 
     let prefix_len = prefix.len();
@@ -697,7 +712,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
         return Ok(None);
     };
     let stream_id = u32::try_from(stream_id).map_err(|_| {
-        MicrovmError::Backend(format!("guest STREAM id 超出 u32 范围: {stream_id}"))
+        MicrovmError::Backend(format!("guest STREAM id exceeds u32 range: {stream_id}"))
     })?;
     match bytes.get(stream_delimiter_index) {
         Some(b':') => {}
@@ -729,18 +744,18 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
     let data_start = data_len_delimiter_index + 1;
     let data_end = data_start
         .checked_add(data_len)
-        .ok_or_else(|| MicrovmError::Backend("guest STREAM 数据长度溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("guest STREAM data length overflow".into()))?;
     if frame_buffer.len() < data_end + 1 {
         return Ok(None);
     }
     if bytes
         .get(data_end)
         .copied()
-        .ok_or_else(|| MicrovmError::Backend("guest STREAM 缺少结尾换行".into()))?
+        .ok_or_else(|| MicrovmError::Backend("guest STREAM missing trailing newline".into()))?
         != b'\n'
     {
         return Err(MicrovmError::Backend(
-            "guest STREAM 数据帧未以换行结束".into(),
+            "guest STREAM frame does not end with newline".into(),
         ));
     }
 
@@ -766,7 +781,9 @@ fn try_take_http_request_frame(
         return Ok(None);
     };
     let request_id = u32::try_from(request_id).map_err(|_| {
-        MicrovmError::Backend(format!("guest HTTP:REQUEST id 超出 u32 范围: {request_id}"))
+        MicrovmError::Backend(format!(
+            "guest HTTP:REQUEST id exceeds u32 range: {request_id}"
+        ))
     })?;
 
     match bytes.get(id_delimiter_index) {
@@ -799,23 +816,21 @@ fn try_take_http_request_frame(
     let json_start = json_len_delimiter_index + 1;
     let json_end = json_start
         .checked_add(json_len)
-        .ok_or_else(|| MicrovmError::Backend("guest HTTP:REQUEST JSON 长度溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("guest HTTP:REQUEST JSON length overflow".into()))?;
     if frame_buffer.len() < json_end + 1 {
         return Ok(None);
     }
-    if bytes
-        .get(json_end)
-        .copied()
-        .ok_or_else(|| MicrovmError::Backend("guest HTTP:REQUEST 缺少结尾换行".into()))?
-        != b'\n'
+    if bytes.get(json_end).copied().ok_or_else(|| {
+        MicrovmError::Backend("guest HTTP:REQUEST missing trailing newline".into())
+    })? != b'\n'
     {
         return Err(MicrovmError::Backend(
-            "guest HTTP:REQUEST 数据帧未以换行结束".into(),
+            "guest HTTP:REQUEST frame does not end with newline".into(),
         ));
     }
 
     let json = String::from_utf8(frame_buffer[json_start..json_end].to_vec()).map_err(|err| {
-        MicrovmError::Backend(format!("guest HTTP:REQUEST JSON 不是合法 UTF-8: {err}"))
+        MicrovmError::Backend(format!("guest HTTP:REQUEST JSON is not valid UTF-8: {err}"))
     })?;
     let request = HttpRequest::from_json(&json)?;
     frame_buffer.drain(..=json_end);
@@ -861,13 +876,17 @@ fn parse_decimal_prefix(
             value = value
                 .checked_mul(10)
                 .and_then(|current| current.checked_add(usize::from(byte - b'0')))
-                .ok_or_else(|| MicrovmError::Backend("guest FSRESULT 数字字段溢出".into()))?;
+                .ok_or_else(|| {
+                    MicrovmError::Backend("guest FSRESULT numeric field overflow".into())
+                })?;
             index += 1;
             continue;
         }
 
         if !saw_digit {
-            return Err(MicrovmError::Backend("guest FSRESULT 缺少数字字段".into()));
+            return Err(MicrovmError::Backend(
+                "guest FSRESULT missing numeric field".into(),
+            ));
         }
         return Ok(Some((value, index)));
     }
@@ -891,12 +910,14 @@ fn parse_signed_decimal_prefix(
         return Ok(None);
     };
     let value = i32::try_from(value).map_err(|_| {
-        MicrovmError::Backend(format!("guest STREAM 数字字段超出 i32 范围: {value}"))
+        MicrovmError::Backend(format!(
+            "guest STREAM numeric field exceeds i32 range: {value}"
+        ))
     })?;
     let signed = if negative {
         value
             .checked_neg()
-            .ok_or_else(|| MicrovmError::Backend("guest STREAM 数字字段发生溢出".into()))?
+            .ok_or_else(|| MicrovmError::Backend("guest STREAM numeric field overflow".into()))?
     } else {
         value
     };

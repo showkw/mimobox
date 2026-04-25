@@ -20,19 +20,17 @@ pub(crate) fn allocate_pty(size: CorePtySize) -> Result<AllocatedPty, SandboxErr
     let pty_system = NativePtySystem::default();
     let pair = pty_system
         .openpty(to_portable_size(size))
-        .map_err(|error| SandboxError::ExecutionFailed(format!("创建 PTY 失败: {error}")))?;
+        .map_err(|error| SandboxError::ExecutionFailed(format!("failed to create PTY: {error}")))?;
 
     let slave_path = pair.master.tty_name().ok_or_else(|| {
-        SandboxError::ExecutionFailed("当前平台无法解析 PTY slave 路径".to_string())
+        SandboxError::ExecutionFailed("current platform cannot resolve PTY slave path".to_string())
     })?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| SandboxError::ExecutionFailed(format!("克隆 PTY reader 失败: {error}")))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| SandboxError::ExecutionFailed(format!("获取 PTY writer 失败: {error}")))?;
+    let reader = pair.master.try_clone_reader().map_err(|error| {
+        SandboxError::ExecutionFailed(format!("failed to clone PTY reader: {error}"))
+    })?;
+    let writer = pair.master.take_writer().map_err(|error| {
+        SandboxError::ExecutionFailed(format!("failed to take PTY writer: {error}"))
+    })?;
 
     drop(pair.slave);
 
@@ -117,10 +115,9 @@ impl OsPtySession {
             return Ok(code);
         }
 
-        let code = self
-            .exit_rx
-            .recv()
-            .map_err(|_| SandboxError::ExecutionFailed("PTY 退出事件通道已关闭".to_string()))?;
+        let code = self.exit_rx.recv().map_err(|_| {
+            SandboxError::ExecutionFailed("PTY exit event channel closed".to_string())
+        })?;
         self.cached_exit_code = Some(code);
         Ok(code)
     }
@@ -135,9 +132,9 @@ impl PtySession for OsPtySession {
     }
 
     fn resize(&mut self, size: CorePtySize) -> Result<(), SandboxError> {
-        self.master
-            .resize(to_portable_size(size))
-            .map_err(|error| SandboxError::ExecutionFailed(format!("调整 PTY 尺寸失败: {error}")))
+        self.master.resize(to_portable_size(size)).map_err(|error| {
+            SandboxError::ExecutionFailed(format!("failed to resize PTY: {error}"))
+        })
     }
 
     fn output_rx(&self) -> &Receiver<PtyEvent> {
@@ -237,7 +234,7 @@ fn wait_for_child(child_pid: libc::pid_t) -> Result<i32, SandboxError> {
                 continue;
             }
             return Err(SandboxError::ExecutionFailed(format!(
-                "waitpid 等待 PTY 子进程失败: {error}"
+                "waitpid failed while waiting for PTY child process: {error}"
             )));
         }
 
@@ -280,7 +277,7 @@ fn send_signal_to_group(child_pid: libc::pid_t, signal: libc::c_int) -> Result<(
     }
 
     Err(SandboxError::ExecutionFailed(format!(
-        "发送信号 {signal} 到 PTY 进程组失败: {error}"
+        "failed to send signal {signal} to PTY process group: {error}"
     )))
 }
 

@@ -17,7 +17,9 @@ pub fn resolve_vm_assets_dir(
     }
 
     let home_dir = home_dir.ok_or_else(|| {
-        MicrovmError::InvalidConfig("必须存在 HOME 环境变量或设置 VM_ASSETS_DIR".into())
+        MicrovmError::InvalidConfig(
+            "HOME environment variable must exist or VM_ASSETS_DIR must be set".into(),
+        )
     })?;
     Ok(home_dir.join(DEFAULT_VM_ASSETS_SUBDIR))
 }
@@ -40,14 +42,14 @@ pub fn microvm_config_from_assets_dir(
 
     if !kernel_path.exists() {
         return Err(MicrovmError::InvalidConfig(format!(
-            "缺少内核镜像: {}",
+            "missing kernel image: {}",
             kernel_path.display()
         )));
     }
 
     if !rootfs_path.exists() {
         return Err(MicrovmError::InvalidConfig(format!(
-            "缺少 rootfs: {}",
+            "missing rootfs: {}",
             rootfs_path.display()
         )));
     }
@@ -120,6 +122,6 @@ mod tests {
         let err = microvm_config_from_assets_dir(assets_dir.path().to_path_buf(), 256)
             .expect_err("缺少 rootfs 时必须失败");
 
-        assert!(err.to_string().contains("缺少 rootfs"));
+        assert!(err.to_string().contains("missing rootfs"));
     }
 }

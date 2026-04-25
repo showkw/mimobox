@@ -1685,6 +1685,7 @@ name = "mimobox-mcp"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "mimobox-core",
  "mimobox-sdk",
  "rmcp",
  "schemars",
@@ -1723,6 +1724,7 @@ dependencies = [
 name = "mimobox-sdk"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "mimobox-core",
  "mimobox-os",
  "mimobox-vm",

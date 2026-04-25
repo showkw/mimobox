@@ -61,7 +61,10 @@ fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Opt
 
     if exit_code == Some(71) && stderr_text.contains("sandbox_apply: Operation not permitted") {
         // SECURITY: 不向上层暴露 sandbox-exec 原始 stderr，避免泄露策略文本或敏感路径。
-        return Some("Seatbelt 策略应用失败（底层路径与策略细节已隐藏）".to_string());
+        return Some(
+            "Seatbelt policy enforcement failed (underlying path and policy details hidden)"
+                .to_string(),
+        );
     }
 
     None
@@ -104,8 +107,9 @@ fn wait_child_with_timeout(
             let _ = waiter.join();
             Ok((
                 std::process::ExitStatus::from_raw(
-                    status
-                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
+                    status.map_err(|e| {
+                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
+                    })?,
                 ),
                 false,
             ))
@@ -116,13 +120,16 @@ fn wait_child_with_timeout(
             // 否则其派生进程会在 supervisor 返回后继续存活。
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
             let status = rx.recv().map_err(|_| {
-                SandboxError::ExecutionFailed("waitpid 等待线程意外断开".to_string())
+                SandboxError::ExecutionFailed(
+                    "waitpid waiter thread disconnected unexpectedly".to_string(),
+                )
             })?;
             let _ = waiter.join();
             Ok((
                 std::process::ExitStatus::from_raw(
-                    status
-                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
+                    status.map_err(|e| {
+                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
+                    })?,
                 ),
                 true,
             ))
@@ -130,7 +137,7 @@ fn wait_child_with_timeout(
         Err(RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
             Err(SandboxError::ExecutionFailed(
-                "waitpid 等待线程意外断开".to_string(),
+                "waitpid monitoring thread disconnected unexpectedly".to_string(),
             ))
         }
     }
@@ -248,7 +255,9 @@ impl Sandbox for MacOsSandbox {
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed("命令为空".into()));
+            return Err(SandboxError::ExecutionFailed(
+                "command must not be empty".into(),
+            ));
         }
 
         // SECURITY: 日志仅记录程序基名和参数个数，避免 argv 中的 token、URL、路径泄露。
@@ -282,20 +291,20 @@ impl Sandbox for MacOsSandbox {
                 })
                 .spawn()
         }
-        .map_err(|e| SandboxError::ExecutionFailed(format!("sandbox-exec 启动失败: {e}")))?;
+        .map_err(|e| SandboxError::ExecutionFailed(format!("failed to start sandbox-exec: {e}")))?;
         let pid = child.id() as libc::pid_t;
 
-        let (exit_status, timed_out) = if let Some(dur) = timeout {
-            wait_child_with_timeout(pid, dur)?
-        } else {
-            (
-                std::process::ExitStatus::from_raw(
-                    waitpid_raw(pid)
-                        .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid 失败: {e}")))?,
-                ),
-                false,
-            )
-        };
+        let (exit_status, timed_out) =
+            if let Some(dur) = timeout {
+                wait_child_with_timeout(pid, dur)?
+            } else {
+                (
+                    std::process::ExitStatus::from_raw(waitpid_raw(pid).map_err(|e| {
+                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
+                    })?),
+                    false,
+                )
+            };
 
         let elapsed = start.elapsed();
 
@@ -336,7 +345,9 @@ impl Sandbox for MacOsSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::ExecutionFailed("PTY 命令为空".into()));
+            return Err(SandboxError::ExecutionFailed(
+                "PTY command must not be empty".into(),
+            ));
         }
 
         tracing::info!(
@@ -353,13 +364,13 @@ impl Sandbox for MacOsSandbox {
             .write(true)
             .open(&allocated.slave_path)
             .map_err(|error| {
-                SandboxError::ExecutionFailed(format!("打开 PTY slave 失败: {error}"))
+                SandboxError::ExecutionFailed(format!("failed to open PTY slave: {error}"))
             })?;
         let stdin_slave = slave_file.try_clone().map_err(|error| {
-            SandboxError::ExecutionFailed(format!("克隆 PTY stdin 失败: {error}"))
+            SandboxError::ExecutionFailed(format!("failed to clone PTY stdin: {error}"))
         })?;
         let stdout_slave = slave_file.try_clone().map_err(|error| {
-            SandboxError::ExecutionFailed(format!("克隆 PTY stdout 失败: {error}"))
+            SandboxError::ExecutionFailed(format!("failed to clone PTY stdout: {error}"))
         })?;
 
         let mut args = vec!["-p".to_string(), policy, "--".to_string()];
@@ -396,7 +407,7 @@ impl Sandbox for MacOsSandbox {
         }
         .spawn()
         .map_err(|error| {
-            SandboxError::ExecutionFailed(format!("sandbox-exec PTY 启动失败: {error}"))
+            SandboxError::ExecutionFailed(format!("failed to start sandbox-exec PTY: {error}"))
         })?;
 
         Ok(build_session(
@@ -447,7 +458,7 @@ mod tests {
                 {
                     Ok(output) => output,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        return Some("当前环境不存在 sandbox-exec".to_string());
+                        return Some("sandbox-exec not found in current environment".to_string());
                     }
                     Err(err) => {
                         panic!("执行 sandbox-exec 最小探测失败: {err}");
@@ -481,7 +492,7 @@ mod tests {
         assert!(
             reason
                 .as_deref()
-                .is_some_and(|value| value.contains("Seatbelt 策略应用失败")),
+                .is_some_and(|value| value.contains("Seatbelt policy enforcement failed")),
             "应识别为 Seatbelt 后端错误, 实际: {reason:?}"
         );
     }
@@ -505,7 +516,7 @@ mod tests {
             "错误消息不应泄露敏感路径: {reason}"
         );
         assert!(
-            reason.contains("Seatbelt 策略应用失败"),
+            reason.contains("Seatbelt policy enforcement failed"),
             "错误消息应保留高层语义: {reason}"
         );
     }

@@ -488,7 +488,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret < 0 {
         return Err(SandboxError::SeccompFailed(
-            "PR_SET_NO_NEW_PRIVS 失败".into(),
+            "PR_SET_NO_NEW_PRIVS failed".into(),
         ));
     }
 

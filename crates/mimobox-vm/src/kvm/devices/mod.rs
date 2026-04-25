@@ -106,14 +106,14 @@ pub(super) fn handle_serial_write(
                                 SerialResponseCollector::Fs => {
                                     if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
                                         return Err(MicrovmError::Backend(format!(
-                                            "等待 FSRESULT 时收到意外串口行: {line}"
+                                            "unexpected serial line while waiting for FSRESULT: {line}"
                                         )));
                                     }
                                 }
                                 SerialResponseCollector::Http => {
                                     if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
                                         return Err(MicrovmError::Backend(format!(
-                                            "等待 HTTP 响应时收到意外串口行: {line}"
+                                            "unexpected serial line while waiting for HTTP response: {line}"
                                         )));
                                     }
                                 }
@@ -125,7 +125,7 @@ pub(super) fn handle_serial_write(
                             match response {
                                 SerialResponseCollector::Command(_) => {
                                     return Err(MicrovmError::Backend(
-                                        "命令执行阶段收到意外 FSRESULT 帧".into(),
+                                        "unexpected FSRESULT frame during command execution".into(),
                                     ));
                                 }
                                 SerialResponseCollector::Fs => {
@@ -133,7 +133,7 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Http => {
                                     return Err(MicrovmError::Backend(
-                                        "等待 HTTP 响应时收到意外 FSRESULT 帧".into(),
+                                        "unexpected FSRESULT frame while waiting for HTTP response".into(),
                                     ));
                                 }
                             }
@@ -147,7 +147,7 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Fs => {
                                     return Err(MicrovmError::Backend(format!(
-                                        "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
+                                        "unexpected STREAM frame while waiting for FSRESULT: {stream_result:?}"
                                     )));
                                 }
                                 SerialResponseCollector::Http => {
@@ -206,14 +206,14 @@ pub(super) fn handle_serial_write(
                                 SerialResponseCollector::Fs => {
                                     if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
                                         return Err(MicrovmError::Backend(format!(
-                                            "等待 FSRESULT 时收到意外串口行: {line}"
+                                            "unexpected serial line while waiting for FSRESULT: {line}"
                                         )));
                                     }
                                 }
                                 SerialResponseCollector::Http => {
                                     if line.starts_with("OUTPUT:") || line.starts_with("EXIT:") {
                                         return Err(MicrovmError::Backend(format!(
-                                            "等待 HTTP 响应时收到意外串口行: {line}"
+                                            "unexpected serial line while waiting for HTTP response: {line}"
                                         )));
                                     }
                                 }
@@ -225,7 +225,7 @@ pub(super) fn handle_serial_write(
                             match response {
                                 SerialResponseCollector::Command(_) => {
                                     return Err(MicrovmError::Backend(
-                                        "命令执行阶段收到意外 FSRESULT 帧".into(),
+                                        "unexpected FSRESULT frame during command execution".into(),
                                     ));
                                 }
                                 SerialResponseCollector::Fs => {
@@ -233,7 +233,7 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Http => {
                                     return Err(MicrovmError::Backend(
-                                        "等待 HTTP 响应时收到意外 FSRESULT 帧".into(),
+                                        "unexpected FSRESULT frame while waiting for HTTP response".into(),
                                     ));
                                 }
                             }
@@ -247,7 +247,7 @@ pub(super) fn handle_serial_write(
                                 }
                                 SerialResponseCollector::Fs => {
                                     return Err(MicrovmError::Backend(format!(
-                                        "等待 FSRESULT 时收到意外 STREAM 帧: {stream_result:?}"
+                                        "unexpected STREAM frame while waiting for FSRESULT: {stream_result:?}"
                                     )));
                                 }
                                 SerialResponseCollector::Http => {

@@ -84,14 +84,21 @@ impl VsockStream {
     }
 
     fn set_recv_timeout(&self, timeout: Duration) -> Result<(), MicrovmError> {
-        let tv_sec = libc::time_t::try_from(timeout.as_secs())
-            .map_err(|_| MicrovmError::Backend("vsock 接收超时秒数无法转换为 time_t".into()))?;
+        let tv_sec = libc::time_t::try_from(timeout.as_secs()).map_err(|_| {
+            MicrovmError::Backend(
+                "vsock receive timeout seconds cannot be converted to time_t".into(),
+            )
+        })?;
         let tv_usec = libc::suseconds_t::try_from(timeout.subsec_micros()).map_err(|_| {
-            MicrovmError::Backend("vsock 接收超时微秒数无法转换为 suseconds_t".into())
+            MicrovmError::Backend(
+                "vsock receive timeout microseconds cannot be converted to suseconds_t".into(),
+            )
         })?;
         let timeout_value = libc::timeval { tv_sec, tv_usec };
-        let timeout_len = libc::socklen_t::try_from(mem::size_of::<libc::timeval>())
-            .map_err(|_| MicrovmError::Backend("timeval 长度无法转换为 socklen_t".into()))?;
+        let timeout_len =
+            libc::socklen_t::try_from(mem::size_of::<libc::timeval>()).map_err(|_| {
+                MicrovmError::Backend("timeval length cannot be converted to socklen_t".into())
+            })?;
 
         // SAFETY: `timeout_value` 是当前栈上有效的 `timeval`，
         // `setsockopt` 只同步读取该结构体，不会越界或悬垂引用。
@@ -106,7 +113,7 @@ impl VsockStream {
         };
         if result != 0 {
             return Err(MicrovmError::Backend(format!(
-                "设置 vsock 接收超时失败: {}",
+                "failed to set vsock receive timeout: {}",
                 Error::last_os_error()
             )));
         }
@@ -129,7 +136,7 @@ impl VsockStream {
             if read_bytes == 0 {
                 return Err(MicrovmError::Io(Error::new(
                     ErrorKind::UnexpectedEof,
-                    "vsock 对端提前关闭",
+                    "vsock peer closed early",
                 )));
             }
             if read_bytes < 0 {
@@ -140,8 +147,9 @@ impl VsockStream {
                 return Err(MicrovmError::Io(err));
             }
 
-            let chunk = usize::try_from(read_bytes)
-                .map_err(|_| MicrovmError::Backend("vsock 读取长度无法转换为 usize".into()))?;
+            let chunk = usize::try_from(read_bytes).map_err(|_| {
+                MicrovmError::Backend("vsock read length cannot be converted to usize".into())
+            })?;
             offset += chunk;
         }
 
@@ -163,7 +171,7 @@ impl VsockStream {
             if written_bytes == 0 {
                 return Err(MicrovmError::Io(Error::new(
                     ErrorKind::WriteZero,
-                    "vsock 写入返回 0",
+                    "vsock write returned 0",
                 )));
             }
             if written_bytes < 0 {
@@ -174,8 +182,9 @@ impl VsockStream {
                 return Err(MicrovmError::Io(err));
             }
 
-            let chunk = usize::try_from(written_bytes)
-                .map_err(|_| MicrovmError::Backend("vsock 写入长度无法转换为 usize".into()))?;
+            let chunk = usize::try_from(written_bytes).map_err(|_| {
+                MicrovmError::Backend("vsock write length cannot be converted to usize".into())
+            })?;
             offset += chunk;
         }
 
@@ -202,8 +211,9 @@ impl VsockCommandChannel {
 
         let listener = VsockFd::new(fd);
         let addr = SockAddrVm::host_command_addr();
-        let addr_len = libc::socklen_t::try_from(mem::size_of::<SockAddrVm>())
-            .map_err(|_| MicrovmError::Backend("sockaddr_vm 长度无法转换为 socklen_t".into()))?;
+        let addr_len = libc::socklen_t::try_from(mem::size_of::<SockAddrVm>()).map_err(|_| {
+            MicrovmError::Backend("sockaddr_vm length cannot be converted to socklen_t".into())
+        })?;
 
         // SAFETY: `addr` 是当前栈上的 `sockaddr_vm`，布局与内核 ABI 对齐；
         // `listener` 持有有效 fd，`bind` 仅同步读取地址结构体。
@@ -298,12 +308,12 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn send_command(&self, cmd: &[u8]) -> Result<(), MicrovmError> {
-        let stream = self
-            .stream
-            .as_ref()
-            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道尚未建立连接".into()))?;
-        let cmd_len = u32::try_from(cmd.len())
-            .map_err(|_| MicrovmError::InvalidConfig("vsock 命令长度超过 u32 上限".into()))?;
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            MicrovmError::Lifecycle("vsock command channel is not connected".into())
+        })?;
+        let cmd_len = u32::try_from(cmd.len()).map_err(|_| {
+            MicrovmError::InvalidConfig("vsock command length exceeds u32 limit".into())
+        })?;
 
         stream.write_all(&cmd_len.to_be_bytes())?;
         stream.write_all(cmd)?;
@@ -311,10 +321,9 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn recv_result(&self) -> Result<GuestCommandResult, MicrovmError> {
-        let stream = self
-            .stream
-            .as_ref()
-            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道尚未建立连接".into()))?;
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            MicrovmError::Lifecycle("vsock command channel is not connected".into())
+        })?;
 
         let stdout = read_length_prefixed_bytes(stream)?;
         let stderr = read_length_prefixed_bytes(stream)?;
@@ -331,10 +340,9 @@ impl VsockCommandChannel {
     }
 
     pub(in crate::kvm) fn probe_round_trip(&self, timeout: Duration) -> Result<(), MicrovmError> {
-        let stream = self
-            .stream
-            .as_ref()
-            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道尚未建立连接".into()))?;
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            MicrovmError::Lifecycle("vsock command channel is not connected".into())
+        })?;
         let default_timeout = Duration::from_secs(STREAM_RECV_TIMEOUT_SECS);
 
         stream.set_recv_timeout(timeout)?;
@@ -357,8 +365,9 @@ impl VsockCommandChannel {
 fn read_length_prefixed_bytes(stream: &VsockStream) -> Result<Vec<u8>, MicrovmError> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
-    let len = usize::try_from(u32::from_be_bytes(len_buf))
-        .map_err(|_| MicrovmError::Backend("vsock 帧长度无法转换为 usize".into()))?;
+    let len = usize::try_from(u32::from_be_bytes(len_buf)).map_err(|_| {
+        MicrovmError::Backend("vsock frame length cannot be converted to usize".into())
+    })?;
 
     let mut data = vec![0u8; len];
     if len > 0 {
@@ -370,19 +379,21 @@ fn read_length_prefixed_bytes(stream: &VsockStream) -> Result<Vec<u8>, MicrovmEr
 fn validate_probe_result(result: GuestCommandResult) -> Result<(), MicrovmError> {
     if result.exit_code != Some(0) {
         return Err(MicrovmError::Backend(format!(
-            "vsock 探针返回了非零退出码: {:?}",
+            "vsock probe returned non-zero exit code: {:?}",
             result.exit_code
         )));
     }
     if !result.stdout.is_empty() || !result.stderr.is_empty() {
         return Err(MicrovmError::Backend(format!(
-            "vsock 探针不应产生输出: stdout={}B stderr={}B",
+            "vsock probe should not produce output: stdout={}B stderr={}B",
             result.stdout.len(),
             result.stderr.len()
         )));
     }
     if result.timed_out {
-        return Err(MicrovmError::Backend("vsock 探针被错误标记为超时".into()));
+        return Err(MicrovmError::Backend(
+            "vsock probe was incorrectly marked as timed out".into(),
+        ));
     }
 
     Ok(())

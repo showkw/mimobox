@@ -106,15 +106,21 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
 #[test]
 fn sandbox_error_display_and_source_behave_as_expected() {
     let execution_error = SandboxError::ExecutionFailed("boom".to_string());
-    assert_eq!(execution_error.to_string(), "命令执行失败: boom");
+    assert_eq!(
+        execution_error.to_string(),
+        "command execution failed: boom"
+    );
     assert!(execution_error.source().is_none());
 
     let unsupported_error = SandboxError::Unsupported;
-    assert_eq!(unsupported_error.to_string(), "当前平台不支持该沙箱后端");
+    assert_eq!(
+        unsupported_error.to_string(),
+        "sandbox backend not supported on current platform"
+    );
     assert!(unsupported_error.source().is_none());
 
     let io_error = SandboxError::from(io::Error::other("disk full"));
-    assert!(io_error.to_string().contains("IO 错误: disk full"));
+    assert!(io_error.to_string().contains("I/O error: disk full"));
     assert!(io_error.source().is_some());
 }
 

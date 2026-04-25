@@ -79,8 +79,8 @@ fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
     {
         Err(SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
-            "Untrusted 隔离级别需要 microVM 后端，当前平台不支持",
-            Some("使用 IsolationLevel::Os 替代".to_string()),
+            "Untrusted isolation level requires microVM backend, which is not supported on current platform",
+            Some("Use IsolationLevel::Os as alternative".to_string()),
         ))
     }
 }
@@ -125,9 +125,12 @@ mod tests {
             }) => {
                 assert_eq!(
                     message,
-                    "Untrusted 隔离级别需要 microVM 后端，当前平台不支持"
+                    "Untrusted isolation level requires microVM backend, which is not supported on current platform"
                 );
-                assert_eq!(suggestion.as_deref(), Some("使用 IsolationLevel::Os 替代"));
+                assert_eq!(
+                    suggestion.as_deref(),
+                    Some("Use IsolationLevel::Os as alternative")
+                );
             }
             other => panic!("期望 fail-closed 的结构化错误，实际为: {other:?}"),
         }

@@ -90,6 +90,28 @@ pub struct ExecuteResult {
     pub elapsed: std::time::Duration,
 }
 
+impl ExecuteResult {
+    /// 构造一个新的执行结果。
+    ///
+    /// 由于 `ExecuteResult` 标记为 `#[non_exhaustive]`，外部 crate 无法使用结构体字面量构造。
+    /// 此方法提供了稳定的构造路径。
+    pub fn new(
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: Option<i32>,
+        timed_out: bool,
+        elapsed: std::time::Duration,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            exit_code,
+            timed_out,
+            elapsed,
+        }
+    }
+}
+
 /// HTTP response from the controlled host-side proxy.
 ///
 /// Returned by [`Sandbox::http_request()`]. Only available with the `vm` feature on Linux.
@@ -381,7 +403,6 @@ trait HttpRequestForSdk {
     ) -> Result<HttpResponse, SdkError>;
 }
 
-
 // ── ExecuteForSdk: OS/Wasm 后端（使用 CoreSandbox trait） ──
 
 #[cfg(all(feature = "os", target_os = "linux"))]
@@ -626,7 +647,6 @@ macro_rules! dispatch_execute {
     };
 }
 
-
 /// VM-only 三变体分派宏（MicroVm / PooledMicroVm / RestoredPooledMicroVm）。
 /// 用于 read_file、write_file、http_request、stream_execute、execute_with_vm_options 等
 /// 仅 VM 后端支持的方法。非 VM 变体统一走 fallback 表达式。
@@ -767,9 +787,9 @@ impl Sandbox {
                 _ => {
                     return Err(SdkError::sandbox(
                         ErrorCode::UnsupportedPlatform,
-                        "当前后端不支持快照能力",
+                        "current backend does not support snapshot",
                         Some(
-                            "将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行"
+                            "set isolation to `MicroVm` and run on Linux with vm feature enabled"
                                 .to_string(),
                         ),
                     ));
@@ -783,8 +803,8 @@ impl Sandbox {
         {
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "当前构建不支持快照能力",
-                Some("仅在 Linux + vm feature 构建上使用快照能力".to_string()),
+                "snapshot not supported in current build",
+                Some("use snapshot on Linux with vm feature enabled".to_string()),
             ))
         }
     }
@@ -806,8 +826,8 @@ impl Sandbox {
             let _ = snapshot;
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "当前构建不支持从快照恢复沙箱",
-                Some("仅在 Linux + vm feature 构建上使用快照恢复能力".to_string()),
+                "snapshot restore not supported in current build",
+                Some("use snapshot restore on Linux with vm feature enabled".to_string()),
             ))
         }
     }
@@ -877,7 +897,9 @@ impl Sandbox {
     pub fn create_pty(&mut self, command: &str) -> Result<PtySession, SdkError> {
         let args = parse_command(command)?;
         if args.is_empty() {
-            return Err(SdkError::Config("PTY 命令不能为空".to_string()));
+            return Err(SdkError::Config(
+                "PTY command must not be empty".to_string(),
+            ));
         }
 
         self.create_pty_with_config(PtyConfig {
@@ -892,44 +914,48 @@ impl Sandbox {
     /// 使用完整 `PtyConfig` 创建交互式终端会话。
     pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
         if config.command.is_empty() {
-            return Err(SdkError::Config("PTY 命令不能为空".to_string()));
+            return Err(SdkError::Config(
+                "PTY command must not be empty".to_string(),
+            ));
         }
 
         self.ensure_backend_for_pty()?;
         let inner = self.require_inner()?;
 
-        let session =
-            match inner {
-                #[cfg(all(feature = "os", target_os = "linux"))]
-                SandboxInner::Os(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
-                    .map_err(map_pty_create_error)?,
-                #[cfg(all(feature = "os", target_os = "macos"))]
-                SandboxInner::OsMac(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
-                    .map_err(map_pty_create_error)?,
-                #[cfg(all(feature = "vm", target_os = "linux"))]
-                SandboxInner::MicroVm(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
-                    .map_err(map_pty_create_error)?,
-                #[cfg(all(feature = "vm", target_os = "linux"))]
-                SandboxInner::PooledMicroVm(_) => {
-                    return Err(SdkError::sandbox(
-                        ErrorCode::UnsupportedPlatform,
-                        "PTY 会话当前仅支持 OS 级后端，microVM 预热池暂不支持",
-                        Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
-                    ));
-                }
-                #[cfg(all(feature = "vm", target_os = "linux"))]
-                SandboxInner::RestoredPooledMicroVm(_) => {
-                    return Err(SdkError::sandbox(
-                        ErrorCode::UnsupportedPlatform,
-                        "PTY 会话当前仅支持 OS 级后端，恢复池返回的 microVM 暂不支持",
-                        Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
-                    ));
-                }
-                #[cfg(feature = "wasm")]
-                SandboxInner::Wasm(sandbox) => {
-                    CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
-                }
-            };
+        let session = match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => {
+                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => {
+                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => {
+                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) => {
+                return Err(SdkError::sandbox(
+                    ErrorCode::UnsupportedPlatform,
+                    "PTY sessions currently only support OS-level backend, microVM pool not supported yet",
+                    Some("set isolation to `Os` or use default Auto".to_string()),
+                ));
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(_) => {
+                return Err(SdkError::sandbox(
+                    ErrorCode::UnsupportedPlatform,
+                    "PTY sessions currently only support OS-level backend, restored microVM pool not supported yet",
+                    Some("set isolation to `Os` or use default Auto".to_string()),
+                ));
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => {
+                CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
+            }
+        };
 
         Ok(PtySession { inner: session })
     }
@@ -975,11 +1001,17 @@ impl Sandbox {
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(inner, sandbox, sandbox.stream_execute_for_sdk(&args),
+        dispatch_vm!(
+            inner,
+            sandbox,
+            sandbox.stream_execute_for_sdk(&args),
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "流式执行仅支持 microVM 后端",
-                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+                "streaming execution only supports microVM backend",
+                Some(
+                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
+                        .to_string()
+                ),
             ))
         )
     }
@@ -990,11 +1022,17 @@ impl Sandbox {
         self.ensure_backend_for_file_ops()?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(inner, sandbox, sandbox.read_file(_path).map_err(map_microvm_error),
+        dispatch_vm!(
+            inner,
+            sandbox,
+            sandbox.read_file(_path).map_err(map_microvm_error),
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "文件传输仅支持 microVM 后端",
-                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+                "file transfer only supports microVM backend",
+                Some(
+                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
+                        .to_string()
+                ),
             ))
         )
     }
@@ -1005,11 +1043,17 @@ impl Sandbox {
         self.ensure_backend_for_file_ops()?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(inner, sandbox, sandbox.write_file(_path, _data).map_err(map_microvm_error),
+        dispatch_vm!(
+            inner,
+            sandbox,
+            sandbox.write_file(_path, _data).map_err(map_microvm_error),
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "文件传输仅支持 microVM 后端",
-                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+                "file transfer only supports microVM backend",
+                Some(
+                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
+                        .to_string()
+                ),
             ))
         )
     }
@@ -1027,11 +1071,14 @@ impl Sandbox {
         self.ensure_backend_for_file_ops()?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(inner, sandbox, sandbox.http_request_for_sdk(method, url, headers, body),
+        dispatch_vm!(
+            inner,
+            sandbox,
+            sandbox.http_request_for_sdk(method, url, headers, body),
             Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
-                "HTTP 代理仅支持 microVM 后端",
-                Some("将 isolation 设置为 `MicroVm` 并配置 allowed_http_domains".to_string()),
+                "HTTP proxy only supports microVM backend",
+                Some("set isolation to `MicroVm` and configure allowed_http_domains".to_string()),
             ))
         )
     }
@@ -1063,7 +1110,9 @@ impl Sandbox {
     /// microVM 后端会执行 PING/PONG readiness probe；OS/Wasm 后端初始化后直接视为就绪。
     pub fn wait_ready(&mut self, timeout: std::time::Duration) -> Result<(), SdkError> {
         if timeout.is_zero() {
-            return Err(SdkError::Config("wait_ready timeout 不能为 0".to_string()));
+            return Err(SdkError::Config(
+                "wait_ready timeout must not be zero".to_string(),
+            ));
         }
 
         let isolation = match self.config.isolation {
@@ -1116,8 +1165,8 @@ impl Sandbox {
         self.inner.as_mut().ok_or_else(|| {
             SdkError::sandbox(
                 ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
+                "backend instance missing after initialization",
+                Some("check if sandbox initialization was interrupted".to_string()),
             )
         })
     }
@@ -1171,24 +1220,31 @@ impl Sandbox {
         let inner = self.require_inner()?;
         let options = mimobox_vm::GuestExecOptions { env, timeout };
 
-        dispatch_vm!(inner, sandbox, {
-            let start = std::time::Instant::now();
-            sandbox
-                .execute_with_options(&args, options)
-                .map(|result| ExecuteResult {
-                    stdout: result.stdout,
-                    stderr: result.stderr,
-                    exit_code: result.exit_code,
-                    timed_out: result.timed_out,
-                    elapsed: start.elapsed(),
-                })
-                .map_err(map_microvm_error)
-        },
-        Err(SdkError::sandbox(
-            ErrorCode::UnsupportedPlatform,
-            "命令级 env/timeout 仅支持 microVM 后端",
-            Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
-        )))
+        dispatch_vm!(
+            inner,
+            sandbox,
+            {
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options)
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(map_microvm_error)
+            },
+            Err(SdkError::sandbox(
+                ErrorCode::UnsupportedPlatform,
+                "per-command env/timeout only supports microVM backend",
+                Some(
+                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
+                        .to_string()
+                ),
+            ))
+        )
     }
 
     #[cfg(all(feature = "vm", not(target_os = "linux")))]
@@ -1208,8 +1264,8 @@ impl Sandbox {
             IsolationLevel::Os | IsolationLevel::Wasm => {
                 return Err(SdkError::sandbox(
                     ErrorCode::UnsupportedPlatform,
-                    "文件传输仅支持 microVM 后端",
-                    Some("将 isolation 设置为 `MicroVm`".to_string()),
+                    "file transfer only supports microVM backend",
+                    Some("set isolation to `MicroVm`".to_string()),
                 ));
             }
         };
@@ -1234,13 +1290,13 @@ impl Sandbox {
                 Some(IsolationLevel::MicroVm) => Ok(()),
                 Some(_) => Err(SdkError::sandbox(
                     ErrorCode::UnsupportedPlatform,
-                    "当前沙箱后端不支持快照能力",
-                    Some("将 isolation 设置为 `MicroVm` 后重新创建沙箱".to_string()),
+                    "current sandbox backend does not support snapshot",
+                    Some("set isolation to `MicroVm` and recreate sandbox".to_string()),
                 )),
                 None => Err(SdkError::sandbox(
                     ErrorCode::SandboxCreateFailed,
-                    "沙箱后端实例存在但未记录隔离层级",
-                    Some("检查沙箱初始化流程是否被中断".to_string()),
+                    "sandbox backend instance exists but isolation level not recorded",
+                    Some("check if sandbox initialization was interrupted".to_string()),
                 )),
             };
         }
@@ -1250,8 +1306,8 @@ impl Sandbox {
             IsolationLevel::Os | IsolationLevel::Wasm => {
                 return Err(SdkError::sandbox(
                     ErrorCode::UnsupportedPlatform,
-                    "当前配置的后端不支持快照能力",
-                    Some("将 isolation 设置为 `MicroVm`".to_string()),
+                    "configured backend does not support snapshot",
+                    Some("set isolation to `MicroVm`".to_string()),
                 ));
             }
         };
@@ -1418,8 +1474,9 @@ fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
 }
 
 fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
-    shlex::split(command)
-        .ok_or_else(|| SdkError::Config("命令解析失败：shell 风格引号不匹配".to_string()))
+    shlex::split(command).ok_or_else(|| {
+        SdkError::Config("command parsing failed: mismatched shell-style quotes".to_string())
+    })
 }
 
 fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
@@ -1427,7 +1484,7 @@ fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
             message,
-            Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
+            Some("set isolation to `Os` or use default Auto".to_string()),
         ),
         other => SdkError::sandbox(ErrorCode::SandboxCreateFailed, other.to_string(), None),
     }
@@ -1438,12 +1495,12 @@ fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkError {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
             message,
-            Some("将 isolation 设置为 `Os` 或使用默认 Auto".to_string()),
+            Some("set isolation to `Os` or use default Auto".to_string()),
         ),
         mimobox_core::SandboxError::Timeout => SdkError::sandbox(
             ErrorCode::CommandTimeout,
-            "PTY 会话执行超时",
-            Some("增大 Config.timeout 或 PtyConfig.timeout".to_string()),
+            "PTY session execution timed out",
+            Some("increase Config.timeout or PtyConfig.timeout".to_string()),
         ),
         other => SdkError::sandbox(ErrorCode::SandboxDestroyed, other.to_string(), None),
     }
@@ -1453,13 +1510,18 @@ fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::InvalidSnapshot => SdkError::sandbox(
             ErrorCode::InvalidConfig,
-            "无效的沙箱快照",
-            Some("文件模式快照请优先使用 from_snapshot()/restore() 或 to_bytes()".to_string()),
+            "invalid sandbox snapshot",
+            Some(
+                "for file-mode snapshots, prefer from_snapshot()/restore() or to_bytes()"
+                    .to_string(),
+            ),
         ),
         mimobox_core::SandboxError::ExecutionFailed(message) => SdkError::sandbox(
             ErrorCode::InvalidConfig,
             message,
-            Some("确认快照数据非空且来源于 mimobox microVM 快照".to_string()),
+            Some(
+                "ensure snapshot data is non-empty and from a mimobox microVM snapshot".to_string(),
+            ),
         ),
         mimobox_core::SandboxError::Io(error) => SdkError::Io(error),
         other => SdkError::sandbox(ErrorCode::InvalidConfig, other.to_string(), None),
@@ -1586,37 +1648,37 @@ fn map_http_proxy_error(error: mimobox_vm::HttpProxyError) -> SdkError {
         HttpProxyError::DeniedHost(message) => SdkError::sandbox(
             ErrorCode::HttpDeniedHost,
             message,
-            Some("确认目标域名在 allowed_http_domains 白名单内".to_string()),
+            Some("ensure target domain is in allowed_http_domains whitelist".to_string()),
         ),
         HttpProxyError::DnsRebind(message) => SdkError::sandbox(
             ErrorCode::HttpDeniedHost,
             message,
-            Some("目标域名解析到了内网或回环地址，拒绝访问".to_string()),
+            Some("target domain resolved to private/loopback address, access denied".to_string()),
         ),
         HttpProxyError::Timeout => SdkError::sandbox(
             ErrorCode::HttpTimeout,
-            "HTTP 请求超时",
-            Some("检查目标服务可达性或提高 timeout 配置".to_string()),
+            "HTTP request timed out",
+            Some("check target service reachability or increase timeout config".to_string()),
         ),
         HttpProxyError::BodyTooLarge => SdkError::sandbox(
             ErrorCode::HttpBodyTooLarge,
-            "HTTP body 超出大小限制",
-            Some("缩小请求/响应体或调低传输规模".to_string()),
+            "HTTP body exceeds size limit",
+            Some("reduce request/response body size or transfer volume".to_string()),
         ),
         HttpProxyError::ConnectFail(message) => SdkError::sandbox(
             ErrorCode::HttpConnectFail,
             message,
-            Some("检查目标服务连通性和端口可达性".to_string()),
+            Some("check target service connectivity and port reachability".to_string()),
         ),
         HttpProxyError::TlsFail(message) => SdkError::sandbox(
             ErrorCode::HttpTlsFail,
             message,
-            Some("检查目标站点证书链和 TLS 配置".to_string()),
+            Some("check target certificate chain and TLS configuration".to_string()),
         ),
         HttpProxyError::InvalidUrl(message) => SdkError::sandbox(
             ErrorCode::HttpInvalidUrl,
             message,
-            Some("仅支持 HTTPS URL，且不得使用 IP 直连".to_string()),
+            Some("only HTTPS URLs are supported, and direct IP access is not allowed".to_string()),
         ),
         HttpProxyError::Internal(message) => SdkError::Config(message),
     }
@@ -1629,16 +1691,19 @@ fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
     match error {
         MicrovmError::UnsupportedPlatform => SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
-            "当前平台不支持 KVM microVM 后端",
-            Some("仅在 Linux + vm feature 构建上使用 microVM 能力".to_string()),
+            "KVM microVM backend not supported on current platform",
+            Some("use microVM features only on Linux with vm feature enabled".to_string()),
         ),
         MicrovmError::InvalidConfig(message) => SdkError::sandbox(
             ErrorCode::InvalidConfig,
             message,
-            Some("检查 microVM 配置、内核/rootfs 路径与内存参数".to_string()),
+            Some("check microVM config, kernel/rootfs paths, and memory settings".to_string()),
         ),
         MicrovmError::Lifecycle(message) => {
-            let code = if message.contains("释放") || message.contains("Destroyed") {
+            let code = if message.contains("released")
+                || message.contains("destroyed")
+                || message.contains("Destroyed")
+            {
                 ErrorCode::SandboxDestroyed
             } else {
                 ErrorCode::SandboxNotReady
@@ -1646,40 +1711,48 @@ fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
             SdkError::sandbox(
                 code,
                 message,
-                Some("确认沙箱已创建完成且当前状态允许执行该操作".to_string()),
+                Some(
+                    "ensure sandbox creation has completed and current state allows this operation"
+                        .to_string(),
+                ),
             )
         }
         MicrovmError::HttpProxy(error) => map_http_proxy_error(error),
         MicrovmError::Backend(message) => {
-            if message.contains("文件路径错误") {
+            if message.contains("file path error") {
                 return SdkError::sandbox(
                     ErrorCode::FileNotFound,
                     message,
-                    Some("确认目标文件存在且路径位于允许访问范围内".to_string()),
+                    Some(
+                        "ensure target file exists and path is within allowed access scope"
+                            .to_string(),
+                    ),
                 );
             }
-            if message.contains("文件权限错误") {
+            if message.contains("file permission error") {
                 return SdkError::sandbox(
                     ErrorCode::FilePermissionDenied,
                     message,
-                    Some("检查文件权限和沙箱挂载策略".to_string()),
+                    Some("check file permissions and sandbox mount policy".to_string()),
                 );
             }
             SdkError::sandbox(
                 ErrorCode::SandboxCreateFailed,
                 message,
-                Some("确认 KVM 可用且 guest 运行时状态正常".to_string()),
+                Some("ensure KVM is available and guest runtime state is healthy".to_string()),
             )
         }
         MicrovmError::SnapshotFormat(message) => SdkError::sandbox(
             ErrorCode::InvalidConfig,
             message,
-            Some("确认快照来自兼容版本的 mimobox microVM".to_string()),
+            Some("ensure snapshot comes from a compatible mimobox microVM version".to_string()),
         ),
         MicrovmError::Io(error) => SdkError::sandbox(
             ErrorCode::SandboxCreateFailed,
             error.to_string(),
-            Some("检查快照文件读写与底层虚拟化资源状态".to_string()),
+            Some(
+                "check snapshot file I/O and underlying virtualization resource state".to_string(),
+            ),
         ),
     }
 }
@@ -1688,10 +1761,10 @@ fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
 fn map_pool_error(error: mimobox_vm::PoolError) -> SdkError {
     match error {
         mimobox_vm::PoolError::InvalidConfig { min_size, max_size } => SdkError::Config(format!(
-            "预热池配置无效: min_size={min_size}, max_size={max_size}"
+            "invalid warm pool config: min_size={min_size}, max_size={max_size}"
         )),
         mimobox_vm::PoolError::StatePoisoned => {
-            SdkError::Config("预热池内部状态锁已中毒".to_string())
+            SdkError::Config("warm pool internal state lock poisoned".to_string())
         }
         mimobox_vm::PoolError::Microvm(error) => map_microvm_error(error),
     }
@@ -1701,12 +1774,12 @@ fn map_pool_error(error: mimobox_vm::PoolError) -> SdkError {
 fn map_restore_pool_error(error: mimobox_vm::RestorePoolError) -> SdkError {
     match error {
         mimobox_vm::RestorePoolError::InvalidConfig { min_size, max_size } => SdkError::Config(
-            format!("恢复池配置无效: min_size={min_size}, max_size={max_size}"),
+            format!("invalid restore pool config: min_size={min_size}, max_size={max_size}"),
         ),
         mimobox_vm::RestorePoolError::StatePoisoned => SdkError::sandbox(
             ErrorCode::SandboxDestroyed,
-            "恢复池内部状态锁已中毒",
-            Some("销毁当前恢复池并重新创建".to_string()),
+            "restore pool internal state lock poisoned",
+            Some("destroy current restore pool and recreate".to_string()),
         ),
         mimobox_vm::RestorePoolError::Microvm(error) => map_microvm_error(error),
     }

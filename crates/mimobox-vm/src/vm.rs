@@ -42,7 +42,7 @@ impl Default for MicrovmConfig {
 
         Self {
             vcpu_count: 1,
-            memory_mb: 128,
+            memory_mb: 256,
             kernel_path: assets_dir.join("vmlinux"),
             rootfs_path: assets_dir.join("rootfs.cpio.gz"),
         }
@@ -54,39 +54,52 @@ impl MicrovmConfig {
     pub fn memory_bytes(&self) -> Result<usize, MicrovmError> {
         let bytes = u64::from(self.memory_mb)
             .checked_mul(1024 * 1024)
-            .ok_or_else(|| MicrovmError::InvalidConfig("memory_mb 转换为字节时溢出".into()))?;
-        usize::try_from(bytes)
-            .map_err(|_| MicrovmError::InvalidConfig("当前平台无法表示所需内存大小".into()))
+            .ok_or_else(|| {
+                MicrovmError::InvalidConfig("memory_mb overflow when converting to bytes".into())
+            })?;
+        usize::try_from(bytes).map_err(|_| {
+            MicrovmError::InvalidConfig(
+                "required memory size exceeds platform address space".into(),
+            )
+        })
     }
 
     /// 校验 microVM 基础配置。
     pub fn validate(&self) -> Result<(), MicrovmError> {
         if self.vcpu_count == 0 {
-            return Err(MicrovmError::InvalidConfig("vcpu_count 不能为 0".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "vcpu_count must not be 0".into(),
+            ));
         }
 
         if self.memory_mb < 64 {
-            return Err(MicrovmError::InvalidConfig("memory_mb 不能小于 64".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "memory_mb must not be less than 64".into(),
+            ));
         }
 
         if self.kernel_path.as_os_str().is_empty() {
-            return Err(MicrovmError::InvalidConfig("kernel_path 不能为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "kernel_path must not be empty".into(),
+            ));
         }
 
         if self.rootfs_path.as_os_str().is_empty() {
-            return Err(MicrovmError::InvalidConfig("rootfs_path 不能为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "rootfs_path must not be empty".into(),
+            ));
         }
 
         if !self.kernel_path.exists() {
             return Err(MicrovmError::InvalidConfig(format!(
-                "kernel_path 不存在: {}",
+                "kernel_path does not exist: {}",
                 self.kernel_path.display()
             )));
         }
 
         if !self.rootfs_path.exists() {
             return Err(MicrovmError::InvalidConfig(format!(
-                "rootfs_path 不存在: {}",
+                "rootfs_path does not exist: {}",
                 self.rootfs_path.display()
             )));
         }
@@ -147,19 +160,19 @@ pub enum StreamEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
     /// 当前平台或构建配置不支持 KVM microVM。
-    #[error("当前平台不支持 KVM microVM 后端")]
+    #[error("KVM microVM backend not supported on current platform")]
     UnsupportedPlatform,
 
     /// microVM 配置无效。
-    #[error("microVM 配置无效: {0}")]
+    #[error("invalid microVM config: {0}")]
     InvalidConfig(String),
 
     /// 生命周期状态不允许执行当前操作。
-    #[error("microVM 生命周期错误: {0}")]
+    #[error("microVM lifecycle error: {0}")]
     Lifecycle(String),
 
     /// KVM 或 guest 协议层错误。
-    #[error("KVM 后端错误: {0}")]
+    #[error("KVM backend error: {0}")]
     Backend(String),
 
     /// 受控 HTTP 代理错误。
@@ -167,11 +180,11 @@ pub enum MicrovmError {
     HttpProxy(#[from] HttpProxyError),
 
     /// 快照格式非法或不兼容。
-    #[error("快照格式错误: {0}")]
+    #[error("invalid snapshot format: {0}")]
     SnapshotFormat(String),
 
     /// 标准库 I/O 错误。
-    #[error("IO 错误: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -437,7 +450,9 @@ impl MicrovmSandbox {
     /// 导出当前 microVM 快照。
     pub fn snapshot(&mut self) -> Result<SandboxSnapshot, MicrovmError> {
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle("仅 Ready 状态允许创建快照".into()));
+            return Err(MicrovmError::Lifecycle(
+                "snapshot only allowed in Ready state".into(),
+            ));
         }
 
         let (memory, vcpu_state) = self.backend.snapshot_parts()?;
@@ -488,7 +503,9 @@ impl MicrovmSandbox {
     /// 非 Linux 平台的文件快照恢复回退。
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     fn restore_from_file_snapshot(_memory_path: &Path) -> Result<Self, MicrovmError> {
-        Err(MicrovmError::Backend("文件快照恢复仅支持 Linux".into()))
+        Err(MicrovmError::Backend(
+            "file snapshot restore only supported on Linux".into(),
+        ))
     }
 
     /// 从当前 microVM 创建一个独立的副本。
@@ -499,7 +516,9 @@ impl MicrovmSandbox {
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle("仅 Ready 状态允许 fork".into()));
+            return Err(MicrovmError::Lifecycle(
+                "fork only allowed in Ready state".into(),
+            ));
         }
 
         #[cfg(feature = "zerocopy-fork")]
@@ -549,7 +568,7 @@ impl MicrovmSandbox {
                         .encode(&vcpu_state),
                 };
                 let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
-                    MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
+                    MicrovmError::SnapshotFormat(format!("failed to serialize state.json: {error}"))
                 })?;
                 std::fs::write(&state_path, state_bytes)?;
 
@@ -564,7 +583,9 @@ impl MicrovmSandbox {
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
-        Err(MicrovmError::Backend("fork 仅支持 Linux + KVM".into()))
+        Err(MicrovmError::Backend(
+            "fork only supported on Linux + KVM".into(),
+        ))
     }
 
     pub(crate) fn from_snapshot(snapshot: MicrovmSnapshot) -> Result<Self, MicrovmError> {
@@ -616,12 +637,12 @@ impl MicrovmSandbox {
     pub fn wait_ready(&mut self, timeout: Duration) -> Result<(), MicrovmError> {
         if timeout.is_zero() {
             return Err(MicrovmError::InvalidConfig(
-                "wait_ready timeout 不能为 0".into(),
+                "wait_ready timeout must not be zero".into(),
             ));
         }
         if self.state == MicrovmState::Destroyed {
             return Err(MicrovmError::Lifecycle(
-                "microVM 已销毁，不能等待就绪".into(),
+                "microVM destroyed, cannot wait for ready".into(),
             ));
         }
 
@@ -655,7 +676,9 @@ impl MicrovmSandbox {
         options: GuestExecOptions,
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         if cmd.is_empty() {
-            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "command must not be empty".into(),
+            ));
         }
 
         self.with_ready_state("stream_execute", |backend| {
@@ -694,7 +717,9 @@ impl MicrovmSandbox {
         options: GuestExecOptions,
     ) -> Result<GuestCommandResult, MicrovmError> {
         if cmd.is_empty() {
-            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "command must not be empty".into(),
+            ));
         }
 
         self.with_ready_state("execute", |backend| {
@@ -723,7 +748,8 @@ impl Sandbox for MicrovmSandbox {
         _config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         Err(SandboxError::UnsupportedOperation(
-            "PTY 会话当前仅支持 OS 级后端，microVM 后端暂不支持".to_string(),
+            "PTY sessions currently only support OS-level backend, microVM not supported"
+                .to_string(),
         ))
     }
 
@@ -754,7 +780,9 @@ impl Sandbox for MicrovmSandbox {
 fn map_snapshot_access_error(error: SandboxError) -> MicrovmError {
     match error {
         SandboxError::Io(error) => MicrovmError::Io(error),
-        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("无效的沙箱快照".into()),
+        SandboxError::InvalidSnapshot => {
+            MicrovmError::SnapshotFormat("invalid sandbox snapshot".into())
+        }
         other => MicrovmError::SnapshotFormat(other.to_string()),
     }
 }
@@ -766,7 +794,9 @@ impl MicrovmSandbox {
         options: GuestExecOptions,
     ) -> Result<SandboxResult, MicrovmError> {
         if cmd.is_empty() {
-            return Err(MicrovmError::InvalidConfig("命令为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "command must not be empty".into(),
+            ));
         }
 
         self.with_ready_state("execute", |backend| {

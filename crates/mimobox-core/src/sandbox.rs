@@ -205,7 +205,7 @@ impl SandboxSnapshot {
     pub fn from_bytes(data: &[u8]) -> Result<Self, SandboxError> {
         if data.is_empty() {
             return Err(SandboxError::ExecutionFailed(
-                "快照数据不能为空".to_string(),
+                "snapshot data must not be empty".to_string(),
             ));
         }
 
@@ -218,7 +218,7 @@ impl SandboxSnapshot {
     pub fn from_owned_bytes(data: Vec<u8>) -> Result<Self, SandboxError> {
         if data.is_empty() {
             return Err(SandboxError::ExecutionFailed(
-                "快照数据不能为空".to_string(),
+                "snapshot data must not be empty".to_string(),
             ));
         }
 
@@ -374,55 +374,55 @@ pub trait PtySession {
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// 当前平台不支持该沙箱实现。
-    #[error("当前平台不支持该沙箱后端")]
+    #[error("sandbox backend not supported on current platform")]
     Unsupported,
 
     /// 当前后端不支持指定操作。
-    #[error("当前操作不受支持: {0}")]
+    #[error("operation not supported: {0}")]
     UnsupportedOperation(String),
 
     /// 命名空间初始化失败。
-    #[error("命名空间创建失败: {0}")]
+    #[error("namespace creation failed: {0}")]
     NamespaceFailed(String),
 
     /// `pivot_root` 调用失败。
-    #[error("pivot_root 失败: {0}")]
+    #[error("pivot_root failed: {0}")]
     PivotRootFailed(String),
 
     /// 挂载文件系统失败。
-    #[error("mount 失败: {0}")]
+    #[error("mount failed: {0}")]
     MountFailed(String),
 
     /// Landlock 规则应用失败。
-    #[error("Landlock 规则应用失败: {0}")]
+    #[error("Landlock rule enforcement failed: {0}")]
     LandlockFailed(String),
 
     /// Seccomp 规则应用失败。
-    #[error("Seccomp 过滤器应用失败: {0}")]
+    #[error("Seccomp filter enforcement failed: {0}")]
     SeccompFailed(String),
 
     /// 命令执行或协议处理失败。
-    #[error("命令执行失败: {0}")]
+    #[error("command execution failed: {0}")]
     ExecutionFailed(String),
 
     /// 快照内容或访问模式无效。
-    #[error("无效的沙箱快照")]
+    #[error("invalid sandbox snapshot")]
     InvalidSnapshot,
 
     /// 子进程执行超时。
-    #[error("子进程超时")]
+    #[error("child process timed out")]
     Timeout,
 
     /// 管道读写失败。
-    #[error("管道 I/O 错误: {0}")]
+    #[error("pipe I/O error: {0}")]
     PipeError(String),
 
     /// 系统调用失败。
-    #[error("系统调用错误: {0}")]
+    #[error("syscall error: {0}")]
     Syscall(String),
 
     /// 标准库 I/O 错误。
-    #[error("IO 错误: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -490,7 +490,7 @@ pub trait Sandbox {
     fn create_pty(&mut self, config: PtyConfig) -> Result<Box<dyn PtySession>, SandboxError> {
         let _ = config;
         Err(SandboxError::UnsupportedOperation(
-            "PTY 会话当前后端不支持".to_string(),
+            "PTY sessions not supported by current backend".to_string(),
         ))
     }
 
@@ -498,7 +498,7 @@ pub trait Sandbox {
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
         Err(SandboxError::ExecutionFailed(
-            "当前后端不支持文件读取".into(),
+            "file reading not supported by current backend".into(),
         ))
     }
 
@@ -507,7 +507,7 @@ pub trait Sandbox {
         let _ = path;
         let _ = data;
         Err(SandboxError::ExecutionFailed(
-            "当前后端不支持文件写入".into(),
+            "file writing not supported by current backend".into(),
         ))
     }
 
@@ -527,7 +527,7 @@ pub trait Sandbox {
     /// ```
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
         Err(SandboxError::UnsupportedOperation(
-            "快照当前后端不支持".to_string(),
+            "snapshot not supported by current backend".to_string(),
         ))
     }
 
@@ -539,7 +539,7 @@ pub trait Sandbox {
         Self: Sized,
     {
         Err(SandboxError::UnsupportedOperation(
-            "fork 当前后端不支持".to_string(),
+            "fork not supported by current backend".to_string(),
         ))
     }
 
@@ -581,7 +581,7 @@ mod tests {
     fn sandbox_snapshot_rejects_empty_bytes() {
         let error = SandboxSnapshot::from_bytes(&[]).expect_err("空快照必须被拒绝");
 
-        assert!(error.to_string().contains("不能为空"));
+        assert!(error.to_string().contains("must not be empty"));
     }
 
     #[test]

@@ -161,7 +161,7 @@ impl LinuxSandbox {
         // SAFETY: 仅在 fork 后子进程中重置环境，不影响父进程。
         if unsafe { reset_child_environment() }.is_err() {
             unsafe {
-                write_error(2, "环境变量初始化失败");
+                write_error(2, "environment variable initialization failed");
                 libc::_exit(119);
             }
         }
@@ -172,7 +172,7 @@ impl LinuxSandbox {
         let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
         if dev_null < 0 {
             unsafe {
-                write_error(2, "无法打开 /dev/null");
+                write_error(2, "failed to open /dev/null");
                 libc::_exit(120);
             }
         }
@@ -190,7 +190,7 @@ impl LinuxSandbox {
             && let Err(e) = set_memory_limit(limit_mb)
         {
             unsafe {
-                write_error(2, &format!("内存限制设置失败: {e}"));
+                write_error(2, &format!("memory limit setting failed: {e}"));
                 libc::_exit(124);
             }
         }
@@ -271,7 +271,7 @@ impl LinuxSandbox {
             if let Err(e) = result {
                 // 致命 #4 修复：Landlock 失败必须终止，否则无文件系统隔离
                 unsafe {
-                    write_error(2, &format!("Landlock 应用失败（致命）: {e}"));
+                    write_error(2, &format!("Landlock enforcement failed (fatal): {e}"));
                     libc::_exit(122);
                 }
             }
@@ -288,7 +288,7 @@ impl LinuxSandbox {
         let ns_result = nix::sched::unshare(full_flags);
 
         if let Err(e) = ns_result {
-            let msg = format!("unshare(full_flags) 失败: {e}, 尝试不带 user ns");
+            let msg = format!("unshare(full_flags) failed: {e}, retrying without user ns");
             unsafe {
                 write_error(2, &msg);
             }
@@ -296,7 +296,7 @@ impl LinuxSandbox {
             if let Err(e2) = nix::sched::unshare(ns_flags) {
                 // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
                 unsafe {
-                    write_error(2, &format!("unshare(ns_flags) 也失败（致命）: {e2}"));
+                    write_error(2, &format!("unshare(ns_flags) also failed (fatal): {e2}"));
                     libc::_exit(121);
                 }
             }
@@ -323,7 +323,7 @@ impl LinuxSandbox {
                     // 孙进程：继续应用 seccomp 并执行命令
                 }
                 Err(e) => unsafe {
-                    write_error(2, &format!("内部 fork 失败: {e}"));
+                    write_error(2, &format!("internal fork failed: {e}"));
                     libc::_exit(123);
                 },
             }
@@ -346,14 +346,14 @@ impl LinuxSandbox {
         // 6. execvp
         // 重要 #12 修复：使用 unwrap_or_else + _exit 替代 unwrap
         let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
-            write_error(2, &format!("命令包含内嵌 NUL: {}", cmd[0]));
+            write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
             libc::_exit(127);
         });
         let c_args: Vec<CString> = cmd
             .iter()
             .map(|s| {
                 CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
-                    write_error(2, &format!("参数包含内嵌 NUL: {s}"));
+                    write_error(2, &format!("argument contains embedded NUL: {s}"));
                     libc::_exit(127);
                 })
             })
@@ -375,14 +375,14 @@ impl LinuxSandbox {
     ) -> ! {
         if unsafe { reset_child_environment_for_pty(pty_config) }.is_err() {
             unsafe {
-                write_error(2, "PTY 环境变量初始化失败");
+                write_error(2, "PTY environment variable initialization failed");
                 libc::_exit(119);
             }
         }
 
         if let Err(error) = attach_pty_stdio(slave_path) {
             unsafe {
-                write_error(2, &format!("附加 PTY slave 失败: {error}"));
+                write_error(2, &format!("failed to attach PTY slave: {error}"));
                 libc::_exit(120);
             }
         }
@@ -391,7 +391,7 @@ impl LinuxSandbox {
             && let Err(error) = change_child_cwd(cwd)
         {
             unsafe {
-                write_error(2, &format!("切换工作目录失败: {error}"));
+                write_error(2, &format!("failed to change working directory: {error}"));
                 libc::_exit(124);
             }
         }
@@ -400,7 +400,7 @@ impl LinuxSandbox {
             && let Err(error) = set_memory_limit(limit_mb)
         {
             unsafe {
-                write_error(2, &format!("内存限制设置失败: {error}"));
+                write_error(2, &format!("memory limit setting failed: {error}"));
                 libc::_exit(124);
             }
         }
@@ -475,7 +475,10 @@ impl LinuxSandbox {
 
             if let Err(error) = result {
                 unsafe {
-                    write_error(2, &format!("Landlock 应用失败（致命）: {error}"));
+                    write_error(
+                        2,
+                        &format!("Landlock enforcement failed (fatal): {error}"),
+                    );
                     libc::_exit(122);
                 }
             }
@@ -492,7 +495,7 @@ impl LinuxSandbox {
             unsafe {
                 write_error(
                     2,
-                    &format!("unshare(full_flags) 失败: {error}, 尝试不带 user ns"),
+                    &format!("unshare(full_flags) failed: {error}, retrying without user ns"),
                 );
             }
 
@@ -500,7 +503,9 @@ impl LinuxSandbox {
                 unsafe {
                     write_error(
                         2,
-                        &format!("unshare(ns_flags) 也失败（致命）: {fallback_error}"),
+                        &format!(
+                            "unshare(ns_flags) also failed (fatal): {fallback_error}"
+                        ),
                     );
                     libc::_exit(121);
                 }
@@ -520,7 +525,7 @@ impl LinuxSandbox {
                 },
                 Ok(ForkResult::Child) => {}
                 Err(error) => unsafe {
-                    write_error(2, &format!("内部 fork 失败: {error}"));
+                    write_error(2, &format!("internal fork failed: {error}"));
                     libc::_exit(123);
                 },
             }
@@ -539,14 +544,14 @@ impl LinuxSandbox {
         }
 
         let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
-            write_error(2, &format!("命令包含内嵌 NUL: {}", cmd[0]));
+            write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
             libc::_exit(127);
         });
         let c_args: Vec<CString> = cmd
             .iter()
             .map(|s| {
                 CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
-                    write_error(2, &format!("参数包含内嵌 NUL: {s}"));
+                    write_error(2, &format!("argument contains embedded NUL: {s}"));
                     libc::_exit(127);
                 })
             })
@@ -574,7 +579,9 @@ impl Sandbox for LinuxSandbox {
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed("命令为空".into()));
+            return Err(SandboxError::ExecutionFailed(
+                "command must not be empty".into(),
+            ));
         }
 
         // SECURITY: 只记录可执行文件基名和参数个数，避免把 argv 中的 token/路径写入日志。
@@ -716,7 +723,9 @@ impl Sandbox for LinuxSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::ExecutionFailed("PTY 命令为空".into()));
+            return Err(SandboxError::ExecutionFailed(
+                "PTY command must not be empty".into(),
+            ));
         }
 
         tracing::info!(
@@ -783,8 +792,12 @@ fn attach_pty_stdio(slave_path: &Path) -> Result<(), String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
 
-    let slave = CString::new(slave_path.as_os_str().as_bytes())
-        .map_err(|_| format!("PTY slave 路径包含内嵌 NUL: {}", slave_path.display()))?;
+    let slave = CString::new(slave_path.as_os_str().as_bytes()).map_err(|_| {
+        format!(
+            "PTY slave path contains interior NUL: {}",
+            slave_path.display()
+        )
+    })?;
     // SAFETY: 路径来自父进程创建完成的 PTY slave 设备，传入合法 C 字符串。
     let slave_fd = unsafe { libc::open(slave.as_ptr(), libc::O_RDWR) };
     if slave_fd < 0 {
@@ -816,7 +829,7 @@ fn attach_pty_stdio(slave_path: &Path) -> Result<(), String> {
 }
 
 fn change_child_cwd(cwd: &str) -> Result<(), String> {
-    let cwd = CString::new(cwd).map_err(|_| "工作目录包含内嵌 NUL".to_string())?;
+    let cwd = CString::new(cwd).map_err(|_| "working directory contains embedded NUL".to_string())?;
     // SAFETY: `cwd` 是当前函数中构造的有效 C 字符串。
     let result = unsafe { libc::chdir(cwd.as_ptr()) };
     if result == 0 {
@@ -1197,7 +1210,9 @@ fn waitpid_with_timeout(
             );
 
             let status = rx.recv().map_err(|_| {
-                SandboxError::ExecutionFailed("waitpid 等待线程意外断开".to_string())
+                SandboxError::ExecutionFailed(
+                    "waitpid waiter thread disconnected unexpectedly".to_string(),
+                )
             })??;
             let _ = waiter.join();
             Ok((status, true))
@@ -1205,7 +1220,7 @@ fn waitpid_with_timeout(
         Err(RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
             Err(SandboxError::ExecutionFailed(
-                "waitpid 等待线程意外断开".to_string(),
+                "waitpid monitoring thread disconnected unexpectedly".to_string(),
             ))
         }
     }

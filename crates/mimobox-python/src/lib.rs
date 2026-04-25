@@ -552,7 +552,7 @@ impl PySandbox {
     fn inner_mut(&mut self) -> PyResult<&mut RustSandbox> {
         self.inner
             .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("Sandbox 已关闭"))
+            .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))
     }
 
     fn close(&mut self) -> Result<(), SdkError> {
@@ -588,7 +588,7 @@ fn parse_python_isolation(value: &str) -> Result<IsolationLevel, String> {
         "wasm" => Ok(IsolationLevel::Wasm),
         "microvm" | "micro-vm" | "micro_vm" => Ok(IsolationLevel::MicroVm),
         other => Err(format!(
-            "未知 isolation 值: {other}。可选值: auto, os, wasm, microvm"
+            "unknown isolation value: {other}. Valid values: auto, os, wasm, microvm"
         )),
     }
 }
@@ -604,7 +604,7 @@ fn map_sdk_error(error: SdkError) -> PyErr {
             suggestion,
         } => {
             let detail = match suggestion {
-                Some(suggestion) => format!("{message}。建议: {suggestion}"),
+                Some(suggestion) => format!("{message}. Suggestion: {suggestion}"),
                 None => message,
             };
 
@@ -638,7 +638,9 @@ fn map_sdk_error(error: SdkError) -> PyErr {
 
 fn parse_python_timeout(timeout: f64) -> PyResult<std::time::Duration> {
     if !timeout.is_finite() || timeout <= 0.0 {
-        return Err(PyValueError::new_err("timeout 必须是大于 0 的有限浮点数"));
+        return Err(PyValueError::new_err(
+            "timeout must be a finite positive float",
+        ));
     }
 
     Ok(std::time::Duration::from_secs_f64(timeout))
@@ -695,13 +697,13 @@ mod tests {
 
     #[test]
     fn missing_exit_code_maps_to_negative_one() {
-        let result = PyExecuteResult::from(ExecuteResult {
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            exit_code: None,
-            timed_out: true,
-            elapsed: Duration::ZERO,
-        });
+        let result = PyExecuteResult::from(ExecuteResult::new(
+            Vec::new(),
+            Vec::new(),
+            None,
+            true,
+            Duration::ZERO,
+        ));
 
         assert_eq!(result.exit_code, -1);
         assert!(result.timed_out);
@@ -710,13 +712,13 @@ mod tests {
 
     #[test]
     fn invalid_utf8_output_is_lossily_decoded() {
-        let result = PyExecuteResult::from(ExecuteResult {
-            stdout: vec![0x66, 0x6f, 0x80, 0x6f],
-            stderr: vec![0xff],
-            exit_code: Some(7),
-            timed_out: false,
-            elapsed: Duration::ZERO,
-        });
+        let result = PyExecuteResult::from(ExecuteResult::new(
+            vec![0x66, 0x6f, 0x80, 0x6f],
+            vec![0xff],
+            Some(7),
+            false,
+            Duration::ZERO,
+        ));
 
         assert_eq!(result.stdout, "fo\u{fffd}o");
         assert_eq!(result.stderr, "\u{fffd}");
