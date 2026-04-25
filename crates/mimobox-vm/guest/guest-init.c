@@ -80,6 +80,7 @@ static volatile sig_atomic_t current_command_pid = -1;
 
 typedef struct {
     char command_line[COMMAND_BUFFER_CAP];
+    char cwd[PATH_MAX];
     const char *json_payload;
     bool structured;
     bool has_timeout;
@@ -1047,6 +1048,10 @@ static int parse_exec_request(const char *payload, exec_request_t *request) {
                 return -1;
             }
             saw_cmd = true;
+        } else if (strcmp(key, "cwd") == 0) {
+            if (parse_json_string(&cursor, request->cwd, sizeof(request->cwd)) < 0) {
+                return -1;
+            }
         } else if (strcmp(key, "timeout") == 0) {
             if (parse_json_u64(&cursor, &request->timeout_secs) < 0 || request->timeout_secs == 0) {
                 return -1;
@@ -1131,6 +1136,11 @@ static int apply_exec_env_from_json(const exec_request_t *request, int stderr_fd
 
         if (strcmp(key, "cmd") == 0) {
             char discarded[COMMAND_BUFFER_CAP];
+            if (parse_json_string(&cursor, discarded, sizeof(discarded)) < 0) {
+                return -1;
+            }
+        } else if (strcmp(key, "cwd") == 0) {
+            char discarded[PATH_MAX];
             if (parse_json_string(&cursor, discarded, sizeof(discarded)) < 0) {
                 return -1;
             }
@@ -1600,6 +1610,12 @@ static pid_t spawn_command_child(const exec_request_t *request, int stdout_pipe[
     if (apply_exec_env_from_json(request, STDERR_FILENO) < 0) {
         dprintf(STDERR_FILENO, "guest-init: invalid EXEC env payload\n");
         _exit(125);
+    }
+    if (request->cwd[0] != '\0') {
+        if (chdir(request->cwd) < 0) {
+            dprintf(STDERR_FILENO, "guest-init: chdir to %s failed: %s\n", request->cwd, strerror(errno));
+            _exit(124);
+        }
     }
 
     execve(SHELL_PATH, argv, environ);

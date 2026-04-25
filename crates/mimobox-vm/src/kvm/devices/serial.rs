@@ -266,8 +266,9 @@ pub(in crate::kvm) fn encode_command_payload(
     cmd: &[String],
     env: &HashMap<String, String>,
     timeout_secs: Option<u64>,
+    cwd: Option<&str>,
 ) -> Result<Vec<u8>, MicrovmError> {
-    let payload = build_guest_exec_payload(cmd, env, timeout_secs)?;
+    let payload = build_guest_exec_payload(cmd, env, timeout_secs, cwd)?;
     encode_text_frame(SERIAL_EXEC_PREFIX, payload.as_bytes())
 }
 
@@ -316,6 +317,7 @@ pub(in crate::kvm) fn build_guest_exec_payload(
     cmd: &[String],
     env: &HashMap<String, String>,
     timeout_secs: Option<u64>,
+    cwd: Option<&str>,
 ) -> Result<String, MicrovmError> {
     if let Some(timeout_secs) = timeout_secs
         && timeout_secs == 0
@@ -330,6 +332,7 @@ pub(in crate::kvm) fn build_guest_exec_payload(
         cmd: &command,
         env,
         timeout: timeout_secs,
+        cwd,
     };
     serde_json::to_string(&payload).map_err(|err| {
         MicrovmError::Backend(format!("failed to serialize guest EXEC payload: {err}"))
@@ -343,6 +346,8 @@ struct GuestExecPayload<'a> {
     env: &'a HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
 }
 
 fn encode_text_frame(prefix: &str, payload: &[u8]) -> Result<Vec<u8>, MicrovmError> {

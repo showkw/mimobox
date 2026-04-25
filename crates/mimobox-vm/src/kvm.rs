@@ -1126,19 +1126,31 @@ impl KvmBackend {
         self.last_command_payload = guest_command.as_bytes().to_vec();
 
         self.lifecycle = KvmLifecycle::Running;
-        let use_vsock =
-            self.vsock_channel.is_some() && options.env.is_empty() && options.timeout.is_none();
+        let use_vsock = self.vsock_channel.is_some()
+            && options.env.is_empty()
+            && options.timeout.is_none()
+            && options.cwd.is_none();
         let result = if use_vsock {
             match self.run_command_over_vsock(guest_command.as_bytes()) {
                 Ok(result) => Ok(result),
                 Err(err) => {
                     warn!(error = %err, "vsock 命令通道执行失败，回退串口协议");
                     self.drop_vsock_channel();
-                    self.run_command_over_serial(cmd, &options.env, effective_timeout_secs)
+                    self.run_command_over_serial(
+                        cmd,
+                        &options.env,
+                        effective_timeout_secs,
+                        options.cwd.as_deref(),
+                    )
                 }
             }
         } else {
-            self.run_command_over_serial(cmd, &options.env, effective_timeout_secs)
+            self.run_command_over_serial(
+                cmd,
+                &options.env,
+                effective_timeout_secs,
+                options.cwd.as_deref(),
+            )
         };
         // A watchdog timeout marks the instance as Destroyed, so later code must not
         // accidentally write it back to Ready.
@@ -1184,8 +1196,12 @@ impl KvmBackend {
 
         self.lifecycle = KvmLifecycle::Running;
         let effective_timeout_secs = self.effective_command_timeout_secs(options.timeout)?;
-        let result =
-            self.run_command_streaming_over_serial(cmd, &options.env, effective_timeout_secs);
+        let result = self.run_command_streaming_over_serial(
+            cmd,
+            &options.env,
+            effective_timeout_secs,
+            options.cwd.as_deref(),
+        );
         if self.lifecycle != KvmLifecycle::Destroyed {
             self.lifecycle = KvmLifecycle::Ready;
         }
@@ -1302,8 +1318,9 @@ impl KvmBackend {
         cmd: &[String],
         env: &HashMap<String, String>,
         timeout_secs: Option<u64>,
+        cwd: Option<&str>,
     ) -> Result<GuestCommandResult, MicrovmError> {
-        let payload = encode_command_payload(cmd, env, timeout_secs)?;
+        let payload = encode_command_payload(cmd, env, timeout_secs, cwd)?;
         self.serial_device.queue_input(&payload);
         self.last_command_payload = payload;
         self.transport = KvmTransport::Serial;
@@ -1315,6 +1332,7 @@ impl KvmBackend {
         cmd: &[String],
         env: &HashMap<String, String>,
         timeout_secs: Option<u64>,
+        cwd: Option<&str>,
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         let guest_command = build_guest_command(cmd)?;
         let payload = encode_streaming_command_payload(&guest_command);
@@ -1328,7 +1346,7 @@ impl KvmBackend {
                 // Old guests may reject EXECS without consuming the full payload, so
                 // clear any leftover serial input before falling back.
                 self.serial_device.rx_fifo.clear();
-                let payload = encode_command_payload(cmd, env, timeout_secs)?;
+                let payload = encode_command_payload(cmd, env, timeout_secs, cwd)?;
                 self.serial_device.queue_input(&payload);
                 self.last_command_payload = payload;
                 let result = self.run_until_command_result(timeout_secs)?;
@@ -2670,8 +2688,8 @@ mod tests {
     fn test_encode_command_payload_uses_length_prefixed_frame() {
         let command = vec!["/bin/echo".to_string(), "test".to_string()];
 
-        let payload =
-            encode_command_payload(&command, &HashMap::new(), None).expect("编码命令帧必须成功");
+        let payload = encode_command_payload(&command, &HashMap::new(), None, None)
+            .expect("编码命令帧必须成功");
 
         assert!(payload.starts_with(b"EXEC:"));
         assert!(payload.ends_with(b"\n"));
@@ -2705,8 +2723,8 @@ mod tests {
         let command = vec!["/bin/echo".to_string(), "hello".to_string()];
         let env = HashMap::from([("MY_VAR".to_string(), "value".to_string())]);
 
-        let payload =
-            build_guest_exec_payload(&command, &env, Some(10)).expect("构建 EXEC 负载必须成功");
+        let payload = build_guest_exec_payload(&command, &env, Some(10), Some("/sandbox"))
+            .expect("构建 EXEC 负载必须成功");
 
         assert!(
             payload.contains(r#""cmd""#),
@@ -2715,6 +2733,7 @@ mod tests {
         assert!(payload.contains("echo"), "payload 必须包含命令: {payload}");
         assert!(payload.contains(r#""MY_VAR":"value""#));
         assert!(payload.contains(r#""timeout":10"#));
+        assert!(payload.contains(r#""cwd":"/sandbox""#));
     }
 
     #[test]
