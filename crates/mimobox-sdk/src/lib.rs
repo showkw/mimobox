@@ -1773,18 +1773,18 @@ fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
             message,
             Some("check microVM config, kernel/rootfs paths, and memory settings".to_string()),
         ),
-        MicrovmError::Lifecycle(message) => {
-            let code = if message.contains("released")
-                || message.contains("destroyed")
-                || message.contains("Destroyed")
-            {
-                ErrorCode::SandboxDestroyed
-            } else {
-                ErrorCode::SandboxNotReady
+        MicrovmError::Lifecycle(error) => {
+            use mimobox_vm::LifecycleError;
+
+            let code = match error {
+                LifecycleError::Destroyed(_) | LifecycleError::Released(_) => {
+                    ErrorCode::SandboxDestroyed
+                }
+                _ => ErrorCode::SandboxNotReady,
             };
             SdkError::sandbox(
                 code,
-                message,
+                error.to_string(),
                 Some(
                     "ensure sandbox creation has completed and current state allows this operation"
                         .to_string(),

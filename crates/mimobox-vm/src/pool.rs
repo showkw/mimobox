@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use crate::vm::LifecycleError;
 use crate::{
     GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
     StreamEvent,
@@ -490,7 +491,9 @@ impl PooledVm {
         let execute_started_at = Instant::now();
         let result = match self.backend.as_mut() {
             Some(backend) => execute_backend(backend, cmd, &options),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         };
         #[cfg(feature = "boot-profile")]
         tracing::info!(
@@ -519,7 +522,9 @@ impl PooledVm {
         let _span = tracing::info_span!("pool_execute").entered();
         match self.backend.as_mut() {
             Some(backend) => stream_execute_backend(backend, cmd, &options),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 
@@ -527,7 +532,9 @@ impl PooledVm {
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => read_file_backend(backend, path),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 
@@ -535,7 +542,9 @@ impl PooledVm {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => write_file_backend(backend, path, data),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 
@@ -543,7 +552,9 @@ impl PooledVm {
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => ping_backend(backend),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 
@@ -551,7 +562,9 @@ impl PooledVm {
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => http_request_backend(backend, request),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 
@@ -562,7 +575,9 @@ impl PooledVm {
             Some(backend) => backend.snapshot_to_file(),
             #[cfg(not(all(target_os = "linux", feature = "kvm")))]
             Some(_) => Err(MicrovmError::UnsupportedPlatform),
-            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
+            None => Err(MicrovmError::Lifecycle(LifecycleError::Released(
+                "VM has been released".into(),
+            ))),
         }
     }
 }

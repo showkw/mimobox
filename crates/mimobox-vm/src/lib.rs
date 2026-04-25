@@ -26,8 +26,8 @@ pub use http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
 pub use pool::{PoolError, PooledVm, VmPool, VmPoolConfig, VmPoolStats};
 pub use snapshot::MicrovmSnapshot;
 pub use vm::{
-    GuestCommandResult, GuestExecOptions, MicrovmConfig, MicrovmError, MicrovmSandbox,
-    MicrovmState, StreamEvent,
+    GuestCommandResult, GuestExecOptions, LifecycleError, MicrovmConfig, MicrovmError,
+    MicrovmSandbox, MicrovmState, StreamEvent,
 };
 pub use vm_assets::{
     microvm_config_from_assets_dir, microvm_config_from_vm_assets, resolve_vm_assets_dir,
