@@ -19,11 +19,11 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 ```
 
 ### Python
-> `pip install mimobox` 即将上线。当前请从源码构建：
+> `pip install mimobox` coming soon. Build from source for now:
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
-pip install target/wheels/*.whl  # 需要先 build wheel
+pip install target/wheels/*.whl  # build wheel first
 ```
 
 ### Rust
