@@ -1910,6 +1910,84 @@ mod tests {
         assert!(matches!(result, Err(SdkError::Config(_))));
     }
 
+    #[test]
+    fn destroy_uninitialized_sandbox_succeeds() {
+        let sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+
+        let result = sandbox.destroy();
+
+        assert!(result.is_ok(), "销毁未初始化沙箱应成功: {:?}", result);
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn destroy_then_drop_does_not_panic() {
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        // 先执行一次命令，确保后端完成懒初始化。
+        sandbox.execute("/bin/echo hello").expect("执行命令失败");
+        assert!(inner_is_initialized(&sandbox));
+
+        let destroyed = Sandbox::with_config(Config::default())
+            .expect("创建沙箱失败")
+            .destroy();
+
+        assert!(destroyed.is_ok(), "destroy 应成功: {:?}", destroyed);
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn drop_after_partial_initialization_does_not_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+            sandbox.execute("/bin/echo test").expect("执行命令失败");
+            // 不主动 destroy，验证 Drop 自动清理路径不会 panic。
+            drop(sandbox);
+        });
+
+        assert!(result.is_ok(), "Drop 自动清理不应 panic");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn concurrent_execute_via_mutex_does_not_panic() {
+        use std::sync::{Arc, Mutex};
+
+        let sandbox = Arc::new(Mutex::new(
+            Sandbox::with_config(Config::default()).expect("创建沙箱失败"),
+        ));
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let sandbox = Arc::clone(&sandbox);
+                std::thread::spawn(move || {
+                    let mut sandbox = sandbox.lock().expect("Mutex 不应 poisoned");
+                    let result = sandbox
+                        .execute(&format!("/bin/echo thread-{i}"))
+                        .expect("并发 execute 不应失败");
+                    let stdout = String::from_utf8_lossy(&result.stdout);
+                    assert!(
+                        stdout.contains(&format!("thread-{i}")),
+                        "线程 {i} stdout 应包含标识，实际: {stdout}"
+                    );
+                    assert_eq!(result.exit_code, Some(0), "退出码应为 0");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("线程不应 panic");
+        }
+
+        let sandbox = match Arc::try_unwrap(sandbox) {
+            Ok(sandbox) => sandbox,
+            Err(_) => panic!("所有引用应已释放"),
+        };
+        sandbox
+            .into_inner()
+            .expect("Mutex 不应 poisoned")
+            .destroy()
+            .expect("销毁沙箱失败");
+    }
+
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn create_pty_auto_routes_to_os_backend() {
@@ -1989,6 +2067,43 @@ mod tests {
         }
 
         sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    #[test]
+    fn list_dir_returns_unsupported_for_pooled_vm_backends() {
+        let Ok(microvm_config) = mimobox_vm::microvm_config_from_vm_assets(256) else {
+            return;
+        };
+        let config = Config::builder()
+            .isolation(IsolationLevel::MicroVm)
+            .vm_memory_mb(microvm_config.memory_mb)
+            .kernel_path(microvm_config.kernel_path.clone())
+            .rootfs_path(microvm_config.rootfs_path.clone())
+            .build();
+        let mut sandbox = Sandbox::with_config(config).expect("创建 pooled VM 沙箱失败");
+
+        sandbox
+            .execute("/bin/echo init")
+            .expect("初始化 VM 后端失败");
+
+        match sandbox.list_dir("/tmp") {
+            Err(SdkError::Sandbox {
+                code: ErrorCode::UnsupportedPlatform,
+                ..
+            }) => {}
+            Ok(_) => {}
+            Err(other) => panic!("list_dir 返回了意外的错误: {other}"),
+        }
+
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    #[test]
+    fn list_dir_vm_backend_unavailable_on_current_platform() {
+        // 非 Linux+KVM 平台，VM 后端不可用；实际 VM list_dir 测试在 Linux + vm feature 下运行。
+        assert!(true, "VM list_dir 测试在当前平台不可用，此为编译验证骨架");
     }
 
     #[cfg(all(

@@ -830,6 +830,44 @@ mod tests {
         assert_eq!(exit.exit_code(), Some(9));
     }
 
+    #[cfg(all(feature = "os", not(target_os = "windows")))]
+    #[test]
+    fn python_sandbox_execute_end_to_end() {
+        pyo3::prepare_freethreaded_python();
+
+        Python::with_gil(|_py| {
+            let config = build_python_config(None, None).expect("构建配置失败");
+            let mut sandbox = RustSandbox::with_config(config).expect("创建 Rust 沙箱失败");
+            let result = sandbox
+                .execute("/bin/echo hello_from_python")
+                .expect("执行命令失败");
+
+            let py_result = PyExecuteResult::from(result);
+            assert!(
+                py_result.stdout.contains("hello_from_python"),
+                "stdout 应包含预期输出，实际: {}",
+                py_result.stdout
+            );
+            assert_eq!(py_result.exit_code, 0, "退出码应为 0");
+            assert!(!py_result.timed_out, "不应超时");
+
+            sandbox.destroy().expect("销毁沙箱失败");
+        });
+    }
+
+    #[cfg(all(feature = "os", not(target_os = "windows")))]
+    #[test]
+    fn python_sandbox_operations_after_close_return_error() {
+        pyo3::prepare_freethreaded_python();
+
+        let mut py_sandbox = PySandbox::new(None, None).expect("创建 Python Sandbox 失败");
+        py_sandbox.close().expect("关闭 Sandbox 失败");
+
+        let result = py_sandbox.execute("/bin/echo should_fail", None, None);
+
+        assert!(result.is_err(), "close 后 execute 应返回错误");
+    }
+
     #[test]
     fn python_snapshot_round_trip_preserves_bytes() {
         let snapshot =
