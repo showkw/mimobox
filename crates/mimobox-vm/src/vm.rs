@@ -19,16 +19,16 @@ use crate::vm_assets::resolve_vm_assets_dir;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::kvm::{KvmBackend, restore_runtime_state};
 
-/// microVM 专属配置。
+/// microVM-specific configuration.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MicrovmConfig {
-    /// vCPU 数量。
+    /// Number of vCPUs.
     pub vcpu_count: u8,
-    /// Guest 内存大小（MiB）。
+    /// Guest memory size in MiB.
     pub memory_mb: u32,
-    /// Guest 内核镜像路径。
+    /// Guest kernel image path.
     pub kernel_path: PathBuf,
-    /// Guest rootfs 路径。
+    /// Guest rootfs path.
     pub rootfs_path: PathBuf,
 }
 
@@ -50,7 +50,7 @@ impl Default for MicrovmConfig {
 }
 
 impl MicrovmConfig {
-    /// 返回 guest memory 字节数。
+    /// Returns the guest memory size in bytes.
     pub fn memory_bytes(&self) -> Result<usize, MicrovmError> {
         let bytes = u64::from(self.memory_mb)
             .checked_mul(1024 * 1024)
@@ -64,7 +64,7 @@ impl MicrovmConfig {
         })
     }
 
-    /// 校验 microVM 基础配置。
+    /// Validates the base microVM configuration.
     pub fn validate(&self) -> Result<(), MicrovmError> {
         if self.vcpu_count == 0 {
             return Err(MicrovmError::InvalidConfig(
@@ -108,82 +108,82 @@ impl MicrovmConfig {
     }
 }
 
-/// microVM 生命周期状态。
+/// microVM lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrovmState {
-    /// 实例已创建但尚未进入可执行状态。
+    /// Instance has been created but is not yet executable.
     Created,
-    /// 实例已就绪，可执行命令或文件操作。
+    /// Instance is ready to execute commands or file operations.
     Ready,
-    /// 实例当前正在执行命令或传输数据。
+    /// Instance is currently executing a command or transferring data.
     Running,
-    /// 实例已经销毁，不能再复用。
+    /// Instance has been destroyed and cannot be reused.
     Destroyed,
 }
 
-/// guest 命令执行结果。
+/// Guest command execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestCommandResult {
-    /// 标准输出字节流。
+    /// Standard output bytes.
     pub stdout: Vec<u8>,
-    /// 标准错误字节流。
+    /// Standard error bytes.
     pub stderr: Vec<u8>,
-    /// 退出码；若进程未正常退出则可能为 `None`。
+    /// Exit code, or `None` if the process did not exit normally.
     pub exit_code: Option<i32>,
-    /// 是否因超时被终止。
+    /// Whether execution was terminated by a timeout.
     pub timed_out: bool,
 }
 
-/// guest 命令级执行选项。
+/// Guest command-level execution options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestExecOptions {
-    /// 仅对本次命令生效的环境变量。
+    /// Environment variables that only apply to this command.
     pub env: HashMap<String, String>,
-    /// 仅对本次命令生效的超时时间。
+    /// Timeout that only applies to this command.
     pub timeout: Option<Duration>,
 }
 
-/// guest 流式执行事件。
+/// Guest streaming execution event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
-    /// 一段标准输出数据。
+    /// A chunk of standard output data.
     Stdout(Vec<u8>),
-    /// 一段标准错误数据。
+    /// A chunk of standard error data.
     Stderr(Vec<u8>),
-    /// 进程退出并携带退出码。
+    /// Process exited with an exit code.
     Exit(i32),
-    /// 执行因超时被终止。
+    /// Execution was terminated by a timeout.
     TimedOut,
 }
 
-/// microVM 级错误。
+/// microVM-level error.
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
-    /// 当前平台或构建配置不支持 KVM microVM。
+    /// KVM microVMs are not supported on the current platform or build configuration.
     #[error("KVM microVM backend not supported on current platform")]
     UnsupportedPlatform,
 
-    /// microVM 配置无效。
+    /// microVM configuration is invalid.
     #[error("invalid microVM config: {0}")]
     InvalidConfig(String),
 
-    /// 生命周期状态不允许执行当前操作。
+    /// Current lifecycle state does not allow the requested operation.
     #[error("microVM lifecycle error: {0}")]
     Lifecycle(String),
 
-    /// KVM 或 guest 协议层错误。
+    /// KVM or guest protocol error.
     #[error("KVM backend error: {0}")]
     Backend(String),
 
-    /// 受控 HTTP 代理错误。
+    /// Controlled HTTP proxy error.
     #[error(transparent)]
     HttpProxy(#[from] HttpProxyError),
 
-    /// 快照格式非法或不兼容。
+    /// Snapshot format is invalid or incompatible.
     #[error("invalid snapshot format: {0}")]
     SnapshotFormat(String),
 
-    /// 标准库 I/O 错误。
+    /// Standard library I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -399,7 +399,7 @@ impl BackendHandle {
     }
 }
 
-/// microVM 沙箱实现。
+/// microVM sandbox implementation.
 pub struct MicrovmSandbox {
     base_config: SandboxConfig,
     microvm_config: MicrovmConfig,
@@ -417,12 +417,12 @@ impl std::fmt::Debug for MicrovmSandbox {
 }
 
 impl MicrovmSandbox {
-    /// 使用默认 `SandboxConfig` 创建 microVM。
+    /// Creates a microVM with the default `SandboxConfig`.
     pub fn new(config: MicrovmConfig) -> Result<Self, MicrovmError> {
         Self::new_with_base(SandboxConfig::default(), config)
     }
 
-    /// 使用显式 `SandboxConfig` + `MicrovmConfig` 创建 microVM。
+    /// Creates a microVM with explicit `SandboxConfig` and `MicrovmConfig` values.
     pub fn new_with_base(
         base_config: SandboxConfig,
         microvm_config: MicrovmConfig,
@@ -447,7 +447,7 @@ impl MicrovmSandbox {
         })
     }
 
-    /// 导出当前 microVM 快照。
+    /// Exports a snapshot of the current microVM.
     pub fn snapshot(&mut self) -> Result<SandboxSnapshot, MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -465,7 +465,7 @@ impl MicrovmSandbox {
         .persist_to_files()
     }
 
-    /// 从快照恢复 microVM。
+    /// Restores a microVM from a snapshot.
     pub fn restore(snapshot: &SandboxSnapshot) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_restore").entered();
         if let Some(memory_path) = snapshot.memory_file_path() {
@@ -476,13 +476,13 @@ impl MicrovmSandbox {
         Self::restore_from_bytes(data)
     }
 
-    /// 从自描述快照字节恢复 microVM。
+    /// Restores a microVM from self-describing snapshot bytes.
     pub fn restore_from_bytes(data: &[u8]) -> Result<Self, MicrovmError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         Self::from_snapshot(snapshot)
     }
 
-    /// 从文件化快照恢复，memory 通过 mmap(MAP_PRIVATE) 加载。
+    /// Restores from a file-backed snapshot, loading memory through mmap(MAP_PRIVATE).
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     fn restore_from_file_snapshot(memory_path: &Path) -> Result<Self, MicrovmError> {
         let (sandbox_config, microvm_config, vcpu_state) =
@@ -500,7 +500,7 @@ impl MicrovmSandbox {
         })
     }
 
-    /// 非 Linux 平台的文件快照恢复回退。
+    /// File snapshot restore fallback for non-Linux platforms.
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     fn restore_from_file_snapshot(_memory_path: &Path) -> Result<Self, MicrovmError> {
         Err(MicrovmError::Backend(
@@ -508,11 +508,13 @@ impl MicrovmSandbox {
         ))
     }
 
-    /// 从当前 microVM 创建一个独立的副本。
+    /// Creates an independent copy from the current microVM.
     ///
-    /// zerocopy-fork feature 开启时直接共享 guest memory 并依赖 MAP_PRIVATE CoW；
-    /// 未开启时保留文件快照恢复链路作为回退。
+    /// When the zerocopy-fork feature is enabled, this directly shares guest memory
+    /// and relies on MAP_PRIVATE CoW. Otherwise it keeps the file snapshot restore
+    /// path as a fallback.
     #[cfg(all(target_os = "linux", feature = "kvm"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
         if self.state != MicrovmState::Ready {
@@ -623,17 +625,17 @@ impl MicrovmSandbox {
         result
     }
 
-    /// 读取 guest 内文件内容。
+    /// Reads file contents from the guest.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         self.with_ready_state("read_file", |backend| backend.read_file(path))
     }
 
-    /// 向 guest 内写入文件内容。
+    /// Writes file contents into the guest.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         self.with_ready_state("write_file", |backend| backend.write_file(path, data))
     }
 
-    /// 等待 microVM 进入可响应状态，并通过 PING/PONG 验证命令循环。
+    /// Waits until the microVM is responsive and verifies the command loop with PING/PONG.
     pub fn wait_ready(&mut self, timeout: Duration) -> Result<(), MicrovmError> {
         if timeout.is_zero() {
             return Err(MicrovmError::InvalidConfig(
@@ -651,17 +653,17 @@ impl MicrovmSandbox {
         })
     }
 
-    /// 返回 microVM 是否处于 Ready 状态。
+    /// Returns whether the microVM is in the Ready state.
     pub fn is_ready(&self) -> bool {
         self.state == MicrovmState::Ready && self.backend.is_ready()
     }
 
-    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         self.with_ready_state("ping", BackendHandle::ping)
     }
 
-    /// 以流式事件形式执行命令。
+    /// Executes a command as a stream of events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -669,7 +671,7 @@ impl MicrovmSandbox {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// 以流式事件形式执行命令，并应用命令级选项。
+    /// Executes a command as a stream of events with command-level options.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -686,7 +688,7 @@ impl MicrovmSandbox {
         })
     }
 
-    /// 执行命令并附加命令级环境变量。
+    /// Executes a command with command-level environment variables.
     pub fn execute_with_env(
         &mut self,
         cmd: &[String],
@@ -695,7 +697,7 @@ impl MicrovmSandbox {
         self.execute_with_options(cmd, GuestExecOptions { env, timeout: None })
     }
 
-    /// 执行命令并覆写命令级超时时间。
+    /// Executes a command with a command-level timeout override.
     pub fn execute_with_timeout(
         &mut self,
         cmd: &[String],
@@ -710,7 +712,7 @@ impl MicrovmSandbox {
         )
     }
 
-    /// 执行命令并应用完整的命令级选项。
+    /// Executes a command with the full set of command-level options.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -727,7 +729,7 @@ impl MicrovmSandbox {
         })
     }
 
-    /// 通过宿主受控 HTTP 代理发起请求。
+    /// Sends a request through the host-controlled HTTP proxy.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         self.with_ready_state("http_request", |backend| backend.http_request(request))
     }

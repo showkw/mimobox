@@ -1,6 +1,7 @@
-//! microVM 预热池。
+//! microVM prewarm pool.
 //!
-//! 提供线程安全的 `KvmBackend` 预热与复用能力，避免每次执行命令都重新创建并启动 VM。
+//! Provides thread-safe `KvmBackend` prewarming and reuse so commands do not need to
+//! recreate and boot a VM for every execution.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -18,15 +19,15 @@ use mimobox_core::{SandboxConfig, SandboxSnapshot};
 use crate::{KvmBackend, KvmExitReason};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// microVM 预热池配置。
+/// microVM prewarm pool configuration.
 pub struct VmPoolConfig {
-    /// 初始化时预热的最小空闲 VM 数量。
+    /// Minimum number of idle VMs to prewarm during initialization.
     pub min_size: usize,
-    /// idle 队列允许保留的最大 VM 数量。
+    /// Maximum number of VMs retained in the idle queue.
     pub max_size: usize,
-    /// 空闲 VM 允许保留的最长时长。
+    /// Maximum duration an idle VM may be retained.
     pub max_idle_duration: Duration,
-    /// 每回收多少次后执行一次健康检查；`None` 表示禁用。
+    /// Runs a health check after this many releases; `None` disables it.
     pub health_check_interval: Option<u32>,
 }
 
@@ -42,37 +43,37 @@ impl Default for VmPoolConfig {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-/// microVM 预热池运行时统计。
+/// Runtime statistics for the microVM prewarm pool.
 pub struct VmPoolStats {
-    /// 从空闲池直接命中的次数。
+    /// Number of direct hits from the idle pool.
     pub hit_count: u64,
-    /// 未命中空闲池并新建 VM 的次数。
+    /// Number of idle pool misses that created a new VM.
     pub miss_count: u64,
-    /// 因超时、健康检查失败或容量淘汰被驱逐的次数。
+    /// Number of VMs evicted because of timeout, health check failure, or capacity pressure.
     pub evict_count: u64,
-    /// 当前空闲 VM 数量。
+    /// Current number of idle VMs.
     pub idle_count: usize,
-    /// 当前借出的 VM 数量。
+    /// Current number of borrowed VMs.
     pub in_use_count: usize,
 }
 
 #[derive(Debug, Error)]
-/// microVM 预热池错误。
+/// microVM prewarm pool error.
 pub enum PoolError {
-    /// 预热池容量配置不合法。
+    /// Pool capacity configuration is invalid.
     #[error("invalid pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
-        /// 非法的最小空闲目标值。
+        /// Invalid minimum idle target.
         min_size: usize,
-        /// 非法的最大容量值。
+        /// Invalid maximum capacity.
         max_size: usize,
     },
 
-    /// 内部共享状态锁已中毒。
+    /// Internal shared state lock is poisoned.
     #[error("warm pool state lock poisoned")]
     StatePoisoned,
 
-    /// 底层 microVM 错误。
+    /// Underlying microVM error.
     #[error(transparent)]
     Microvm(#[from] MicrovmError),
 }
@@ -285,18 +286,18 @@ impl VmPoolInner {
 }
 
 #[derive(Clone)]
-/// 线程安全的 microVM 预热池。
+/// Thread-safe microVM prewarm pool.
 pub struct VmPool {
     inner: Arc<VmPoolInner>,
 }
 
 impl VmPool {
-    /// 使用默认 `SandboxConfig` 创建 microVM 预热池。
+    /// Creates a microVM prewarm pool with the default `SandboxConfig`.
     pub fn new(config: MicrovmConfig, pool_config: VmPoolConfig) -> Result<Self, PoolError> {
         Self::new_with_base(SandboxConfig::default(), config, pool_config)
     }
 
-    /// 使用显式基础沙箱配置创建 microVM 预热池。
+    /// Creates a microVM prewarm pool with an explicit base sandbox configuration.
     pub fn new_with_base(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -329,7 +330,7 @@ impl VmPool {
         Ok(pool)
     }
 
-    /// 从池中获取一个可执行的 microVM 实例。
+    /// Acquires an executable microVM instance from the pool.
     pub fn acquire(&self) -> Result<PooledVm, PoolError> {
         let _span = tracing::info_span!("pool_acquire").entered();
         #[cfg(feature = "boot-profile")]
@@ -393,7 +394,7 @@ impl VmPool {
         })
     }
 
-    /// 将空闲池补足到至少 `count` 个 VM。
+    /// Warms the idle pool to at least `count` VMs.
     pub fn warm(&self, count: usize) -> Result<usize, PoolError> {
         let expired = self.inner.take_expired_idle()?;
         for entry in expired {
@@ -438,26 +439,26 @@ impl VmPool {
         Ok(inserted)
     }
 
-    /// 返回当前预热池统计快照。
+    /// Returns a snapshot of the current pool statistics.
     pub fn stats(&self) -> Result<VmPoolStats, PoolError> {
         Ok(self.inner.lock_state()?.snapshot())
     }
 }
 
-/// 从 `VmPool` 借出的 microVM 句柄。
+/// microVM handle borrowed from a `VmPool`.
 pub struct PooledVm {
     backend: Option<Backend>,
     pool: Arc<VmPoolInner>,
 }
 
 impl PooledVm {
-    /// 执行命令并等待完成。
+    /// Executes a command and waits for completion.
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         let _span = tracing::info_span!("pool_execute").entered();
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// 执行命令并应用命令级选项。
+    /// Executes a command with command-level options.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -479,7 +480,7 @@ impl PooledVm {
         result
     }
 
-    /// 以流式事件形式执行命令。
+    /// Executes a command as a stream of events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -488,7 +489,7 @@ impl PooledVm {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// 以流式事件形式执行命令，并应用命令级选项。
+    /// Executes a command as a stream of events with command-level options.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -501,7 +502,7 @@ impl PooledVm {
         }
     }
 
-    /// 读取 guest 内文件内容。
+    /// Reads file contents from the guest.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => read_file_backend(backend, path),
@@ -509,7 +510,7 @@ impl PooledVm {
         }
     }
 
-    /// 向 guest 内写入文件内容。
+    /// Writes file contents into the guest.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => write_file_backend(backend, path, data),
@@ -517,7 +518,7 @@ impl PooledVm {
         }
     }
 
-    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => ping_backend(backend),
@@ -525,7 +526,7 @@ impl PooledVm {
         }
     }
 
-    /// 通过宿主受控 HTTP 代理发起请求。
+    /// Sends a request through the host-controlled HTTP proxy.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => http_request_backend(backend, request),
@@ -533,7 +534,7 @@ impl PooledVm {
         }
     }
 
-    /// 导出当前 VM 的文件化快照。
+    /// Exports a file-backed snapshot of the current VM.
     pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             #[cfg(all(target_os = "linux", feature = "kvm"))]

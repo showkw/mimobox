@@ -33,64 +33,64 @@ pub struct HttpProxyRequestPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// 经过校验和归一化的 HTTP 代理请求。
+/// Validated and normalized HTTP proxy request.
 pub struct HttpRequest {
-    /// 请求方法，例如 `GET`、`POST`。
+    /// Request method, such as `GET` or `POST`.
     pub method: String,
-    /// 目标 HTTPS URL。
+    /// Target HTTPS URL.
     pub url: String,
-    /// 请求头集合。
+    /// Request headers.
     pub headers: HashMap<String, String>,
-    /// 可选请求体。
+    /// Optional request body.
     pub body: Option<Vec<u8>>,
-    /// 请求超时时间，单位为毫秒。
+    /// Request timeout in milliseconds.
     pub timeout_ms: u64,
-    /// 允许返回的最大响应体大小。
+    /// Maximum response body size allowed.
     pub max_response_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// HTTP 代理响应。
+/// HTTP proxy response.
 pub struct HttpResponse {
-    /// HTTP 状态码。
+    /// HTTP status code.
     pub status: u16,
-    /// 响应头集合。
+    /// Response headers.
     pub headers: HashMap<String, String>,
-    /// 响应体字节流。
+    /// Response body bytes.
     pub body: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
-/// microVM HTTP 代理错误。
+/// microVM HTTP proxy error.
 pub enum HttpProxyError {
-    /// 目标域名不在允许名单中。
+    /// Target host is not in the allowlist.
     #[error("domain not in whitelist: {0}")]
     DeniedHost(String),
-    /// 请求超过超时时间。
+    /// Request exceeded its timeout.
     #[error("HTTP request timed out")]
     Timeout,
-    /// 请求体或响应体超出大小限制。
+    /// Request or response body exceeded the size limit.
     #[error("HTTP body exceeds size limit")]
     BodyTooLarge,
-    /// 与目标服务器建立连接失败。
+    /// Failed to connect to the target server.
     #[error("HTTP connection failed: {0}")]
     ConnectFail(String),
-    /// TLS 握手失败。
+    /// TLS handshake failed.
     #[error("TLS handshake failed: {0}")]
     TlsFail(String),
-    /// 请求 URL 非法。
+    /// Request URL is invalid.
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
-    /// DNS 解析到了内网或保留地址。
+    /// DNS resolved to a private or reserved address.
     #[error("DNS resolution hit private address: {0}")]
     DnsRebind(String),
-    /// 代理内部执行失败。
+    /// Proxy execution failed internally.
     #[error("HTTP proxy internal error: {0}")]
     Internal(String),
 }
 
 impl HttpProxyError {
-    /// 返回稳定的错误码字符串。
+    /// Returns the stable error code string.
     pub fn code(&self) -> &'static str {
         match self {
             Self::DeniedHost(_) => "DENIED_HOST",
@@ -136,7 +136,7 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
 }
 
 impl HttpRequest {
-    /// 构造一个新的 HTTP 代理请求并应用默认限制。
+    /// Constructs a new HTTP proxy request and applies default limits.
     pub fn new(
         method: impl Into<String>,
         url: impl Into<String>,
@@ -162,7 +162,7 @@ impl HttpRequest {
         })
     }
 
-    /// 从 JSON 负载解析 HTTP 代理请求。
+    /// Parses an HTTP proxy request from a JSON payload.
     pub fn from_json(json: &str) -> Result<Self, HttpProxyError> {
         let payload = serde_json::from_str::<HttpProxyRequestPayload>(json).map_err(|err| {
             HttpProxyError::InvalidUrl(format!("invalid HTTP request JSON: {err}"))
@@ -171,7 +171,7 @@ impl HttpRequest {
     }
 }
 
-/// 通过宿主受控代理执行 HTTP 请求。
+/// Executes an HTTP request through the host-controlled proxy.
 pub fn execute_http_request(
     config: &SandboxConfig,
     request: &HttpRequest,
@@ -215,7 +215,7 @@ pub fn execute_http_request(
     })
 }
 
-/// 判断指定域名是否命中允许的 HTTP 域名白名单。
+/// Returns whether the given host matches the HTTP host allowlist.
 pub fn is_allowed_http_host(config: &SandboxConfig, host: &str) -> bool {
     let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
     if normalized_host.is_empty() {

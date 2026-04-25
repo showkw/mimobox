@@ -127,8 +127,9 @@ impl KvmBackend {
         apply_host_passthrough_cpuid(&self.kvm, &mut entries);
 
         if let Some(tsc_khz) = self.boot_tsc_khz() {
-            // 当前稳定可获取的是 TSC 频率；LAPIC 频率缺少统一可靠的宿主查询接口，
-            // 先保守置 0，优先让 guest 命中 TSC 快路径。
+            // The stable value currently available is the TSC frequency. LAPIC frequency
+            // lacks a single reliable host query interface, so keep it conservatively at
+            // 0 and let the guest prefer the TSC fast path.
             if !inject_hypervisor_timing_cpuid(&mut entries, tsc_khz, 0) {
                 debug!(
                     entry_count = entries.len(),
@@ -312,8 +313,9 @@ fn apply_host_passthrough_cpuid(kvm: &Kvm, entries: &mut [kvm_cpuid_entry2]) {
             continue;
         }
 
-        // 这里保留 KVM 过滤后的可用特性集合，只把对冷启动最关键的
-        // TSC deadline/APIC 位显式对齐到宿主机能力，避免 guest 回落到更慢的校准路径。
+        // Keep the KVM-filtered available feature set here and explicitly align only the
+        // cold-start-critical TSC deadline/APIC bits with host capabilities, preventing
+        // the guest from falling back to slower calibration paths.
         entry.ecx |= host_leaf1_ecx;
         entry.edx |= host_leaf1_edx;
         return;

@@ -1,10 +1,13 @@
-//! mimobox-vm: microVM 沙箱后端
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+//! mimobox-vm: microVM sandbox backend.
 //!
-//! 当前 crate 提供 microVM 后端的基础骨架：
-//! - [`MicrovmConfig`]：microVM 专属配置
-//! - [`MicrovmSandbox`]：实现 [`mimobox_core::Sandbox`] 的外部入口
-//! - [`MicrovmSnapshot`]：自描述快照格式（magic + version + config + memory + vCPU state）
-//! - Linux + `kvm` feature 下的 `KvmBackend`：KVM 生命周期基础实现
+//! This crate provides the foundation for the microVM backend:
+//! - [`MicrovmConfig`]: microVM-specific configuration.
+//! - [`MicrovmSandbox`]: the public entry point implementing [`mimobox_core::Sandbox`].
+//! - [`MicrovmSnapshot`]: the self-describing snapshot format
+//!   (magic + version + config + memory + vCPU state).
+//! - `KvmBackend` on Linux with the `kvm` feature: the basic KVM lifecycle implementation.
 
 mod http_proxy;
 pub mod pool;
@@ -30,6 +33,8 @@ pub use vm_assets::{
 };
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "kvm")))]
 pub use kvm::{KvmBackend, KvmExitReason, KvmLifecycle, KvmTransport};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "kvm")))]
 pub use restore_pool::{PooledRestoreVm, RestorePool, RestorePoolConfig, RestorePoolError};

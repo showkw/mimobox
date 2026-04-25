@@ -5,9 +5,10 @@ use crate::vm::{MicrovmConfig, MicrovmError};
 
 const DEFAULT_VM_ASSETS_SUBDIR: &str = ".mimobox/assets";
 
-/// 解析 microVM 资产目录。
+/// Resolves the microVM assets directory.
 ///
-/// 优先使用显式传入的覆盖目录；若未提供，则回退到 `HOME/.mimobox/assets`。
+/// An explicit override takes precedence. If no override is provided, this falls back to
+/// `HOME/.mimobox/assets`.
 pub fn resolve_vm_assets_dir(
     vm_assets_override: Option<PathBuf>,
     home_dir: Option<PathBuf>,
@@ -24,7 +25,7 @@ pub fn resolve_vm_assets_dir(
     Ok(home_dir.join(DEFAULT_VM_ASSETS_SUBDIR))
 }
 
-/// 从环境变量解析默认 microVM 资产目录。
+/// Resolves the default microVM assets directory from environment variables.
 pub fn vm_assets_dir() -> Result<PathBuf, MicrovmError> {
     resolve_vm_assets_dir(
         env::var_os("VM_ASSETS_DIR").map(PathBuf::from),
@@ -32,7 +33,7 @@ pub fn vm_assets_dir() -> Result<PathBuf, MicrovmError> {
     )
 }
 
-/// 根据资产目录构造 `MicrovmConfig`。
+/// Builds a `MicrovmConfig` from an assets directory.
 pub fn microvm_config_from_assets_dir(
     assets_dir: PathBuf,
     memory_mb: u32,
@@ -62,7 +63,7 @@ pub fn microvm_config_from_assets_dir(
     })
 }
 
-/// 从默认资产目录构造 `MicrovmConfig`。
+/// Builds a `MicrovmConfig` from the default assets directory.
 pub fn microvm_config_from_vm_assets(memory_mb: u32) -> Result<MicrovmConfig, MicrovmError> {
     let assets_dir = vm_assets_dir()?;
     microvm_config_from_assets_dir(assets_dir, memory_mb)
