@@ -436,6 +436,7 @@ fn check_seatbelt() -> CheckResult {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn check_seatbelt() -> CheckResult {
     CheckResult {
         name: "Seatbelt".to_string(),
