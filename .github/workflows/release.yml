@@ -46,7 +46,7 @@ jobs:
         with:
           name: mimobox-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/mimobox
+            target/${{ matrix.target }}/release/mimobox-cli
             target/${{ matrix.target }}/release/mimobox-mcp
 
   github-release:
