@@ -54,7 +54,7 @@ main() {
     info "Running sandbox demo command..."
     run_start=$SECONDS
     set +e
-    output=$(target/release/mimobox run --command "/bin/echo 'Hello from mimobox sandbox!'" 2>&1)
+    output=$(target/release/mimobox-cli run --command "/bin/echo 'Hello from mimobox sandbox!'" 2>&1)
     exit_code=$?
     set -e
 
