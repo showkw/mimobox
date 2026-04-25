@@ -1,6 +1,6 @@
 //! mimobox MCP Server.
 //!
-//! Exposes 7 tools over stdio:
+//! Exposes 10 tools over stdio:
 //! - create_sandbox
 //! - destroy_sandbox
 //! - list_sandboxes
@@ -8,6 +8,9 @@
 //! - execute_command
 //! - read_file
 //! - write_file
+//! - snapshot
+//! - fork
+//! - http_request
 
 use std::{
     collections::HashMap,
@@ -15,6 +18,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "vm")]
+use base64::{Engine, engine::general_purpose::STANDARD};
 use mimobox_sdk::{Config, ExecuteResult, IsolationLevel, Sandbox, SdkError};
 use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::JsonSchema;
@@ -108,6 +113,31 @@ struct WriteFileRequest {
     content: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+struct SnapshotRequest {
+    /// 目标沙箱 ID。
+    sandbox_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+struct ForkRequest {
+    /// 要 fork 的沙箱 ID。
+    sandbox_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+struct McpHttpRequest {
+    /// 目标沙箱 ID。
+    sandbox_id: u64,
+    /// 请求 URL（仅支持 HTTPS）。
+    url: String,
+    /// HTTP 方法：GET 或 POST。
+    method: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 struct ExecuteResponse {
     stdout: String,
@@ -150,6 +180,25 @@ struct WriteFileResponse {
     path: String,
     size_bytes: usize,
     written: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct SnapshotResponse {
+    sandbox_id: u64,
+    size_bytes: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ForkResponse {
+    original_sandbox_id: u64,
+    new_sandbox_id: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct McpHttpResponse {
+    sandbox_id: u64,
+    status: u16,
+    body: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -300,7 +349,7 @@ impl MimoboxServer {
             Ok(Json(ReadFileResponse {
                 sandbox_id: request.sandbox_id,
                 path: request.path,
-                content: encode_base64(&content),
+                content: STANDARD.encode(&content),
                 size_bytes,
             }))
         }
@@ -308,7 +357,7 @@ impl MimoboxServer {
         #[cfg(not(feature = "vm"))]
         {
             let _ = request;
-            Err(to_error(file_transfer_requires_vm()))
+            Err(to_error(vm_feature_required("read_file")))
         }
     }
 
@@ -319,7 +368,9 @@ impl MimoboxServer {
     ) -> Result<Json<WriteFileResponse>, Json<ErrorResponse>> {
         #[cfg(feature = "vm")]
         {
-            let data = decode_base64(&request.content).map_err(to_error)?;
+            let data = STANDARD
+                .decode(&request.content)
+                .map_err(|err| to_error(format!("content 不是合法 base64：{err}")))?;
             let size_bytes = data.len();
             let mut sandboxes = self.sandboxes.lock().await;
             let managed = sandboxes
@@ -341,7 +392,114 @@ impl MimoboxServer {
         #[cfg(not(feature = "vm"))]
         {
             let _ = request;
-            Err(to_error(file_transfer_requires_vm()))
+            Err(to_error(vm_feature_required("write_file")))
+        }
+    }
+
+    #[tool(description = "Create a memory snapshot of a microVM-backed sandbox")]
+    async fn snapshot(
+        &self,
+        Parameters(request): Parameters<SnapshotRequest>,
+    ) -> Result<Json<SnapshotResponse>, Json<ErrorResponse>> {
+        #[cfg(feature = "vm")]
+        {
+            let mut sandboxes = self.sandboxes.lock().await;
+            let managed = sandboxes
+                .get_mut(&request.sandbox_id)
+                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            let snapshot = managed
+                .sandbox
+                .snapshot()
+                .map_err(|error| to_error(format_sdk_error(error)))?;
+
+            Ok(Json(SnapshotResponse {
+                sandbox_id: request.sandbox_id,
+                size_bytes: snapshot.size(),
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("snapshot")))
+        }
+    }
+
+    #[tool(description = "Fork a microVM-backed sandbox, creating an independent copy with CoW memory")]
+    async fn fork(
+        &self,
+        Parameters(request): Parameters<ForkRequest>,
+    ) -> Result<Json<ForkResponse>, Json<ErrorResponse>> {
+        #[cfg(feature = "vm")]
+        {
+            let mut sandboxes = self.sandboxes.lock().await;
+            let managed = sandboxes
+                .get_mut(&request.sandbox_id)
+                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            let forked = managed
+                .sandbox
+                .fork()
+                .map_err(|error| to_error(format_sdk_error(error)))?;
+
+            let mut next_id = self.next_id.lock().await;
+            let new_id = *next_id;
+            *next_id = next_id.saturating_add(1);
+            drop(next_id);
+
+            sandboxes.insert(
+                new_id,
+                ManagedSandbox {
+                    sandbox: forked,
+                    created_at_ms: unix_timestamp_ms(),
+                    created_at_instant: Instant::now(),
+                },
+            );
+
+            Ok(Json(ForkResponse {
+                original_sandbox_id: request.sandbox_id,
+                new_sandbox_id: new_id,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("fork")))
+        }
+    }
+
+    #[tool(description = "Execute an HTTP request from a microVM sandbox through a controlled proxy with domain whitelist")]
+    async fn http_request(
+        &self,
+        Parameters(request): Parameters<McpHttpRequest>,
+    ) -> Result<Json<McpHttpResponse>, Json<ErrorResponse>> {
+        #[cfg(feature = "vm")]
+        {
+            let method = request.method.to_ascii_uppercase();
+            if !matches!(method.as_str(), "GET" | "POST") {
+                return Err(to_error("method 仅支持 GET 和 POST".to_string()));
+            }
+
+            let mut sandboxes = self.sandboxes.lock().await;
+            let managed = sandboxes
+                .get_mut(&request.sandbox_id)
+                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            let response = managed
+                .sandbox
+                .http_request(&method, &request.url, HashMap::new(), None)
+                .map_err(|error| to_error(format_sdk_error(error)))?;
+
+            Ok(Json(McpHttpResponse {
+                sandbox_id: request.sandbox_id,
+                status: response.status,
+                body: String::from_utf8_lossy(&response.body).into_owned(),
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("http_request")))
         }
     }
 
@@ -428,8 +586,8 @@ fn sandbox_not_found(sandbox_id: u64) -> String {
 }
 
 #[cfg(not(feature = "vm"))]
-fn file_transfer_requires_vm() -> String {
-    "文件传输需要 microVM 后端支持，请启用 vm feature 并使用 MicroVm 隔离层级".to_string()
+fn vm_feature_required(operation: &str) -> String {
+    format!("{operation} 需要 microVM 后端支持，请启用 vm feature 并使用 MicroVm 隔离层级")
 }
 
 fn build_code_command(language: Option<&str>, code: &str) -> Result<String, String> {
@@ -456,93 +614,6 @@ fn format_execute_result(result: ExecuteResult) -> ExecuteResponse {
         exit_code: result.exit_code,
         timed_out: result.timed_out,
         elapsed_ms: result.elapsed.as_millis(),
-    }
-}
-
-#[cfg(feature = "vm")]
-const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-#[cfg(feature = "vm")]
-fn encode_base64(data: &[u8]) -> String {
-    let mut encoded = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-
-        encoded.push(BASE64_TABLE[(first >> 2) as usize] as char);
-        encoded.push(BASE64_TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            encoded.push(
-                BASE64_TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char,
-            );
-        } else {
-            encoded.push('=');
-        }
-        if chunk.len() > 2 {
-            encoded.push(BASE64_TABLE[(third & 0b0011_1111) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-    }
-    encoded
-}
-
-#[cfg(feature = "vm")]
-fn decode_base64(content: &str) -> Result<Vec<u8>, String> {
-    let bytes = content.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return Err("content 不是合法 base64：长度必须是 4 的倍数".to_string());
-    }
-
-    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-    let chunk_count = bytes.len() / 4;
-    for (chunk_index, chunk) in bytes.chunks(4).enumerate() {
-        let pad_count = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
-        if pad_count > 2 {
-            return Err("content 不是合法 base64：padding 过长".to_string());
-        }
-        if pad_count > 0 && chunk_index + 1 != chunk_count {
-            return Err("content 不是合法 base64：padding 后存在数据".to_string());
-        }
-
-        let mut values = [0u8; 4];
-        for (index, byte) in chunk.iter().enumerate() {
-            values[index] = if *byte == b'=' {
-                if index < 2 {
-                    return Err("content 不是合法 base64：padding 位置无效".to_string());
-                }
-                0
-            } else if pad_count > 0 && index >= 4 - pad_count {
-                return Err("content 不是合法 base64：padding 后存在数据".to_string());
-            } else {
-                decode_base64_byte(*byte).ok_or_else(|| {
-                    format!("content 不是合法 base64：包含非法字符 `{}`", *byte as char)
-                })?
-            };
-        }
-
-        decoded.push((values[0] << 2) | (values[1] >> 4));
-        if pad_count < 2 {
-            decoded.push((values[1] << 4) | (values[2] >> 2));
-        }
-        if pad_count == 0 {
-            decoded.push((values[2] << 6) | values[3]);
-        }
-    }
-
-    Ok(decoded)
-}
-
-#[cfg(feature = "vm")]
-fn decode_base64_byte(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
     }
 }
 
