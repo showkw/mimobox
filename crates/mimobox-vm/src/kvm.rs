@@ -124,7 +124,10 @@ impl AssetCache {
         slot: &mut Option<(PathBuf, u64, Arc<[u8]>)>,
     ) -> Result<Arc<[u8]>, MicrovmError> {
         let metadata = fs::metadata(path).map_err(|err| {
-            MicrovmError::Backend(format!("读取资源元数据失败: {}: {err}", path.display()))
+            MicrovmError::Backend(format!(
+                "failed to read asset metadata: {}: {err}",
+                path.display()
+            ))
         })?;
         let mtime = metadata
             .modified()
@@ -142,7 +145,10 @@ impl AssetCache {
 
         let bytes: Arc<[u8]> = fs::read(path)
             .map_err(|err| {
-                MicrovmError::Backend(format!("读取资源文件失败: {}: {err}", path.display()))
+                MicrovmError::Backend(format!(
+                    "failed to read asset file: {}: {err}",
+                    path.display()
+                ))
             })?
             .into();
         *slot = Some((path.to_path_buf(), mtime, Arc::clone(&bytes)));
@@ -605,8 +611,9 @@ impl KvmBackend {
             .guest_memory
             .get_host_address(GuestAddress(0))
             .map_err(to_backend_error)? as u64;
-        let memory_size = u64::try_from(self.config.memory_bytes()?)
-            .map_err(|_| MicrovmError::Backend("guest memory 长度无法转换为 u64".into()))?;
+        let memory_size = u64::try_from(self.config.memory_bytes()?).map_err(|_| {
+            MicrovmError::Backend("guest memory size cannot be converted to u64".into())
+        })?;
         let memory_region = kvm_userspace_memory_region {
             slot: 0,
             guest_phys_addr: 0,
@@ -648,11 +655,15 @@ impl KvmBackend {
         let _entered = span.enter();
 
         if timeout.is_zero() {
-            return Err(MicrovmError::InvalidConfig("ping timeout 不能为 0".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "ping timeout must not be zero".into(),
+            ));
         }
         self.ensure_guest_ready()?;
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
 
         let started_at = Instant::now();
@@ -797,7 +808,9 @@ impl KvmBackend {
     /// 初始化 vCPU 启动寄存器并进入真实 `KVM_RUN` 循环。
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
         if self.guest_ready {
             return Ok(KvmExitReason::Io);
@@ -862,9 +875,11 @@ impl KvmBackend {
         for index in 0..phnum {
             let ph_start = phoff
                 .checked_add(index.checked_mul(phentsize).ok_or_else(|| {
-                    MicrovmError::Backend("ELF program header 偏移计算溢出".into())
+                    MicrovmError::Backend("ELF program header offset calculation overflow".into())
                 })?)
-                .ok_or_else(|| MicrovmError::Backend("ELF program header 偏移计算溢出".into()))?;
+                .ok_or_else(|| {
+                    MicrovmError::Backend("ELF program header offset calculation overflow".into())
+                })?;
             let ph = checked_slice(&self.kernel_bytes, ph_start, phentsize)?;
             let program_type = read_u32_at(ph, 0)?;
             if program_type != PT_LOAD {
@@ -884,7 +899,7 @@ impl KvmBackend {
             let mem_size = usize_from_u64(read_u64_at(ph, 40)?)?;
             if mem_size < file_size {
                 return Err(MicrovmError::Backend(format!(
-                    "ELF 段 memsz 小于 filesz: memsz={mem_size}, filesz={file_size}"
+                    "ELF segment memsz is smaller than filesz: memsz={mem_size}, filesz={file_size}"
                 )));
             }
 
@@ -893,24 +908,32 @@ impl KvmBackend {
             self.zero_guest_range(
                 guest_addr
                     .checked_add(u64::try_from(file_size).map_err(|_| {
-                        MicrovmError::Backend("ELF 段文件长度无法转换为 u64".into())
+                        MicrovmError::Backend(
+                            "ELF segment file size cannot be converted to u64".into(),
+                        )
                     })?)
-                    .ok_or_else(|| MicrovmError::Backend("ELF 段地址计算溢出".into()))?,
+                    .ok_or_else(|| {
+                        MicrovmError::Backend("ELF segment address calculation overflow".into())
+                    })?,
                 mem_size - file_size,
             )?;
             loaded_segment = true;
             high_watermark = high_watermark.max(
                 guest_addr
                     .checked_add(u64::try_from(mem_size).map_err(|_| {
-                        MicrovmError::Backend("ELF 段内存长度无法转换为 u64".into())
+                        MicrovmError::Backend(
+                            "ELF segment memory size cannot be converted to u64".into(),
+                        )
                     })?)
-                    .ok_or_else(|| MicrovmError::Backend("ELF 段地址计算溢出".into()))?,
+                    .ok_or_else(|| {
+                        MicrovmError::Backend("ELF segment address calculation overflow".into())
+                    })?,
             );
         }
 
         if !loaded_segment {
             return Err(MicrovmError::Backend(
-                "ELF 镜像中不存在可装载的 PT_LOAD 段".into(),
+                "ELF image contains no loadable PT_LOAD segment".into(),
             ));
         }
 
@@ -927,7 +950,9 @@ impl KvmBackend {
             self.loaded_kernel
                 .high_watermark
                 .checked_add(0x20_0000)
-                .ok_or_else(|| MicrovmError::Backend("initrd 装载地址计算溢出".into()))?,
+                .ok_or_else(|| {
+                    MicrovmError::Backend("initrd load address calculation overflow".into())
+                })?,
             0x1000,
         )?;
         self.write_guest_bytes(proposed, &self.rootfs_bytes)?;
@@ -966,7 +991,7 @@ impl KvmBackend {
         write_u32(
             &mut zero_page,
             SETUP_HDR_RAMDISK_SIZE,
-            u32_from_len(self.rootfs_bytes.len(), "initrd 大小超过 u32 上限")?,
+            u32_from_len(self.rootfs_bytes.len(), "initrd size exceeds u32 limit")?,
         )?;
         write_u32(
             &mut zero_page,
@@ -981,18 +1006,18 @@ impl KvmBackend {
         write_u32(
             &mut zero_page,
             ZERO_PAGE_EXT_RAMDISK_SIZE,
-            upper_u32(
-                u64::try_from(self.rootfs_bytes.len())
-                    .map_err(|_| MicrovmError::Backend("initrd 大小无法转换为 u64".into()))?,
-            )?,
+            upper_u32(u64::try_from(self.rootfs_bytes.len()).map_err(|_| {
+                MicrovmError::Backend("initrd size cannot be converted to u64".into())
+            })?)?,
         )?;
         write_u32(
             &mut zero_page,
             ZERO_PAGE_EXT_CMD_LINE_PTR,
             upper_u32(self.cmdline_addr)?,
         )?;
-        let memory_end = u64::try_from(self.config.memory_bytes()?)
-            .map_err(|_| MicrovmError::Backend("guest memory 长度无法转换为 u64".into()))?;
+        let memory_end = u64::try_from(self.config.memory_bytes()?).map_err(|_| {
+            MicrovmError::Backend("guest memory size cannot be converted to u64".into())
+        })?;
         let mut e820_entries = 0usize;
 
         if memory_end > 0 {
@@ -1010,12 +1035,10 @@ impl KvmBackend {
 
         if memory_end > HIMEM_START {
             let start = ZERO_PAGE_E820_TABLE
-                .checked_add(
-                    e820_entries
-                        .checked_mul(E820_ENTRY_SIZE)
-                        .ok_or_else(|| MicrovmError::Backend("E820 偏移计算溢出".into()))?,
-                )
-                .ok_or_else(|| MicrovmError::Backend("E820 偏移计算溢出".into()))?;
+                .checked_add(e820_entries.checked_mul(E820_ENTRY_SIZE).ok_or_else(|| {
+                    MicrovmError::Backend("E820 offset calculation overflow".into())
+                })?)
+                .ok_or_else(|| MicrovmError::Backend("E820 offset calculation overflow".into()))?;
             encode_e820_entry(
                 &mut zero_page[start..start + E820_ENTRY_SIZE],
                 HIMEM_START,
@@ -1026,7 +1049,7 @@ impl KvmBackend {
         }
 
         zero_page[ZERO_PAGE_E820_ENTRIES] = u8::try_from(e820_entries)
-            .map_err(|_| MicrovmError::Backend("E820 条目数量超过 u8 上限".into()))?;
+            .map_err(|_| MicrovmError::Backend("E820 entry count exceeds u8 limit".into()))?;
 
         self.write_guest_bytes(self.boot_params_addr, &zero_page)
     }
@@ -1057,10 +1080,14 @@ impl KvmBackend {
         options: &GuestExecOptions,
     ) -> Result<GuestCommandResult, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
         if cmd.is_empty() {
-            return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "command must not be empty".into(),
+            ));
         }
 
         self.ensure_guest_ready()?;
@@ -1110,10 +1137,14 @@ impl KvmBackend {
         options: &GuestExecOptions,
     ) -> Result<mpsc::Receiver<StreamEvent>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
         if cmd.is_empty() {
-            return Err(MicrovmError::InvalidConfig("命令不能为空".into()));
+            return Err(MicrovmError::InvalidConfig(
+                "command must not be empty".into(),
+            ));
         }
 
         self.ensure_guest_ready()?;
@@ -1138,7 +1169,9 @@ impl KvmBackend {
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
 
         self.ensure_guest_ready()?;
@@ -1148,7 +1181,8 @@ impl KvmBackend {
             .is_some_and(|channel| channel.is_connected())
         {
             return Err(MicrovmError::Backend(
-                "FS 串口协议暂不支持已建立的 guest-vsock 连接".into(),
+                "FS serial protocol does not support an established guest-vsock connection yet"
+                    .into(),
             ));
         }
 
@@ -1168,7 +1202,9 @@ impl KvmBackend {
 
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
 
         self.ensure_guest_ready()?;
@@ -1178,7 +1214,8 @@ impl KvmBackend {
             .is_some_and(|channel| channel.is_connected())
         {
             return Err(MicrovmError::Backend(
-                "FS 串口协议暂不支持已建立的 guest-vsock 连接".into(),
+                "FS serial protocol does not support an established guest-vsock connection yet"
+                    .into(),
             ));
         }
 
@@ -1198,7 +1235,9 @@ impl KvmBackend {
 
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
-            return Err(MicrovmError::Lifecycle("KVM 后端未处于 Ready 状态".into()));
+            return Err(MicrovmError::Lifecycle(
+                "KVM backend is not in Ready state".into(),
+            ));
         }
 
         execute_http_request(&self.base_config, &request).map_err(Into::into)
@@ -1208,7 +1247,7 @@ impl KvmBackend {
         let channel = self
             .vsock_channel
             .as_ref()
-            .ok_or_else(|| MicrovmError::Lifecycle("vsock 命令通道不可用".into()))?;
+            .ok_or_else(|| MicrovmError::Lifecycle("vsock command channel unavailable".into()))?;
         channel.send_command(cmd)?;
         let result = channel.recv_result()?;
         self.transport = KvmTransport::Vsock;
@@ -1263,13 +1302,13 @@ impl KvmBackend {
             Some(timeout) => {
                 if timeout.is_zero() {
                     return Err(MicrovmError::InvalidConfig(
-                        "命令级 timeout 不能为 0".into(),
+                        "per-command timeout must not be zero".into(),
                     ));
                 }
                 let millis = timeout.as_millis();
                 let secs = millis.div_ceil(1000);
                 let secs = u64::try_from(secs).map_err(|_| {
-                    MicrovmError::InvalidConfig("命令级 timeout 超出 u64 范围".into())
+                    MicrovmError::InvalidConfig("per-command timeout exceeds u64 range".into())
                 })?;
                 Ok(Some(secs.max(1)))
             }
@@ -1319,8 +1358,9 @@ impl KvmBackend {
             "body_len": response.body.len(),
             "truncated": false,
         });
-        let payload = serde_json::to_vec(&payload)
-            .map_err(|err| MicrovmError::Backend(format!("序列化 HTTP 响应头失败: {err}")))?;
+        let payload = serde_json::to_vec(&payload).map_err(|err| {
+            MicrovmError::Backend(format!("failed to serialize HTTP response headers: {err}"))
+        })?;
         let mut frame = format!(
             "{SERIAL_HTTPRESP_HEADERS_PREFIX}{request_id}:{}:",
             payload.len()
@@ -1438,7 +1478,7 @@ impl KvmBackend {
     fn ensure_guest_ready(&mut self) -> Result<(), MicrovmError> {
         if self.lifecycle == KvmLifecycle::Destroyed {
             return Err(MicrovmError::Lifecycle(
-                "KVM 后端已销毁，不能继续复用 guest 状态".into(),
+                "KVM backend destroyed, cannot reuse guest state".into(),
             ));
         }
         if self.guest_ready {
@@ -1448,7 +1488,7 @@ impl KvmBackend {
         let exit_reason = self.boot()?;
         if exit_reason != KvmExitReason::Io {
             return Err(MicrovmError::Backend(format!(
-                "guest 未进入命令循环即退出: {exit_reason:?}"
+                "guest exited before entering command loop: {exit_reason:?}"
             )));
         }
         Ok(())
@@ -1506,12 +1546,13 @@ impl KvmBackend {
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io | KvmExitReason::Hlt)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
-                        "等待 vsock 连接期间 guest 异常退出: {exit_reason:?}"
+                        "guest exited unexpectedly while waiting for vsock connection: {exit_reason:?}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(_)) => {
                     return Err(MicrovmError::Backend(
-                        "vsock 连接握手阶段不应收到协议完成事件".into(),
+                        "protocol completion event received unexpectedly during vsock handshake"
+                            .into(),
                     ));
                 }
                 Err(err) if watchdog.timed_out() => {
@@ -1532,7 +1573,7 @@ impl KvmBackend {
         let vcpu = self
             .vcpus
             .first_mut()
-            .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
+            .ok_or_else(|| MicrovmError::Backend("at least one vCPU is required".into()))?;
         Ok(VcpuRunWatchdog::start(vcpu, timeout))
     }
 
@@ -1557,12 +1598,12 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(_)) => {
                     return Err(MicrovmError::Backend(
-                        "boot 阶段不应收到协议完成事件".into(),
+                        "protocol completion event received unexpectedly during boot".into(),
                     ));
                 }
                 Err(err) if watchdog.timed_out() => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 启动超时: {err}; last_exit={:?}; last_io={:?}; io_history={:?}; serial={}",
+                        "guest boot timed out: {err}; last_exit={:?}; last_io={:?}; io_history={:?}; serial={}",
                         self.last_exit_reason,
                         self.last_io_detail,
                         self.recent_io_details,
@@ -1589,14 +1630,16 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(_))) => {
                     return Err(MicrovmError::Backend(
-                        "命令执行阶段收到意外 FSRESULT 帧".into(),
+                        "unexpected FSRESULT frame during command execution".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
                     self.run_http_proxy_request(frame.id, frame.request)?;
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
-                    return Err(MicrovmError::Backend("命令执行阶段收到意外 PONG 帧".into()));
+                    return Err(MicrovmError::Backend(
+                        "unexpected PONG frame during command execution".into(),
+                    ));
                 }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
@@ -1606,13 +1649,14 @@ impl KvmBackend {
                     | SerialProtocolResult::StreamTimeout(_),
                 )) => {
                     return Err(MicrovmError::Backend(
-                        "Phase A 尚未接入流式命令执行路径，却收到了 STREAM 帧".into(),
+                        "STREAM frame received before streaming command execution path is enabled"
+                            .into(),
                     ));
                 }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 在返回 EXIT 帧前异常退出: {exit_reason:?}"
+                        "guest exited unexpectedly before returning EXIT frame: {exit_reason:?}"
                     )));
                 }
                 Err(_) if watchdog.timed_out() => {
@@ -1646,7 +1690,7 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 不支持 PING readiness probe: exit_code={:?}, stdout={}",
+                        "guest does not support PING readiness probe: exit_code={:?}, stdout={}",
                         result.exit_code,
                         String::from_utf8_lossy(&result.stdout),
                     )));
@@ -1660,20 +1704,20 @@ impl KvmBackend {
                     | SerialProtocolResult::StreamTimeout(_),
                 )) => {
                     return Err(MicrovmError::Backend(
-                        "readiness probe 阶段收到意外协议帧".into(),
+                        "unexpected protocol frame during readiness probe".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io | KvmExitReason::Hlt)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 在返回 PONG 前异常退出: {exit_reason:?}"
+                        "guest exited unexpectedly before returning PONG: {exit_reason:?}"
                     )));
                 }
                 Err(err) if watchdog.timed_out() => {
                     self.guest_ready = false;
                     self.lifecycle = KvmLifecycle::Destroyed;
                     return Err(MicrovmError::Backend(format!(
-                        "guest readiness probe 超时: {err}; serial={}",
+                        "guest readiness probe timed out: {err}; serial={}",
                         preview_serial_output(&self.serial_buffer),
                     )));
                 }
@@ -1699,13 +1743,13 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStart(stream_id))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "收到意外 STREAM:START id，期望 0，实际 {stream_id}"
+                        "unexpected STREAM:START id, expected 0, got {stream_id}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStdout(0, data))) => {
                     if !started {
                         return Err(MicrovmError::Backend(
-                            "收到 STREAM:STDOUT 前缺少 STREAM:START".into(),
+                            "missing STREAM:START before STREAM:STDOUT".into(),
                         ));
                     }
                     let _ = stream_tx.send(StreamEvent::Stdout(data));
@@ -1715,13 +1759,13 @@ impl KvmBackend {
                     _,
                 ))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "收到意外 STREAM:STDOUT id，期望 0，实际 {stream_id}"
+                        "unexpected STREAM:STDOUT id, expected 0, got {stream_id}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamStderr(0, data))) => {
                     if !started {
                         return Err(MicrovmError::Backend(
-                            "收到 STREAM:STDERR 前缺少 STREAM:START".into(),
+                            "missing STREAM:START before STREAM:STDERR".into(),
                         ));
                     }
                     let _ = stream_tx.send(StreamEvent::Stderr(data));
@@ -1731,13 +1775,13 @@ impl KvmBackend {
                     _,
                 ))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "收到意外 STREAM:STDERR id，期望 0，实际 {stream_id}"
+                        "unexpected STREAM:STDERR id, expected 0, got {stream_id}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamEnd(0, exit_code))) => {
                     if !started {
                         return Err(MicrovmError::Backend(
-                            "收到 STREAM:END 前缺少 STREAM:START".into(),
+                            "missing STREAM:START before STREAM:END".into(),
                         ));
                     }
                     let _ = stream_tx.send(StreamEvent::Exit(exit_code));
@@ -1745,13 +1789,13 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamEnd(stream_id, _))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "收到意外 STREAM:END id，期望 0，实际 {stream_id}"
+                        "unexpected STREAM:END id, expected 0, got {stream_id}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::StreamTimeout(0))) => {
                     if !started {
                         return Err(MicrovmError::Backend(
-                            "收到 STREAM:TIMEOUT 前缺少 STREAM:START".into(),
+                            "missing STREAM:START before STREAM:TIMEOUT".into(),
                         ));
                     }
                     let _ = stream_tx.send(StreamEvent::TimedOut);
@@ -1761,7 +1805,7 @@ impl KvmBackend {
                     stream_id,
                 ))) => {
                     return Err(MicrovmError::Backend(format!(
-                        "收到意外 STREAM:TIMEOUT id，期望 0，实际 {stream_id}"
+                        "unexpected STREAM:TIMEOUT id, expected 0, got {stream_id}"
                     )));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(result))) => {
@@ -1776,16 +1820,18 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Fs(_))) => {
                     return Err(MicrovmError::Backend(
-                        "流式执行阶段收到意外 FSRESULT 帧".into(),
+                        "unexpected FSRESULT frame during streaming execution".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
-                    return Err(MicrovmError::Backend("流式执行阶段收到意外 PONG 帧".into()));
+                    return Err(MicrovmError::Backend(
+                        "unexpected PONG frame during streaming execution".into(),
+                    ));
                 }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 在返回 STREAM:END 前异常退出: {exit_reason:?}"
+                        "guest exited unexpectedly before returning STREAM:END: {exit_reason:?}"
                     )));
                 }
                 Err(_) if watchdog.timed_out() => {
@@ -1813,14 +1859,16 @@ impl KvmBackend {
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::Command(_))) => {
                     return Err(MicrovmError::Backend(
-                        "文件操作阶段收到意外命令结果帧".into(),
+                        "unexpected command result frame during file operation".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
                     self.run_http_proxy_request(frame.id, frame.request)?;
                 }
                 Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::PingPong)) => {
-                    return Err(MicrovmError::Backend("文件操作阶段收到意外 PONG 帧".into()));
+                    return Err(MicrovmError::Backend(
+                        "unexpected PONG frame during file operation".into(),
+                    ));
                 }
                 Ok(RunLoopOutcome::ResponseDone(
                     SerialProtocolResult::StreamStart(_)
@@ -1830,20 +1878,20 @@ impl KvmBackend {
                     | SerialProtocolResult::StreamTimeout(_),
                 )) => {
                     return Err(MicrovmError::Backend(
-                        "文件操作阶段收到意外 STREAM 帧".into(),
+                        "unexpected STREAM frame during file operation".into(),
                     ));
                 }
                 Ok(RunLoopOutcome::Exit(KvmExitReason::Io)) => {}
                 Ok(RunLoopOutcome::Exit(exit_reason)) => {
                     return Err(MicrovmError::Backend(format!(
-                        "guest 在返回 FSRESULT 帧前异常退出: {exit_reason:?}"
+                        "guest exited unexpectedly before returning FSRESULT frame: {exit_reason:?}"
                     )));
                 }
                 Err(err) if watchdog.timed_out() => {
                     self.guest_ready = false;
                     self.lifecycle = KvmLifecycle::Destroyed;
                     return Err(MicrovmError::Backend(format!(
-                        "guest 文件操作超时: {err}; serial={}",
+                        "guest file operation timed out: {err}; serial={}",
                         preview_serial_output(&self.serial_buffer),
                     )));
                 }
@@ -1865,7 +1913,7 @@ impl KvmBackend {
             let vcpu = self
                 .vcpus
                 .first_mut()
-                .ok_or_else(|| MicrovmError::Backend("至少需要一个 vCPU".into()))?;
+                .ok_or_else(|| MicrovmError::Backend("at least one vCPU is required".into()))?;
             vcpu.run()
         };
         let outcome = (|| -> Result<RunLoopOutcome, MicrovmError> {
@@ -1873,7 +1921,7 @@ impl KvmBackend {
                 Ok(exit) => exit,
                 Err(err) if watchdog.timed_out() => {
                     return Err(MicrovmError::Backend(format!(
-                        "KVM_RUN 被 watchdog 中断: {err}"
+                        "KVM_RUN interrupted by watchdog: {err}"
                     )));
                 }
                 Err(err) => return Err(to_backend_error(err)),
@@ -2040,7 +2088,7 @@ impl KvmBackend {
                 VcpuExit::InternalError => {
                     *last_exit_reason = Some(KvmExitReason::InternalError);
                     Err(MicrovmError::Backend(
-                        "vCPU 进入 KVM_EXIT_INTERNAL_ERROR".into(),
+                        "vCPU entered KVM_EXIT_INTERNAL_ERROR".into(),
                     ))
                 }
                 VcpuExit::IoOut(port, data) => {
@@ -2093,7 +2141,7 @@ impl KvmBackend {
                 other => {
                     *last_exit_reason = Some(KvmExitReason::InternalError);
                     Err(MicrovmError::Backend(format!(
-                        "未处理的 vCPU 退出: {other:?}"
+                        "unhandled vCPU exit: {other:?}"
                     )))
                 }
             }
@@ -2156,7 +2204,7 @@ impl KvmBackend {
             .get_host_address(GuestAddress(0))
             .map_err(to_backend_error)? as u64;
         let memory_size = u64::try_from(self.config.memory_bytes()?)
-            .map_err(|_| MicrovmError::Backend("memory size 无法转换为 u64".into()))?;
+            .map_err(|_| MicrovmError::Backend("memory size cannot be converted to u64".into()))?;
 
         let new_region = kvm_userspace_memory_region {
             slot: 0,
@@ -2196,7 +2244,7 @@ impl KvmBackend {
         let expected_len = self.config.memory_bytes()?;
         if memory.len() != expected_len {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "guest memory 长度不匹配: 快照为 {}，当前为 {}",
+                "guest memory size mismatch: snapshot has {}, current has {}",
                 memory.len(),
                 expected_len
             )));
@@ -2219,13 +2267,14 @@ impl KvmBackend {
 
         let file = File::open(memory_path)?;
         let metadata = file.metadata()?;
-        let file_size = usize::try_from(metadata.len())
-            .map_err(|_| MicrovmError::SnapshotFormat("快照文件大小超出 usize 范围".into()))?;
+        let file_size = usize::try_from(metadata.len()).map_err(|_| {
+            MicrovmError::SnapshotFormat("snapshot file size exceeds usize range".into())
+        })?;
 
         let expected_len = self.config.memory_bytes()?;
         if file_size != expected_len {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "guest memory 文件大小不匹配: 文件为 {}，期望为 {}",
+                "guest memory file size mismatch: file has {}, expected {}",
                 file_size, expected_len
             )));
         }
@@ -2252,21 +2301,21 @@ impl KvmBackend {
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_NORESERVE,
         )
-        .map_err(|error| MicrovmError::Backend(format!("零拷贝 mmap 失败: {error}")))?;
+        .map_err(|error| MicrovmError::Backend(format!("zero-copy mmap failed: {error}")))?;
 
         let guest_region = GuestRegionMmap::new(region, GuestAddress(0)).map_err(|error| {
-            MicrovmError::Backend(format!("创建 GuestRegionMmap 失败: {error}"))
+            MicrovmError::Backend(format!("failed to create GuestRegionMmap: {error}"))
         })?;
         let new_guest_memory =
             GuestMemoryMmap::from_regions(vec![guest_region]).map_err(|error| {
-                MicrovmError::Backend(format!("创建 GuestMemoryMmap 失败: {error}"))
+                MicrovmError::Backend(format!("failed to create GuestMemoryMmap: {error}"))
             })?;
 
         let host_addr = new_guest_memory
             .get_host_address(GuestAddress(0))
             .map_err(to_backend_error)? as u64;
         let memory_size = u64::try_from(file_size)
-            .map_err(|_| MicrovmError::Backend("memory size 无法转换为 u64".into()))?;
+            .map_err(|_| MicrovmError::Backend("memory size cannot be converted to u64".into()))?;
 
         let new_region = kvm_userspace_memory_region {
             slot: 0,
@@ -2298,13 +2347,14 @@ impl KvmBackend {
 
         let file = File::open(memory_path)?;
         let metadata = file.metadata()?;
-        let file_size = usize::try_from(metadata.len())
-            .map_err(|_| MicrovmError::SnapshotFormat("快照文件大小超出 usize 范围".into()))?;
+        let file_size = usize::try_from(metadata.len()).map_err(|_| {
+            MicrovmError::SnapshotFormat("snapshot file size exceeds usize range".into())
+        })?;
 
         let expected_len = self.config.memory_bytes()?;
         if file_size != expected_len {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "guest memory 文件大小不匹配: 文件为 {}，期望为 {}",
+                "guest memory file size mismatch: file has {}, expected {}",
                 file_size, expected_len
             )));
         }
@@ -2356,9 +2406,13 @@ impl KvmBackend {
             let chunk = ZEROES.len().min(len - written);
             let chunk_addr = guest_addr
                 .checked_add(u64::try_from(written).map_err(|_| {
-                    MicrovmError::Backend("guest memory 清零偏移无法转换为 u64".into())
+                    MicrovmError::Backend(
+                        "guest memory zero offset cannot be converted to u64".into(),
+                    )
                 })?)
-                .ok_or_else(|| MicrovmError::Backend("guest memory 清零地址计算溢出".into()))?;
+                .ok_or_else(|| {
+                    MicrovmError::Backend("guest memory zero address calculation overflow".into())
+                })?;
             self.write_guest_bytes(chunk_addr, &ZEROES[..chunk])?;
             written += chunk;
         }
@@ -2403,17 +2457,19 @@ pub(crate) fn restore_runtime_state(
         return restore_runtime_state_v3(backend, &mut cursor);
     }
     Err(MicrovmError::SnapshotFormat(
-        "KVM 运行时快照 magic 不匹配".into(),
+        "KVM runtime snapshot magic mismatch".into(),
     ))
 }
 
 fn fs_result_to_error(status: u8, path: &str) -> MicrovmError {
     match status {
-        1 => MicrovmError::Backend(format!("guest 文件路径错误: {path}")),
-        2 => MicrovmError::Backend(format!("guest 文件 IO 错误: {path}")),
-        3 => MicrovmError::Backend(format!("guest 文件权限错误: {path}")),
-        4 => MicrovmError::Backend(format!("guest 文件空间不足: {path}")),
-        other => MicrovmError::Backend(format!("guest 返回未知文件状态码 {other}: {path}")),
+        1 => MicrovmError::Backend(format!("guest file path error: {path}")),
+        2 => MicrovmError::Backend(format!("guest file I/O error: {path}")),
+        3 => MicrovmError::Backend(format!("guest file permission error: {path}")),
+        4 => MicrovmError::Backend(format!("guest file out of space: {path}")),
+        other => MicrovmError::Backend(format!(
+            "guest returned unknown file status code {other}: {path}"
+        )),
     }
 }
 
@@ -2469,7 +2525,7 @@ fn should_retry_stream_with_blocking_command(result: &GuestCommandResult) -> boo
 fn validate_initrd_image(bytes: &[u8]) -> Result<(), MicrovmError> {
     if bytes.len() < GZIP_MAGIC.len() || bytes[..2] != GZIP_MAGIC {
         return Err(MicrovmError::Backend(
-            "rootfs 必须是 gzip 压缩的 cpio initrd".into(),
+            "rootfs must be a gzip-compressed cpio initrd".into(),
         ));
     }
     Ok(())
@@ -2483,24 +2539,28 @@ fn validate_elf_header(
 ) -> Result<(), MicrovmError> {
     if bytes.len() < 64 {
         return Err(MicrovmError::Backend(
-            "内核镜像长度不足，无法解析 ELF header".into(),
+            "kernel image too short to parse ELF header".into(),
         ));
     }
     if &bytes[..4] != b"\x7fELF" {
-        return Err(MicrovmError::Backend("内核镜像不是 ELF 格式".into()));
+        return Err(MicrovmError::Backend(
+            "kernel image is not ELF format".into(),
+        ));
     }
     if bytes[4] != 2 {
         return Err(MicrovmError::Backend(
-            "仅支持 64 位 ELF vmlinux 镜像".into(),
+            "only 64-bit ELF vmlinux images are supported".into(),
         ));
     }
     if bytes[5] != 1 {
-        return Err(MicrovmError::Backend("仅支持小端 ELF vmlinux 镜像".into()));
+        return Err(MicrovmError::Backend(
+            "only little-endian ELF vmlinux images are supported".into(),
+        ));
     }
 
     let table_len = phentsize
         .checked_mul(phnum)
-        .ok_or_else(|| MicrovmError::Backend("ELF program header 表长度溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("ELF program header table length overflow".into()))?;
     let _ = checked_slice(bytes, phoff, table_len)?;
     Ok(())
 }

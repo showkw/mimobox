@@ -68,13 +68,15 @@ impl MicrovmSnapshot {
         let mut cursor = SnapshotCursor::new(data);
         let magic = cursor.read_exact(SNAPSHOT_MAGIC.len())?;
         if magic != SNAPSHOT_MAGIC {
-            return Err(MicrovmError::SnapshotFormat("快照 magic 不匹配".into()));
+            return Err(MicrovmError::SnapshotFormat(
+                "snapshot magic mismatch".into(),
+            ));
         }
 
         let version = cursor.read_u16()?;
         if version != SNAPSHOT_VERSION {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "不支持的快照版本: {version}"
+                "unsupported snapshot version: {version}"
             )));
         }
 
@@ -85,7 +87,7 @@ impl MicrovmSnapshot {
 
         if !cursor.is_eof() {
             return Err(MicrovmError::SnapshotFormat(
-                "快照尾部存在未识别数据".into(),
+                "unrecognized data at end of snapshot".into(),
             ));
         }
 
@@ -113,7 +115,7 @@ impl MicrovmSnapshot {
                 vcpu_state_base64: BASE64_STANDARD.encode(&self.vcpu_state),
             };
             let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
-                MicrovmError::SnapshotFormat(format!("序列化 state.json 失败: {error}"))
+                MicrovmError::SnapshotFormat(format!("failed to serialize state.json: {error}"))
             })?;
             fs::write(&state_path, state_bytes)?;
 
@@ -154,14 +156,18 @@ impl MicrovmSnapshot {
 fn map_snapshot_error(error: SandboxError) -> MicrovmError {
     match error {
         SandboxError::Io(error) => MicrovmError::Io(error),
-        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("文件快照无效".into()),
+        SandboxError::InvalidSnapshot => {
+            MicrovmError::SnapshotFormat("invalid file snapshot".into())
+        }
         other => MicrovmError::SnapshotFormat(other.to_string()),
     }
 }
 
 fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
     let home_dir = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-        MicrovmError::SnapshotFormat("HOME 环境变量缺失，无法定位快照目录".into())
+        MicrovmError::SnapshotFormat(
+            "HOME environment variable missing, cannot locate snapshot directory".into(),
+        )
     })?;
     Ok(home_dir.join(".mimobox").join("snapshots"))
 }
@@ -173,7 +179,7 @@ pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
     for _ in 0..32 {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| MicrovmError::SnapshotFormat(format!("系统时间异常: {error}")))?;
+            .map_err(|error| MicrovmError::SnapshotFormat(format!("system time error: {error}")))?;
         let sequence = SNAPSHOT_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let snapshot_dir = root_dir.join(format!(
             "{:x}-{:x}-{:x}",
@@ -189,12 +195,17 @@ pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
         }
     }
 
-    Err(MicrovmError::SnapshotFormat("生成唯一快照目录失败".into()))
+    Err(MicrovmError::SnapshotFormat(
+        "failed to generate unique snapshot directory".into(),
+    ))
 }
 
 fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
     let snapshot_dir = memory_path.parent().ok_or_else(|| {
-        MicrovmError::SnapshotFormat(format!("快照文件路径缺少父目录: {}", memory_path.display()))
+        MicrovmError::SnapshotFormat(format!(
+            "snapshot file path missing parent directory: {}",
+            memory_path.display()
+        ))
     })?;
     Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
 }
@@ -207,21 +218,23 @@ pub(crate) fn load_state_from_memory_file(
     let state_bytes = fs::read(&state_path)?;
     let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
         MicrovmError::SnapshotFormat(format!(
-            "解析 state.json 失败 ({}): {error}",
+            "failed to parse state.json ({}): {error}",
             state_path.display()
         ))
     })?;
 
     if state.version != FILE_SNAPSHOT_VERSION {
         return Err(MicrovmError::SnapshotFormat(format!(
-            "不支持的文件快照版本: {}",
+            "unsupported file snapshot version: {}",
             state.version
         )));
     }
 
     let vcpu_state = BASE64_STANDARD
         .decode(state.vcpu_state_base64.as_bytes())
-        .map_err(|error| MicrovmError::SnapshotFormat(format!("解码 vCPU state 失败: {error}")))?;
+        .map_err(|error| {
+            MicrovmError::SnapshotFormat(format!("failed to decode vCPU state: {error}"))
+        })?;
 
     Ok((state.sandbox_config, state.microvm_config, vcpu_state))
 }
@@ -270,7 +283,7 @@ fn decode_microvm_config(cursor: &mut SnapshotCursor<'_>) -> Result<MicrovmConfi
 
 fn encode_paths(out: &mut Vec<u8>, paths: &[PathBuf]) -> Result<(), MicrovmError> {
     let len = u32::try_from(paths.len())
-        .map_err(|_| MicrovmError::SnapshotFormat("路径数量超过 u32 上限".into()))?;
+        .map_err(|_| MicrovmError::SnapshotFormat("path count exceeds u32 limit".into()))?;
     out.extend_from_slice(&len.to_le_bytes());
     for path in paths {
         encode_path(out, path)?;
@@ -289,7 +302,7 @@ fn decode_paths(cursor: &mut SnapshotCursor<'_>) -> Result<Vec<PathBuf>, Microvm
 
 fn encode_strings(out: &mut Vec<u8>, strings: &[String]) -> Result<(), MicrovmError> {
     let len = u32::try_from(strings.len())
-        .map_err(|_| MicrovmError::SnapshotFormat("字符串数量超过 u32 上限".into()))?;
+        .map_err(|_| MicrovmError::SnapshotFormat("string count exceeds u32 limit".into()))?;
     out.extend_from_slice(&len.to_le_bytes());
     for s in strings {
         encode_bytes(out, s.as_bytes())?;
@@ -303,7 +316,9 @@ fn decode_strings(cursor: &mut SnapshotCursor<'_>) -> Result<Vec<String>, Microv
     for _ in 0..len {
         let bytes = cursor.read_bytes()?;
         String::from_utf8(bytes)
-            .map_err(|e| MicrovmError::SnapshotFormat(format!("字符串 UTF-8 解码失败: {e}")))
+            .map_err(|e| {
+                MicrovmError::SnapshotFormat(format!("failed to decode UTF-8 string: {e}"))
+            })
             .map(|s| strings.push(s))?;
     }
     Ok(strings)
@@ -317,13 +332,13 @@ fn encode_path(out: &mut Vec<u8>, path: &std::path::Path) -> Result<(), MicrovmE
 fn decode_path(cursor: &mut SnapshotCursor<'_>) -> Result<PathBuf, MicrovmError> {
     let bytes = cursor.read_bytes()?;
     let value = String::from_utf8(bytes)
-        .map_err(|err| MicrovmError::SnapshotFormat(format!("路径不是合法 UTF-8: {err}")))?;
+        .map_err(|err| MicrovmError::SnapshotFormat(format!("path is not valid UTF-8: {err}")))?;
     Ok(PathBuf::from(value))
 }
 
 fn encode_bytes(out: &mut Vec<u8>, data: &[u8]) -> Result<(), MicrovmError> {
     let len = u64::try_from(data.len())
-        .map_err(|_| MicrovmError::SnapshotFormat("数据块长度超过 u64 上限".into()))?;
+        .map_err(|_| MicrovmError::SnapshotFormat("data block length exceeds u64 limit".into()))?;
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(data);
     Ok(())
@@ -355,7 +370,7 @@ fn u8_to_seccomp(value: u8) -> Result<SeccompProfile, MicrovmError> {
         2 => Ok(SeccompProfile::EssentialWithFork),
         3 => Ok(SeccompProfile::NetworkWithFork),
         other => Err(MicrovmError::SnapshotFormat(format!(
-            "非法 seccomp profile 编码: {other}"
+            "invalid seccomp profile encoding: {other}"
         ))),
     }
 }
@@ -375,9 +390,11 @@ impl<'a> SnapshotCursor<'a> {
         let end = self
             .offset
             .checked_add(len)
-            .ok_or_else(|| MicrovmError::SnapshotFormat("快照偏移溢出".into()))?;
+            .ok_or_else(|| MicrovmError::SnapshotFormat("snapshot offset overflow".into()))?;
         let bytes = self.data.get(self.offset..end).ok_or_else(|| {
-            MicrovmError::SnapshotFormat("快照数据在读取固定长度字段时提前结束".into())
+            MicrovmError::SnapshotFormat(
+                "snapshot data ended early while reading fixed-length field".into(),
+            )
         })?;
         self.offset = end;
         let mut array = [0u8; N];
@@ -406,7 +423,7 @@ impl<'a> SnapshotCursor<'a> {
             0 => Ok(false),
             1 => Ok(true),
             other => Err(MicrovmError::SnapshotFormat(format!(
-                "非法布尔编码: {other}"
+                "invalid boolean encoding: {other}"
             ))),
         }
     }
@@ -416,22 +433,24 @@ impl<'a> SnapshotCursor<'a> {
             0 => Ok(None),
             1 => Ok(Some(self.read_u64()?)),
             other => Err(MicrovmError::SnapshotFormat(format!(
-                "非法 Option<u64> 编码: {other}"
+                "invalid Option<u64> encoding: {other}"
             ))),
         }
     }
 
     fn read_bytes(&mut self) -> Result<Vec<u8>, MicrovmError> {
-        let len = usize::try_from(self.read_u64()?)
-            .map_err(|_| MicrovmError::SnapshotFormat("数据块长度无法转换为 usize".into()))?;
+        let len = usize::try_from(self.read_u64()?).map_err(|_| {
+            MicrovmError::SnapshotFormat("data block length cannot be converted to usize".into())
+        })?;
         let end = self
             .offset
             .checked_add(len)
-            .ok_or_else(|| MicrovmError::SnapshotFormat("快照偏移溢出".into()))?;
-        let bytes = self
-            .data
-            .get(self.offset..end)
-            .ok_or_else(|| MicrovmError::SnapshotFormat("快照数据在读取字节块时提前结束".into()))?;
+            .ok_or_else(|| MicrovmError::SnapshotFormat("snapshot offset overflow".into()))?;
+        let bytes = self.data.get(self.offset..end).ok_or_else(|| {
+            MicrovmError::SnapshotFormat(
+                "snapshot data ended early while reading byte block".into(),
+            )
+        })?;
         self.offset = end;
         Ok(bytes.to_vec())
     }

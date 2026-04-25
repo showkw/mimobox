@@ -64,28 +64,28 @@ pub struct HttpResponse {
 /// microVM HTTP 代理错误。
 pub enum HttpProxyError {
     /// 目标域名不在允许名单中。
-    #[error("域名不在白名单内: {0}")]
+    #[error("domain not in whitelist: {0}")]
     DeniedHost(String),
     /// 请求超过超时时间。
-    #[error("HTTP 请求超时")]
+    #[error("HTTP request timed out")]
     Timeout,
     /// 请求体或响应体超出大小限制。
-    #[error("HTTP body 超出大小限制")]
+    #[error("HTTP body exceeds size limit")]
     BodyTooLarge,
     /// 与目标服务器建立连接失败。
-    #[error("HTTP 连接失败: {0}")]
+    #[error("HTTP connection failed: {0}")]
     ConnectFail(String),
     /// TLS 握手失败。
-    #[error("TLS 握手失败: {0}")]
+    #[error("TLS handshake failed: {0}")]
     TlsFail(String),
     /// 请求 URL 非法。
-    #[error("URL 无效: {0}")]
+    #[error("invalid URL: {0}")]
     InvalidUrl(String),
     /// DNS 解析到了内网或保留地址。
-    #[error("DNS 解析命中内网地址: {0}")]
+    #[error("DNS resolution hit private address: {0}")]
     DnsRebind(String),
     /// 代理内部执行失败。
-    #[error("HTTP 代理内部错误: {0}")]
+    #[error("HTTP proxy internal error: {0}")]
     Internal(String),
 }
 
@@ -112,7 +112,7 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
         let body = match value.body_b64 {
             Some(encoded) => {
                 let bytes = BASE64_STANDARD.decode(encoded).map_err(|err| {
-                    HttpProxyError::InvalidUrl(format!("body_b64 不是合法 base64: {err}"))
+                    HttpProxyError::InvalidUrl(format!("body_b64 is not valid base64: {err}"))
                 })?;
                 if bytes.len() > MAX_REQUEST_BODY_BYTES {
                     return Err(HttpProxyError::BodyTooLarge);
@@ -164,8 +164,9 @@ impl HttpRequest {
 
     /// 从 JSON 负载解析 HTTP 代理请求。
     pub fn from_json(json: &str) -> Result<Self, HttpProxyError> {
-        let payload = serde_json::from_str::<HttpProxyRequestPayload>(json)
-            .map_err(|err| HttpProxyError::InvalidUrl(format!("HTTP 请求 JSON 无效: {err}")))?;
+        let payload = serde_json::from_str::<HttpProxyRequestPayload>(json).map_err(|err| {
+            HttpProxyError::InvalidUrl(format!("invalid HTTP request JSON: {err}"))
+        })?;
         Self::try_from(payload)
     }
 }
@@ -181,13 +182,13 @@ pub fn execute_http_request(
     validate_dns_resolution(&url)?;
 
     let method = Method::from_bytes(request.method.as_bytes())
-        .map_err(|err| HttpProxyError::InvalidUrl(format!("HTTP method 无效: {err}")))?;
+        .map_err(|err| HttpProxyError::InvalidUrl(format!("invalid HTTP method: {err}")))?;
     let timeout = Duration::from_millis(request.timeout_ms.max(1));
     let client = Client::builder()
         .timeout(timeout)
         .redirect(Policy::none())
         .build()
-        .map_err(|err| HttpProxyError::Internal(format!("构造 HTTP client 失败: {err}")))?;
+        .map_err(|err| HttpProxyError::Internal(format!("failed to build HTTP client: {err}")))?;
 
     let mut builder = client.request(method, url);
     for (key, value) in &request.headers {
@@ -239,28 +240,30 @@ pub fn is_allowed_http_host(config: &SandboxConfig, host: &str) -> bool {
 fn validate_http_request(config: &SandboxConfig, url: &reqwest::Url) -> Result<(), HttpProxyError> {
     if url.scheme() != "https" {
         return Err(HttpProxyError::InvalidUrl(format!(
-            "仅允许 HTTPS，实际为 {}",
+            "only HTTPS is allowed, got {}",
             url.scheme()
         )));
     }
 
     let host = url
         .host_str()
-        .ok_or_else(|| HttpProxyError::InvalidUrl("URL 缺少 host".into()))?;
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
     validate_host(config, host)
 }
 
 fn validate_host(config: &SandboxConfig, host: &str) -> Result<(), HttpProxyError> {
     let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
     if normalized_host.is_empty() {
-        return Err(HttpProxyError::InvalidUrl("host 不能为空".into()));
+        return Err(HttpProxyError::InvalidUrl("host must not be empty".into()));
     }
 
     if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Err(HttpProxyError::DeniedHost(normalized_host));
         }
-        return Err(HttpProxyError::InvalidUrl("禁止使用 IP 直连".into()));
+        return Err(HttpProxyError::InvalidUrl(
+            "direct IP access is forbidden".into(),
+        ));
     }
 
     if !is_allowed_http_host(config, &normalized_host) {
@@ -273,19 +276,19 @@ fn validate_host(config: &SandboxConfig, host: &str) -> Result<(), HttpProxyErro
 fn validate_dns_resolution(url: &reqwest::Url) -> Result<(), HttpProxyError> {
     let host = url
         .host_str()
-        .ok_or_else(|| HttpProxyError::InvalidUrl("URL 缺少 host".into()))?;
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| HttpProxyError::InvalidUrl("URL 缺少端口信息".into()))?;
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing port information".into()))?;
 
     let addrs = (host, port)
         .to_socket_addrs()
-        .map_err(|err| HttpProxyError::ConnectFail(format!("DNS 解析失败: {err}")))?;
+        .map_err(|err| HttpProxyError::ConnectFail(format!("DNS resolution failed: {err}")))?;
 
     for addr in addrs {
         if is_private_ip(addr.ip()) {
             return Err(HttpProxyError::DnsRebind(format!(
-                "{host} 解析到内网地址 {}",
+                "{host} resolved to private address {}",
                 addr.ip()
             )));
         }
@@ -316,9 +319,9 @@ fn read_response_body(
     let mut buffer = [0u8; 8192];
 
     loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|err| HttpProxyError::Internal(format!("读取 HTTP 响应失败: {err}")))?;
+        let read = response.read(&mut buffer).map_err(|err| {
+            HttpProxyError::Internal(format!("failed to read HTTP response: {err}"))
+        })?;
         if read == 0 {
             break;
         }

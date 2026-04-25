@@ -51,7 +51,7 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
     let result = MicrovmSandbox::new(config);
 
     #[cfg(any(not(target_os = "linux"), not(feature = "kvm")))]
-    assert!(matches!(result, Err(err) if err.to_string().contains("不支持")));
+    assert!(matches!(result, Err(err) if err.to_string().contains("not supported")));
 
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     assert!(matches!(

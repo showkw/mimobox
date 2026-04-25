@@ -400,7 +400,7 @@ fn test_kvm_vm_read_nonexistent_file() {
         .expect_err("读取不存在文件必须失败");
 
     assert!(
-        matches!(error, MicrovmError::Backend(ref message) if message.contains("路径错误")),
+        matches!(error, MicrovmError::Backend(ref message) if message.contains("path error")),
         "不存在文件应映射为路径错误: {error}"
     );
 

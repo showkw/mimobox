@@ -276,6 +276,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### `Sandbox::wait_ready`
+
+```rust
+pub fn wait_ready(&mut self, timeout: Duration) -> Result<(), SdkError>
+```
+
+Blocks until the sandbox backend is ready to accept commands. For the microVM backend, this performs a PING/PONG readiness probe.
+
+**Errors**: Returns `SandboxNotReady` if the backend does not become ready within the specified timeout. Returns `SandboxDestroyed` if the sandbox has already been destroyed.
+
+```rust
+use std::time::Duration;
+use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .isolation(IsolationLevel::MicroVm)
+        .build();
+    let mut sandbox = Sandbox::with_config(config)?;
+    sandbox.wait_ready(Duration::from_secs(30))?;
+    let result = sandbox.execute("/bin/echo ready")?;
+    assert_eq!(result.exit_code, Some(0));
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+### `Sandbox::is_ready`
+
+```rust
+pub fn is_ready(&self) -> bool
+```
+
+Returns `true` if the sandbox backend is initialized and in a ready state. This is a non-blocking check.
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sandbox = Sandbox::new()?;
+    // Backend is lazily initialized, so is_ready() may return false before first execute
+    let ready = sandbox.is_ready();
+    println!("ready = {ready}");
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
 ### `Sandbox::read_file`
 
 *(requires `vm` feature + Linux)*
@@ -523,6 +571,7 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 - **`memory_limit_mb` vs `vm_memory_mb`**: For the microVM backend, the effective guest memory is `min(memory_limit_mb, vm_memory_mb)`.
 - **`timeout` precision**: Timeout is rounded up to whole seconds internally. For example, `1500ms` becomes `2s`.
 - **`allowed_http_domains`**: Supports glob patterns like `*.openai.com`. Combined with `NetworkPolicy::AllowDomains`.
+- **`MicrovmConfig.memory_mb`**: The default value (256 MiB) is unified with `Config.vm_memory_mb` to ensure consistency between the SDK-level and backend-level defaults.
 
 ```rust
 use mimobox_sdk::Config;

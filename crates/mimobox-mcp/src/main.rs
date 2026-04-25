@@ -370,7 +370,7 @@ impl MimoboxServer {
         {
             let data = STANDARD
                 .decode(&request.content)
-                .map_err(|err| to_error(format!("content 不是合法 base64：{err}")))?;
+                .map_err(|err| to_error(format!("content is not valid base64: {err}")))?;
             let size_bytes = data.len();
             let mut sandboxes = self.sandboxes.lock().await;
             let managed = sandboxes
@@ -425,7 +425,9 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Fork a microVM-backed sandbox, creating an independent copy with CoW memory")]
+    #[tool(
+        description = "Fork a microVM-backed sandbox, creating an independent copy with CoW memory"
+    )]
     async fn fork(
         &self,
         Parameters(request): Parameters<ForkRequest>,
@@ -468,7 +470,9 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Execute an HTTP request from a microVM sandbox through a controlled proxy with domain whitelist")]
+    #[tool(
+        description = "Execute an HTTP request from a microVM sandbox through a controlled proxy with domain whitelist"
+    )]
     async fn http_request(
         &self,
         Parameters(request): Parameters<McpHttpRequest>,
@@ -477,7 +481,7 @@ impl MimoboxServer {
         {
             let method = request.method.to_ascii_uppercase();
             if !matches!(method.as_str(), "GET" | "POST") {
-                return Err(to_error("method 仅支持 GET 和 POST".to_string()));
+                return Err(to_error("method only supports GET and POST".to_string()));
             }
 
             let mut sandboxes = self.sandboxes.lock().await;
@@ -567,7 +571,7 @@ fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> 
         "wasm" => Ok(IsolationLevel::Wasm),
         "microvm" | "micro_vm" | "micro-vm" | "vm" => Ok(IsolationLevel::MicroVm),
         other => Err(format!(
-            "不支持的 isolation_level={other}，可选值为 auto、os、wasm、microvm"
+            "unsupported isolation_level={other}, valid values: auto, os, wasm, microvm"
         )),
     }
 }
@@ -582,12 +586,14 @@ fn format_isolation_level(level: IsolationLevel) -> &'static str {
 }
 
 fn sandbox_not_found(sandbox_id: u64) -> String {
-    format!("未找到 sandbox_id={sandbox_id} 的沙箱实例")
+    format!("sandbox instance not found for sandbox_id={sandbox_id}")
 }
 
 #[cfg(not(feature = "vm"))]
 fn vm_feature_required(operation: &str) -> String {
-    format!("{operation} 需要 microVM 后端支持，请启用 vm feature 并使用 MicroVm 隔离层级")
+    format!(
+        "{operation} requires microVM backend; enable vm feature and use MicroVm isolation level"
+    )
 }
 
 fn build_code_command(language: Option<&str>, code: &str) -> Result<String, String> {
@@ -598,7 +604,7 @@ fn build_code_command(language: Option<&str>, code: &str) -> Result<String, Stri
         "bash" => Ok(format!("bash -c {escaped_code}")),
         "sh" | "shell" => Ok(format!("sh -c {escaped_code}")),
         other => Err(format!(
-            "不支持的 language={other}，可选值为 python、node、bash、sh"
+            "unsupported language={other}, valid values: python, node, bash, sh"
         )),
     }
 }
@@ -624,13 +630,13 @@ fn format_sdk_error(error: SdkError) -> String {
             message,
             suggestion,
         } => match suggestion {
-            Some(suggestion) => format!("[{}] {message}；建议：{suggestion}", code.as_str()),
+            Some(suggestion) => format!("[{}] {message}; suggestion: {suggestion}", code.as_str()),
             None => format!("[{}] {message}", code.as_str()),
         },
-        SdkError::BackendUnavailable(message) => format!("后端不可用：{message}"),
-        SdkError::Config(message) => format!("配置错误：{message}"),
-        SdkError::Io(error) => format!("IO 错误：{error}"),
-        error => format!("SDK 错误：{error}"),
+        SdkError::BackendUnavailable(message) => format!("backend unavailable: {message}"),
+        SdkError::Config(message) => format!("config error: {message}"),
+        SdkError::Io(error) => format!("I/O error: {error}"),
+        error => format!("SDK error: {error}"),
     }
 }
 
@@ -656,4 +662,307 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("mimobox MCP stdio server 退出");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mimobox_sdk::ErrorCode;
+    use std::time::Duration;
+
+    // ── parse_isolation_level ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_isolation_none_defaults_to_auto() {
+        let result = parse_isolation_level(None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), IsolationLevel::Auto);
+    }
+
+    #[test]
+    fn test_parse_isolation_explicit_values() {
+        assert_eq!(
+            parse_isolation_level(Some("os")).unwrap(),
+            IsolationLevel::Os
+        );
+        assert_eq!(
+            parse_isolation_level(Some("wasm")).unwrap(),
+            IsolationLevel::Wasm
+        );
+        assert_eq!(
+            parse_isolation_level(Some("microvm")).unwrap(),
+            IsolationLevel::MicroVm
+        );
+    }
+
+    #[test]
+    fn test_parse_isolation_aliases() {
+        let aliases = ["micro_vm", "micro-vm", "vm"];
+        for alias in aliases {
+            assert_eq!(
+                parse_isolation_level(Some(alias)).unwrap(),
+                IsolationLevel::MicroVm,
+                "alias '{alias}' 应解析为 MicroVm"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_isolation_case_insensitive() {
+        assert_eq!(
+            parse_isolation_level(Some("AUTO")).unwrap(),
+            IsolationLevel::Auto
+        );
+        assert_eq!(
+            parse_isolation_level(Some("Os")).unwrap(),
+            IsolationLevel::Os
+        );
+        assert_eq!(
+            parse_isolation_level(Some("WASM")).unwrap(),
+            IsolationLevel::Wasm
+        );
+        assert_eq!(
+            parse_isolation_level(Some("MICROVM")).unwrap(),
+            IsolationLevel::MicroVm
+        );
+    }
+
+    #[test]
+    fn test_parse_isolation_invalid_values() {
+        let invalid = ["invalid", "docker", ""];
+        for val in invalid {
+            assert!(
+                parse_isolation_level(Some(val)).is_err(),
+                "'{val}' 应为无效值"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_isolation_none_same_as_auto_string() {
+        let from_none = parse_isolation_level(None).unwrap();
+        let from_auto = parse_isolation_level(Some("auto")).unwrap();
+        assert_eq!(from_none, from_auto);
+    }
+
+    // ── build_code_command ─────────────────────────────────────────────
+
+    #[test]
+    fn test_build_code_command_python_aliases() {
+        for lang in ["python", "python3", "py"] {
+            let cmd = build_code_command(Some(lang), "print(1)").unwrap();
+            assert!(
+                cmd.starts_with("python3 -c "),
+                "language='{lang}' 应生成 python3 命令，实际: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_code_command_node_aliases() {
+        for lang in ["node", "javascript", "js", "nodejs"] {
+            let cmd = build_code_command(Some(lang), "console.log(1)").unwrap();
+            assert!(
+                cmd.starts_with("node -e "),
+                "language='{lang}' 应生成 node 命令，实际: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_code_command_bash_default() {
+        let cmd = build_code_command(None, "hello").unwrap();
+        assert_eq!(cmd, "bash -c 'hello'");
+    }
+
+    #[test]
+    fn test_build_code_command_sh_and_shell() {
+        let cmd_sh = build_code_command(Some("sh"), "echo hi").unwrap();
+        assert!(cmd_sh.starts_with("sh -c "));
+
+        let cmd_shell = build_code_command(Some("shell"), "echo hi").unwrap();
+        assert!(cmd_shell.starts_with("sh -c "));
+    }
+
+    #[test]
+    fn test_build_code_command_unsupported_language() {
+        let result = build_code_command(Some("ruby"), "puts 1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ruby"));
+    }
+
+    // ── shell_single_quote ─────────────────────────────────────────────
+
+    #[test]
+    fn test_shell_single_quote_simple() {
+        assert_eq!(shell_single_quote("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_single_quote_empty() {
+        assert_eq!(shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn test_shell_single_quote_with_single_quote() {
+        // "it's" -> 'it'\''s'
+        assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_single_quote_special_chars() {
+        // 确保双引号和 $ 符号被原样保留在引号内
+        let input = r#"hello "world" $var"#;
+        let quoted = shell_single_quote(input);
+        assert!(quoted.starts_with('\''));
+        assert!(quoted.ends_with('\''));
+        assert!(quoted.contains(r#"hello "world" $var"#));
+    }
+
+    // ── format_sdk_error ───────────────────────────────────────────────
+
+    #[test]
+    fn test_format_sdk_error_sandbox_with_suggestion() {
+        let err = SdkError::sandbox(
+            ErrorCode::CommandTimeout,
+            "timed out",
+            Some("increase timeout".to_string()),
+        );
+        let formatted = format_sdk_error(err);
+        assert!(formatted.contains("[command_timeout]"), "应包含错误码");
+        assert!(formatted.contains("timed out"), "应包含消息");
+        assert!(
+            formatted.contains("suggestion: increase timeout"),
+            "应包含建议"
+        );
+    }
+
+    #[test]
+    fn test_format_sdk_error_sandbox_without_suggestion() {
+        let err = SdkError::sandbox(ErrorCode::FileNotFound, "file not found", None);
+        let formatted = format_sdk_error(err);
+        assert!(formatted.contains("[file_not_found]"));
+        assert!(formatted.contains("file not found"));
+        assert!(
+            !formatted.contains("suggestion:"),
+            "无 suggestion 时不输出建议"
+        );
+    }
+
+    #[test]
+    fn test_format_sdk_error_backend_unavailable() {
+        let err = SdkError::BackendUnavailable("microvm");
+        let formatted = format_sdk_error(err);
+        assert!(formatted.contains("backend unavailable"));
+        assert!(formatted.contains("microvm"));
+    }
+
+    #[test]
+    fn test_format_sdk_error_config() {
+        let err = SdkError::Config("invalid config".to_string());
+        let formatted = format_sdk_error(err);
+        assert!(formatted.contains("config error"));
+        assert!(formatted.contains("invalid config"));
+    }
+
+    #[test]
+    fn test_format_sdk_error_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = SdkError::Io(io_err);
+        let formatted = format_sdk_error(err);
+        assert!(formatted.contains("I/O error"));
+        assert!(formatted.contains("file not found"));
+    }
+
+    // ── format_isolation_level ─────────────────────────────────────────
+
+    #[test]
+    fn test_format_isolation_level_roundtrip() {
+        assert_eq!(format_isolation_level(IsolationLevel::Auto), "auto");
+        assert_eq!(format_isolation_level(IsolationLevel::Os), "os");
+        assert_eq!(format_isolation_level(IsolationLevel::Wasm), "wasm");
+        assert_eq!(format_isolation_level(IsolationLevel::MicroVm), "microvm");
+    }
+
+    // ── format_execute_result ──────────────────────────────────────────
+
+    #[test]
+    fn test_format_execute_result_fields() {
+        let result = ExecuteResult::new(
+            b"out".to_vec(),
+            b"err".to_vec(),
+            Some(0),
+            false,
+            Duration::from_millis(42),
+        );
+        let resp = format_execute_result(result);
+        assert_eq!(resp.stdout, "out");
+        assert_eq!(resp.stderr, "err");
+        assert_eq!(resp.exit_code, Some(0));
+        assert!(!resp.timed_out);
+        assert_eq!(resp.elapsed_ms, 42);
+    }
+
+    #[test]
+    fn test_format_execute_result_non_utf8() {
+        let result = ExecuteResult::new(
+            vec![0xff, 0xfe],
+            vec![],
+            None,
+            true,
+            Duration::from_millis(100),
+        );
+        let resp = format_execute_result(result);
+        // String::from_utf8_lossy 会把无效 UTF-8 替换为替换字符
+        assert!(!resp.stdout.is_empty());
+        assert!(resp.stderr.is_empty());
+        assert_eq!(resp.exit_code, None);
+        assert!(resp.timed_out);
+        assert_eq!(resp.elapsed_ms, 100);
+    }
+
+    // ── sandbox_not_found ──────────────────────────────────────────────
+
+    #[test]
+    fn test_sandbox_not_found_contains_id() {
+        let msg = sandbox_not_found(42);
+        assert!(msg.contains("42"), "应包含 sandbox_id");
+        assert!(msg.contains("not found"), "应包含提示信息");
+    }
+
+    // ── unix_timestamp_ms ──────────────────────────────────────────────
+
+    #[test]
+    fn test_unix_timestamp_ms_reasonable() {
+        let ts = unix_timestamp_ms();
+        // 2023-01-01 00:00:00 UTC ≈ 1_672_531_200_000
+        assert!(ts > 1_672_531_200_000, "时间戳应在 2023 年之后，实际: {ts}");
+        // 不应超过远期上限（2100 年 ≈ 4_102_444_800_000）
+        assert!(ts < 4_102_444_800_000, "时间戳不应超过 2100 年");
+    }
+
+    #[test]
+    fn test_unix_timestamp_ms_monotonic() {
+        let t1 = unix_timestamp_ms();
+        let t2 = unix_timestamp_ms();
+        assert!(t2 >= t1, "连续调用应单调不递减");
+    }
+
+    // ── to_error helper ────────────────────────────────────────────────
+
+    #[test]
+    fn test_to_error_contains_message() {
+        let Json(err) = to_error("测试错误");
+        assert_eq!(err.error, "测试错误");
+    }
+
+    // ── vm_feature_required (non-vm builds) ────────────────────────────
+
+    #[cfg(not(feature = "vm"))]
+    #[test]
+    fn test_vm_feature_required_message() {
+        let msg = vm_feature_required("snapshot");
+        assert!(msg.contains("snapshot"), "应包含操作名");
+        assert!(msg.contains("microVM") || msg.contains("vm feature"));
+    }
 }

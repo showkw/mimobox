@@ -92,12 +92,12 @@ impl SdkError {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
-                suggestion: Some("将 isolation 设置为 `Os` 或使用默认 Auto".into()),
+                suggestion: Some("set isolation to `Os` or use default Auto".into()),
             },
             mimobox_core::SandboxError::Timeout => Self::Sandbox {
                 code: ErrorCode::CommandTimeout,
-                message: "命令执行超时".into(),
-                suggestion: Some("增大 Config.timeout 或命令级 timeout 参数".into()),
+                message: "command execution timed out".into(),
+                suggestion: Some("increase Config.timeout or per-command timeout".into()),
             },
             mimobox_core::SandboxError::ExecutionFailed(msg) => Self::Sandbox {
                 code: ErrorCode::CommandExit(1),
@@ -118,12 +118,14 @@ impl SdkError {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
-                suggestion: Some("将 isolation 设置为 `Os` 或使用默认 Auto".into()),
+                suggestion: Some("set isolation to `Os` or use default Auto".into()),
             },
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
-                suggestion: Some("检查 KVM 是否可用（Linux）或选择其他隔离层级".into()),
+                suggestion: Some(
+                    "verify KVM is available (Linux) or choose a different isolation level".into(),
+                ),
             },
         }
     }

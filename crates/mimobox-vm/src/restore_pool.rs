@@ -162,7 +162,7 @@ pub struct RestorePoolConfig {
 /// snapshot restore 池错误。
 pub enum RestorePoolError {
     /// 恢复池配置不合法。
-    #[error("恢复池配置无效: min_size={min_size}, max_size={max_size}")]
+    #[error("invalid restore pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
         /// 非法的最小空闲目标值。
         min_size: usize,
@@ -171,7 +171,7 @@ pub enum RestorePoolError {
     },
 
     /// 内部共享状态锁已中毒。
-    #[error("恢复池状态锁已中毒")]
+    #[error("restore pool state lock poisoned")]
     StatePoisoned,
 
     /// 底层 microVM 错误。
@@ -469,7 +469,9 @@ impl PooledRestoreVm {
     ) -> Result<GuestCommandResult, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.run_command_with_options(cmd, &options),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -489,7 +491,9 @@ impl PooledRestoreVm {
     ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.run_command_streaming_with_options(cmd, &options),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -497,7 +501,9 @@ impl PooledRestoreVm {
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.read_file(path),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -505,7 +511,9 @@ impl PooledRestoreVm {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -513,7 +521,9 @@ impl PooledRestoreVm {
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.ping(),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -521,7 +531,9 @@ impl PooledRestoreVm {
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.http_request(request),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 
@@ -529,7 +541,9 @@ impl PooledRestoreVm {
     pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             Some(backend) => backend.snapshot_to_file(),
-            None => Err(MicrovmError::Lifecycle("恢复态 VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle(
+                "restored VM has been released".into(),
+            )),
         }
     }
 }
@@ -550,8 +564,9 @@ fn register_guest_memory(
     let host_addr = guest_memory
         .get_host_address(GuestAddress(0))
         .map_err(to_backend_error)? as u64;
-    let memory_size = u64::try_from(config.memory_bytes()?)
-        .map_err(|_| MicrovmError::Backend("guest memory 长度无法转换为 u64".into()))?;
+    let memory_size = u64::try_from(config.memory_bytes()?).map_err(|_| {
+        MicrovmError::Backend("guest memory size cannot be converted to u64".into())
+    })?;
     let memory_region = kvm_userspace_memory_region {
         slot: 0,
         guest_phys_addr: 0,
@@ -577,7 +592,9 @@ fn to_backend_error(err: impl std::fmt::Display) -> MicrovmError {
 fn map_snapshot_access_error(error: SandboxError) -> RestorePoolError {
     let error = match error {
         SandboxError::Io(error) => MicrovmError::Io(error),
-        SandboxError::InvalidSnapshot => MicrovmError::SnapshotFormat("无效的沙箱快照".into()),
+        SandboxError::InvalidSnapshot => {
+            MicrovmError::SnapshotFormat("invalid sandbox snapshot".into())
+        }
         other => MicrovmError::SnapshotFormat(other.to_string()),
     };
     RestorePoolError::Microvm(error)

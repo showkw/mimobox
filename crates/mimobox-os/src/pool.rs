@@ -72,7 +72,7 @@ pub struct PoolStats {
 #[derive(Debug, Error)]
 pub enum PoolError {
     /// 池配置不合法。
-    #[error("池配置无效: min_size={min_size}, max_size={max_size}")]
+    #[error("invalid pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
         /// 非法的最小预热数量。
         min_size: usize,
@@ -81,7 +81,7 @@ pub enum PoolError {
     },
 
     /// 共享状态锁已中毒。
-    #[error("预热池状态锁已中毒")]
+    #[error("warm pool state lock poisoned")]
     StatePoisoned,
 
     /// 底层沙箱错误。
@@ -448,7 +448,9 @@ impl PooledSandbox {
     pub fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         match self.sandbox.as_mut() {
             Some(sandbox) => sandbox.execute(cmd),
-            None => Err(SandboxError::ExecutionFailed("沙箱已被释放".to_string())),
+            None => Err(SandboxError::ExecutionFailed(
+                "sandbox has been released".to_string(),
+            )),
         }
     }
 }

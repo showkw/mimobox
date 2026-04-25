@@ -60,7 +60,7 @@ pub struct VmPoolStats {
 /// microVM 预热池错误。
 pub enum PoolError {
     /// 预热池容量配置不合法。
-    #[error("池配置无效: min_size={min_size}, max_size={max_size}")]
+    #[error("invalid pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
         /// 非法的最小空闲目标值。
         min_size: usize,
@@ -69,7 +69,7 @@ pub enum PoolError {
     },
 
     /// 内部共享状态锁已中毒。
-    #[error("预热池状态锁已中毒")]
+    #[error("warm pool state lock poisoned")]
     StatePoisoned,
 
     /// 底层 microVM 错误。
@@ -468,7 +468,7 @@ impl PooledVm {
         let execute_started_at = Instant::now();
         let result = match self.backend.as_mut() {
             Some(backend) => execute_backend(backend, cmd, &options),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         };
         #[cfg(feature = "boot-profile")]
         tracing::info!(
@@ -497,7 +497,7 @@ impl PooledVm {
         let _span = tracing::info_span!("pool_execute").entered();
         match self.backend.as_mut() {
             Some(backend) => stream_execute_backend(backend, cmd, &options),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 
@@ -505,7 +505,7 @@ impl PooledVm {
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => read_file_backend(backend, path),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 
@@ -513,7 +513,7 @@ impl PooledVm {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => write_file_backend(backend, path, data),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 
@@ -521,7 +521,7 @@ impl PooledVm {
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => ping_backend(backend),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 
@@ -529,7 +529,7 @@ impl PooledVm {
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => http_request_backend(backend, request),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 
@@ -540,7 +540,7 @@ impl PooledVm {
             Some(backend) => backend.snapshot_to_file(),
             #[cfg(not(all(target_os = "linux", feature = "kvm")))]
             Some(_) => Err(MicrovmError::UnsupportedPlatform),
-            None => Err(MicrovmError::Lifecycle("VM 已被释放".into())),
+            None => Err(MicrovmError::Lifecycle("VM has been released".into())),
         }
     }
 }

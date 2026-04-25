@@ -210,7 +210,7 @@ impl KvmBackend {
 
         #[allow(unreachable_code)]
         Err(MicrovmError::Backend(
-            "当前 KVM bring-up 仅支持 x86_64".into(),
+            "KVM bring-up only supports x86_64".into(),
         ))
     }
 
@@ -224,7 +224,7 @@ impl KvmBackend {
 
         #[allow(unreachable_code)]
         Err(MicrovmError::Backend(
-            "当前 KVM bring-up 仅支持 x86_64".into(),
+            "KVM bring-up only supports x86_64".into(),
         ))
     }
 }
@@ -452,10 +452,10 @@ fn configure_segments_and_sregs(
 
     sregs.gdt.base = BOOT_GDT_OFFSET;
     sregs.gdt.limit = u16::try_from(mem::size_of_val(&gdt_table) - 1)
-        .map_err(|_| MicrovmError::Backend("GDT 长度无法转换为 u16".into()))?;
+        .map_err(|_| MicrovmError::Backend("GDT length cannot be converted to u16".into()))?;
     sregs.idt.base = BOOT_IDT_OFFSET;
     sregs.idt.limit = u16::try_from(mem::size_of::<u64>() - 1)
-        .map_err(|_| MicrovmError::Backend("IDT 长度无法转换为 u16".into()))?;
+        .map_err(|_| MicrovmError::Backend("IDT length cannot be converted to u16".into()))?;
     sregs.cs = code_seg;
     sregs.ds = data_seg;
     sregs.es = data_seg;
@@ -502,14 +502,17 @@ fn write_gdt_table(guest_memory: &GuestMemoryMmap, table: &[u64]) -> Result<(), 
         let addr = BOOT_GDT_OFFSET
             .checked_add(
                 u64::try_from(index)
-                    .map_err(|_| MicrovmError::Backend("GDT 索引无法转换为 u64".into()))?
-                    .checked_mul(
-                        u64::try_from(mem::size_of::<u64>())
-                            .map_err(|_| MicrovmError::Backend("u64 大小无法转换为 u64".into()))?,
-                    )
-                    .ok_or_else(|| MicrovmError::Backend("GDT 地址计算溢出".into()))?,
+                    .map_err(|_| {
+                        MicrovmError::Backend("GDT index cannot be converted to u64".into())
+                    })?
+                    .checked_mul(u64::try_from(mem::size_of::<u64>()).map_err(|_| {
+                        MicrovmError::Backend("u64 size cannot be converted to u64".into())
+                    })?)
+                    .ok_or_else(|| {
+                        MicrovmError::Backend("GDT address calculation overflow".into())
+                    })?,
             )
-            .ok_or_else(|| MicrovmError::Backend("GDT 地址计算溢出".into()))?;
+            .ok_or_else(|| MicrovmError::Backend("GDT address calculation overflow".into()))?;
         guest_memory
             .write_obj(*entry, GuestAddress(addr))
             .map_err(to_backend_error)?;
@@ -572,10 +575,9 @@ fn gdt_limit(entry: u64) -> u32 {
 #[cfg(target_arch = "x86_64")]
 fn get_klapic_reg(klapic: &kvm_lapic_state, reg_offset: usize) -> Result<i32, MicrovmError> {
     let range = reg_offset..reg_offset + 4;
-    let reg = klapic
-        .regs
-        .get(range)
-        .ok_or_else(|| MicrovmError::Backend(format!("无效 LAPIC 寄存器偏移: {reg_offset:#x}")))?;
+    let reg = klapic.regs.get(range).ok_or_else(|| {
+        MicrovmError::Backend(format!("invalid LAPIC register offset: {reg_offset:#x}"))
+    })?;
     Ok(read_le_i32(reg))
 }
 
@@ -586,10 +588,9 @@ fn set_klapic_reg(
     value: i32,
 ) -> Result<(), MicrovmError> {
     let range = reg_offset..reg_offset + 4;
-    let reg = klapic
-        .regs
-        .get_mut(range)
-        .ok_or_else(|| MicrovmError::Backend(format!("无效 LAPIC 寄存器偏移: {reg_offset:#x}")))?;
+    let reg = klapic.regs.get_mut(range).ok_or_else(|| {
+        MicrovmError::Backend(format!("invalid LAPIC register offset: {reg_offset:#x}"))
+    })?;
     write_le_i32(reg, value);
     Ok(())
 }

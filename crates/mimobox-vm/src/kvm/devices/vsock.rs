@@ -528,22 +528,22 @@ pub(in crate::kvm) fn activate_vhost_backend(
 ) -> Result<(), String> {
     // 1. 打开 /dev/vhost-vsock 并创建 vhost 后端句柄
     let vsock = VhostKernVsock::new(guest_memory)
-        .map_err(|e| format!("打开 /dev/vhost-vsock 失败: {e}"))?;
+        .map_err(|e| format!("failed to open /dev/vhost-vsock: {e}"))?;
 
     // 2. 设置 owner（必须首先调用）
     vsock
         .set_owner()
-        .map_err(|e| format!("VHOST_SET_OWNER 失败: {e}"))?;
+        .map_err(|e| format!("VHOST_SET_OWNER failed: {e}"))?;
 
     // 3. 设置 guest CID
     vsock
         .set_guest_cid(guest_cid)
-        .map_err(|e| format!("VHOST_VSOCK_SET_GUEST_CID({guest_cid}) 失败: {e}"))?;
+        .map_err(|e| format!("VHOST_VSOCK_SET_GUEST_CID({guest_cid}) failed: {e}"))?;
 
     // 4. 设置协商的特性
     vsock
         .set_features(acked_features)
-        .map_err(|e| format!("VHOST_SET_FEATURES({acked_features:#x}) 失败: {e}"))?;
+        .map_err(|e| format!("VHOST_SET_FEATURES({acked_features:#x}) failed: {e}"))?;
 
     // 5. 设置 guest memory 布局
     // 通过 GuestMemory trait 遍历所有 region，转换为 vhost 需要的内存表
@@ -551,26 +551,30 @@ pub(in crate::kvm) fn activate_vhost_backend(
         .iter()
         .map(|region| {
             VhostUserMemoryRegionInfo::from_guest_region(region)
-                .map_err(|e| format!("转换 guest memory region 失败: {e}"))
+                .map_err(|e| format!("failed to convert guest memory region: {e}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     vsock
         .set_mem_table(&mem_regions)
-        .map_err(|e| format!("VHOST_SET_MEM_TABLE 失败: {e}"))?;
+        .map_err(|e| format!("VHOST_SET_MEM_TABLE failed: {e}"))?;
 
     // 6. 配置每个 virtqueue (rx=0, tx=1, event=2)
     for (queue_index, queue) in queues.iter().enumerate() {
         if !queue.ready {
-            return Err(format!("queue {queue_index} 未就绪，无法激活 vhost 后端"));
+            return Err(format!(
+                "queue {queue_index} is not ready, cannot activate vhost backend"
+            ));
         }
         if queue.size == 0 {
-            return Err(format!("queue {queue_index} 大小为 0，无法激活 vhost 后端"));
+            return Err(format!(
+                "queue {queue_index} size is 0, cannot activate vhost backend"
+            ));
         }
 
         // VHOST_SET_VRING_NUM: 设置队列描述符数量
         vsock
             .set_vring_num(queue_index, queue.size)
-            .map_err(|e| format!("VHOST_SET_VRING_NUM(queue={queue_index}) 失败: {e}"))?;
+            .map_err(|e| format!("VHOST_SET_VRING_NUM(queue={queue_index}) failed: {e}"))?;
 
         // VHOST_SET_VRING_ADDR: 设置描述符表、可用环、已用环地址
         let config = VringConfigData {
@@ -584,18 +588,18 @@ pub(in crate::kvm) fn activate_vhost_backend(
         };
         vsock
             .set_vring_addr(queue_index, &config)
-            .map_err(|e| format!("VHOST_SET_VRING_ADDR(queue={queue_index}) 失败: {e}"))?;
+            .map_err(|e| format!("VHOST_SET_VRING_ADDR(queue={queue_index}) failed: {e}"))?;
 
         // VHOST_SET_VRING_BASE: 设置可用环起始索引
         vsock
             .set_vring_base(queue_index, 0)
-            .map_err(|e| format!("VHOST_SET_VRING_BASE(queue={queue_index}) 失败: {e}"))?;
+            .map_err(|e| format!("VHOST_SET_VRING_BASE(queue={queue_index}) failed: {e}"))?;
     }
 
     // 7. 启动 vhost 数据面
     vsock
         .start()
-        .map_err(|e| format!("VHOST_VSOCK_SET_RUNNING(true) 失败: {e}"))?;
+        .map_err(|e| format!("VHOST_VSOCK_SET_RUNNING(true) failed: {e}"))?;
 
     debug!(
         guest_cid,

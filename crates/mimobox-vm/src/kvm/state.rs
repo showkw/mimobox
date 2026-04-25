@@ -71,7 +71,7 @@ pub(super) fn restore_runtime_tail(
     backend.initrd_addr = cursor.read_u64()?;
     if !cursor.is_eof() {
         return Err(MicrovmError::SnapshotFormat(
-            "KVM 运行时快照尾部存在未识别数据".into(),
+            "unrecognized data at end of KVM runtime snapshot".into(),
         ));
     }
     Ok(())
@@ -102,7 +102,7 @@ pub(super) fn restore_runtime_state_v3(
 
 pub(super) fn encode_vcpu_ids(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {
     let count = u32::try_from(vcpus.len())
-        .map_err(|_| MicrovmError::Backend("vCPU 数量超过 u32 上限".into()))?;
+        .map_err(|_| MicrovmError::Backend("vCPU count exceeds u32 limit".into()))?;
     out.extend_from_slice(&count.to_le_bytes());
     for (index, _) in vcpus.iter().enumerate() {
         out.extend_from_slice(&(index as u64).to_le_bytes());
@@ -114,11 +114,12 @@ pub(super) fn restore_vcpu_ids(
     vcpus: &[VcpuFd],
     cursor: &mut ByteCursor<'_>,
 ) -> Result<(), MicrovmError> {
-    let count = usize::try_from(cursor.read_u32()?)
-        .map_err(|_| MicrovmError::SnapshotFormat("快照中的 vCPU 数量无法转换为 usize".into()))?;
+    let count = usize::try_from(cursor.read_u32()?).map_err(|_| {
+        MicrovmError::SnapshotFormat("vCPU count in snapshot cannot be converted to usize".into())
+    })?;
     if count != vcpus.len() {
         return Err(MicrovmError::SnapshotFormat(format!(
-            "vCPU 数量不匹配: 快照为 {count}，当前后端为 {}",
+            "vCPU count mismatch: snapshot has {count}, current backend has {}",
             vcpus.len()
         )));
     }
@@ -127,7 +128,7 @@ pub(super) fn restore_vcpu_ids(
         let encoded_id = cursor.read_u64()?;
         if encoded_id != index as u64 {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "vCPU ID 不匹配: 快照为 {encoded_id}，当前为 {}",
+                "vCPU ID mismatch: snapshot has {encoded_id}, current is {}",
                 index
             )));
         }
@@ -169,13 +170,13 @@ pub(super) fn restore_vm_state(
     backend
         .vm_fd
         .set_clock(&clock)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 KVM 时钟失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore KVM clock: {err}")))?;
 
     let pit_state: kvm_pit_state2 = read_pod(cursor)?;
     backend
         .vm_fd
         .set_pit2(&pit_state)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 PIT 状态失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore PIT state: {err}")))?;
 
     for expected_chip_id in [
         KVM_IRQCHIP_PIC_MASTER,
@@ -185,12 +186,14 @@ pub(super) fn restore_vm_state(
         let irqchip: kvm_irqchip = read_pod(cursor)?;
         if irqchip.chip_id != expected_chip_id {
             return Err(MicrovmError::SnapshotFormat(format!(
-                "irqchip ID 不匹配: 快照为 {}，期望 {expected_chip_id}",
+                "irqchip ID mismatch: snapshot has {}, expected {expected_chip_id}",
                 irqchip.chip_id
             )));
         }
         backend.vm_fd.set_irqchip(&irqchip).map_err(|err| {
-            MicrovmError::Backend(format!("恢复 irqchip({expected_chip_id}) 状态失败: {err}"))
+            MicrovmError::Backend(format!(
+                "failed to restore irqchip({expected_chip_id}) state: {err}"
+            ))
         })?;
     }
 
@@ -242,21 +245,21 @@ pub(super) fn restore_vcpu_state(
     let msr_entries = read_msr_entries(cursor)?;
 
     vcpu.set_sregs(&sregs)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 sregs 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore sregs: {err}")))?;
     vcpu.set_regs(&regs)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 regs 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore regs: {err}")))?;
     vcpu.set_fpu(&fpu)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 fpu 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore fpu: {err}")))?;
     vcpu.set_lapic(&lapic)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 lapic 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore lapic: {err}")))?;
     vcpu.set_mp_state(mp_state)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 mp_state 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore mp_state: {err}")))?;
     vcpu.set_xsave(&xsave)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 xsave 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore xsave: {err}")))?;
     vcpu.set_xcrs(&xcrs)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 xcrs 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore xcrs: {err}")))?;
     vcpu.set_vcpu_events(&vcpu_events)
-        .map_err(|err| MicrovmError::Backend(format!("恢复 vcpu_events 失败: {err}")))?;
+        .map_err(|err| MicrovmError::Backend(format!("failed to restore vcpu_events: {err}")))?;
     restore_vcpu_msrs(vcpu, &msr_entries)?;
     Ok(())
 }
@@ -267,7 +270,7 @@ pub(super) fn snapshot_vcpu_msrs(vcpu: &VcpuFd) -> Result<Vec<kvm_msr_entry>, Mi
     let read = vcpu.get_msrs(&mut msrs).map_err(to_backend_error)?;
     if read != template.len() {
         return Err(MicrovmError::Backend(format!(
-            "快照 MSR 仅读取 {read}/{} 项",
+            "snapshot MSR read only {read}/{} entries",
             template.len()
         )));
     }
@@ -361,7 +364,7 @@ pub(super) fn encode_e820_entry(
     entry_type: u32,
 ) -> Result<(), MicrovmError> {
     if dst.len() != E820_ENTRY_SIZE {
-        return Err(MicrovmError::Backend("E820 条目长度不正确".into()));
+        return Err(MicrovmError::Backend("invalid E820 entry length".into()));
     }
     dst[..8].copy_from_slice(&addr.to_le_bytes());
     dst[8..16].copy_from_slice(&size.to_le_bytes());
@@ -391,8 +394,9 @@ pub(super) fn append_msr_entries(
 pub(super) fn read_msr_entries(
     cursor: &mut ByteCursor<'_>,
 ) -> Result<Vec<kvm_msr_entry>, MicrovmError> {
-    let len = usize::try_from(cursor.read_u32()?)
-        .map_err(|_| MicrovmError::SnapshotFormat("MSR 条目数量无法转换为 usize".into()))?;
+    let len = usize::try_from(cursor.read_u32()?).map_err(|_| {
+        MicrovmError::SnapshotFormat("MSR entry count cannot be converted to usize".into())
+    })?;
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
         entries.push(read_pod(cursor)?);
@@ -454,10 +458,10 @@ pub(super) fn checked_slice(
 ) -> Result<&[u8], MicrovmError> {
     let end = offset
         .checked_add(len)
-        .ok_or_else(|| MicrovmError::Backend("字节区间长度计算溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("byte range length calculation overflow".into()))?;
     bytes.get(offset..end).ok_or_else(|| {
         MicrovmError::Backend(format!(
-            "字节区间越界: offset={offset}, len={len}, total={}",
+            "byte range out of bounds: offset={offset}, len={len}, total={}",
             bytes.len()
         ))
     })
@@ -484,7 +488,7 @@ pub(super) fn read_u64_at(bytes: &[u8], offset: usize) -> Result<u64, MicrovmErr
 pub(super) fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(), MicrovmError> {
     let dst = bytes
         .get_mut(offset..offset + 2)
-        .ok_or_else(|| MicrovmError::Backend("boot_params 写入越界".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("boot_params write out of bounds".into()))?;
     dst.copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
@@ -492,18 +496,18 @@ pub(super) fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(
 pub(super) fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(), MicrovmError> {
     let dst = bytes
         .get_mut(offset..offset + 4)
-        .ok_or_else(|| MicrovmError::Backend("boot_params 写入越界".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("boot_params write out of bounds".into()))?;
     dst.copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
 
 pub(super) fn align_up(value: u64, align: u64) -> Result<u64, MicrovmError> {
     if align == 0 {
-        return Err(MicrovmError::Backend("对齐粒度不能为 0".into()));
+        return Err(MicrovmError::Backend("alignment must not be zero".into()));
     }
     let adjusted = value
         .checked_add(align - 1)
-        .ok_or_else(|| MicrovmError::Backend("地址对齐计算溢出".into()))?;
+        .ok_or_else(|| MicrovmError::Backend("address alignment calculation overflow".into()))?;
     Ok(adjusted / align * align)
 }
 
@@ -516,7 +520,8 @@ pub(super) fn upper_u32(value: u64) -> Result<u32, MicrovmError> {
 }
 
 pub(super) fn usize_from_u64(value: u64) -> Result<usize, MicrovmError> {
-    usize::try_from(value).map_err(|_| MicrovmError::Backend("u64 无法转换为 usize".into()))
+    usize::try_from(value)
+        .map_err(|_| MicrovmError::Backend("u64 cannot be converted to usize".into()))
 }
 
 pub(super) fn u32_from_len(len: usize, message: &str) -> Result<u32, MicrovmError> {
@@ -562,7 +567,9 @@ impl<'a> ByteCursor<'a> {
 
     pub(super) fn read_bytes(&mut self) -> Result<Vec<u8>, MicrovmError> {
         let len = usize::try_from(self.read_u32()?).map_err(|_| {
-            MicrovmError::SnapshotFormat("快照中的字节块长度无法转换为 usize".into())
+            MicrovmError::SnapshotFormat(
+                "byte block length in snapshot cannot be converted to usize".into(),
+            )
         })?;
         Ok(self.read_exact(len)?.to_vec())
     }

@@ -16,6 +16,7 @@ class ExecuteResult:
     stderr: str
     exit_code: int
     timed_out: bool
+    elapsed: Optional[float]
 
 
 class HttpResponse:
@@ -152,6 +153,28 @@ class Sandbox:
         Returns:
             A ``StreamIterator`` yielding ``StreamEvent`` objects for stdout,
             stderr chunks and the final exit event.
+        """
+        ...
+
+    def wait_ready(self, timeout_secs: Optional[float] = ...) -> None:
+        """Wait until the sandbox is ready to accept commands.
+
+        Blocks until the underlying backend signals readiness (e.g. via PING/PONG
+        for the microVM backend), or the timeout expires.
+
+        Args:
+            timeout_secs: Maximum time to wait in seconds. Defaults to 30.0.
+
+        Raises:
+            SandboxError: If the sandbox is destroyed or the timeout expires.
+        """
+        ...
+
+    def is_ready(self) -> bool:
+        """Return whether the sandbox is currently ready to accept commands.
+
+        Returns:
+            ``True`` if the sandbox backend is initialized and in a ready state.
         """
         ...
 
