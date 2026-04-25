@@ -1,0 +1,30 @@
+# mimobox
+
+> Cross-platform Agent Sandbox for AI agents, written in Rust.
+> Three-layer isolation: OS (Landlock+Seccomp), Wasm (Wasmtime), microVM (KVM).
+
+## Documentation
+
+- docs/getting-started.md — Installation and Quick Start guide
+- docs/architecture.md — 8-crate workspace architecture overview
+- docs/api.md — Full API reference (SDK, Config, Error types)
+- docs/mcp-server.md — MCP Server tool reference and integration guide
+- docs/python-sdk.md — Python SDK installation and API guide
+- SPECIFICATION.md — Performance specifications and benchmarks
+
+## Examples
+
+- crates/mimobox-sdk/examples/ — 14 Rust SDK examples (basic, streaming, http_proxy, env_vars, file_ops, agent_demo, agent_streaming, basic_sandbox, timeout_and_memory, network_policy, sandbox_pool, fork_demo, filesystem_isolation, llm_agent)
+- examples/python/ — 9 Python SDK examples (basic, streaming, http_request, file_ops, env_vars, error_handling, context_manager, config_options, snapshot_restore)
+- examples/wasm-tools/ — Wasm tool example
+
+## Source Code
+
+- crates/mimobox-core/ — Sandbox trait, Config, Error types
+- crates/mimobox-os/ — OS-level sandbox (Landlock, Seccomp, Namespaces)
+- crates/mimobox-wasm/ — Wasm sandbox (Wasmtime, WASI Preview 2)
+- crates/mimobox-vm/ — microVM sandbox (KVM, snapshot/restore, fork)
+- crates/mimobox-sdk/ — Unified SDK with smart routing
+- crates/mimobox-mcp/ — MCP Server (10 tools, rmcp)
+- crates/mimobox-python/ — Python bindings (PyO3)
+- crates/mimobox-cli/ — CLI entry point
