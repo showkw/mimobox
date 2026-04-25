@@ -60,6 +60,7 @@ fn stream_step(sandbox: &mut Sandbox, command: &str) -> Result<(), Box<dyn std::
             StreamEvent::TimedOut => {
                 println!("command timed out");
             }
+            _ => {}
         }
     }
 
