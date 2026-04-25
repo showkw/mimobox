@@ -9,28 +9,27 @@ OUTPUT="${OUTPUT:-}"
 CC_BIN="${CC:-gcc}"
 ENABLE_BOOT_PROFILE="${ENABLE_BOOT_PROFILE:-}"
 ENABLE_VSOCK="${ENABLE_VSOCK:-}"
-# BusyBox 官方 binaries 目录当前可用的最新 x86_64-linux-musl 版本是 1.35.0；
-# 1.36.1 对应链接已失效，因此主下载地址先回退到官方仍可访问的最新版本。
+# The latest available x86_64-linux-musl version in the official BusyBox
+# binaries directory is currently 1.35.0. The 1.36.1 link is unavailable, so
+# the primary download URL falls back to the latest still-accessible version.
 PRIMARY_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 FALLBACK_BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
 DOCKER_IMAGE="${DOCKER_IMAGE:-alpine:3.20}"
 TARGET_ALPINE_ARCH="x86_64"
 BUSYBOX_APPLETS=(
-    sh
-    echo
-    cat
-    ls
-    mkdir
-    rm
-    cp
-    mv
-    sleep
-    true
-    false
-    test
-    pwd
-    printf
-    timeout
+    sh ash
+    echo cat ls mkdir rm cp mv
+    sleep true false test pwd printf timeout
+    grep sed awk find xargs
+    head tail sort wc tee tr cut
+    chmod chown chgrp
+    ln realpath dirname basename
+    date uname hostname
+    tar gzip gunzip
+    touch stat
+    dd
+    env export
+    which
 )
 
 log() {
@@ -64,14 +63,14 @@ should_enable_vsock() {
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        fail "缺少依赖命令: $1"
+        fail "Missing required command: $1"
     fi
 }
 
 install_python_runtime_with_apk() {
     local rootfs_dir="$1"
 
-    log "向 Alpine rootfs 安装 Python 3 运行时"
+    log "Installing Python 3 runtime into Alpine rootfs"
     apk add \
         --root "${rootfs_dir}" \
         --initdb \
@@ -83,7 +82,7 @@ install_python_runtime_with_apk() {
         py3-pip >/dev/null
     rm -rf -- "${rootfs_dir}/var/cache/apk"
 
-    [[ -x "${rootfs_dir}/usr/bin/python3" ]] || fail "rootfs 中未找到 /usr/bin/python3"
+    [[ -x "${rootfs_dir}/usr/bin/python3" ]] || fail "python3 not found in rootfs at /usr/bin/python3"
 }
 
 install_python_runtime_in_rootfs() {
@@ -95,9 +94,10 @@ install_python_runtime_in_rootfs() {
     fi
 
     require_command docker
-    log "宿主机未安装 apk，使用 Docker 为 rootfs 安装 Python 3 运行时"
+    log "apk not found on host, using Docker to install Python 3 runtime into rootfs"
 
-    # 通过 Alpine 容器对目标 rootfs 执行 apk add，保持本地与 Docker 构建结果一致。
+    # Use an Alpine container to run apk add against the target rootfs, keeping
+    # local and Docker build outputs consistent.
     docker run --rm \
         -e TARGET_ALPINE_ARCH="${TARGET_ALPINE_ARCH}" \
         -v "${rootfs_dir}:/rootfs" \
@@ -117,6 +117,54 @@ install_python_runtime_in_rootfs() {
         '
 }
 
+install_nodejs_runtime_with_apk() {
+    local rootfs_dir="$1"
+
+    log "Installing Node.js runtime into Alpine rootfs"
+    apk add \
+        --root "${rootfs_dir}" \
+        --initdb \
+        --no-cache \
+        --arch "${TARGET_ALPINE_ARCH}" \
+        --repositories-file /etc/apk/repositories \
+        --keys-dir /etc/apk/keys \
+        nodejs \
+        npm >/dev/null
+    rm -rf -- "${rootfs_dir}/var/cache/apk"
+
+    [[ -x "${rootfs_dir}/usr/bin/node" ]] || fail "node not found in rootfs at /usr/bin/node"
+}
+
+install_nodejs_runtime_in_rootfs() {
+    local rootfs_dir="$1"
+
+    if command -v apk >/dev/null 2>&1; then
+        install_nodejs_runtime_with_apk "${rootfs_dir}"
+        return
+    fi
+
+    require_command docker
+    log "apk not found on host, using Docker to install Node.js runtime into rootfs"
+
+    docker run --rm \
+        -e TARGET_ALPINE_ARCH="${TARGET_ALPINE_ARCH}" \
+        -v "${rootfs_dir}:/rootfs" \
+        "${DOCKER_IMAGE}" \
+        sh -eu -c '
+            apk add \
+                --root /rootfs \
+                --initdb \
+                --no-cache \
+                --arch "${TARGET_ALPINE_ARCH}" \
+                --repositories-file /etc/apk/repositories \
+                --keys-dir /etc/apk/keys \
+                nodejs \
+                npm >/dev/null
+            rm -rf /rootfs/var/cache/apk
+            [ -x /rootfs/usr/bin/node ]
+        '
+}
+
 resolve_output_path() {
     local output_path="${OUTPUT}"
 
@@ -124,7 +172,7 @@ resolve_output_path() {
         if [[ -n "${VM_ASSETS_DIR:-}" ]]; then
             output_path="${VM_ASSETS_DIR}/rootfs.cpio.gz"
         else
-            [[ -n "${HOME:-}" ]] || fail "未设置 OUTPUT 时，必须存在 HOME 环境变量或设置 VM_ASSETS_DIR"
+            [[ -n "${HOME:-}" ]] || fail "When OUTPUT is not set, HOME must exist or VM_ASSETS_DIR must be set"
             output_path="${HOME}/${DEFAULT_VM_ASSETS_SUBDIR}/rootfs.cpio.gz"
         fi
     fi
@@ -171,7 +219,7 @@ build_rootfs_locally() {
         "${rootfs_dir}/tmp" \
         "${rootfs_dir}/root"
 
-    log "编译静态 guest init"
+    log "Compiling static guest init"
     "${CC_BIN}" \
         -O2 \
         -Wall \
@@ -183,9 +231,9 @@ build_rootfs_locally() {
         -o "${guest_init_bin}" \
         "${ROOT_DIR}/crates/mimobox-vm/guest/guest-init.c"
 
-    log "下载静态 BusyBox"
+    log "Downloading static BusyBox"
     if ! curl -fSL -o "${busybox_path}" "${PRIMARY_BUSYBOX_URL}"; then
-        log "主 BusyBox URL 不可用，尝试备用 URL"
+        log "Primary BusyBox URL unavailable, trying fallback URL"
         curl -fSL -o "${busybox_path}" "${FALLBACK_BUSYBOX_URL}"
     fi
     chmod 0755 "${busybox_path}"
@@ -207,6 +255,7 @@ EOF
     mknod -m 600 "${rootfs_dir}/dev/console" c 5 1
     mknod -m 666 "${rootfs_dir}/dev/null" c 1 3
     install_python_runtime_in_rootfs "${rootfs_dir}"
+    install_nodejs_runtime_in_rootfs "${rootfs_dir}"
 
     mkdir -p "$(dirname "${output_path}")"
     (
@@ -224,7 +273,7 @@ build_rootfs_in_docker() {
     output_name="$(basename "${output_path}")"
     mkdir -p "${output_dir}"
 
-    log "使用 Docker fallback 构建 rootfs"
+    log "Building rootfs using Docker fallback"
     docker run --rm \
         -e HOST_UID="$(id -u)" \
         -e HOST_GID="$(id -g)" \
@@ -256,7 +305,7 @@ build_rootfs_in_docker() {
                 "${rootfs_dir}/root"
 
             if [ -n "${GUEST_INIT_CFLAGS}" ]; then
-                echo "[build-rootfs] 额外 guest init 编译参数: ${GUEST_INIT_CFLAGS}"
+                echo "[build-rootfs] Extra guest init compile flags: ${GUEST_INIT_CFLAGS}"
             fi
 
             gcc -O2 -Wall -Wextra -Werror -static -s ${GUEST_INIT_CFLAGS} \
@@ -290,8 +339,18 @@ EOF
                 --keys-dir /etc/apk/keys \
                 python3 \
                 py3-pip >/dev/null
+            apk add \
+                --root "${rootfs_dir}" \
+                --initdb \
+                --no-cache \
+                --arch "${TARGET_ALPINE_ARCH}" \
+                --repositories-file /etc/apk/repositories \
+                --keys-dir /etc/apk/keys \
+                nodejs \
+                npm >/dev/null
             rm -rf -- "${rootfs_dir}/var/cache/apk"
             [ -x "${rootfs_dir}/usr/bin/python3" ]
+            [ -x "${rootfs_dir}/usr/bin/node" ]
 
             (
                 cd "${rootfs_dir}"
@@ -302,7 +361,7 @@ EOF
 }
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    fail "scripts/build-rootfs.sh 仅支持在 Linux 上执行"
+    fail "This script only runs on Linux"
 fi
 
 require_command "${CC_BIN}"
@@ -315,12 +374,12 @@ GUEST_INIT_CFLAGS=()
 
 if should_enable_boot_profile; then
     GUEST_INIT_CFLAGS+=("-DBOOT_PROFILE")
-    log "启用 guest boot profile 串口时间戳输出"
+    log "Enabling guest boot profile serial timestamp output"
 fi
 
 if should_enable_vsock; then
     GUEST_INIT_CFLAGS+=("-DUSE_VSOCK")
-    log "启用 guest vsock 命令通道"
+    log "Enabling guest vsock command channel"
 fi
 
 cd "${ROOT_DIR}"
@@ -328,10 +387,10 @@ cd "${ROOT_DIR}"
 if can_create_device_nodes && build_rootfs_locally "${OUTPUT_PATH}"; then
     :
 else
-    log "本机构建不可用，回退到 Docker"
+    log "Local build unavailable, falling back to Docker"
     build_rootfs_in_docker "${OUTPUT_PATH}"
 fi
 
 SIZE_BYTES="$(wc -c < "${OUTPUT_PATH}" | tr -d '[:space:]')"
-log "rootfs 已生成: ${OUTPUT_PATH}"
-log "文件大小: ${SIZE_BYTES} bytes"
+log "rootfs generated: ${OUTPUT_PATH}"
+log "File size: ${SIZE_BYTES} bytes"
