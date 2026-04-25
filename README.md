@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 pip install mimobox
+# 或从源码构建：cd crates/mimobox-python && pip install -e .
 ```
 
 ```python
@@ -227,6 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 6.2 高级控制：显式配置路由、环境变量注入和命令级超时
 
+<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+
 ```rust
 use std::collections::HashMap;
 use std::time::Duration;
@@ -264,6 +267,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 6.3 流式输出：`stream_execute`
 
+<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
 
@@ -292,6 +297,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### 6.4 HTTP 代理：`http_request`
+
+<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
 
 ```rust
 use std::collections::HashMap;
@@ -383,6 +390,8 @@ cargo run -p mimobox-cli --features wasm -- \
 ```
 
 ### 8.3 KVM microVM 后端
+
+<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
 
 ```bash
 cargo run -p mimobox-cli --features kvm -- \

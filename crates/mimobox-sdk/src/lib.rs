@@ -118,11 +118,12 @@ impl ExecuteResult {
 ///
 /// # Examples
 ///
-/// ```text
+/// ```rust,no_run,ignore
 /// // Requires `vm` feature + Linux
 /// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 /// use std::collections::HashMap;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = Config::builder()
 ///     .isolation(IsolationLevel::MicroVm)
 ///     .allowed_http_domains(["example.com"])
@@ -130,6 +131,8 @@ impl ExecuteResult {
 /// let mut sandbox = Sandbox::with_config(config)?;
 /// let resp = sandbox.http_request("GET", "https://example.com", HashMap::new(), None)?;
 /// println!("status: {}", resp.status);
+/// # Ok(())
+/// # }
 /// ```
 #[non_exhaustive]
 pub struct HttpResponse {
@@ -288,10 +291,11 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 ///
 /// # Examples
 ///
-/// ```text
+/// ```rust,no_run,ignore
 /// // Requires `vm` feature + Linux
 /// use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = Config::builder()
 ///     .isolation(IsolationLevel::MicroVm)
 ///     .build();
@@ -303,8 +307,11 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 ///         StreamEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
 ///         StreamEvent::Exit(code) => println!("exit = {code}"),
 ///         StreamEvent::TimedOut => println!("timed out"),
+///         _ => {}
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
