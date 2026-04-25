@@ -35,8 +35,8 @@ jobs:
       - name: Cargo Check Workspace
         run: cargo check --workspace
 
-      - name: Install rustfmt
-        run: rustup component add rustfmt
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
 
       - name: Cargo Format Check
         run: cargo fmt --check --all
@@ -137,11 +137,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
       - name: Cargo Audit
-        uses: rustsec/audit-action@v2.7.0
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          advisory-server: https://github.com/RustSec/advisory-db
+        run: cargo audit
 
   test-macos:
     runs-on: macos-latest
