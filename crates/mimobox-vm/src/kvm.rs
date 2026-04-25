@@ -246,7 +246,7 @@ impl VcpuRunWatchdog {
         let immediate_exit_ptr = (&mut vcpu.get_kvm_run().immediate_exit as *mut u8) as usize;
         // SAFETY: `pthread_self` only returns the current thread identifier and does not
         // touch the Rust memory model.
-        let target_thread = unsafe { libc::pthread_self() };
+        let target_thread = unsafe { libc::pthread_self() } as usize;
         vcpu.set_kvm_immediate_exit(0);
 
         let (tx, rx) = mpsc::channel();
@@ -263,7 +263,7 @@ impl VcpuRunWatchdog {
                 // mapping becomes invalid.
                 unsafe {
                     std::ptr::write_volatile(immediate_exit_ptr as *mut u8, 1);
-                    libc::pthread_kill(target_thread, WATCHDOG_SIGNAL);
+                    libc::pthread_kill(target_thread as _, WATCHDOG_SIGNAL);
                 }
             }
         });
