@@ -25,6 +25,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/showkw/mimobox"
+homepage = "https://github.com/showkw/mimobox"
 
 [workspace.dependencies]
 # 内部 crate
@@ -57,6 +58,9 @@ vm-memory = { version = "0.16", features = ["backend-mmap"] }
 vmm-sys-util = "0.12.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 portable-pty = "0.9"
+rmcp = { version = "1.5", features = ["client", "server", "schemars", "transport-async-rw", "transport-io"] }
+schemars = "1"
+tokio = { version = "1", features = ["full"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

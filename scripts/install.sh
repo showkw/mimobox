@@ -119,6 +119,9 @@ detect_platform() {
     Linux:x86_64)
       TARGET="x86_64-unknown-linux-musl"
       ;;
+    Linux:aarch64)
+      TARGET="aarch64-unknown-linux-musl"
+      ;;
     macOS:x86_64)
       TARGET="x86_64-apple-darwin"
       ;;

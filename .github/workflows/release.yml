@@ -46,29 +46,27 @@ jobs:
       - name: Build MCP
         if: matrix.build_mcp
         run: cargo build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+      - name: Rename binaries
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv mimobox-cli mimobox-cli-${{ matrix.target }}
+          if [ -f mimobox-mcp ]; then
+            mv mimobox-mcp mimobox-mcp-${{ matrix.target }}
+          fi
       - name: Generate checksums
         run: |
           cd target/${{ matrix.target }}/release
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum mimobox-cli > mimobox-cli.sha256
+            sha256sum mimobox-cli-${{ matrix.target }} > mimobox-cli-${{ matrix.target }}.sha256
           else
-            shasum -a 256 mimobox-cli > mimobox-cli.sha256
+            shasum -a 256 mimobox-cli-${{ matrix.target }} > mimobox-cli-${{ matrix.target }}.sha256
           fi
           if [ "${{ matrix.build_mcp }}" = "true" ]; then
             if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum mimobox-mcp > mimobox-mcp.sha256
+              sha256sum mimobox-mcp-${{ matrix.target }} > mimobox-mcp-${{ matrix.target }}.sha256
             else
-              shasum -a 256 mimobox-mcp > mimobox-mcp.sha256
+              shasum -a 256 mimobox-mcp-${{ matrix.target }} > mimobox-mcp-${{ matrix.target }}.sha256
             fi
-          fi
-      - name: Rename for release
-        run: |
-          cd target/${{ matrix.target }}/release
-          mv mimobox-cli mimobox-cli-${{ matrix.target }}
-          mv mimobox-cli.sha256 mimobox-cli-${{ matrix.target }}.sha256
-          if [ -f mimobox-mcp ]; then
-            mv mimobox-mcp mimobox-mcp-${{ matrix.target }}
-            mv mimobox-mcp.sha256 mimobox-mcp-${{ matrix.target }}.sha256
           fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

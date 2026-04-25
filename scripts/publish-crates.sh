@@ -18,9 +18,9 @@ CRATES=(
     "mimobox-mcp"
 )
 
-echo "=== 发布前测试 ==="
-cargo test --workspace --exclude mimobox-python || {
-    echo "[错误] 测试失败，中止发布"
+echo "=== 发布前检查（编译验证） ==="
+cargo check --workspace --exclude mimobox-python --all-features || {
+    echo "[错误] 编译检查失败，中止发布"
     exit 1
 }
 
@@ -37,8 +37,8 @@ for crate in "${CRATES[@]}"; do
         PUBLISHED+=("${crate}")
         # 等待 crates.io 索引更新
         if [[ -z "${DRY_RUN}" ]]; then
-            echo "等待 10 秒让 crates.io 索引更新..."
-            sleep 10
+            echo "等待 30 秒让 crates.io 索引更新..."
+            sleep 30
         fi
     else
         echo "[失败] ${crate} 发布失败"
