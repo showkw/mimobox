@@ -582,32 +582,34 @@ impl MicrovmSandbox {
         Ok(sandbox)
     }
 
-    /// 读取 guest 内文件内容。
-    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+    fn with_ready_state<F, T>(&mut self, op_name: &str, op: F) -> Result<T, MicrovmError>
+    where
+        F: FnOnce(&mut BackendHandle) -> Result<T, MicrovmError>,
+    {
         if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可读文件状态".into(),
-            ));
+            return Err(MicrovmError::Lifecycle(format!(
+                "microVM not ready for {op_name}"
+            )));
         }
 
         self.state = MicrovmState::Running;
-        let result = self.backend.read_file(path);
-        self.state = MicrovmState::Ready;
+        let result = op(&mut self.backend);
+        self.state = if self.backend.is_destroyed() {
+            MicrovmState::Destroyed
+        } else {
+            MicrovmState::Ready
+        };
         result
+    }
+
+    /// 读取 guest 内文件内容。
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
+        self.with_ready_state("read_file", |backend| backend.read_file(path))
     }
 
     /// 向 guest 内写入文件内容。
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可写文件状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let result = self.backend.write_file(path, data);
-        self.state = MicrovmState::Ready;
-        result
+        self.with_ready_state("write_file", |backend| backend.write_file(path, data))
     }
 
     /// 等待 microVM 进入可响应状态，并通过 PING/PONG 验证命令循环。
@@ -623,14 +625,9 @@ impl MicrovmSandbox {
             ));
         }
 
-        self.state = MicrovmState::Running;
-        let result = self.backend.ping_with_timeout(timeout);
-        self.state = if self.backend.is_destroyed() {
-            MicrovmState::Destroyed
-        } else {
-            MicrovmState::Ready
-        };
-        result.map(|_| ())
+        self.with_ready_state("wait_ready", |backend| {
+            backend.ping_with_timeout(timeout).map(|_| ())
+        })
     }
 
     /// 返回 microVM 是否处于 Ready 状态。
@@ -640,20 +637,7 @@ impl MicrovmSandbox {
 
     /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可探测状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let result = self.backend.ping();
-        self.state = if self.backend.is_destroyed() {
-            MicrovmState::Destroyed
-        } else {
-            MicrovmState::Ready
-        };
-        result
+        self.with_ready_state("ping", BackendHandle::ping)
     }
 
     /// 以流式事件形式执行命令。
@@ -674,22 +658,9 @@ impl MicrovmSandbox {
             return Err(MicrovmError::InvalidConfig("命令为空".into()));
         }
 
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可执行状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let result = self
-            .backend
-            .run_command_streaming_with_options(cmd, &options);
-        self.state = if self.backend.is_destroyed() {
-            MicrovmState::Destroyed
-        } else {
-            MicrovmState::Ready
-        };
-        result
+        self.with_ready_state("stream_execute", |backend| {
+            backend.run_command_streaming_with_options(cmd, &options)
+        })
     }
 
     /// 执行命令并附加命令级环境变量。
@@ -726,31 +697,14 @@ impl MicrovmSandbox {
             return Err(MicrovmError::InvalidConfig("命令为空".into()));
         }
 
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可执行状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let result = self.backend.run_command_with_options(cmd, &options);
-        self.state = if self.backend.is_destroyed() {
-            MicrovmState::Destroyed
-        } else {
-            MicrovmState::Ready
-        };
-        result
+        self.with_ready_state("execute", |backend| {
+            backend.run_command_with_options(cmd, &options)
+        })
     }
 
     /// 通过宿主受控 HTTP 代理发起请求。
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可执行 HTTP 代理状态".into(),
-            ));
-        }
-
-        self.backend.http_request(request)
+        self.with_ready_state("http_request", |backend| backend.http_request(request))
     }
 }
 
@@ -815,28 +769,16 @@ impl MicrovmSandbox {
             return Err(MicrovmError::InvalidConfig("命令为空".into()));
         }
 
-        if self.state != MicrovmState::Ready {
-            return Err(MicrovmError::Lifecycle(
-                "microVM 当前不处于可执行状态".into(),
-            ));
-        }
-
-        self.state = MicrovmState::Running;
-        let start = Instant::now();
-        let result = self.backend.run_command_with_options(cmd, &options);
-        self.state = if self.backend.is_destroyed() {
-            MicrovmState::Destroyed
-        } else {
-            MicrovmState::Ready
-        };
-
-        let guest = result?;
-        Ok(SandboxResult {
-            stdout: guest.stdout,
-            stderr: guest.stderr,
-            exit_code: guest.exit_code,
-            elapsed: start.elapsed(),
-            timed_out: guest.timed_out,
+        self.with_ready_state("execute", |backend| {
+            let start = Instant::now();
+            let guest = backend.run_command_with_options(cmd, &options)?;
+            Ok(SandboxResult {
+                stdout: guest.stdout,
+                stderr: guest.stderr,
+                exit_code: guest.exit_code,
+                elapsed: start.elapsed(),
+                timed_out: guest.timed_out,
+            })
         })
     }
 }

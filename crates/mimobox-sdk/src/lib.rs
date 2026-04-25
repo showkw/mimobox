@@ -109,6 +109,7 @@ pub struct ExecuteResult {
 /// let resp = sandbox.http_request("GET", "https://example.com", HashMap::new(), None)?;
 /// println!("status: {}", resp.status);
 /// ```
+#[non_exhaustive]
 pub struct HttpResponse {
     /// HTTP 状态码。
     pub status: u16,
@@ -317,6 +318,7 @@ pub enum StreamEvent {
 /// # Ok(())
 /// # }
 /// ```
+#[non_exhaustive]
 pub struct PtySession {
     inner: Box<dyn mimobox_core::PtySession>,
 }
