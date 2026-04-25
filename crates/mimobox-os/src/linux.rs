@@ -175,6 +175,199 @@ fn kill_process_group(pid: libc::pid_t, signal: Signal) {
     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal);
 }
 
+/// Applies all child-process security policies and executes the command.
+///
+/// Execution order (security policies are applied as early as possible to minimize race windows):
+/// 1. Set the memory limit (`setrlimit`).
+/// 2. Set process count limit when fork is allowed.
+/// 3. Apply Landlock filesystem isolation.
+/// 4. Unshare namespaces with user namespace fallback.
+/// 5. Fork once after `CLONE_NEWPID` when needed, and let the intermediate process wait.
+/// 6. Apply Seccomp-bpf system call filtering as the final step before `exec`.
+/// 7. Execute the command with `execvp`.
+fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> ! {
+    // 1. 设置内存限制（最早应用，防止后续操作消耗过多内存）
+    if let Some(limit_mb) = config.memory_limit_mb
+        && let Err(e) = set_memory_limit(limit_mb)
+    {
+        unsafe {
+            write_error(2, &format!("memory limit setting failed: {e}"));
+            libc::_exit(124);
+        }
+    }
+
+    // 1.5 进程数限制：防止 fork bomb
+    // 当 allow_fork 为 true 时，通过 setrlimit(RLIMIT_NPROC) 限制子进程可创建的最大进程数。
+    // 注意：RLIMIT_NPROC 在 user namespace 中行为可能不同，
+    // 如果后续接入 per-sandbox cgroup 生命周期，应改用 cgroup pids.max 以获得更可靠的限制。
+    if config.allow_fork {
+        const MAX_NPROC: libc::rlim_t = 256;
+        let rlim = libc::rlimit {
+            rlim_cur: MAX_NPROC,
+            rlim_max: MAX_NPROC,
+        };
+        // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法。
+        let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
+        if ret != 0 {
+            let errno = unsafe { *libc::__errno_location() };
+            tracing::warn!(
+                "setrlimit(RLIMIT_NPROC, 256) 失败: errno={}，fork bomb 防护未生效",
+                errno
+            );
+        }
+    }
+
+    // 2. 应用 Landlock（文件系统隔离）
+    {
+        use landlock::{
+            ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, path_beneath_rules,
+        };
+
+        let abi = ABI::V1;
+        let all_access = AccessFs::from_all(abi);
+        let read_access = AccessFs::from_read(abi);
+
+        let result = (|| -> Result<(), landlock::RulesetError> {
+            let mut ruleset = Ruleset::default().handle_access(all_access)?.create()?;
+
+            let default_ro: Vec<&str> = [
+                "/bin",
+                "/usr",
+                "/lib",
+                "/lib64",
+                "/etc",
+                "/proc/self",
+                "/dev/urandom",
+                "/tmp",
+            ]
+            .into_iter()
+            .filter(|path| std::path::Path::new(path).exists())
+            .collect();
+            if !default_ro.is_empty() {
+                ruleset = ruleset.add_rules(path_beneath_rules(&default_ro, read_access))?;
+            }
+
+            let user_ro: Vec<&str> = config
+                .fs_readonly
+                .iter()
+                .filter_map(|p| p.to_str())
+                .collect();
+            if !user_ro.is_empty() {
+                ruleset = ruleset.add_rules(path_beneath_rules(&user_ro, read_access))?;
+            }
+
+            let rw: Vec<&str> = config
+                .fs_readwrite
+                .iter()
+                .filter_map(|p| p.to_str())
+                .collect();
+            if !rw.is_empty() {
+                ruleset = ruleset.add_rules(path_beneath_rules(&rw, all_access))?;
+            }
+
+            ruleset.restrict_self()?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            // 致命 #4 修复：Landlock 失败必须终止，否则无文件系统隔离
+            unsafe {
+                write_error(2, &format!("Landlock enforcement failed (fatal): {e}"));
+                libc::_exit(122);
+            }
+        }
+    }
+
+    // 3. unshare 命名空间
+    let ns_flags = CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWIPC;
+
+    let full_flags = CloneFlags::CLONE_NEWUSER | ns_flags;
+
+    let ns_result = nix::sched::unshare(full_flags);
+
+    if let Err(e) = ns_result {
+        let msg = format!("unshare(full_flags) failed: {e}, retrying without user ns");
+        unsafe {
+            write_error(2, &msg);
+        }
+
+        if let Err(e2) = nix::sched::unshare(ns_flags) {
+            // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
+            unsafe {
+                write_error(2, &format!("unshare(ns_flags) also failed (fatal): {e2}"));
+                libc::_exit(121);
+            }
+        }
+    }
+
+    // 4. CLONE_NEWPID 需要 fork 才生效
+    // 致命 #6 修复：简化逻辑 — 仅在首次 unshare 成功时需要 reexec
+    // （CLONE_NEWPID 已包含在 full_flags 中，无需二次尝试）
+    if ns_result.is_ok() {
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child }) => {
+                // 中间进程：等待孙进程退出后转发退出码
+                loop {
+                    match waitpid(child, None) {
+                        Ok(WaitStatus::Exited(_, code)) => unsafe { libc::_exit(code) },
+                        Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
+                            libc::_exit(128 + sig as i32)
+                        },
+                        _ => continue,
+                    }
+                }
+            }
+            Ok(ForkResult::Child) => {
+                // 孙进程：继续应用 seccomp 并执行命令
+            }
+            Err(e) => unsafe {
+                write_error(2, &format!("internal fork failed: {e}"));
+                libc::_exit(123);
+            },
+        }
+    }
+
+    // 5. 应用 Seccomp-bpf 过滤（在 exec 之前最后应用）
+    // 致命 #3 修复：Seccomp 在所有安全策略配置完成后、exec 之前立即应用
+    let effective_profile = match (config.allow_fork, config.seccomp_profile) {
+        (true, SeccompProfile::Essential) => SeccompProfile::EssentialWithFork,
+        (true, SeccompProfile::Network) => SeccompProfile::NetworkWithFork,
+        (_, other) => other,
+    };
+    if let Err(e) = seccomp::apply_seccomp(effective_profile) {
+        unsafe {
+            write_error(2, &format!("Seccomp error: {e}"));
+            libc::_exit(126);
+        }
+    }
+
+    // 6. execvp
+    // 重要 #12 修复：使用 unwrap_or_else + _exit 替代 unwrap
+    let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
+        write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
+        libc::_exit(127);
+    });
+    let c_args: Vec<CString> = cmd
+        .iter()
+        .map(|s| {
+            CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
+                write_error(2, &format!("argument contains embedded NUL: {s}"));
+                libc::_exit(127);
+            })
+        })
+        .collect();
+
+    let _ = execvp(&c_cmd, &c_args);
+
+    unsafe {
+        write_error(2, &format!("execvp failed: {}", cmd[0]));
+        libc::_exit(125);
+    }
+}
+
 impl LinuxSandbox {
     /// Runs the child-process main flow by applying security policies before executing the command.
     ///
@@ -234,186 +427,7 @@ impl LinuxSandbox {
             libc::close(stderr_fd);
         }
 
-        // 1. 设置内存限制（最早应用，防止后续操作消耗过多内存）
-        if let Some(limit_mb) = config.memory_limit_mb
-            && let Err(e) = set_memory_limit(limit_mb)
-        {
-            unsafe {
-                write_error(2, &format!("memory limit setting failed: {e}"));
-                libc::_exit(124);
-            }
-        }
-
-        // 1.5 进程数限制：防止 fork bomb
-        // 当 allow_fork 为 true 时，通过 setrlimit(RLIMIT_NPROC) 限制子进程可创建的最大进程数。
-        // 注意：RLIMIT_NPROC 在 user namespace 中行为可能不同，
-        // 如果后续接入 per-sandbox cgroup 生命周期，应改用 cgroup pids.max 以获得更可靠的限制。
-        if config.allow_fork {
-            const MAX_NPROC: libc::rlim_t = 256;
-            let rlim = libc::rlimit {
-                rlim_cur: MAX_NPROC,
-                rlim_max: MAX_NPROC,
-            };
-            // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法
-            let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
-            if ret != 0 {
-                let errno = unsafe { *libc::__errno_location() };
-                tracing::warn!(
-                    "setrlimit(RLIMIT_NPROC, 64) 失败: errno={}，fork bomb 防护未生效",
-                    errno
-                );
-            }
-        }
-
-        // 2. 应用 Landlock（文件系统隔离）
-        {
-            use landlock::{
-                ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, path_beneath_rules,
-            };
-
-            let abi = ABI::V1;
-            let all_access = AccessFs::from_all(abi);
-            let read_access = AccessFs::from_read(abi);
-
-            let result = (|| -> Result<(), landlock::RulesetError> {
-                let mut ruleset = Ruleset::default().handle_access(all_access)?.create()?;
-
-                let default_ro: Vec<&str> = [
-                    "/bin",
-                    "/usr",
-                    "/lib",
-                    "/lib64",
-                    "/etc",
-                    "/proc/self",
-                    "/dev/urandom",
-                    "/tmp",
-                ]
-                .into_iter()
-                .filter(|path| std::path::Path::new(path).exists())
-                .collect();
-                if !default_ro.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&default_ro, read_access))?;
-                }
-
-                let user_ro: Vec<&str> = config
-                    .fs_readonly
-                    .iter()
-                    .filter_map(|p| p.to_str())
-                    .collect();
-                if !user_ro.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&user_ro, read_access))?;
-                }
-
-                let rw: Vec<&str> = config
-                    .fs_readwrite
-                    .iter()
-                    .filter_map(|p| p.to_str())
-                    .collect();
-                if !rw.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&rw, all_access))?;
-                }
-
-                ruleset.restrict_self()?;
-                Ok(())
-            })();
-
-            if let Err(e) = result {
-                // 致命 #4 修复：Landlock 失败必须终止，否则无文件系统隔离
-                unsafe {
-                    write_error(2, &format!("Landlock enforcement failed (fatal): {e}"));
-                    libc::_exit(122);
-                }
-            }
-        }
-
-        // 3. unshare 命名空间
-        let ns_flags = CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWNET
-            | CloneFlags::CLONE_NEWIPC;
-
-        let full_flags = CloneFlags::CLONE_NEWUSER | ns_flags;
-
-        let ns_result = nix::sched::unshare(full_flags);
-
-        if let Err(e) = ns_result {
-            let msg = format!("unshare(full_flags) failed: {e}, retrying without user ns");
-            unsafe {
-                write_error(2, &msg);
-            }
-
-            if let Err(e2) = nix::sched::unshare(ns_flags) {
-                // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
-                unsafe {
-                    write_error(2, &format!("unshare(ns_flags) also failed (fatal): {e2}"));
-                    libc::_exit(121);
-                }
-            }
-        }
-
-        // 4. CLONE_NEWPID 需要 fork 才生效
-        // 致命 #6 修复：简化逻辑 — 仅在首次 unshare 成功时需要 reexec
-        // （CLONE_NEWPID 已包含在 full_flags 中，无需二次尝试）
-        if ns_result.is_ok() {
-            match unsafe { fork() } {
-                Ok(ForkResult::Parent { child }) => {
-                    // 中间进程：等待孙进程退出后转发退出码
-                    loop {
-                        match waitpid(child, None) {
-                            Ok(WaitStatus::Exited(_, code)) => unsafe { libc::_exit(code) },
-                            Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
-                                libc::_exit(128 + sig as i32)
-                            },
-                            _ => continue,
-                        }
-                    }
-                }
-                Ok(ForkResult::Child) => {
-                    // 孙进程：继续应用 seccomp 并执行命令
-                }
-                Err(e) => unsafe {
-                    write_error(2, &format!("internal fork failed: {e}"));
-                    libc::_exit(123);
-                },
-            }
-        }
-
-        // 5. 应用 Seccomp-bpf 过滤（在 exec 之前最后应用）
-        // 致命 #3 修复：Seccomp 在所有安全策略配置完成后、exec 之前立即应用
-        let effective_profile = match (config.allow_fork, config.seccomp_profile) {
-            (true, SeccompProfile::Essential) => SeccompProfile::EssentialWithFork,
-            (true, SeccompProfile::Network) => SeccompProfile::NetworkWithFork,
-            (_, other) => other,
-        };
-        if let Err(e) = seccomp::apply_seccomp(effective_profile) {
-            unsafe {
-                write_error(2, &format!("Seccomp error: {e}"));
-                libc::_exit(126);
-            }
-        }
-
-        // 6. execvp
-        // 重要 #12 修复：使用 unwrap_or_else + _exit 替代 unwrap
-        let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
-            write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
-            libc::_exit(127);
-        });
-        let c_args: Vec<CString> = cmd
-            .iter()
-            .map(|s| {
-                CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
-                    write_error(2, &format!("argument contains embedded NUL: {s}"));
-                    libc::_exit(127);
-                })
-            })
-            .collect();
-
-        let _ = execvp(&c_cmd, &c_args);
-
-        unsafe {
-            write_error(2, &format!("execvp failed: {}", cmd[0]));
-            libc::_exit(125);
-        }
+        apply_security_policies_and_exec(cmd, config);
     }
 
     fn pty_child_main(
@@ -445,168 +459,7 @@ impl LinuxSandbox {
             }
         }
 
-        if let Some(limit_mb) = sandbox_config.memory_limit_mb
-            && let Err(error) = set_memory_limit(limit_mb)
-        {
-            unsafe {
-                write_error(2, &format!("memory limit setting failed: {error}"));
-                libc::_exit(124);
-            }
-        }
-
-        if sandbox_config.allow_fork {
-            const MAX_NPROC: libc::rlim_t = 256;
-            let rlim = libc::rlimit {
-                rlim_cur: MAX_NPROC,
-                rlim_max: MAX_NPROC,
-            };
-            // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法。
-            let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
-            if ret != 0 {
-                let errno = unsafe { *libc::__errno_location() };
-                tracing::warn!(
-                    "setrlimit(RLIMIT_NPROC, 256) 失败: errno={}，fork bomb 防护未生效",
-                    errno
-                );
-            }
-        }
-
-        {
-            use landlock::{
-                ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, path_beneath_rules,
-            };
-
-            let abi = ABI::V1;
-            let all_access = AccessFs::from_all(abi);
-            let read_access = AccessFs::from_read(abi);
-
-            let result = (|| -> Result<(), landlock::RulesetError> {
-                let mut ruleset = Ruleset::default().handle_access(all_access)?.create()?;
-
-                let default_ro: Vec<&str> = [
-                    "/bin",
-                    "/usr",
-                    "/lib",
-                    "/lib64",
-                    "/etc",
-                    "/proc/self",
-                    "/dev/urandom",
-                    "/tmp",
-                ]
-                .into_iter()
-                .filter(|path| std::path::Path::new(path).exists())
-                .collect();
-                if !default_ro.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&default_ro, read_access))?;
-                }
-
-                let user_ro: Vec<&str> = sandbox_config
-                    .fs_readonly
-                    .iter()
-                    .filter_map(|p| p.to_str())
-                    .collect();
-                if !user_ro.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&user_ro, read_access))?;
-                }
-
-                let rw: Vec<&str> = sandbox_config
-                    .fs_readwrite
-                    .iter()
-                    .filter_map(|p| p.to_str())
-                    .collect();
-                if !rw.is_empty() {
-                    ruleset = ruleset.add_rules(path_beneath_rules(&rw, all_access))?;
-                }
-
-                ruleset.restrict_self()?;
-                Ok(())
-            })();
-
-            if let Err(error) = result {
-                unsafe {
-                    write_error(2, &format!("Landlock enforcement failed (fatal): {error}"));
-                    libc::_exit(122);
-                }
-            }
-        }
-
-        let ns_flags = CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWNET
-            | CloneFlags::CLONE_NEWIPC;
-        let full_flags = CloneFlags::CLONE_NEWUSER | ns_flags;
-        let ns_result = nix::sched::unshare(full_flags);
-
-        if let Err(error) = ns_result {
-            unsafe {
-                write_error(
-                    2,
-                    &format!("unshare(full_flags) failed: {error}, retrying without user ns"),
-                );
-            }
-
-            if let Err(fallback_error) = nix::sched::unshare(ns_flags) {
-                unsafe {
-                    write_error(
-                        2,
-                        &format!("unshare(ns_flags) also failed (fatal): {fallback_error}"),
-                    );
-                    libc::_exit(121);
-                }
-            }
-        }
-
-        if ns_result.is_ok() {
-            match unsafe { fork() } {
-                Ok(ForkResult::Parent { child }) => loop {
-                    match waitpid(child, None) {
-                        Ok(WaitStatus::Exited(_, code)) => unsafe { libc::_exit(code) },
-                        Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
-                            libc::_exit(128 + sig as i32)
-                        },
-                        _ => continue,
-                    }
-                },
-                Ok(ForkResult::Child) => {}
-                Err(error) => unsafe {
-                    write_error(2, &format!("internal fork failed: {error}"));
-                    libc::_exit(123);
-                },
-            }
-        }
-
-        let effective_profile = match (sandbox_config.allow_fork, sandbox_config.seccomp_profile) {
-            (true, SeccompProfile::Essential) => SeccompProfile::EssentialWithFork,
-            (true, SeccompProfile::Network) => SeccompProfile::NetworkWithFork,
-            (_, other) => other,
-        };
-        if let Err(error) = seccomp::apply_seccomp(effective_profile) {
-            unsafe {
-                write_error(2, &format!("Seccomp error: {error}"));
-                libc::_exit(126);
-            }
-        }
-
-        let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
-            write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
-            libc::_exit(127);
-        });
-        let c_args: Vec<CString> = cmd
-            .iter()
-            .map(|s| {
-                CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
-                    write_error(2, &format!("argument contains embedded NUL: {s}"));
-                    libc::_exit(127);
-                })
-            })
-            .collect();
-
-        let _ = execvp(&c_cmd, &c_args);
-
-        unsafe {
-            write_error(2, &format!("execvp failed: {}", cmd[0]));
-            libc::_exit(125);
-        }
+        apply_security_policies_and_exec(cmd, sandbox_config);
     }
 }
 

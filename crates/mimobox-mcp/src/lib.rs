@@ -15,7 +15,10 @@
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -38,7 +41,7 @@ use tracing::error;
 #[derive(Clone)]
 pub struct MimoboxServer {
     pub(crate) sandboxes: Arc<Mutex<HashMap<u64, ManagedSandbox>>>,
-    pub next_id: Arc<Mutex<u64>>,
+    pub next_id: Arc<AtomicU64>,
     pub tool_router: ToolRouter<Self>,
 }
 
@@ -236,7 +239,7 @@ impl MimoboxServer {
     pub fn new() -> Self {
         Self {
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(Mutex::new(1)),
+            next_id: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
         }
     }
@@ -320,10 +323,7 @@ impl MimoboxServer {
         .map_err(|error| to_error(format_join_error(error)))?
         .map_err(|error| to_error(format_sdk_error(error)))?;
 
-        let mut next_id = self.next_id.lock().await;
-        let sandbox_id = *next_id;
-        *next_id = next_id.saturating_add(1);
-        drop(next_id);
+        let sandbox_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let mut sandboxes = self.sandboxes.lock().await;
         sandboxes.insert(
@@ -552,10 +552,7 @@ impl MimoboxServer {
                 }
             };
 
-            let mut next_id = self.next_id.lock().await;
-            let new_id = *next_id;
-            *next_id = next_id.saturating_add(1);
-            drop(next_id);
+            let new_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
             let mut sandboxes = self.sandboxes.lock().await;
             sandboxes.insert(request.sandbox_id, managed);
