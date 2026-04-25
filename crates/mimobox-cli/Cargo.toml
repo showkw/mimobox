@@ -16,6 +16,7 @@ mimobox-os.workspace = true
 mimobox-sdk.workspace = true
 mimobox-wasm = { workspace = true, optional = true }
 clap.workspace = true
+clap_complete.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

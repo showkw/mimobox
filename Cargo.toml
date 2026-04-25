@@ -41,6 +41,7 @@ nix = { version = "0.30", features = ["process", "sched", "mount", "signal", "fs
 libc = "0.2"
 landlock = "0.4"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 wasmtime = { version = "43", features = ["cranelift", "component-model", "async"] }
 wasmtime-wasi = { version = "43", features = ["p1"] }
 sha2 = "0.10"
