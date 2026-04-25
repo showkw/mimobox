@@ -35,6 +35,9 @@ jobs:
       - name: Cargo Check Workspace
         run: cargo check --workspace
 
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
       - name: Cargo Format Check
         run: cargo fmt --check --all
 
@@ -54,7 +57,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Cargo Test mimobox-os
-        run: sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,HOME cargo test --package mimobox-os
+        run: sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "HOME=$HOME" cargo test --package mimobox-os
 
   test-linux-vm:
     if: github.event_name == 'workflow_dispatch'
@@ -135,7 +138,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Cargo Audit
-        uses: rustsec/audit-action@v2.6.0
+        uses: rustsec/audit-action@v2.7.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           advisory-server: https://github.com/RustSec/advisory-db
@@ -230,7 +233,7 @@ jobs:
         run: pip install target/wheels/*.whl
 
       - name: Test import
-        run: python -c 'import mimibox; print("mimobox wheel import OK")'
+        run: python -c 'import mimobox; print("mimobox wheel import OK")'
 
   bench-regression:
     name: Benchmark Regression Check

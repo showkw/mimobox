@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             StreamEvent::TimedOut => {
                 println!("command timed out");
             }
+            _ => {}
         }
     }
 
