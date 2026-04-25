@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 //! mimobox-os: OS-level sandbox backends.
 //!
 //! Provides process-level sandbox implementations for Linux, macOS, and Windows (skeleton).

@@ -46,7 +46,7 @@ const PR_SET_SECCOMP: i32 = 22;
 const SECCOMP_MODE_FILTER: i32 = 2;
 
 // x86_64 系统调用号（保留全部定义供参考，未使用的允许 dead_code）
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs)]
 mod syscall_nr {
     pub const READ: u32 = 0;
     pub const WRITE: u32 = 1;

@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 //! mimobox-sdk: Unified Agent Sandbox API
 //!
 //! **Smart routing by default, full control for advanced users.**

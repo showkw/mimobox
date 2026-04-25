@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 
 //! mimobox-vm: microVM sandbox backend.
 //!
@@ -10,6 +11,7 @@
 //! - `KvmBackend` on Linux with the `kvm` feature: the basic KVM lifecycle implementation.
 
 mod http_proxy;
+/// microVM prewarm pool types.
 pub mod pool;
 mod snapshot;
 mod vm;

@@ -18,8 +18,8 @@ use mimobox_core::{SandboxConfig, SandboxSnapshot};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// microVM prewarm pool configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmPoolConfig {
     /// Minimum number of idle VMs to prewarm during initialization.
     pub min_size: usize,
@@ -42,8 +42,8 @@ impl Default for VmPoolConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Runtime statistics for the microVM prewarm pool.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VmPoolStats {
     /// Number of direct hits from the idle pool.
     pub hit_count: u64,
@@ -57,8 +57,8 @@ pub struct VmPoolStats {
     pub in_use_count: usize,
 }
 
-#[derive(Debug, Error)]
 /// microVM prewarm pool error.
+#[derive(Debug, Error)]
 pub enum PoolError {
     /// Pool capacity configuration is invalid.
     #[error("invalid pool config: min_size={min_size}, max_size={max_size}")]

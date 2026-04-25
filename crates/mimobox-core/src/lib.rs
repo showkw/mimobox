@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 //! mimobox-core: core traits and type definitions.
 //!
 //! Defines the unified sandbox abstraction interface ([`Sandbox`] trait) implemented by each backend

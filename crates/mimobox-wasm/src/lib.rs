@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 //! mimobox-wasm: Wasm sandbox backend.
 //!
 //! Implements a Wasm sandbox on top of the Wasmtime runtime with WASI Preview 1 support.

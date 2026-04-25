@@ -149,8 +149,8 @@ impl EmptyVmSlot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Snapshot restore pool configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestorePoolConfig {
     /// Minimum number of empty VM shells to prewarm during initialization.
     pub min_size: usize,
@@ -158,8 +158,8 @@ pub struct RestorePoolConfig {
     pub max_size: usize,
 }
 
-#[derive(Debug, Error)]
 /// Snapshot restore pool error.
+#[derive(Debug, Error)]
 pub enum RestorePoolError {
     /// Restore pool configuration is invalid.
     #[error("invalid restore pool config: min_size={min_size}, max_size={max_size}")]
@@ -287,8 +287,8 @@ impl RestorePoolInner {
     }
 }
 
-#[derive(Clone)]
 /// microVM restore pool based on snapshot restoration.
+#[derive(Clone)]
 pub struct RestorePool {
     inner: Arc<RestorePoolInner>,
 }

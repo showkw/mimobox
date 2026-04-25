@@ -18,22 +18,29 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
+/// Raw JSON payload accepted by the guest-to-host HTTP proxy protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpProxyRequestPayload {
+    /// Request method, such as `GET` or `POST`.
     pub method: String,
+    /// Target HTTPS URL.
     pub url: String,
+    /// Request headers supplied by the guest.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Optional base64-encoded request body.
     #[serde(default)]
     pub body_b64: Option<String>,
+    /// Optional request timeout in milliseconds.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Optional maximum response body size in bytes.
     #[serde(default)]
     pub max_response_bytes: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Validated and normalized HTTP proxy request.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// Request method, such as `GET` or `POST`.
     pub method: String,
@@ -49,8 +56,8 @@ pub struct HttpRequest {
     pub max_response_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// HTTP proxy response.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     /// HTTP status code.
     pub status: u16,
@@ -60,8 +67,8 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, thiserror::Error)]
 /// microVM HTTP proxy error.
+#[derive(Debug, thiserror::Error)]
 pub enum HttpProxyError {
     /// Target host is not in the allowlist.
     #[error("domain not in whitelist: {0}")]

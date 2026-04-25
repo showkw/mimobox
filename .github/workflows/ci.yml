@@ -207,3 +207,15 @@ jobs:
         env:
           PYO3_PYTHON: python3
         run: cargo check -p mimobox-python
+
+  bench-regression:
+    name: Benchmark Regression Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run OS benchmarks
+        run: cargo bench -p mimobox-os --bench pool_bench -- --save-baseline ci
+      - name: Run Wasm benchmarks
+        run: cargo bench -p mimobox-wasm --features wasm --bench wasm_bench -- --save-baseline ci
