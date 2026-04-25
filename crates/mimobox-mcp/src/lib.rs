@@ -48,11 +48,11 @@ struct ManagedSandbox {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateSandboxRequest {
-    /// 可选隔离层级：auto、os、wasm、microvm。
+    /// Optional isolation level: auto, os, wasm, microvm.
     isolation_level: Option<String>,
-    /// 沙箱默认超时时间，单位毫秒。
+    /// Default sandbox timeout in milliseconds.
     timeout_ms: Option<u64>,
-    /// 沙箱内存上限，单位 MiB。
+    /// Sandbox memory limit in MiB.
     memory_limit_mb: Option<u64>,
 }
 
@@ -64,29 +64,29 @@ pub struct CreateSandboxResponse {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExecuteCodeRequest {
-    /// 不提供时创建临时沙箱，执行完成后立即销毁。
+    /// If not provided, a temporary sandbox is created and destroyed after execution.
     sandbox_id: Option<u64>,
-    /// 要执行的代码片段。
+    /// Code snippet to execute.
     code: String,
-    /// 可选语言：python、javascript、node、bash、sh。
+    /// Optional language: python, javascript, node, bash, sh.
     language: Option<String>,
-    /// 本次执行的超时时间，单位毫秒。仅对临时沙箱生效。
+    /// Execution timeout in milliseconds. Only applies to temporary sandboxes.
     timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExecuteCommandRequest {
-    /// 不提供时创建临时沙箱，执行完成后立即销毁。
+    /// If not provided, a temporary sandbox is created and destroyed after execution.
     sandbox_id: Option<u64>,
-    /// 要执行的 shell 命令。
+    /// Shell command to execute.
     command: String,
-    /// 本次执行的超时时间，单位毫秒。仅对临时沙箱生效。
+    /// Execution timeout in milliseconds. Only applies to temporary sandboxes.
     timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DestroySandboxRequest {
-    /// 要销毁的沙箱 ID。
+    /// ID of the sandbox to destroy.
     sandbox_id: u64,
 }
 
@@ -96,45 +96,45 @@ pub struct ListSandboxesRequest {}
 #[derive(Debug, Deserialize, JsonSchema)]
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 pub struct ReadFileRequest {
-    /// 目标沙箱 ID。
+    /// Target sandbox ID.
     sandbox_id: u64,
-    /// 沙箱内文件路径。
+    /// File path inside the sandbox.
     path: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 pub struct WriteFileRequest {
-    /// 目标沙箱 ID。
+    /// Target sandbox ID.
     sandbox_id: u64,
-    /// 沙箱内文件路径。
+    /// File path inside the sandbox.
     path: String,
-    /// Base64 编码后的文件内容。
+    /// Base64-encoded file content.
     content: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 pub struct SnapshotRequest {
-    /// 目标沙箱 ID。
+    /// Target sandbox ID.
     sandbox_id: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 pub struct ForkRequest {
-    /// 要 fork 的沙箱 ID。
+    /// ID of the sandbox to fork.
     sandbox_id: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 pub struct McpHttpRequest {
-    /// 目标沙箱 ID。
+    /// Target sandbox ID.
     sandbox_id: u64,
-    /// 请求 URL（仅支持 HTTPS）。
+    /// Request URL (HTTPS only).
     url: String,
-    /// HTTP 方法：GET 或 POST。
+    /// HTTP method: GET or POST.
     method: String,
 }
 
@@ -215,21 +215,21 @@ impl MimoboxServer {
         }
     }
 
-    /// 清理所有活跃的 sandbox 实例，在收到 SIGTERM/SIGINT 时调用。
+    /// Clean up all active sandbox instances. Called on SIGTERM/SIGINT.
     pub async fn cleanup_all(&self) {
         let mut sandboxes = self.sandboxes.lock().await;
         let count = sandboxes.len();
         for (id, managed) in sandboxes.drain() {
-            tracing::debug!(sandbox_id = id, "信号清理：销毁 sandbox");
+            tracing::debug!(sandbox_id = id, "Signal cleanup: destroying sandbox");
             if let Err(err) = managed.sandbox.destroy() {
                 tracing::warn!(
                     sandbox_id = id,
                     error = %format_sdk_error(err),
-                    "信号清理时 sandbox 销毁失败"
+                    "Failed to destroy sandbox during signal cleanup"
                 );
             }
         }
-        tracing::info!(count, "信号清理完成");
+        tracing::info!(count, "Signal cleanup complete");
     }
 }
 
@@ -288,7 +288,7 @@ impl MimoboxServer {
             error!(
                 sandbox_id = request.sandbox_id,
                 error = %format_sdk_error(err),
-                "沙箱销毁失败，实例已从活动列表移除"
+                "Sandbox destroy failed, instance removed from active list"
             );
         }
 
@@ -548,7 +548,7 @@ impl MimoboxServer {
             .map_err(format_sdk_error)?;
         let result = sandbox.execute(command).map_err(format_sdk_error);
         if let Err(err) = sandbox.destroy() {
-            error!(error = %format_sdk_error(err), "临时沙箱销毁失败");
+            error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
         }
         result
     }
@@ -707,7 +707,7 @@ mod tests {
             assert_eq!(
                 parse_isolation_level(Some(alias)).unwrap(),
                 IsolationLevel::MicroVm,
-                "alias '{alias}' 应解析为 MicroVm"
+                "alias '{alias}' should resolve to MicroVm"
             );
         }
     }
@@ -738,7 +738,7 @@ mod tests {
         for val in invalid {
             assert!(
                 parse_isolation_level(Some(val)).is_err(),
-                "'{val}' 应为无效值"
+                "'{val}' should be invalid"
             );
         }
     }
@@ -758,7 +758,7 @@ mod tests {
             let cmd = build_code_command(Some(lang), "print(1)").unwrap();
             assert!(
                 cmd.starts_with("python3 -c "),
-                "language='{lang}' 应生成 python3 命令，实际: {cmd}"
+                "language='{lang}' should generate python3 command, got: {cmd}"
             );
         }
     }
@@ -769,7 +769,7 @@ mod tests {
             let cmd = build_code_command(Some(lang), "console.log(1)").unwrap();
             assert!(
                 cmd.starts_with("node -e "),
-                "language='{lang}' 应生成 node 命令，实际: {cmd}"
+                "language='{lang}' should generate node command, got: {cmd}"
             );
         }
     }
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn test_shell_single_quote_special_chars() {
-        // 确保双引号和 $ 符号被原样保留在引号内
+        // Ensure double quotes and $ are preserved inside quotes
         let input = r#"hello "world" $var"#;
         let quoted = shell_single_quote(input);
         assert!(quoted.starts_with('\''));
@@ -834,11 +834,11 @@ mod tests {
             Some("increase timeout".to_string()),
         );
         let formatted = format_sdk_error(err);
-        assert!(formatted.contains("[command_timeout]"), "应包含错误码");
-        assert!(formatted.contains("timed out"), "应包含消息");
+        assert!(formatted.contains("[command_timeout]"), "should contain error code");
+        assert!(formatted.contains("timed out"), "should contain message");
         assert!(
             formatted.contains("suggestion: increase timeout"),
-            "应包含建议"
+            "should contain suggestion"
         );
     }
 
@@ -850,7 +850,7 @@ mod tests {
         assert!(formatted.contains("file not found"));
         assert!(
             !formatted.contains("suggestion:"),
-            "无 suggestion 时不输出建议"
+            "No suggestion should be output when absent"
         );
     }
 
@@ -918,7 +918,7 @@ mod tests {
             Duration::from_millis(100),
         );
         let resp = format_execute_result(result);
-        // String::from_utf8_lossy 会把无效 UTF-8 替换为替换字符
+        // String::from_utf8_lossy replaces invalid UTF-8 with replacement character
         assert!(!resp.stdout.is_empty());
         assert!(resp.stderr.is_empty());
         assert_eq!(resp.exit_code, None);
@@ -931,8 +931,8 @@ mod tests {
     #[test]
     fn test_sandbox_not_found_contains_id() {
         let msg = sandbox_not_found(42);
-        assert!(msg.contains("42"), "应包含 sandbox_id");
-        assert!(msg.contains("not found"), "应包含提示信息");
+        assert!(msg.contains("42"), "should contain sandbox_id");
+        assert!(msg.contains("not found"), "should contain hint");
     }
 
     // ── unix_timestamp_ms ──────────────────────────────────────────────
@@ -941,24 +941,24 @@ mod tests {
     fn test_unix_timestamp_ms_reasonable() {
         let ts = unix_timestamp_ms();
         // 2023-01-01 00:00:00 UTC ≈ 1_672_531_200_000
-        assert!(ts > 1_672_531_200_000, "时间戳应在 2023 年之后，实际: {ts}");
-        // 不应超过远期上限（2100 年 ≈ 4_102_444_800_000）
-        assert!(ts < 4_102_444_800_000, "时间戳不应超过 2100 年");
+        assert!(ts > 1_672_531_200_000, "Timestamp should be after 2023, got: {ts}");
+        // Should not exceed the future upper bound (2100 ≈ 4_102_444_800_000)
+        assert!(ts < 4_102_444_800_000, "Timestamp should not exceed 2100");
     }
 
     #[test]
     fn test_unix_timestamp_ms_monotonic() {
         let t1 = unix_timestamp_ms();
         let t2 = unix_timestamp_ms();
-        assert!(t2 >= t1, "连续调用应单调不递减");
+        assert!(t2 >= t1, "Consecutive calls should be monotonically non-decreasing");
     }
 
     // ── to_error helper ────────────────────────────────────────────────
 
     #[test]
     fn test_to_error_contains_message() {
-        let Json(err) = to_error("测试错误");
-        assert_eq!(err.error, "测试错误");
+        let Json(err) = to_error("test error");
+        assert_eq!(err.error, "test error");
     }
 
     // ── vm_feature_required (non-vm builds) ────────────────────────────
@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn test_vm_feature_required_message() {
         let msg = vm_feature_required("snapshot");
-        assert!(msg.contains("snapshot"), "应包含操作名");
+        assert!(msg.contains("snapshot"), "should contain operation name");
         assert!(msg.contains("microVM") || msg.contains("vm feature"));
     }
 }

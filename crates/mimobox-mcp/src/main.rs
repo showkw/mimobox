@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
-    tracing::info!("mimobox MCP stdio server 启动");
+    tracing::info!("mimobox MCP stdio server starting");
 
     let server = MimoboxServer::new();
     let cleanup_handle = server.clone();
@@ -23,16 +23,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result?;
         }
         _ = sigterm.recv() => {
-            tracing::info!("收到 SIGTERM，开始清理 sandboxes...");
+            tracing::info!("Received SIGTERM, cleaning up sandboxes...");
             cleanup_handle.cleanup_all().await;
         }
         _ = sigint.recv() => {
-            tracing::info!("收到 SIGINT，开始清理 sandboxes...");
+            tracing::info!("Received SIGINT, cleaning up sandboxes...");
             cleanup_handle.cleanup_all().await;
         }
     }
 
-    tracing::info!("mimobox MCP stdio server 退出");
+    tracing::info!("mimobox MCP stdio server exiting");
 
     Ok(())
 }
