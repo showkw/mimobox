@@ -15,7 +15,7 @@
 ### Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash
 ```
 
 ### Python

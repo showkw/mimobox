@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/showkw/mimobox/discussions
     about: Ask questions, share ideas, and discuss mimobox with the community.
   - name: Documentation
-    url: https://github.com/showkw/mimobox/blob/main/docs/
+    url: https://github.com/showkw/mimobox/blob/master/docs/
     about: Read the project documentation before opening an issue.
