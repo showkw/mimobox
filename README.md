@@ -38,7 +38,7 @@ A cross-platform Agent Sandbox implemented in Rust, providing a secure isolated 
 No installation required — just clone and run:
 
 ```bash
-git clone https://github.com/user/mimobox.git && cd mimobox
+git clone https://github.com/showkw/mimobox.git && cd mimobox
 bash scripts/quickstart-demo.sh
 ```
 
