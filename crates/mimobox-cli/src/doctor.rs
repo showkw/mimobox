@@ -124,22 +124,20 @@ pub fn run_setup() -> i32 {
             return 2;
         }
 
-        if !vm_asset_paths.kernel_path.exists() {
-            match build_missing_kernel(&mut handle, &vm_asset_paths.kernel_path) {
-                Ok(()) => {}
-                Err(error) => {
-                    let _ = writeln!(&mut handle, "❌ kernel 构建失败: {error}");
-                    return 2;
+        match crate::asset_download::download_vm_assets(&vm_asset_paths.assets_dir, &mut handle) {
+            Ok(true) => {
+                let _ = writeln!(&mut handle, "  预构建资产下载完成");
+            }
+            Ok(false) => {
+                let _ = writeln!(&mut handle, "  预构建资产不可用，回退本地构建...");
+                if let Err(exit_code) = build_missing_vm_assets(&mut handle, &vm_asset_paths) {
+                    return exit_code;
                 }
             }
-        }
-
-        if !vm_asset_paths.rootfs_path.exists() {
-            match build_missing_rootfs(&mut handle, &vm_asset_paths.rootfs_path) {
-                Ok(()) => {}
-                Err(error) => {
-                    let _ = writeln!(&mut handle, "❌ rootfs 构建失败: {error}");
-                    return 2;
+            Err(error) => {
+                let _ = writeln!(&mut handle, "  预构建资产下载失败: {error}");
+                if let Err(exit_code) = build_missing_vm_assets(&mut handle, &vm_asset_paths) {
+                    return exit_code;
                 }
             }
         }
@@ -834,6 +832,30 @@ fn summarize_vm_assets_for_setup() -> CheckResult {
 
 fn missing_any_vm_asset(paths: &VmAssetPaths) -> bool {
     !paths.kernel_path.exists() || !paths.rootfs_path.exists()
+}
+
+fn build_missing_vm_assets(writer: &mut impl Write, paths: &VmAssetPaths) -> Result<(), i32> {
+    if !paths.kernel_path.exists() {
+        match build_missing_kernel(writer, &paths.kernel_path) {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = writeln!(writer, "❌ kernel 构建失败: {error}");
+                return Err(2);
+            }
+        }
+    }
+
+    if !paths.rootfs_path.exists() {
+        match build_missing_rootfs(writer, &paths.rootfs_path) {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = writeln!(writer, "❌ rootfs 构建失败: {error}");
+                return Err(2);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_directory_exists(path: &Path) -> io::Result<()> {
