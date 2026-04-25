@@ -72,7 +72,9 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
         assert!(result.is_err(), "invalid config (vcpu_count=0) must fail");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("vcpu_count") || msg.contains("kernel_path") || msg.contains("rootfs_path"),
+            msg.contains("vcpu_count")
+                || msg.contains("kernel_path")
+                || msg.contains("rootfs_path"),
             "unexpected error message: {msg}"
         );
     }
