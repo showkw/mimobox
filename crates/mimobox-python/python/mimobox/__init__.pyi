@@ -179,6 +179,34 @@ class Sandbox:
         """
         ...
 
+    def execute_code(
+        self,
+        language: str,
+        code: str,
+        *,
+        env: Optional[Dict[str, str]] = ...,
+        timeout: Optional[float] = ...,
+    ) -> ExecuteResult:
+        """Execute code in the given language inside the sandbox.
+
+        Supported languages: ``"bash"``, ``"sh"``, ``"python"``, ``"python3"``,
+        ``"py"``, ``"javascript"``, ``"js"``, ``"node"``, ``"nodejs"``.
+
+        Args:
+            language: Programming language name.
+            code: Source code to execute.
+            env: Optional environment variables to set for the command.
+            timeout: Optional timeout in seconds (float). Must be > 0 and finite.
+
+        Returns:
+            An ``ExecuteResult`` with stdout, stderr, exit_code, and timed_out.
+
+        Raises:
+            SandboxError: If the sandbox is destroyed or execution fails.
+            ValueError: If the language is not supported.
+        """
+        ...
+
     def stream_execute(self, command: str) -> StreamIterator:
         """Execute a command and return a streaming iterator of events.
 
