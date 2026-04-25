@@ -405,8 +405,9 @@ pub(super) fn read_msr_entries(
 }
 
 pub(super) fn append_pod<T>(out: &mut Vec<u8>, value: &T) {
-    // SAFETY: KVM 绑定结构是可按字节复制的内核 ABI 数据。当前快照仅用于同架构、
-    // 同进程版本的 restore，直接保存原始字节不会引入别名或生命周期问题。
+    // SAFETY: KVM binding structs are byte-copyable kernel ABI data. Current snapshots
+    // are only restored on the same architecture and process version, so storing raw
+    // bytes does not introduce aliasing or lifetime issues.
     let bytes = unsafe {
         std::slice::from_raw_parts((value as *const T).cast::<u8>(), mem::size_of::<T>())
     };
@@ -416,8 +417,9 @@ pub(super) fn append_pod<T>(out: &mut Vec<u8>, value: &T) {
 pub(super) fn read_pod<T: Default>(cursor: &mut ByteCursor<'_>) -> Result<T, MicrovmError> {
     let bytes = cursor.read_exact(mem::size_of::<T>())?;
     let mut value = T::default();
-    // SAFETY: `value` 先以 `Default` 零初始化，再用等长字节覆盖。源字节来自同一 ABI
-    // 的 `append_pod` 序列化结果，因此布局和大小匹配。
+    // SAFETY: `value` is zero-initialized with `Default` and then overwritten with the
+    // same number of bytes. The source bytes come from `append_pod` serialization for
+    // the same ABI, so layout and size match.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),

@@ -8,17 +8,18 @@ use std::time::Duration;
 
 use crate::{GuestCommandResult, MicrovmError};
 
-/// Linux AF_VSOCK 地址族常量。
+/// Linux AF_VSOCK address family constant.
 const AF_VSOCK: libc::c_int = 40;
-/// host 侧固定 CID。
+/// Fixed host-side CID.
 const VMADDR_CID_HOST: u32 = 2;
-/// host 命令通道固定端口。
+/// Fixed host command channel port.
 const COMMAND_PORT: u32 = 1024;
-/// listener backlog 只需要容纳单个 guest 连接。
+/// Listener backlog only needs to hold one guest connection.
 const LISTEN_BACKLOG: libc::c_int = 1;
-/// 已建立的 vsock 流最多阻塞 30 秒，超时后由上层回退串口协议。
+/// Established vsock streams block for at most 30 seconds; after timeout the upper
+/// layer falls back to the serial protocol.
 const STREAM_RECV_TIMEOUT_SECS: u64 = 30;
-/// 使用 shell 内建 no-op 验证 vsock 数据面是否真正可收发。
+/// Uses the shell built-in no-op to verify that the vsock data plane can actually send and receive.
 const PROBE_COMMAND: &[u8] = b":";
 
 #[repr(C)]
@@ -63,8 +64,9 @@ impl Drop for VsockFd {
             return;
         }
 
-        // SAFETY: `self.fd` 是当前对象独占持有的有效文件描述符。
-        // drop 时仅调用一次 `close` 释放内核资源，不会与其他所有者重复关闭。
+        // SAFETY: `self.fd` is a valid file descriptor exclusively owned by this object.
+        // `drop` calls `close` exactly once to release kernel resources, so it cannot be
+        // closed twice by another owner.
         unsafe {
             libc::close(self.fd);
         }
@@ -100,8 +102,9 @@ impl VsockStream {
                 MicrovmError::Backend("timeval length cannot be converted to socklen_t".into())
             })?;
 
-        // SAFETY: `timeout_value` 是当前栈上有效的 `timeval`，
-        // `setsockopt` 只同步读取该结构体，不会越界或悬垂引用。
+        // SAFETY: `timeout_value` is a valid `timeval` on the current stack.
+        // `setsockopt` only reads this structure synchronously, so there is no out-of-bounds
+        // access or dangling reference.
         let result = unsafe {
             libc::setsockopt(
                 self.fd.raw_fd(),
@@ -124,8 +127,8 @@ impl VsockStream {
     fn read_exact(&self, buf: &mut [u8]) -> Result<(), MicrovmError> {
         let mut offset = 0usize;
         while offset < buf.len() {
-            // SAFETY: `buf[offset..]` 是当前栈上可写切片，长度由 Rust 保证；
-            // `read` 只会写入该切片边界内的数据。
+            // SAFETY: `buf[offset..]` is a writable slice on the current stack and Rust
+            // guarantees its length. `read` only writes within the slice bounds.
             let read_bytes = unsafe {
                 libc::read(
                     self.fd.raw_fd(),
@@ -159,8 +162,8 @@ impl VsockStream {
     fn write_all(&self, buf: &[u8]) -> Result<(), MicrovmError> {
         let mut offset = 0usize;
         while offset < buf.len() {
-            // SAFETY: `buf[offset..]` 是当前切片的有效只读范围，
-            // `write` 只会读取该范围内的数据，不会修改 Rust 内存。
+            // SAFETY: `buf[offset..]` is a valid read-only range of the current slice.
+            // `write` only reads data from this range and does not modify Rust memory.
             let written_bytes = unsafe {
                 libc::write(
                     self.fd.raw_fd(),
@@ -200,7 +203,8 @@ pub(in crate::kvm) struct VsockCommandChannel {
 
 impl VsockCommandChannel {
     pub(in crate::kvm) fn new() -> Result<Self, MicrovmError> {
-        // SAFETY: `socket` 仅向内核申请一个 AF_VSOCK stream fd，不直接操作 Rust 内存。
+        // SAFETY: `socket` only asks the kernel for an AF_VSOCK stream fd and does not
+        // directly operate on Rust memory.
         let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
         if fd < 0 {
             return Err(MicrovmError::Backend(format!(
@@ -215,8 +219,9 @@ impl VsockCommandChannel {
             MicrovmError::Backend("sockaddr_vm length cannot be converted to socklen_t".into())
         })?;
 
-        // SAFETY: `addr` 是当前栈上的 `sockaddr_vm`，布局与内核 ABI 对齐；
-        // `listener` 持有有效 fd，`bind` 仅同步读取地址结构体。
+        // SAFETY: `addr` is a `sockaddr_vm` on the current stack with a layout matching
+        // the kernel ABI. `listener` holds a valid fd, and `bind` only reads the address
+        // structure synchronously.
         let bind_result = unsafe {
             libc::bind(
                 listener.raw_fd(),
@@ -231,7 +236,8 @@ impl VsockCommandChannel {
             )));
         }
 
-        // SAFETY: `listener.raw_fd()` 是有效 socket fd，`listen` 不涉及 Rust 内存别名问题。
+        // SAFETY: `listener.raw_fd()` is a valid socket fd, and `listen` does not involve
+        // Rust memory aliasing.
         let listen_result = unsafe { libc::listen(listener.raw_fd(), LISTEN_BACKLOG) };
         if listen_result != 0 {
             return Err(MicrovmError::Backend(format!(
@@ -266,7 +272,8 @@ impl VsockCommandChannel {
         };
 
         loop {
-            // SAFETY: `poll_fd` 指向当前栈上单元素数组，长度为 1，`poll` 只会读写该结构体。
+            // SAFETY: `poll_fd` points to a one-element array on the current stack, and
+            // `poll` only reads and writes that structure.
             let ready = unsafe { libc::poll(ptr::from_mut(&mut poll_fd), 1, timeout_ms) };
             if ready == 0 {
                 return Err(MicrovmError::Io(Error::new(
@@ -287,7 +294,8 @@ impl VsockCommandChannel {
         }
 
         loop {
-            // SAFETY: listener fd 有效；当前不关心 peer 地址，因此传空指针即可。
+            // SAFETY: listener fd is valid. The peer address is not needed here, so null
+            // pointers are acceptable.
             let stream_fd =
                 unsafe { libc::accept(self.listener.raw_fd(), ptr::null_mut(), ptr::null_mut()) };
             if stream_fd >= 0 {

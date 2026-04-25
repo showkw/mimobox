@@ -91,7 +91,8 @@ const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 const READINESS_PROBE_TIMEOUT_SECS: u64 = 5;
 const VSOCK_ACCEPT_TIMEOUT_SECS: u64 = 10;
 const VSOCK_PROBE_TIMEOUT_MILLIS: u64 = 500;
-/// `guest-vsock` feature 默认关闭，关闭时 host 不暴露 virtio-vsock 设备。
+/// The `guest-vsock` feature is disabled by default. When disabled, the host does
+/// not expose a virtio-vsock device.
 #[cfg(feature = "guest-vsock")]
 const VSOCK_TRANSPORT_ENABLED: bool = true;
 #[cfg(not(feature = "guest-vsock"))]
@@ -99,15 +100,16 @@ const VSOCK_TRANSPORT_ENABLED: bool = false;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
 const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init";
 const VSOCK_CMDLINE_FRAGMENT: &str = " virtio_mmio.device=512@0xd0000000:5";
-/// vsock MMIO 设备在 guest 物理地址空间中的基地址
+/// Base address of the vsock MMIO device in the guest physical address space.
 const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
-/// vsock MMIO 设备地址空间大小
+/// Address space size of the vsock MMIO device.
 const VSOCK_MMIO_SIZE: u64 = 0x200;
-/// vsock MMIO 设备使用的中断 GSI 号
+/// Interrupt GSI used by the vsock MMIO device.
 const VSOCK_GSI: u32 = 5;
 const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
 
-/// 缓存冷启动阶段重复读取的内核与 rootfs 字节，避免每次创建 VM 都访问磁盘。
+/// Caches kernel and rootfs bytes reused during cold start, avoiding disk access for
+/// every VM creation.
 #[derive(Debug, Default)]
 struct AssetCache {
     kernel: Option<(PathBuf, u64, Arc<[u8]>)>,
@@ -172,14 +174,14 @@ impl AssetCache {
     }
 }
 
-/// 命令通道类型。
+/// Command channel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmTransport {
     Serial,
     Vsock,
 }
 
-/// KVM 后端生命周期状态。
+/// KVM backend lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmLifecycle {
     Created,
@@ -188,7 +190,7 @@ pub enum KvmLifecycle {
     Destroyed,
 }
 
-/// `KVM_RUN` 循环处理后的退出原因。
+/// Exit reason after the `KVM_RUN` loop is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmExitReason {
     Io,
@@ -231,7 +233,8 @@ impl VcpuRunWatchdog {
         install_watchdog_signal_handler();
 
         let immediate_exit_ptr = (&mut vcpu.get_kvm_run().immediate_exit as *mut u8) as usize;
-        // SAFETY: `pthread_self` 仅返回当前线程标识，不触碰 Rust 内存模型。
+        // SAFETY: `pthread_self` only returns the current thread identifier and does not
+        // touch the Rust memory model.
         let target_thread = unsafe { libc::pthread_self() };
         vcpu.set_kvm_immediate_exit(0);
 
@@ -242,9 +245,11 @@ impl VcpuRunWatchdog {
             if rx.recv_timeout(timeout).is_err() {
                 fired_clone.store(true, Ordering::SeqCst);
 
-                // SAFETY: `immediate_exit_ptr` 指向当前 vCPU 对应 `kvm_run` 映射中的
-                // `immediate_exit` 字段。watchdog 生命周期严格包裹一次 run loop，
-                // 在 `drop` 时会先通知线程停止再 join，确保该指针不会在映射失效后被访问。
+                // SAFETY: `immediate_exit_ptr` points to the `immediate_exit` field in
+                // the `kvm_run` mapping for the current vCPU. The watchdog lifetime
+                // strictly wraps one run loop, and `drop` notifies the thread to stop
+                // before joining it, ensuring the pointer is not accessed after the
+                // mapping becomes invalid.
                 unsafe {
                     std::ptr::write_volatile(immediate_exit_ptr as *mut u8, 1);
                     libc::pthread_kill(target_thread, WATCHDOG_SIGNAL);
@@ -275,7 +280,7 @@ impl Drop for VcpuRunWatchdog {
     }
 }
 
-/// Linux KVM 后端基础实现。
+/// Basic Linux KVM backend implementation.
 pub struct KvmBackend {
     base_config: SandboxConfig,
     config: MicrovmConfig,
@@ -295,9 +300,9 @@ pub struct KvmBackend {
     guest_booted: bool,
     guest_ready: bool,
     serial_device: SerialDevice,
-    /// vsock virtio MMIO 设备模拟器（None 表示 vsock 未启用）
+    /// vsock virtio MMIO device emulator (`None` means vsock is disabled).
     vsock_device: Option<VsockMmioDevice>,
-    /// host 侧 vsock 命令通道；仅在显式启用 guest-vsock 时建立。
+    /// Host-side vsock command channel, established only when guest-vsock is explicitly enabled.
     vsock_channel: Option<VsockCommandChannel>,
     serial_buffer: Vec<u8>,
     last_exit_reason: Option<KvmExitReason>,
@@ -324,7 +329,7 @@ impl KvmBackend {
         cmdline
     }
 
-    /// 执行 `KVM_CREATE_VM`，分配 guest memory 并创建 vCPU。
+    /// Executes `KVM_CREATE_VM`, allocates guest memory, and creates vCPUs.
     pub fn create_vm(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -340,7 +345,8 @@ impl KvmBackend {
         Self::create_vm_with_mode(base_config, config, BackendCreateMode::SnapshotRestore)
     }
 
-    /// 基于外部预创建 slot 的原始组件构造后端，不重复执行 VM 创建流程。
+    /// Builds a backend from raw components of an externally pre-created slot without
+    /// repeating the VM creation flow.
     pub(crate) fn from_slot_components(
         kvm: Kvm,
         vm_fd: VmFd,
@@ -392,14 +398,17 @@ impl KvmBackend {
         self.pending_restore_profile = Some(profile);
     }
 
-    /// 尝试为 guest memory 提示内核启用 2MB Huge Pages，以提升快照恢复吞吐量。
+    /// Hints the kernel to enable 2MB huge pages for guest memory to improve snapshot
+    /// restore throughput.
     pub(crate) fn try_enable_huge_pages(guest_memory: &GuestMemoryMmap) {
         for (region_index, region) in guest_memory.iter().enumerate() {
             let ptr = region.as_ptr().cast::<libc::c_void>();
             let len = region.size();
 
-            // SAFETY: `ptr` 和 `len` 直接来自 `GuestMemoryMmap` 当前持有的有效 mmap region，
-            // 调用期间映射仍然存活，`madvise` 只向内核提供内存使用建议，不会越界访问用户态内存。
+            // SAFETY: `ptr` and `len` come directly from a valid mmap region currently
+            // owned by `GuestMemoryMmap`. The mapping remains alive for the call, and
+            // `madvise` only provides usage hints to the kernel without accessing user
+            // memory out of bounds.
             let result = unsafe { libc::madvise(ptr, len, libc::MADV_HUGEPAGE) };
             if result != 0 {
                 let err = std::io::Error::last_os_error();
@@ -622,8 +631,9 @@ impl KvmBackend {
             flags: 0,
         };
 
-        // SAFETY: `userspace_addr` 来自 `GuestMemoryMmap` 当前持有的连续映射，
-        // `guest_memory` 生命周期覆盖整个 `KvmBackend`，且当前仅注册一个不重叠的 slot 0。
+        // SAFETY: `userspace_addr` comes from the contiguous mapping currently owned by
+        // `GuestMemoryMmap`. `guest_memory` lives for the entire `KvmBackend`, and this
+        // only registers one non-overlapping slot 0.
         unsafe {
             self.vm_fd
                 .set_user_memory_region(memory_region)
@@ -632,17 +642,17 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// 返回累积的串口输出。
+    /// Returns accumulated serial output.
     pub fn serial_output(&self) -> &[u8] {
         &self.serial_buffer
     }
 
-    /// 返回 guest 是否已经进入 READY 状态。
+    /// Returns whether the guest has reached the READY state.
     pub fn is_guest_ready(&self) -> bool {
         self.lifecycle == KvmLifecycle::Ready && self.guest_ready
     }
 
-    /// 通过串口 `PING\n`/`PONG\n` 探测 guest 命令循环是否仍可响应。
+    /// Probes through serial `PING\n`/`PONG\n` to check whether the guest command loop is responsive.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         self.ping_with_timeout(Duration::from_secs(READINESS_PROBE_TIMEOUT_SECS))
     }
@@ -683,7 +693,7 @@ impl KvmBackend {
         })
     }
 
-    /// 清理池化复用时不应泄漏到下一次借出的宿主侧状态。
+    /// Clears host-side state that must not leak into the next pooled checkout.
     pub fn clear_pool_artifacts(&mut self) {
         self.serial_buffer.clear();
         self.last_command_payload.clear();
@@ -805,7 +815,7 @@ impl KvmBackend {
         );
     }
 
-    /// 初始化 vCPU 启动寄存器并进入真实 `KVM_RUN` 循环。
+    /// Initializes vCPU boot registers and enters the real `KVM_RUN` loop.
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(
@@ -856,7 +866,7 @@ impl KvmBackend {
         Ok(exit_reason)
     }
 
-    /// 将内核镜像按 ELF `PT_LOAD` 段装载到 guest memory。
+    /// Loads the kernel image into guest memory according to ELF `PT_LOAD` segments.
     pub fn load_kernel(&mut self) -> Result<(), MicrovmError> {
         debug!(
             bytes = self.kernel_bytes.len(),
@@ -944,7 +954,7 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// 将 rootfs(initrd) 装载到 guest memory。
+    /// Loads the rootfs (initrd) into guest memory.
     fn load_initrd(&mut self) -> Result<(), MicrovmError> {
         let proposed = align_up(
             self.loaded_kernel
@@ -960,7 +970,7 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// 构造 zero page / `boot_params`，并写入命令行和 initrd 信息。
+    /// Builds the zero page / `boot_params` and writes command line and initrd metadata.
     fn write_boot_params(&mut self) -> Result<(), MicrovmError> {
         let mut cmdline = Self::default_cmdline().into_bytes();
         cmdline.push(0);
@@ -1054,7 +1064,7 @@ impl KvmBackend {
         self.write_guest_bytes(self.boot_params_addr, &zero_page)
     }
 
-    /// 将 rootfs 元信息写入 guest memory，便于测试验证 guest 布局。
+    /// Writes rootfs metadata into guest memory so tests can verify the guest layout.
     #[cfg(test)]
     fn load_rootfs_metadata(&mut self) -> Result<(), MicrovmError> {
         let metadata = format!(
@@ -1068,12 +1078,12 @@ impl KvmBackend {
         self.write_guest_bytes(ROOTFS_METADATA_ADDR, metadata.as_bytes())
     }
 
-    /// 显式启用 guest-vsock 时优先走 vsock，否则默认走串口协议。
+    /// Prefers vsock when guest-vsock is explicitly enabled; otherwise defaults to the serial protocol.
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         self.run_command_with_options(cmd, &GuestExecOptions::default())
     }
 
-    /// 允许按命令覆写环境变量与超时。
+    /// Allows per-command environment and timeout overrides.
     pub fn run_command_with_options(
         &mut self,
         cmd: &[String],
@@ -1112,7 +1122,8 @@ impl KvmBackend {
         } else {
             self.run_command_over_serial(cmd, &options.env, effective_timeout_secs)
         };
-        // watchdog 超时会把实例标记为 Destroyed，不能再被后续代码误写回 Ready。
+        // A watchdog timeout marks the instance as Destroyed, so later code must not
+        // accidentally write it back to Ready.
         if self.lifecycle != KvmLifecycle::Destroyed {
             self.lifecycle = KvmLifecycle::Ready;
         }
@@ -1123,7 +1134,8 @@ impl KvmBackend {
         result
     }
 
-    /// Phase B 流式执行固定走串口协议，避免与当前 vsock 命令通道语义冲突。
+    /// Phase B streaming execution always uses the serial protocol to avoid semantic
+    /// conflicts with the current vsock command channel.
     pub fn run_command_streaming(
         &mut self,
         cmd: &[String],
@@ -1282,7 +1294,8 @@ impl KvmBackend {
         match self.run_until_command_stream(stream_tx.clone(), timeout_secs)? {
             StreamCommandOutcome::Completed => {}
             StreamCommandOutcome::RetryBlocking => {
-                // 旧 guest 拒绝 EXECS 时可能不会消费完整 payload，回退前必须清空残留串口输入。
+                // Old guests may reject EXECS without consuming the full payload, so
+                // clear any leftover serial input before falling back.
                 self.serial_device.rx_fifo.clear();
                 let payload = encode_command_payload(cmd, env, timeout_secs)?;
                 self.serial_device.queue_input(&payload);
@@ -1414,7 +1427,7 @@ impl KvmBackend {
         self.run_until_fs_result()
     }
 
-    /// 导出快照所需的内存和 vCPU 状态。
+    /// Exports the memory and vCPU state required for a snapshot.
     pub fn snapshot_state(&self) -> Result<(Vec<u8>, Vec<u8>), MicrovmError> {
         let memory = self.dump_guest_memory()?;
         let vcpu_state = encode_runtime_state(self)?;
@@ -1443,7 +1456,7 @@ impl KvmBackend {
         .persist_to_files()
     }
 
-    /// 从快照恢复 guest memory 和 vCPU 状态。
+    /// Restores guest memory and vCPU state from a snapshot.
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
         let _span = tracing::info_span!("vm_restore").entered();
         let mut restore_profile = self.take_or_seed_restore_profile();
@@ -1463,7 +1476,7 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// 关闭 VM 并释放生命周期状态。
+    /// Shuts down the VM and releases lifecycle state.
     pub fn shutdown(&mut self) -> Result<(), MicrovmError> {
         self.last_command_payload.clear();
         self.serial_device = SerialDevice::default();
@@ -2002,7 +2015,7 @@ impl KvmBackend {
                             format!("mmio read addr={addr:#x} size={}", data.len()),
                         );
                     }
-                    // 检查是否命中 vsock MMIO 地址范围
+                    // Check whether the access hits the vsock MMIO address range.
                     if let Some(ref vsock) = *vsock_device {
                         let base = vsock.mmio_base();
                         let size = vsock.mmio_size();
@@ -2026,7 +2039,7 @@ impl KvmBackend {
                             format!("mmio write addr={addr:#x} size={}", data.len()),
                         );
                     }
-                    // 检查是否命中 vsock MMIO 地址范围
+                    // Check whether the access hits the vsock MMIO address range.
                     if let Some(vsock) = vsock_device {
                         let base = vsock.mmio_base();
                         let size = vsock.mmio_size();
@@ -2060,7 +2073,8 @@ impl KvmBackend {
                                         }
                                     }
                                     Err(err) => {
-                                        // vhost 激活失败不阻断 guest 运行，降级为 MMIO 数据面模拟
+                                        // A vhost activation failure must not block the guest;
+                                        // degrade to MMIO data-plane emulation.
                                         tracing::warn!(
                                             guest_cid = cid,
                                             error = %err,
@@ -2160,12 +2174,13 @@ impl KvmBackend {
         Ok(memory)
     }
 
-    /// 导出 vCPU 状态，同时 clone 共享 guest memory（零拷贝 fork 用）。
+    /// Exports vCPU state while cloning shared guest memory for zero-copy fork.
     ///
-    /// GuestMemoryMmap 内部使用 Arc，clone 只增加引用计数，不拷贝数据。
-    /// 两个 KVM VM fd 各自注册自己的 KVM_SET_USER_MEMORY_REGION 指向同一块
-    /// mmap 区域时，由于映射是 MAP_PRIVATE，内核对写入页自动执行 CoW，
-    /// 保证两个 VM 的内存修改互不影响。
+    /// `GuestMemoryMmap` uses `Arc` internally, so cloning only increments the
+    /// reference count without copying data. When the two KVM VM fds each register
+    /// their own `KVM_SET_USER_MEMORY_REGION` pointing at the same mmap region,
+    /// MAP_PRIVATE lets the kernel apply CoW to written pages, keeping memory changes
+    /// isolated between the two VMs.
     #[cfg(feature = "zerocopy-fork")]
     pub(crate) fn snapshot_for_fork(&self) -> Result<(GuestMemoryMmap, Vec<u8>), MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
@@ -2173,11 +2188,13 @@ impl KvmBackend {
         Ok((self.guest_memory.clone(), vcpu_state))
     }
 
-    /// 零拷贝 fork restore：用共享的 GuestMemoryMmap 注册到当前 VM 的 KVM slot。
+    /// Zero-copy fork restore: registers the shared `GuestMemoryMmap` in the current
+    /// VM's KVM slot.
     ///
-    /// 此方法替代 restore_from_file_zerocopy，跳过文件 mmap，直接复用已有的
-    /// mmap 区域。新 VM 的 vm_fd 会注册自己的 KVM_SET_USER_MEMORY_REGION，
-    /// userspace_addr 指向共享映射。由于 MAP_PRIVATE，内核自动 CoW 隔离。
+    /// This replaces `restore_from_file_zerocopy`, skips file mmap, and directly
+    /// reuses the existing mmap region. The new VM's `vm_fd` registers its own
+    /// `KVM_SET_USER_MEMORY_REGION`, with `userspace_addr` pointing to the shared
+    /// mapping. MAP_PRIVATE lets the kernel provide CoW isolation automatically.
     #[cfg(feature = "zerocopy-fork")]
     pub(crate) fn restore_from_shared_memory(
         &mut self,
@@ -2192,8 +2209,9 @@ impl KvmBackend {
             userspace_addr: 0,
             flags: 0,
         };
-        // SAFETY: KVM 约定 memory_size=0 表示注销指定 slot。slot 0 是本后端
-        // 唯一注册的 guest memory region，注销后立即注册等长新映射。
+        // SAFETY: KVM defines `memory_size = 0` as unregistering the specified slot.
+        // Slot 0 is the only guest memory region registered by this backend, and an
+        // equally sized new mapping is registered immediately after unregistering it.
         unsafe {
             self.vm_fd
                 .set_user_memory_region(old_region)
@@ -2213,9 +2231,10 @@ impl KvmBackend {
             userspace_addr: host_addr,
             flags: 0,
         };
-        // SAFETY: userspace_addr 来自共享的 GuestMemoryMmap 映射，映射长度与
-        // memory_size 一致。替换前已注销旧 slot 0，不存在重叠。MAP_PRIVATE
-        // 保证两个 VM 的 KVM 写入触发 CoW，互不影响。
+        // SAFETY: `userspace_addr` comes from the shared `GuestMemoryMmap` mapping,
+        // whose length matches `memory_size`. Old slot 0 was unregistered before
+        // replacement, so there is no overlap. MAP_PRIVATE ensures KVM writes from
+        // the two VMs trigger CoW and remain isolated.
         unsafe {
             self.vm_fd
                 .set_user_memory_region(new_region)
@@ -2226,7 +2245,7 @@ impl KvmBackend {
 
         let mut restore_profile = self.take_or_seed_restore_profile();
         let restore_memory_started_at = Instant::now();
-        // 共享内存直接挂载，无数据拷贝。
+        // Attach shared memory directly with no data copy.
         restore_profile.memory_state_write = restore_memory_started_at.elapsed();
 
         restore_profile.cpuid_config = self.prepare_restored_vcpus()?;
@@ -2255,8 +2274,8 @@ impl KvmBackend {
             .map_err(to_backend_error)
     }
 
-    /// 零拷贝 restore：直接将 snapshot 文件映射为 guest memory，
-    /// 替换当前 KVM memory region，跳过 write_slice 数据拷贝。
+    /// Zero-copy restore: maps the snapshot file directly as guest memory, replaces
+    /// the current KVM memory region, and skips `write_slice` data copying.
     #[cfg(feature = "zerocopy-fork")]
     pub(crate) fn restore_from_file_zerocopy(
         &mut self,
@@ -2286,8 +2305,9 @@ impl KvmBackend {
             userspace_addr: 0,
             flags: 0,
         };
-        // SAFETY: KVM 约定 memory_size=0 表示注销指定 slot。slot 0 是本后端唯一
-        // 注册的 guest memory region，注销后会立即注册等长的新映射。
+        // SAFETY: KVM defines `memory_size = 0` as unregistering the specified slot.
+        // Slot 0 is the only guest memory region registered by this backend, and an
+        // equally sized new mapping is registered immediately after unregistering it.
         unsafe {
             self.vm_fd
                 .set_user_memory_region(old_region)
@@ -2324,8 +2344,9 @@ impl KvmBackend {
             userspace_addr: host_addr,
             flags: 0,
         };
-        // SAFETY: `userspace_addr` 来自新的 `GuestMemoryMmap` 映射，映射长度已与
-        // `memory_size` 一致，且替换前已经注销旧的 slot 0，不存在重叠 region。
+        // SAFETY: `userspace_addr` comes from the new `GuestMemoryMmap` mapping, whose
+        // length matches `memory_size`. Old slot 0 was unregistered before replacement,
+        // so there is no overlapping region.
         unsafe {
             self.vm_fd
                 .set_user_memory_region(new_region)
@@ -2336,10 +2357,10 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// 从快照文件 mmap(MAP_PRIVATE) 恢复 guest memory。
+    /// Restores guest memory from a snapshot file using mmap(MAP_PRIVATE).
     ///
-    /// 相比 restore_guest_memory 接受 &[u8]，此方法直接 mmap 文件，
-    /// 避免了将整个快照文件读入 Vec<u8> 的内存分配开销。
+    /// Compared with `restore_guest_memory`, which accepts `&[u8]`, this method maps
+    /// the file directly and avoids allocating a `Vec<u8>` for the full snapshot file.
     #[cfg(all(target_os = "linux", not(feature = "zerocopy-fork")))]
     pub(crate) fn restore_from_file(&self, memory_path: &Path) -> Result<(), MicrovmError> {
         use std::fs::File;
@@ -2359,9 +2380,9 @@ impl KvmBackend {
             )));
         }
 
-        // SAFETY: mmap(MAP_PRIVATE) 将文件映射到进程地址空间。
-        // MAP_PRIVATE 保证写入不影响原文件。文件大小已验证匹配。
-        // 映射区域在显式 munmap 后释放。
+        // SAFETY: mmap(MAP_PRIVATE) maps the file into the process address space.
+        // MAP_PRIVATE ensures writes do not affect the original file. File size has
+        // been validated, and the mapping is released by the explicit munmap below.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -2377,7 +2398,8 @@ impl KvmBackend {
             return Err(MicrovmError::Io(std::io::Error::last_os_error()));
         }
 
-        // SAFETY: mmap 成功返回有效指针，且 file_size 已和映射长度一致。
+        // SAFETY: mmap succeeded and returned a valid pointer, and `file_size` matches
+        // the mapping length.
         let memory_slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, file_size) };
 
         let result = self
@@ -2385,7 +2407,7 @@ impl KvmBackend {
             .write_slice(memory_slice, GuestAddress(0))
             .map_err(to_backend_error);
 
-        // SAFETY: ptr 来自 mmap，file_size 为该映射的长度。
+        // SAFETY: `ptr` comes from mmap, and `file_size` is the length of that mapping.
         unsafe {
             libc::munmap(ptr, file_size);
         }
@@ -2579,8 +2601,9 @@ fn push_io_detail(
 
 fn install_watchdog_signal_handler() {
     WATCHDOG_SIGNAL_HANDLER_INIT.call_once(|| {
-        // SAFETY: 仅注册一个 no-op 信号处理器用于打断阻塞的 `KVM_RUN`。
-        // 处理器本身不访问共享状态，不执行分配，也不会与 Rust 栈对象交互。
+        // SAFETY: This only registers a no-op signal handler to interrupt a blocking
+        // `KVM_RUN`. The handler itself does not access shared state, allocate, or
+        // interact with Rust stack objects.
         unsafe {
             libc::signal(
                 WATCHDOG_SIGNAL,
@@ -2620,7 +2643,7 @@ mod tests {
         assert!(payload.starts_with(b"EXEC:"));
         assert!(payload.ends_with(b"\n"));
         let payload_str = String::from_utf8(payload).expect("payload 必须是合法 UTF-8");
-        // JSON 格式: {"cmd":"/bin/echo test"}
+        // JSON format: {"cmd":"/bin/echo test"}
         assert!(
             payload_str.contains(r#""cmd""#),
             "payload 必须包含 cmd 字段: {payload_str}"

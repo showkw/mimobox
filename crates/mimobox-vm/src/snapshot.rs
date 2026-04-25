@@ -26,7 +26,7 @@ pub(crate) struct SnapshotStateFile {
     pub(crate) vcpu_state_base64: String,
 }
 
-/// microVM 自描述快照。
+/// Self-describing microVM snapshot.
 #[derive(Clone)]
 pub struct MicrovmSnapshot {
     pub(crate) sandbox_config: SandboxConfig,
@@ -36,7 +36,7 @@ pub struct MicrovmSnapshot {
 }
 
 impl MicrovmSnapshot {
-    /// 创建快照对象。
+    /// Creates a snapshot object.
     pub fn new(
         sandbox_config: SandboxConfig,
         microvm_config: MicrovmConfig,
@@ -51,7 +51,7 @@ impl MicrovmSnapshot {
         }
     }
 
-    /// 序列化为 `magic + version + config + memory + vcpu state`。
+    /// Serializes into `magic + version + config + memory + vcpu state`.
     pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&SNAPSHOT_MAGIC);
@@ -63,7 +63,7 @@ impl MicrovmSnapshot {
         Ok(bytes)
     }
 
-    /// 从字节流恢复快照对象。
+    /// Restores a snapshot object from a byte stream.
     pub fn restore(data: &[u8]) -> Result<Self, MicrovmError> {
         let mut cursor = SnapshotCursor::new(data);
         let magic = cursor.read_exact(SNAPSHOT_MAGIC.len())?;
@@ -99,7 +99,7 @@ impl MicrovmSnapshot {
         })
     }
 
-    /// 将快照持久化到 `~/.mimobox/snapshots/<id>/memory.bin + state.json`。
+    /// Persists the snapshot to `~/.mimobox/snapshots/<id>/memory.bin + state.json`.
     pub(crate) fn persist_to_files(&self) -> Result<SandboxSnapshot, MicrovmError> {
         let snapshot_dir = create_snapshot_dir()?;
         let memory_path = snapshot_dir.join(SNAPSHOT_MEMORY_FILE_NAME);
@@ -129,7 +129,7 @@ impl MicrovmSnapshot {
         write_result
     }
 
-    /// 从文件化快照的 `memory.bin` 恢复完整快照对象。
+    /// Restores a full snapshot object from a file-backed snapshot `memory.bin`.
     pub fn from_memory_file(memory_path: &Path) -> Result<Self, MicrovmError> {
         let (sandbox_config, microvm_config, vcpu_state) =
             load_state_from_memory_file(memory_path)?;
@@ -210,7 +210,8 @@ fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
     Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
 }
 
-/// 读取文件化快照的配置与 vCPU 状态，不加载 guest memory 文件。
+/// Reads the configuration and vCPU state from a file-backed snapshot without loading
+/// the guest memory file.
 pub(crate) fn load_state_from_memory_file(
     memory_path: &Path,
 ) -> Result<(SandboxConfig, MicrovmConfig, Vec<u8>), MicrovmError> {

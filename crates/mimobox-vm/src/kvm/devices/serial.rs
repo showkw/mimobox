@@ -459,7 +459,7 @@ fn parse_output_payload(payload: &str) -> (OutputStream, &str) {
         return (OutputStream::Stderr, encoded);
     }
 
-    // 兼容旧 guest：无 fd 标记时默认视为 stdout。
+    // Backward compatibility for old guests: without an fd marker, default to stdout.
     (OutputStream::Stdout, payload)
 }
 

@@ -150,31 +150,31 @@ impl EmptyVmSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// snapshot restore 池配置。
+/// Snapshot restore pool configuration.
 pub struct RestorePoolConfig {
-    /// 初始化时预热的最小空壳 VM 数量。
+    /// Minimum number of empty VM shells to prewarm during initialization.
     pub min_size: usize,
-    /// 恢复池允许保留的最大空壳 VM 数量。
+    /// Maximum number of empty VM shells retained by the restore pool.
     pub max_size: usize,
 }
 
 #[derive(Debug, Error)]
-/// snapshot restore 池错误。
+/// Snapshot restore pool error.
 pub enum RestorePoolError {
-    /// 恢复池配置不合法。
+    /// Restore pool configuration is invalid.
     #[error("invalid restore pool config: min_size={min_size}, max_size={max_size}")]
     InvalidConfig {
-        /// 非法的最小空闲目标值。
+        /// Invalid minimum idle target.
         min_size: usize,
-        /// 非法的最大容量值。
+        /// Invalid maximum capacity.
         max_size: usize,
     },
 
-    /// 内部共享状态锁已中毒。
+    /// Internal shared state lock is poisoned.
     #[error("restore pool state lock poisoned")]
     StatePoisoned,
 
-    /// 底层 microVM 错误。
+    /// Underlying microVM error.
     #[error(transparent)]
     Microvm(#[from] MicrovmError),
 }
@@ -288,13 +288,13 @@ impl RestorePoolInner {
 }
 
 #[derive(Clone)]
-/// 基于快照恢复的 microVM 恢复池。
+/// microVM restore pool based on snapshot restoration.
 pub struct RestorePool {
     inner: Arc<RestorePoolInner>,
 }
 
 impl RestorePool {
-    /// 创建一个用于 snapshot restore 的空壳 VM 恢复池。
+    /// Creates a pool of empty VM shells for snapshot restore.
     pub fn new(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -325,7 +325,7 @@ impl RestorePool {
         Ok(pool)
     }
 
-    /// 使用内存页和 vCPU 状态恢复一个 microVM。
+    /// Restores a microVM from memory pages and vCPU state.
     pub fn restore(
         &self,
         memory: &[u8],
@@ -363,14 +363,14 @@ impl RestorePool {
         })
     }
 
-    /// 从完整快照字节恢复一个 microVM。
+    /// Restores a microVM from full snapshot bytes.
     pub fn restore_from_bytes(&self, data: &[u8]) -> Result<PooledRestoreVm, RestorePoolError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         let (_, _, memory, vcpu_state) = snapshot.into_parts();
         self.restore(memory.as_slice(), vcpu_state.as_slice())
     }
 
-    /// 从 `SandboxSnapshot` 恢复一个 microVM。
+    /// Restores a microVM from a `SandboxSnapshot`.
     pub fn restore_snapshot(
         &self,
         snapshot: &SandboxSnapshot,
@@ -432,7 +432,7 @@ impl RestorePool {
         })
     }
 
-    /// 返回当前恢复池中的空闲槽位数量。
+    /// Returns the current number of idle slots in the restore pool.
     pub fn idle_count(&self) -> usize {
         match self.inner.state.lock() {
             Ok(state) => state.idle.len(),
@@ -443,25 +443,25 @@ impl RestorePool {
         }
     }
 
-    /// 将恢复池预热到至少 `target` 个空壳 VM。
+    /// Warms the restore pool to at least `target` empty VM shells.
     pub fn warm(&self, target: usize) -> Result<(), RestorePoolError> {
         self.inner.warm(target)
     }
 }
 
-/// 从 `RestorePool` 借出的恢复态 microVM 句柄。
+/// Restored microVM handle borrowed from a `RestorePool`.
 pub struct PooledRestoreVm {
     backend: Option<KvmBackend>,
     pool: Arc<RestorePoolInner>,
 }
 
 impl PooledRestoreVm {
-    /// 执行命令并等待完成。
+    /// Executes a command and waits for completion.
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// 执行命令并应用命令级选项。
+    /// Executes a command with command-level options.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -475,7 +475,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 以流式事件形式执行命令。
+    /// Executes a command as a stream of events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -483,7 +483,7 @@ impl PooledRestoreVm {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// 以流式事件形式执行命令，并应用命令级选项。
+    /// Executes a command as a stream of events with command-level options.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -497,7 +497,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 读取 guest 内文件内容。
+    /// Reads file contents from the guest.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.read_file(path),
@@ -507,7 +507,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 向 guest 内写入文件内容。
+    /// Writes file contents into the guest.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
@@ -517,7 +517,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 执行一次 PING/PONG readiness probe 并返回往返耗时。
+    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.ping(),
@@ -527,7 +527,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 通过宿主受控 HTTP 代理发起请求。
+    /// Sends a request through the host-controlled HTTP proxy.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.http_request(request),
@@ -537,7 +537,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// 导出当前恢复态 VM 的文件化快照。
+    /// Exports a file-backed snapshot of the current restored VM.
     pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             Some(backend) => backend.snapshot_to_file(),
@@ -575,8 +575,9 @@ fn register_guest_memory(
         flags: 0,
     };
 
-    // SAFETY: `userspace_addr` 直接来自当前 `GuestMemoryMmap` 持有的有效 mmap，
-    // 生命周期覆盖整个空壳 slot，且这里只注册唯一的 slot 0，不会与其他 region 重叠。
+    // SAFETY: `userspace_addr` comes directly from a valid mmap owned by the current
+    // `GuestMemoryMmap`. Its lifetime covers the entire empty slot, and this only
+    // registers slot 0, so it cannot overlap with other regions.
     unsafe {
         vm_fd
             .set_user_memory_region(memory_region)
