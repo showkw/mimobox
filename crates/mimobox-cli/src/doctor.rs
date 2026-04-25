@@ -1026,7 +1026,7 @@ fn permission_string_from_mode(mode: u32) -> String {
 fn read_kvm_api_version(file: &File) -> io::Result<i32> {
     // SAFETY: `file` is a valid `/dev/kvm` fd held by the current process. `KVM_GET_API_VERSION`
     // does not read or write user-space buffers and only returns an integer version.
-    let version = unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_API_VERSION_IOCTL) };
+    let version = unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_API_VERSION_IOCTL as _) };
     if version < 0 {
         return Err(io::Error::last_os_error());
     }
