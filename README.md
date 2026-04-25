@@ -33,6 +33,19 @@ A cross-platform Agent Sandbox implemented in Rust, providing a secure isolated 
 | Warm pool | Pool of pre-created sandbox instances (OS-level / microVM-level) for microsecond-level acquisition and reuse |
 | Smart routing | Backend selection that is automatic based on command type, isolation preference, and trust level |
 
+## Quick Start (60 Seconds)
+
+No installation required — just clone and run:
+
+```bash
+git clone https://github.com/user/mimobox.git && cd mimobox
+bash scripts/quickstart-demo.sh
+```
+
+This builds the CLI and executes your first sandboxed command. Works on both macOS and Linux.
+
+> **Level 2 (5 min):** See [SDK examples](#quick-start-30-seconds) for Rust and Python API usage.
+
 ## Quick Start (30 Seconds)
 
 ### Rust

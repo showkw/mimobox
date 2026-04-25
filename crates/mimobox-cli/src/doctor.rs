@@ -86,7 +86,10 @@ pub fn run_setup() -> i32 {
         let result = CheckResult {
             name: "mimobox directory".to_string(),
             status: CheckStatus::Fail,
-            message: format!("failed to create directory: {} ({error})", app_home.display()),
+            message: format!(
+                "failed to create directory: {} ({error})",
+                app_home.display()
+            ),
             hint: Some("check HOME directory permissions and retry".to_string()),
         };
         let _ = render_check(&mut handle, &result);
@@ -97,7 +100,10 @@ pub fn run_setup() -> i32 {
         let result = CheckResult {
             name: "assets directory".to_string(),
             status: CheckStatus::Fail,
-            message: format!("failed to create directory: {} ({error})", assets_dir.display()),
+            message: format!(
+                "failed to create directory: {} ({error})",
+                assets_dir.display()
+            ),
             hint: Some("check HOME directory permissions and retry".to_string()),
         };
         let _ = render_check(&mut handle, &result);
@@ -129,7 +135,10 @@ pub fn run_setup() -> i32 {
                 let _ = writeln!(&mut handle, "  Pre-built assets downloaded");
             }
             Ok(false) => {
-                let _ = writeln!(&mut handle, "  Pre-built assets unavailable, falling back to local build...");
+                let _ = writeln!(
+                    &mut handle,
+                    "  Pre-built assets unavailable, falling back to local build..."
+                );
                 if let Err(exit_code) = build_missing_vm_assets(&mut handle, &vm_asset_paths) {
                     return exit_code;
                 }
@@ -164,7 +173,9 @@ pub fn run_setup() -> i32 {
             name: "VM asset bootstrap".to_string(),
             status: CheckStatus::Skip,
             message: "VM feature not enabled in current build (Cargo feature: kvm)".to_string(),
-            hint: Some("For microVM support, rebuild mimobox-cli with `--features kvm`".to_string()),
+            hint: Some(
+                "For microVM support, rebuild mimobox-cli with `--features kvm`".to_string(),
+            ),
         };
         let _ = render_check(&mut handle, &result);
     } else {
@@ -280,7 +291,8 @@ impl CheckStatus {
 fn check_os() -> CheckResult {
     let os_name =
         run_command_output("uname", &["-s"]).unwrap_or_else(|| env::consts::OS.to_string());
-    let version = run_command_output("uname", &["-r"]).unwrap_or_else(|| "unknown version".to_string());
+    let version =
+        run_command_output("uname", &["-r"]).unwrap_or_else(|| "unknown version".to_string());
     let arch =
         run_command_output("uname", &["-m"]).unwrap_or_else(|| env::consts::ARCH.to_string());
 
@@ -330,7 +342,9 @@ fn check_kvm() -> CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
                 message: format!("Failed to read /dev/kvm: {error}"),
-                hint: Some("Check that /dev/kvm exists and the current user has access".to_string()),
+                hint: Some(
+                    "Check that /dev/kvm exists and the current user has access".to_string(),
+                ),
             };
         }
     };
@@ -344,8 +358,13 @@ fn check_kvm() -> CheckResult {
             return CheckResult {
                 name: "KVM".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("/dev/kvm exists but current user lacks read/write permissions ({permissions})"),
-                hint: Some("Add the current user to the kvm group or adjust /dev/kvm permissions".to_string()),
+                message: format!(
+                    "/dev/kvm exists but current user lacks read/write permissions ({permissions})"
+                ),
+                hint: Some(
+                    "Add the current user to the kvm group or adjust /dev/kvm permissions"
+                        .to_string(),
+                ),
             };
         }
         Err(error) => {
@@ -368,8 +387,13 @@ fn check_kvm() -> CheckResult {
         Err(error) => CheckResult {
             name: "KVM".to_string(),
             status: CheckStatus::Warn,
-            message: format!("/dev/kvm accessible ({permissions}) but failed to read API version: {error}"),
-            hint: Some("Ensure the kernel KVM interface is available or reload the KVM module on the host".to_string()),
+            message: format!(
+                "/dev/kvm accessible ({permissions}) but failed to read API version: {error}"
+            ),
+            hint: Some(
+                "Ensure the kernel KVM interface is available or reload the KVM module on the host"
+                    .to_string(),
+            ),
         },
     }
 }
@@ -449,7 +473,10 @@ fn check_memory() -> CheckResult {
         Ok(memory_bytes) if memory_bytes >= MIN_VM_MEMORY_BYTES => CheckResult {
             name: "Memory".to_string(),
             status: CheckStatus::Ok,
-            message: format!("{} available (4GB+ recommended for VM)", human_bytes(memory_bytes)),
+            message: format!(
+                "{} available (4GB+ recommended for VM)",
+                human_bytes(memory_bytes)
+            ),
             hint: None,
         },
         Ok(memory_bytes) => CheckResult {
@@ -549,7 +576,9 @@ fn check_huge_pages() -> CheckResult {
                 name: "Huge Pages".to_string(),
                 status: CheckStatus::Warn,
                 message: format!("Failed to read Transparent Huge Pages status: {error}"),
-                hint: Some("Check `/sys/kernel/mm/transparent_hugepage/enabled` manually".to_string()),
+                hint: Some(
+                    "Check `/sys/kernel/mm/transparent_hugepage/enabled` manually".to_string(),
+                ),
             },
         };
     }
@@ -708,7 +737,9 @@ fn check_toolchain() -> CheckResult {
             name: "Rust toolchain".to_string(),
             status: CheckStatus::Fail,
             message: "rustc/cargo not found".to_string(),
-            hint: Some("Run `scripts/setup.sh` to install the Rust development environment".to_string()),
+            hint: Some(
+                "Run `scripts/setup.sh` to install the Rust development environment".to_string(),
+            ),
         },
     }
 }
@@ -880,7 +911,8 @@ fn build_missing_rootfs(writer: &mut impl Write, output_path: &Path) -> Result<(
             .to_string()
     })?;
 
-    writeln!(writer, "  rootfs (rootfs.cpio.gz): building...").map_err(|error| error.to_string())?;
+    writeln!(writer, "  rootfs (rootfs.cpio.gz): building...")
+        .map_err(|error| error.to_string())?;
     info!(script = %script.display(), output = %output_path.display(), "building rootfs asset");
     run_script_with_env(&script, &[], &[("OUTPUT", output_path.as_os_str())])?;
     writeln!(writer, "  rootfs (rootfs.cpio.gz): ✅").map_err(|error| error.to_string())
@@ -1017,7 +1049,10 @@ fn detect_memory_bytes() -> Result<u64, String> {
         .map_err(|error| format!("sysctl execution failed: {error}"))?;
 
     if !output.status.success() {
-        return Err(format!("sysctl returned unexpected status: {}", output.status));
+        return Err(format!(
+            "sysctl returned unexpected status: {}",
+            output.status
+        ));
     }
 
     let value = String::from_utf8_lossy(&output.stdout)
@@ -1123,7 +1158,8 @@ mod tests {
     #[test]
     fn resolve_app_home_dir_uses_hidden_directory() {
         let home_dir = PathBuf::from("/tmp/demo-home");
-        let app_home = resolve_app_home_dir(Some(home_dir.clone())).expect("should generate default app directory");
+        let app_home = resolve_app_home_dir(Some(home_dir.clone()))
+            .expect("should generate default app directory");
 
         assert_eq!(app_home, home_dir.join(".mimobox"));
     }
@@ -1159,7 +1195,8 @@ mod tests {
     #[test]
     fn parse_linux_memory_bytes_prefers_memavailable() {
         let meminfo = "MemTotal:       32768000 kB\nMemAvailable:   16384000 kB\n";
-        let bytes = parse_linux_memory_bytes(meminfo).expect("should successfully parse MemAvailable");
+        let bytes =
+            parse_linux_memory_bytes(meminfo).expect("should successfully parse MemAvailable");
 
         assert_eq!(bytes, 16_384_000 * 1024);
     }
