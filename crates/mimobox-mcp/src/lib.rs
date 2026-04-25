@@ -31,6 +31,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tokio::task::JoinError;
 use tracing::error;
 
 #[derive(Clone)]
@@ -220,17 +221,54 @@ impl MimoboxServer {
     pub async fn cleanup_all(&self) {
         let mut sandboxes = self.sandboxes.lock().await;
         let count = sandboxes.len();
-        for (id, managed) in sandboxes.drain() {
+        let drained = sandboxes.drain().collect::<Vec<_>>();
+        drop(sandboxes);
+
+        for (id, managed) in drained {
             tracing::debug!(sandbox_id = id, "Signal cleanup: destroying sandbox");
-            if let Err(err) = managed.sandbox.destroy() {
-                tracing::warn!(
-                    sandbox_id = id,
-                    error = %format_sdk_error(err),
-                    "Failed to destroy sandbox during signal cleanup"
-                );
+            match tokio::task::spawn_blocking(move || managed.sandbox.destroy()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        sandbox_id = id,
+                        error = %format_sdk_error(err),
+                        "Failed to destroy sandbox during signal cleanup"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        sandbox_id = id,
+                        error = %format_join_error(err),
+                        "Sandbox cleanup task failed during signal cleanup"
+                    );
+                }
             }
         }
         tracing::info!(count, "Signal cleanup complete");
+    }
+
+    async fn with_managed_sandbox<T, F>(&self, sandbox_id: u64, operation: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Sandbox) -> Result<T, SdkError> + Send + 'static,
+    {
+        let mut sandboxes = self.sandboxes.lock().await;
+        let mut managed = sandboxes
+            .remove(&sandbox_id)
+            .ok_or_else(|| sandbox_not_found(sandbox_id))?;
+        drop(sandboxes);
+
+        let (managed, result) = tokio::task::spawn_blocking(move || {
+            let result = operation(&mut managed.sandbox);
+            (managed, result)
+        })
+        .await
+        .map_err(format_join_error)?;
+
+        let mut sandboxes = self.sandboxes.lock().await;
+        sandboxes.insert(sandbox_id, managed);
+
+        result.map_err(format_sdk_error)
     }
 }
 
@@ -249,9 +287,14 @@ impl MimoboxServer {
     ) -> Result<Json<CreateSandboxResponse>, Json<ErrorResponse>> {
         let isolation =
             parse_isolation_level(request.isolation_level.as_deref()).map_err(to_error)?;
-        let sandbox =
-            create_sandbox_with_options(isolation, request.timeout_ms, request.memory_limit_mb)
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+        let timeout_ms = request.timeout_ms;
+        let memory_limit_mb = request.memory_limit_mb;
+        let sandbox = tokio::task::spawn_blocking(move || {
+            create_sandbox_with_options(isolation, timeout_ms, memory_limit_mb)
+        })
+        .await
+        .map_err(|error| to_error(format_join_error(error)))?
+        .map_err(|error| to_error(format_sdk_error(error)))?;
 
         let mut next_id = self.next_id.lock().await;
         let sandbox_id = *next_id;
@@ -285,12 +328,22 @@ impl MimoboxServer {
             .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
         drop(sandboxes);
 
-        if let Err(err) = managed.sandbox.destroy() {
-            error!(
-                sandbox_id = request.sandbox_id,
-                error = %format_sdk_error(err),
-                "Sandbox destroy failed, instance removed from active list"
-            );
+        match tokio::task::spawn_blocking(move || managed.sandbox.destroy()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                error!(
+                    sandbox_id = request.sandbox_id,
+                    error = %format_sdk_error(err),
+                    "Sandbox destroy failed, instance removed from active list"
+                );
+            }
+            Err(err) => {
+                error!(
+                    sandbox_id = request.sandbox_id,
+                    error = %format_join_error(err),
+                    "Sandbox destroy task failed, instance removed from active list"
+                );
+            }
         }
 
         Ok(Json(DestroySandboxResponse {
@@ -360,19 +413,19 @@ impl MimoboxServer {
     ) -> Result<Json<ReadFileResponse>, Json<ErrorResponse>> {
         #[cfg(feature = "vm")]
         {
-            let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&request.sandbox_id)
-                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
-            let content = managed
-                .sandbox
-                .read_file(&request.path)
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+            let path = request.path;
+            let content = self
+                .with_managed_sandbox(request.sandbox_id, {
+                    let path = path.clone();
+                    move |sandbox| sandbox.read_file(&path)
+                })
+                .await
+                .map_err(to_error)?;
             let size_bytes = content.len();
 
             Ok(Json(ReadFileResponse {
                 sandbox_id: request.sandbox_id,
-                path: request.path,
+                path,
                 content: STANDARD.encode(&content),
                 size_bytes,
             }))
@@ -396,18 +449,17 @@ impl MimoboxServer {
                 .decode(&request.content)
                 .map_err(|err| to_error(format!("content is not valid base64: {err}")))?;
             let size_bytes = data.len();
-            let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&request.sandbox_id)
-                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
-            managed
-                .sandbox
-                .write_file(&request.path, &data)
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+            let path = request.path;
+            self.with_managed_sandbox(request.sandbox_id, {
+                let path = path.clone();
+                move |sandbox| sandbox.write_file(&path, &data)
+            })
+            .await
+            .map_err(to_error)?;
 
             Ok(Json(WriteFileResponse {
                 sandbox_id: request.sandbox_id,
-                path: request.path,
+                path,
                 size_bytes,
                 written: true,
             }))
@@ -427,14 +479,10 @@ impl MimoboxServer {
     ) -> Result<Json<SnapshotResponse>, Json<ErrorResponse>> {
         #[cfg(feature = "vm")]
         {
-            let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&request.sandbox_id)
-                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
-            let snapshot = managed
-                .sandbox
-                .snapshot()
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+            let snapshot = self
+                .with_managed_sandbox(request.sandbox_id, |sandbox| sandbox.snapshot())
+                .await
+                .map_err(to_error)?;
 
             Ok(Json(SnapshotResponse {
                 sandbox_id: request.sandbox_id,
@@ -464,7 +512,14 @@ impl MimoboxServer {
                 .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
             drop(sandboxes);
 
-            let forked = match managed.sandbox.fork() {
+            let (managed, fork_result) = tokio::task::spawn_blocking(move || {
+                let fork_result = managed.sandbox.fork();
+                (managed, fork_result)
+            })
+            .await
+            .map_err(|error| to_error(format_join_error(error)))?;
+
+            let forked = match fork_result {
                 Ok(forked) => forked,
                 Err(error) => {
                     let mut sandboxes = self.sandboxes.lock().await;
@@ -516,14 +571,13 @@ impl MimoboxServer {
                 return Err(to_error("method only supports GET and POST".to_string()));
             }
 
-            let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&request.sandbox_id)
-                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
-            let response = managed
-                .sandbox
-                .http_request(&method, &request.url, HashMap::new(), None)
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+            let url = request.url;
+            let response = self
+                .with_managed_sandbox(request.sandbox_id, move |sandbox| {
+                    sandbox.http_request(&method, &url, HashMap::new(), None)
+                })
+                .await
+                .map_err(to_error)?;
 
             Ok(Json(McpHttpResponse {
                 sandbox_id: request.sandbox_id,
@@ -547,20 +601,24 @@ impl MimoboxServer {
         timeout_ms: Option<u64>,
     ) -> Result<ExecuteResult, String> {
         if let Some(sandbox_id) = sandbox_id {
-            let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&sandbox_id)
-                .ok_or_else(|| sandbox_not_found(sandbox_id))?;
-            return managed.sandbox.execute(command).map_err(format_sdk_error);
+            let command = command.to_string();
+            return self
+                .with_managed_sandbox(sandbox_id, move |sandbox| sandbox.execute(&command))
+                .await;
         }
 
-        let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)
-            .map_err(format_sdk_error)?;
-        let result = sandbox.execute(command).map_err(format_sdk_error);
-        if let Err(err) = sandbox.destroy() {
-            error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
-        }
-        result
+        let command = command.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
+            let result = sandbox.execute(&command);
+            if let Err(err) = sandbox.destroy() {
+                error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
+            }
+            result
+        })
+        .await
+        .map_err(format_join_error)?
+        .map_err(format_sdk_error)
     }
 }
 
@@ -671,6 +729,10 @@ fn format_sdk_error(error: SdkError) -> String {
         SdkError::Io(error) => format!("I/O error: {error}"),
         error => format!("SDK error: {error}"),
     }
+}
+
+fn format_join_error(error: JoinError) -> String {
+    format!("blocking task failed: {error}")
 }
 
 fn to_error(error: impl Into<String>) -> Json<ErrorResponse> {
@@ -844,7 +906,10 @@ mod tests {
             Some("increase timeout".to_string()),
         );
         let formatted = format_sdk_error(err);
-        assert!(formatted.contains("[command_timeout]"), "should contain error code");
+        assert!(
+            formatted.contains("[command_timeout]"),
+            "should contain error code"
+        );
         assert!(formatted.contains("timed out"), "should contain message");
         assert!(
             formatted.contains("suggestion: increase timeout"),
@@ -951,7 +1016,10 @@ mod tests {
     fn test_unix_timestamp_ms_reasonable() {
         let ts = unix_timestamp_ms();
         // 2023-01-01 00:00:00 UTC ≈ 1_672_531_200_000
-        assert!(ts > 1_672_531_200_000, "Timestamp should be after 2023, got: {ts}");
+        assert!(
+            ts > 1_672_531_200_000,
+            "Timestamp should be after 2023, got: {ts}"
+        );
         // Should not exceed the future upper bound (2100 ≈ 4_102_444_800_000)
         assert!(ts < 4_102_444_800_000, "Timestamp should not exceed 2100");
     }
@@ -960,7 +1028,10 @@ mod tests {
     fn test_unix_timestamp_ms_monotonic() {
         let t1 = unix_timestamp_ms();
         let t2 = unix_timestamp_ms();
-        assert!(t2 >= t1, "Consecutive calls should be monotonically non-decreasing");
+        assert!(
+            t2 >= t1,
+            "Consecutive calls should be monotonically non-decreasing"
+        );
     }
 
     // ── to_error helper ────────────────────────────────────────────────
