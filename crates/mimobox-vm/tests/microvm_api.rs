@@ -48,19 +48,32 @@ fn snapshot_round_trip_restores_same_bytes() {
 
 #[test]
 fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
-    let config = MicrovmConfig::default();
-    let result = MicrovmSandbox::new(config);
-
+    // 非 Linux 或未启用 KVM：使用 default config，预期返回 Unsupported
     #[cfg(any(not(target_os = "linux"), not(feature = "kvm")))]
-    assert!(matches!(result, Err(err) if err.to_string().contains("not supported")));
+    {
+        let config = MicrovmConfig::default();
+        let result = MicrovmSandbox::new(config);
+        assert!(matches!(result, Err(err) if err.to_string().contains("not supported")));
+    }
 
+    // Linux + KVM：构造显式无效配置（vcpu_count=0），确保 validate() 拒绝
+    // 不使用 default()，因为 hermes 开发机上 default() 会解析到真实 vm 资产路径，
+    // 导致 validate() 通过后在 KvmBackend::create_vm() 阶段因权限失败，错误消息不匹配断言
     #[cfg(all(target_os = "linux", feature = "kvm"))]
-    assert!(matches!(
-        result,
-        Err(err)
-            if err.to_string().contains("kernel_path")
-                || err.to_string().contains("rootfs_path")
-                || err.to_string().contains("vcpu_count")
-                || err.to_string().contains("不存在")
-    ));
+    {
+        let bad_config = MicrovmConfig {
+            vcpu_count: 0,
+            memory_mb: 64,
+            cpu_quota_us: None,
+            kernel_path: PathBuf::from("/nonexistent/vmlinux"),
+            rootfs_path: PathBuf::from("/nonexistent/rootfs.cpio.gz"),
+        };
+        let result = MicrovmSandbox::new(bad_config);
+        assert!(result.is_err(), "invalid config (vcpu_count=0) must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("vcpu_count") || msg.contains("kernel_path") || msg.contains("rootfs_path"),
+            "unexpected error message: {msg}"
+        );
+    }
 }
