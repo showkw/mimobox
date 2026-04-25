@@ -315,52 +315,52 @@ enum RunExecutionMode {
 
 #[derive(Debug, Error)]
 enum CliError {
-    #[error("参数解析失败: {0}")]
+    #[error("argument parsing failed: {0}")]
     Args(String),
 
-    #[error("命令字符串解析失败: {0}")]
+    #[error("command string parsing failed: {0}")]
     CommandParse(String),
 
-    #[error("命令不能为空")]
+    #[error("command must not be empty")]
     EmptyCommand,
 
-    #[error("日志初始化失败: {0}")]
+    #[error("logging initialization failed: {0}")]
     Logging(String),
 
-    #[error("JSON 输出失败: {0}")]
+    #[error("JSON output failed: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("IO 错误: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("SDK 执行失败: {0}")]
+    #[error("SDK execution failed: {0}")]
     Sdk(String),
 
-    #[error("沙箱执行失败: {0}")]
+    #[error("sandbox execution failed: {0}")]
     Sandbox(#[from] SandboxError),
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    #[error("当前平台不支持 OS 后端")]
+    #[error("OS backend not supported on current platform")]
     UnsupportedOsBackend,
 
-    #[error("当前构建未启用 Wasm 后端，请使用 `--features wasm` 重新编译")]
+    #[error("Wasm backend not enabled in current build; rebuild with `--features wasm`")]
     #[allow(dead_code)]
     WasmFeatureDisabled,
 
     #[error(
-        "当前构建未启用 KVM 后端，或当前平台不支持，请在 Linux 上使用 `--features kvm` 重新编译"
+        "KVM backend not enabled or platform unsupported; rebuild on Linux with `--features kvm`"
     )]
     #[allow(dead_code)]
     KvmFeatureDisabled,
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    #[error("当前平台不支持预热池基准")]
+    #[error("warm pool benchmark not supported on current platform")]
     BenchUnsupported,
 
-    #[error("基准执行失败: {0}")]
+    #[error("benchmark execution failed: {0}")]
     Benchmark(String),
 
-    #[error("运行时发生未预期 panic: {0}")]
+    #[error("unexpected runtime panic: {0}")]
     Panic(String),
 }
 
@@ -626,7 +626,7 @@ fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
     {
         let _ = args;
         return Err(CliError::Sdk(
-            "shell 子命令当前仅支持 Unix 终端环境".to_string(),
+            "shell subcommand only supports Unix terminal environments".to_string(),
         ));
     }
 
@@ -1047,7 +1047,7 @@ fn build_snapshot_sdk_config(
 
     if let Some(memory) = args.memory {
         config.vm_memory_mb = u32::try_from(memory)
-            .map_err(|_| CliError::Args(format!("snapshot memory 超出 u32 范围: {memory}")))?;
+            .map_err(|_| CliError::Args(format!("snapshot memory exceeds u32 range: {memory}")))?;
     }
 
     if let Some(kernel) = &args.kernel {
@@ -1096,7 +1096,7 @@ fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfi
 
 fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
     let argv = shlex::split(command)
-        .ok_or_else(|| CliError::CommandParse("命令字符串包含未闭合引号".to_string()))?;
+        .ok_or_else(|| CliError::CommandParse("command string contains unclosed quotes".to_string()))?;
     if argv.is_empty() {
         return Err(CliError::EmptyCommand);
     }
@@ -1133,7 +1133,7 @@ fn handle_run_via_sdk(
                 .active_isolation()
                 .and_then(backend_from_sdk_isolation)
                 .ok_or_else(|| {
-                    let error = CliError::Sdk("SDK 执行成功但未记录实际后端".to_string());
+                    let error = CliError::Sdk("SDK execution succeeded but actual backend not recorded".to_string());
                     error!(
                         code = error.code(),
                         message = %error,
@@ -1307,7 +1307,7 @@ fn execute_kvm_backend(
     let memory_limit_mb = config.memory_limit_mb.unwrap_or(DEFAULT_MEMORY_MB);
     let memory_mb = u32::try_from(memory_limit_mb).map_err(|_| {
         CliError::Sandbox(SandboxError::ExecutionFailed(format!(
-            "KVM guest memory 超出 u32 范围: {memory_limit_mb} MB"
+            "KVM guest memory exceeds u32 range: {memory_limit_mb} MB"
         )))
     })?;
 
@@ -2025,8 +2025,8 @@ mod tests {
             .expect_err("SDK 配置错误应映射为 CLI 错误");
 
         assert_eq!(error.code(), "sdk_error");
-        assert!(error.to_string().contains("config error") || error.to_string().contains("配置错误"));
-        assert!(error.to_string().contains("shell 风格引号不匹配"));
+        assert!(error.to_string().contains("config error"));
+        assert!(error.to_string().contains("mismatched shell-style quotes"));
     }
 
     #[test]
