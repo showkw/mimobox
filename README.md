@@ -12,6 +12,8 @@
 
 ## Quick Start
 
+> **Platform notes**: macOS supports OS-level and Wasm sandboxes only. microVM features require Linux with KVM (`/dev/kvm`). The MCP server binary is currently available for Linux only.
+
 ### Install
 
 ```bash
@@ -19,11 +21,13 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 ```
 
 ### Python
-> `pip install mimobox` coming soon. Build from source for now:
+> Python wheels are coming to PyPI. For now, build from source (requires Rust toolchain):
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
-pip install target/wheels/*.whl  # build wheel first
+cargo build --release -p mimobox-python
+# wheel will be at target/wheels/
+pip install target/wheels/*.whl
 ```
 
 ### Rust
