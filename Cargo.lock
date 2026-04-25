@@ -1729,7 +1729,6 @@ name = "mimobox-python"
 version = "0.1.0"
 dependencies = [
  "mimobox-sdk",
- "mimobox-vm",
  "pyo3",
  "pyo3-build-config",
 ]
