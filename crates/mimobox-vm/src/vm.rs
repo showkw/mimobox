@@ -145,6 +145,8 @@ pub struct GuestExecOptions {
     pub env: HashMap<String, String>,
     /// Timeout that only applies to this command.
     pub timeout: Option<Duration>,
+    /// Working directory that only applies to this command.
+    pub cwd: Option<String>,
 }
 
 /// Guest streaming execution event.
@@ -736,7 +738,14 @@ impl MicrovmSandbox {
         cmd: &[String],
         env: HashMap<String, String>,
     ) -> Result<GuestCommandResult, MicrovmError> {
-        self.execute_with_options(cmd, GuestExecOptions { env, timeout: None })
+        self.execute_with_options(
+            cmd,
+            GuestExecOptions {
+                env,
+                timeout: None,
+                cwd: None,
+            },
+        )
     }
 
     /// Executes a command with a command-level timeout override.
@@ -750,6 +759,7 @@ impl MicrovmSandbox {
             GuestExecOptions {
                 env: HashMap::new(),
                 timeout: Some(timeout),
+                cwd: None,
             },
         )
     }
