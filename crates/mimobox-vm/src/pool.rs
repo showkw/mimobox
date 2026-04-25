@@ -365,6 +365,7 @@ impl VmPool {
         let backend_prepare_started_at = Instant::now();
         #[cfg(feature = "boot-profile")]
         let reused_hit = reused.is_some();
+        #[allow(clippy::question_mark)]
         let backend = match reused {
             Some(backend) => backend,
             None => match create_backend(&self.inner.base_config, &self.inner.config) {

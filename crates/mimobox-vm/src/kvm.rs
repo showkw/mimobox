@@ -103,6 +103,7 @@ const VSOCK_CMDLINE_FRAGMENT: &str = " virtio_mmio.device=512@0xd0000000:5";
 /// Base address of the vsock MMIO device in the guest physical address space.
 const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
 /// Address space size of the vsock MMIO device.
+#[allow(dead_code)] // vsock.rs 有独立定义；此处保留作为 KVM 地址布局文档参考。
 const VSOCK_MMIO_SIZE: u64 = 0x200;
 /// Interrupt GSI used by the vsock MMIO device.
 const VSOCK_GSI: u32 = 5;
@@ -1336,6 +1337,7 @@ impl KvmBackend {
                 }
                 let millis = timeout.as_millis();
                 let secs = millis.div_ceil(1000);
+                #[allow(clippy::unnecessary_fallible_conversions)]
                 let secs = u64::try_from(secs).map_err(|_| {
                     MicrovmError::InvalidConfig("per-command timeout exceeds u64 range".into())
                 })?;
@@ -1450,6 +1452,7 @@ impl KvmBackend {
         Ok((memory, vcpu_state))
     }
 
+    #[allow(dead_code)] // 公开快照 API 供外部调用方使用，当前 crate 内尚未直接调用。
     pub(crate) fn snapshot_bytes(&self) -> Result<Vec<u8>, MicrovmError> {
         let (memory, vcpu_state) = self.snapshot_state()?;
         MicrovmSnapshot::new(

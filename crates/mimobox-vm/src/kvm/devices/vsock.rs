@@ -193,6 +193,7 @@ pub(in crate::kvm) struct VsockMmioDevice {
     /// Base address of the MMIO device in the guest physical address space.
     mmio_base: u64,
     /// Interrupt GSI assigned to this device.
+    #[allow(dead_code)] // 通过 gsi() API 暴露，字段需要保留用于运行时设备元数据。
     gsi: u32,
 }
 
@@ -231,11 +232,13 @@ impl VsockMmioDevice {
     }
 
     /// Returns the interrupt GSI assigned to this device.
+    #[allow(dead_code)] // 作为设备完整 API 保留，当前仅测试路径直接使用。
     pub(in crate::kvm) fn gsi(&self) -> u32 {
         self.gsi
     }
 
     /// Returns whether the device has been activated by the guest driver by setting DRIVER_OK.
+    #[allow(dead_code)] // 作为设备完整 API 保留，当前仅测试路径直接使用。
     pub(in crate::kvm) fn is_activated(&self) -> bool {
         self.activated
     }
