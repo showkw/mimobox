@@ -70,6 +70,8 @@ with Sandbox() as sandbox:
     print(result.stdout, end="")
 ```
 
+> **Note**: Streaming, file ops, HTTP proxy, snapshot, and fork require Linux with KVM. macOS supports OS-level sandboxing only.
+
 Current Python SDK capabilities include:
 
 - streaming: `stream_execute()` returns `StreamIterator`, which yields `StreamEvent` values during iteration.

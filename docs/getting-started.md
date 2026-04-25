@@ -55,6 +55,21 @@ If you want to enable both Wasm and microVM:
 cargo build --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
 ```
 
+## 2.4 Platform Limitations
+
+### macOS Limitations
+
+- Only OS-level sandbox (Seatbelt) is available — no microVM or KVM support
+- `stream_execute`, `read_file`, `write_file`, `http_request`, `snapshot`, and `fork` are microVM-only and return `UnsupportedPlatform` on macOS
+- Memory limits are enforced via `ulimit` (soft boundary) rather than cgroups (hard boundary)
+- Filesystem isolation uses Seatbelt profiles with broader default read access than Linux's Landlock
+
+### Linux Requirements
+
+- KVM required for microVM (`/dev/kvm` must exist)
+- Full sandbox tests require sudo, cgroups v2, and standard system paths
+- Landlock requires kernel >= 5.13
+
 ## 3. 30-Second Start (Rust SDK)
 
 The example below is adjusted to the current `mimobox-sdk` API and is compilable. Note: `exit_code` is `Option<i32>` in the current SDK, so it cannot be formatted directly as an integer.
