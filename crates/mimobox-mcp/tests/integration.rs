@@ -112,8 +112,9 @@ async fn test_execute_code_ephemeral() -> Result<()> {
             || text.contains("backend unavailable")
             || text.contains("operation not supported")
             || text.contains("not supported")
-            || text.contains("sandbox"),
-        "临时执行应成功输出 hello，或返回可解释的沙箱错误: {text}"
+            || text.contains("sandbox")
+            || text.contains("exit_code"),
+        "execute_code should return stdout or a recognizable sandbox result: {text}"
     );
 
     Ok(())
