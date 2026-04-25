@@ -2,22 +2,17 @@
 
 # mimobox
 
-**mimobox** — 一个使用 Rust 构建的跨平台 Agent Sandbox，提供 OS 级、Wasm 和 microVM 隔离，默认智能路由，并为高级用户保留完整控制能力。
+[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-`mimobox` 通过统一的 SDK、CLI、MCP server 和 Python binding，为 AI Agent 工作负载提供安全、自托管的代码执行能力。
+**mimobox** — 在安全隔离的沙箱中运行 AI 生成的代码。本地运行。无需 API 密钥，无需 Docker，无需云端。
 
-## 平台支持
+> **无需 API 密钥。无需 Docker。无需云端。** 下载单个二进制文件即可安全执行代码。OS 级和 Wasm 沙箱在所有平台可用；microVM 隔离在支持 KVM 的 Linux 上可用。
 
-| Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
-| --- | --- | --- | --- |
-| Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
-| macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
+mimobox 通过统一的 SDK、CLI、MCP server 和 Python binding，为 AI Agent 工作负载提供安全、自托管的代码执行能力。
 
-> **状态**：mimobox 目前处于 **alpha** 阶段（v0.1.x）。它尚未经过正式安全审计。威胁模型和已知限制见 [SECURITY.md](SECURITY.md)。
+## Quick Start
 
-## 安装
-
-### Binary (Recommended)
+### 安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
@@ -36,22 +31,20 @@ pip install mimobox
 mimobox-sdk = "0.1"
 ```
 
-### From Source
+### 从源码构建
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
 cargo build --release -p mimobox-cli --features mimobox-cli/wasm
 ```
 
-## 快速开始
-
-### CLI
+### 运行
 
 ```bash
 mimobox run --backend auto --command "/bin/echo hello"
 ```
 
-### Python
+### Python 示例
 
 ```python
 from mimobox import Sandbox
@@ -61,7 +54,7 @@ with Sandbox() as sandbox:
     print(result.stdout, end="")
 ```
 
-### Rust
+### Rust 示例
 
 ```rust
 use mimobox_sdk::Sandbox;
@@ -77,6 +70,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 流式输出、文件操作、HTTP proxy、snapshot/fork、CLI 示例和高级 SDK 用法见 [docs/getting-started.md](docs/getting-started.md)。
 
+> **Status**: mimobox 目前处于 **alpha** 阶段（v0.1.x）。它尚未经过正式安全审计。威胁模型和已知限制见 [SECURITY.md](SECURITY.md)。
+
+## 平台支持
+
+| Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
+| --- | --- | --- | --- |
+| Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
+| macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
+
 ## 三层隔离
 
 | Layer | Backend | Best For | Status |
@@ -87,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 术语表和架构细节见 [docs/architecture.md](docs/architecture.md)。
 
-## 性能概览
+## 性能概览 P50
 
 | Scenario | Target | Current P50 | Status |
 | --- | --- | --- | --- |
