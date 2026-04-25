@@ -132,6 +132,26 @@ struct VmPoolInner {
     state: Mutex<PoolState>,
 }
 
+impl Drop for VmPoolInner {
+    fn drop(&mut self) {
+        // 获取 idle 队列中所有 VM 并逐个 shutdown，释放 KVM fd。
+        let idle = match self.state.lock() {
+            Ok(mut state) => std::mem::take(&mut state.idle),
+            Err(_) => {
+                tracing::warn!("VmPool drop 时状态锁已中毒，无法清理 idle VM");
+                return;
+            }
+        };
+        let count = idle.len();
+        for entry in idle {
+            destroy_idle_entry(entry, "VmPool drop 清理");
+        }
+        if count > 0 {
+            tracing::debug!(count, "VmPool drop 清理完成");
+        }
+    }
+}
+
 impl VmPoolInner {
     fn lock_state(&self) -> Result<MutexGuard<'_, PoolState>, PoolError> {
         self.state.lock().map_err(|_| PoolError::StatePoisoned)

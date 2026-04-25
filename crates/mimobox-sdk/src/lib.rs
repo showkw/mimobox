@@ -1445,8 +1445,26 @@ impl Sandbox {
 }
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        if let Err(error) = self.destroy_inner() {
-            warn!(message = %error, "Sandbox drop 自动清理失败");
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.destroy_inner() {
+                Ok(()) => return,
+                Err(error) if attempt < MAX_ATTEMPTS - 1 => {
+                    warn!(
+                        attempt = attempt + 1,
+                        error = %error,
+                        "Sandbox drop 自动清理失败，重试中"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(100 * u64::from(attempt + 1)));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        attempts = MAX_ATTEMPTS,
+                        error = %error,
+                        "Sandbox drop 自动清理在多次重试后仍然失败"
+                    );
+                }
+            }
         }
     }
 }
