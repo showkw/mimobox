@@ -1,22 +1,24 @@
-//! mimobox-os: OS 级沙箱后端
+#![cfg_attr(docsrs, feature(doc_cfg))]
+//! mimobox-os: OS-level sandbox backends.
 //!
-//! 提供 Linux、macOS、Windows（骨架）平台上的进程级沙箱实现。
+//! Provides process-level sandbox implementations for Linux, macOS, and Windows (skeleton).
 //!
-//! Linux 后端（`LinuxSandbox`）是当前唯一完整实现，使用以下内核机制：
-//! - **Landlock** — 文件系统访问控制（默认拒绝所有，白名单放行）
-//! - **Seccomp-bpf** — 系统调用过滤（默认白名单模式）
-//! - **Namespaces** — PID / Network / Mount / IPC 隔离（含 user namespace 降级）
-//! - **setrlimit** — 内存限制（RLIMIT_AS）
+//! The Linux backend (`LinuxSandbox`) is currently the only complete implementation and uses
+//! the following kernel mechanisms:
+//! - **Landlock** — filesystem access control (deny by default, allowlist-based access)
+//! - **Seccomp-bpf** — system call filtering (allowlist mode by default)
+//! - **Namespaces** — PID / Network / Mount / IPC isolation (including user namespace fallback)
+//! - **setrlimit** — memory limits (`RLIMIT_AS`)
 //!
-//! 还提供预热池 [`SandboxPool`] 用于微秒级沙箱获取。
+//! Also provides the warm pool [`SandboxPool`] for microsecond-level sandbox acquisition.
 //!
-//! # 平台支持
+//! # Platform Support
 //!
-//! | 平台 | 状态 |
+//! | Platform | Status |
 //! |------|------|
-//! | Linux | 完整实现 |
-//! | macOS | 完整实现（Seatbelt / sandbox-exec） |
-//! | Windows | 待实现（AppContainer） |
+//! | Linux | Complete implementation |
+//! | macOS | Complete implementation (Seatbelt / sandbox-exec) |
+//! | Windows | Planned (AppContainer) |
 
 #[cfg(target_os = "linux")]
 mod linux;

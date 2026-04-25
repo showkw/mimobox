@@ -1,19 +1,19 @@
-//! macOS 沙箱后端（Seatbelt / sandbox-exec）
+//! macOS sandbox backend (Seatbelt / sandbox-exec).
 //!
-//! 使用 macOS 原生 Seatbelt 框架实现进程级沙箱隔离。
-//! 通过 `sandbox-exec -p "<seatbelt_policy>"` 命令执行，利用 Seatbelt 策略语言
-//! 实现文件系统、网络、进程执行等维度的限制。
+//! Implements process-level sandbox isolation with the native macOS Seatbelt framework.
+//! Runs commands through `sandbox-exec -p "<seatbelt_policy>"` and uses the Seatbelt
+//! policy language to restrict filesystem access, networking, process execution, and more.
 //!
-//! # 安全策略
+//! # Security Policy
 //!
-//! | 维度 | 策略 | 说明 |
+//! | Dimension | Policy | Description |
 //! |------|------|------|
-//! | 文件读取 | 全局允许 + 敏感路径拒绝 | macOS 进程启动依赖大量系统路径，无法精确白名单；改为显式拒绝敏感用户目录 |
-//! | 文件写入 | 白名单 | 仅允许 `fs_readwrite` 中配置的路径（默认 `/tmp`） |
-//! | 网络访问 | 默认拒绝 | 通过 `(deny network*)` 禁止所有网络操作 |
-//! | 进程执行 | 路径限制 | 仅允许 `/bin`、`/usr/bin`、`/sbin`、`/usr/sbin` 下的可执行文件 |
-//! | 进程 fork | 允许 | shell 等命令需要 fork 子进程 |
-//! | 内存限制 | 不支持 | macOS 上 `RLIMIT_AS` 无法从无限值缩小，记录告警日志 |
+//! | File reads | Allow globally + deny sensitive paths | macOS process startup depends on many system paths, making precise allowlisting impractical; sensitive user directories are denied explicitly instead. |
+//! | File writes | Allowlist | Allows only paths configured in `fs_readwrite` (defaults to `/tmp`). |
+//! | Network access | Deny by default | Denies all network operations with `(deny network*)`. |
+//! | Process execution | Path-restricted | Allows only executables under `/bin`, `/usr/bin`, `/sbin`, and `/usr/sbin`. |
+//! | Process fork | Allowed | Shells and similar commands need to fork child processes. |
+//! | Memory limits | Unsupported | `RLIMIT_AS` cannot be reduced from an unlimited value on macOS; a warning is logged instead. |
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -28,10 +28,11 @@ use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
-/// 需要显式拒绝读取的敏感用户目录后缀（相对于 $HOME）
+/// Sensitive user directory suffixes, relative to `$HOME`, whose reads must be denied explicitly.
 ///
-/// macOS 进程启动依赖大量系统路径（dyld、Frameworks 等），无法使用精确白名单。
-/// 改为全局放行文件读取，然后显式拒绝已知的敏感目录（SSH 密钥、云凭证等）。
+/// macOS process startup depends on many system paths (`dyld`, frameworks, and others),
+/// making precise allowlisting impractical. File reads are allowed globally, while known
+/// sensitive directories such as SSH keys and cloud credentials are denied explicitly.
 const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -43,15 +44,15 @@ const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".config/gh",
 ];
 
-/// macOS Seatbelt 沙箱后端
+/// macOS Seatbelt sandbox backend.
 ///
-/// 通过 `sandbox-exec -p "<seatbelt_policy>"` 执行命令，
-/// 利用 macOS 原生 Seatbelt 框架实现沙箱隔离。
+/// Runs commands through `sandbox-exec -p "<seatbelt_policy>"` and uses the native
+/// macOS Seatbelt framework for sandbox isolation.
 ///
-/// # 平台限制
+/// # Platform Limitations
 ///
-/// - 文件读取无法精确白名单（macOS dyld/Frameworks 依赖过多系统路径），改为拒绝敏感目录
-/// - 内存限制无法通过 `setrlimit(RLIMIT_AS)` 实现（macOS 不支持缩小）
+/// - File reads cannot be precisely allowlisted because macOS `dyld` and frameworks depend on many system paths; sensitive directories are denied instead.
+/// - Memory limits cannot be enforced with `setrlimit(RLIMIT_AS)` because macOS does not support reducing this limit.
 pub struct MacOsSandbox {
     config: SandboxConfig,
 }
@@ -175,16 +176,16 @@ impl MacOsSandbox {
         }
     }
 
-    /// 根据 SandboxConfig 生成 Seatbelt 策略字符串
+    /// Generates a Seatbelt policy string from `SandboxConfig`.
     ///
-    /// 策略结构（Seatbelt Scheme 编译格式 version 1）：
-    /// 1. `(deny default)` — 默认拒绝所有操作
-    /// 2. `(allow file-read*)` — 允许所有文件读取（macOS 进程启动需要）
-    /// 3. `(deny file-read* (subpath ...))` — 显式拒绝敏感用户目录
-    /// 4. `(allow file-write* (subpath ...))` — 仅允许配置的路径写入
-    /// 5. `(allow process-exec (subpath ...))` — 限制可执行路径
-    /// 6. `(allow process-fork)` — 允许 fork（shell 命令需要）
-    /// 7. `(deny network*)` — 拒绝网络访问
+    /// Policy structure using Seatbelt Scheme compiled format version 1:
+    /// 1. `(deny default)` — denies all operations by default.
+    /// 2. `(allow file-read*)` — allows all file reads required by macOS process startup.
+    /// 3. `(deny file-read* (subpath ...))` — explicitly denies sensitive user directories.
+    /// 4. `(allow file-write* (subpath ...))` — allows writes only to configured paths.
+    /// 5. `(allow process-exec (subpath ...))` — restricts executable paths.
+    /// 6. `(allow process-fork)` — allows fork for shell commands.
+    /// 7. `(deny network*)` — denies network access.
     fn generate_policy(&self) -> String {
         let mut rules = Vec::new();
 
@@ -430,7 +431,7 @@ mod tests {
     use super::*;
     use mimobox_core::{Sandbox, SandboxConfig};
 
-    /// macOS 默认测试配置（不设内存限制，macOS 不支持）
+    /// Creates the default macOS test configuration without memory limits, which macOS does not support.
     fn test_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
