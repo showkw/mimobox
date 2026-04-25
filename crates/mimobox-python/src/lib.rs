@@ -143,6 +143,30 @@ impl PySnapshot {
         Ok(Self { inner: snapshot })
     }
 
+    /// 从文件化快照创建 Snapshot 实例。
+    ///
+    /// 直接从磁盘文件路径构造快照引用，无需将整个文件读入内存。
+    /// 适用于之前通过 `to_bytes()` 保存到磁盘的大快照文件。
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 快照文件的磁盘路径（如之前 `to_bytes()` 保存的 `.bin` 文件）。
+    ///
+    /// # Returns
+    ///
+    /// A restored `Snapshot` instance.
+    ///
+    /// # Raises
+    ///
+    /// * `FileNotFoundError` - If the file does not exist.
+    /// * `SandboxError` - If the snapshot file is invalid.
+    #[classmethod]
+    fn from_file(_cls: &Bound<'_, PyType>, path: &str) -> PyResult<Self> {
+        let snapshot = RustSnapshot::from_file(std::path::PathBuf::from(path))
+            .map_err(map_sdk_error)?;
+        Ok(Self { inner: snapshot })
+    }
+
     /// Serialize the snapshot to raw bytes.
     ///
     /// # Returns
