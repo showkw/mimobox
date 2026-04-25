@@ -239,3 +239,46 @@ fn test_restore_pool_stats_tracking() {
         b"after-release\n",
     );
 }
+
+#[test]
+fn test_restore_pool_concurrent_restore_and_execute() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let config = e2e_config();
+    let (memory, vcpu_state) = build_booted_snapshot(&config);
+    let pool = must(
+        create_restore_pool(SandboxConfig::default(), config, restore_pool_config(4, 8)),
+        "创建并发测试 RestorePool 失败",
+    );
+    let pool = Arc::new(pool);
+    let barrier = Arc::new(Barrier::new(4));
+
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let pool = Arc::clone(&pool);
+            let barrier = Arc::clone(&barrier);
+            let memory = memory.clone();
+            let vcpu_state = vcpu_state.clone();
+
+            thread::spawn(move || {
+                barrier.wait();
+                let mut vm = must(
+                    pool.restore(memory.as_slice(), vcpu_state.as_slice()),
+                    &format!("并发线程 {i} restore VM 失败"),
+                );
+                let result = must(
+                    vm.execute(&guest_cmd(&["/bin/echo", &format!("concurrent-{i}")])),
+                    &format!("并发线程 {i} execute 失败"),
+                );
+                let expected = format!("concurrent-{i}\n");
+                assert_eq!(result.exit_code, Some(0));
+                assert_eq!(result.stdout, expected.as_bytes());
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("并发恢复线程不应 panic");
+    }
+}
