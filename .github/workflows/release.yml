@@ -24,8 +24,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            cli_features: wasm,kvm
-            build_mcp: true
+            cli_features: wasm
+            build_mcp: false
           - target: x86_64-apple-darwin
             os: macos-13
             cli_features: wasm
