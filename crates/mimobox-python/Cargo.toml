@@ -15,7 +15,7 @@ name = "mimobox"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-mimobox-sdk = { path = "../mimobox-sdk", default-features = false, features = ["os", "vm"] }
+mimobox-sdk = { workspace = true, features = ["os", "vm"] }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 
 [build-dependencies]
