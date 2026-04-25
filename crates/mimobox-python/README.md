@@ -1,29 +1,25 @@
 # mimobox-python
 
-Python bindings for mimobox Agent Sandbox, implemented with PyO3.
-
-`mimobox-python` provides Python access to the same secure sandbox execution model exposed by `mimobox-sdk`, including command execution, streaming output, file transfer, snapshots, forks, and controlled HTTP requests.
+PyO3 Python bindings for mimobox sandbox execution with context manager support.
 
 Repository: <https://github.com/showkw/mimobox>
 
-## Installation
+## Architecture
 
-Install for local development with maturin:
+`mimobox-python` is a thin Python wrapper over `mimobox-sdk`; Rust owns backend selection, isolation, lifecycle, streaming, snapshots, files, and HTTP proxying.
 
 ```bash
 maturin develop -m crates/mimobox-python/Cargo.toml
 ```
 
-## Quick Start
-
-Use `Sandbox` as a context manager so resources are released automatically:
+## Quick Example
 
 ```python
 from mimobox import Sandbox
 
 with Sandbox(isolation="auto") as sandbox:
-    result = sandbox.execute("/bin/echo hello from python")
-    print(result.stdout.decode())
+    result = sandbox.execute("echo hello", timeout=5.0)
+    print(result.stdout)
 ```
 
 Streaming output:
@@ -32,47 +28,31 @@ Streaming output:
 from mimobox import Sandbox
 
 with Sandbox(isolation="os") as sandbox:
-    for event in sandbox.stream_execute("printf 'hello\\nworld\\n'"):
-        if event.stdout is not None:
+    for event in sandbox.stream_execute("printf 'a\\nb\\n'"):
+        if event.stdout:
             print(event.stdout.decode(), end="")
 ```
 
-## API Overview
+## API
 
-The main `Sandbox` APIs are:
-
-- `execute(command, env=None, timeout=None)` executes a command and returns `ExecuteResult`.
-- `stream_execute(command)` returns an iterator of `StreamEvent` objects.
-- `read_file(path)` reads bytes from the sandbox.
-- `write_file(path, data)` writes bytes into the sandbox.
-- `snapshot()` captures sandbox state where supported.
-- `Sandbox.from_snapshot(snapshot)` restores a sandbox from a snapshot.
-- `fork()` creates an independent sandbox copy where supported.
-- `http_request(method, url, headers=None, body=None)` uses the controlled HTTP proxy.
-
-## Isolation Parameter
-
-`Sandbox(isolation=...)` accepts:
-
-| Value | Description |
+| API | Purpose |
 | --- | --- |
-| `auto` | Smart routing selected by mimobox. |
-| `os` | OS-level sandbox backend. |
-| `wasm` | Wasm sandbox backend when available. |
-| `microvm` | microVM backend on Linux + KVM. |
+| `execute`, `stream_execute` | Run commands normally or as events. |
+| `read_file`, `write_file` | Transfer sandbox files as bytes. |
+| `snapshot`, `from_snapshot`, `fork` | Capture, restore, or copy state. |
+| `http_request` | Use the whitelisted host HTTP proxy. |
+| `wait_ready`, `is_ready`, `close` | Manage lifecycle and readiness. |
 
-## Exception Hierarchy
+| Isolation | Meaning |
+| --- | --- |
+| `auto` | Let mimobox choose the backend. |
+| `os` | Use the OS sandbox backend. |
+| `wasm` | Use the Wasm backend. |
+| `microvm` | Use the microVM backend. |
 
-The bindings expose typed Python exceptions for sandbox failures:
+## Exceptions
 
-- `SandboxError` is the base exception for mimobox failures.
-- `SandboxProcessError` is raised for process execution failures.
-- `SandboxTimeoutError` is raised when an operation exceeds its timeout.
-- `ValueError` is raised for invalid Python arguments such as an unknown isolation value.
-
-## Feature Flags
-
-This crate is built as a Python extension module and currently enables the `os` and `vm` SDK backends in its crate configuration.
+`SandboxError` is the base exception; `SandboxProcessError`, `SandboxHttpError`, and `SandboxLifecycleError` derive from it.
 
 ## License
 

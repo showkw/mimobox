@@ -1,63 +1,52 @@
 # mimobox-mcp
 
-MCP Server for AI agents that need secure code and command execution through mimobox Agent Sandbox.
-
-`mimobox-mcp` exposes mimobox sandbox operations over the Model Context Protocol, allowing MCP-compatible clients to create isolated sandboxes, run commands, move files, snapshot state, fork sandboxes, and make controlled HTTP requests.
+MCP server for AI agents, exposing mimobox sandbox operations over stdio.
 
 Repository: <https://github.com/showkw/mimobox>
 
+## Architecture
+
+`mimobox-mcp` is the Model Context Protocol adapter for mimobox and uses `mimobox-sdk` for sandbox creation, execution, file I/O, snapshots, forks, HTTP requests, and lifecycle cleanup.
+
+It is built on `rmcp`, runs async on `tokio`, and cleans up active sandboxes on SIGTERM or SIGINT.
+
 ## Tools
 
-| Tool | Description |
+| Tool | Purpose |
 | --- | --- |
-| `create_sandbox` | Create a new sandbox with the requested isolation mode. |
-| `execute_code` | Execute source code inside a sandbox. |
-| `execute_command` | Execute a shell-style command inside a sandbox. |
-| `destroy_sandbox` | Destroy a sandbox and release resources. |
-| `list_sandboxes` | List active sandboxes known to the server. |
-| `read_file` | Read a file from a sandbox. |
-| `write_file` | Write a file into a sandbox. |
-| `snapshot` | Capture sandbox state where supported. |
-| `fork` | Fork a sandbox from an existing sandbox state where supported. |
-| `http_request` | Perform a controlled HTTP request through the sandbox proxy. |
+| `create_sandbox`, `destroy_sandbox`, `list_sandboxes` | Manage sandbox lifecycle. |
+| `execute_code`, `execute_command` | Run code snippets or commands. |
+| `read_file`, `write_file` | Move file data through the sandbox boundary. |
+| `snapshot`, `fork` | Capture or copy backend state. |
+| `http_request` | Send controlled sandbox HTTP requests. |
 
-## Quick Start
-
-Run the server from the repository:
+## Quick Example
 
 ```bash
-cargo run -p mimobox-mcp
+mimobox mcp-init
 ```
 
-Run with microVM support enabled on Linux + KVM:
-
-```bash
-cargo run -p mimobox-mcp --features vm
-```
-
-## Claude Desktop Configuration
-
-Add an MCP server entry similar to the following:
+Claude Desktop, Cursor, and Windsurf can use the generated stdio server configuration.
 
 ```json
 {
   "mcpServers": {
     "mimobox": {
-      "command": "cargo",
-      "args": ["run", "-p", "mimobox-mcp"]
+      "command": "mimobox-mcp",
+      "args": []
     }
   }
 }
 ```
 
-For a packaged binary, replace `command` with the absolute path to your `mimobox-mcp` executable and omit the Cargo arguments.
+For local development, point `command` at the built binary or use the project script entrypoint.
 
-## Feature Flags
+## Features
 
-| Feature | Default | Description |
+| Feature | Default | Meaning |
 | --- | --- | --- |
-| `os` | Yes | Enables the OS-level backend through `mimobox-sdk/os`. |
-| `vm` | No | Enables the microVM backend through `mimobox-sdk/vm`. |
+| `os` | Yes | OS sandbox support through `mimobox-sdk`. |
+| `vm` | No | microVM sandbox support through `mimobox-sdk`. |
 
 ## License
 

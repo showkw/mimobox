@@ -24,10 +24,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            cli_features: wasm,kvm
+            build_mcp: true
           - target: x86_64-apple-darwin
             os: macos-latest
+            cli_features: wasm
+            build_mcp: false
           - target: aarch64-apple-darwin
             os: macos-latest
+            cli_features: wasm
+            build_mcp: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,17 +43,42 @@ jobs:
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build
+      - name: Build CLI
+        run: cargo build --release -p mimobox-cli --no-default-features --features ${{ matrix.cli_features }} --target ${{ matrix.target }}
+      - name: Build MCP
+        if: matrix.build_mcp
+        run: cargo build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+      - name: Generate checksums
         run: |
-          cargo build --release -p mimobox-cli --target ${{ matrix.target }}
-          cargo build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+          cd target/${{ matrix.target }}/release
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum mimobox-cli > mimobox-cli.sha256
+          else
+            shasum -a 256 mimobox-cli > mimobox-cli.sha256
+          fi
+          if [ "${{ matrix.build_mcp }}" = "true" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum mimobox-mcp > mimobox-mcp.sha256
+            else
+              shasum -a 256 mimobox-mcp > mimobox-mcp.sha256
+            fi
+          fi
+      - name: Rename for release
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv mimobox-cli mimobox-cli-${{ matrix.target }}
+          mv mimobox-cli.sha256 mimobox-cli-${{ matrix.target }}.sha256
+          if [ -f mimobox-mcp ]; then
+            mv mimobox-mcp mimobox-mcp-${{ matrix.target }}
+            mv mimobox-mcp.sha256 mimobox-mcp-${{ matrix.target }}.sha256
+          fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mimobox-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/mimobox-cli
-            target/${{ matrix.target }}/release/mimobox-mcp
+            target/${{ matrix.target }}/release/mimobox-cli-*
+            target/${{ matrix.target }}/release/mimobox-mcp-*
 
   github-release:
     needs: build-binaries
@@ -59,3 +90,46 @@ jobs:
         with:
           files: mimobox-*/mimobox*
           generate_release_notes: true
+
+  build-wheels:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: docker/setup-qemu-action@v3
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release
+          target: ${{ matrix.target }}
+          manylinux: auto
+          working-directory: crates/mimobox-python
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: target/wheels/*.whl
+
+  publish-pypi:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --skip-existing wheels-*/*.whl
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
