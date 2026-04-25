@@ -894,12 +894,44 @@ impl Sandbox {
         self.ensure_backend("/bin/ls")?;
         let inner = self.require_inner()?;
 
-        dispatch_execute!(inner, s, {
-            mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
-                mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                other => SdkError::from_sandbox_execute_error(other),
-            })
-        })
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => {
+                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => {
+                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => {
+                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
+                Err(SdkError::sandbox(
+                    mimobox_core::ErrorCode::UnsupportedPlatform,
+                    "list_dir is not yet supported for pooled VM backends",
+                    None,
+                ))
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => {
+                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+        }
     }
 
     /// 创建交互式终端会话。
