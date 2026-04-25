@@ -26,10 +26,6 @@ jobs:
             os: ubuntu-latest
             cli_features: wasm,kvm
             build_mcp: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            cli_features: wasm
-            build_mcp: false
           - target: aarch64-apple-darwin
             os: macos-latest
             cli_features: wasm
@@ -97,8 +93,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-unknown-linux-gnu
