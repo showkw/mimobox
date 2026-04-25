@@ -12,6 +12,8 @@ mimobox 通过统一的 SDK、CLI、MCP server 和 Python binding，为 AI Agent
 
 ## Quick Start
 
+> **平台说明**：macOS 仅支持 OS 级和 Wasm 沙箱。microVM 功能需要支持 KVM 的 Linux（`/dev/kvm`）。MCP server 二进制目前仅支持 Linux。
+
 ### 安装
 
 ```bash
@@ -19,11 +21,13 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 ```
 
 ### Python
-> `pip install mimobox` 即将上线。当前请从源码构建：
+> Python wheel 即将发布到 PyPI。当前请从源码构建（需要 Rust 工具链）：
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
-pip install target/wheels/*.whl  # 需要先 build wheel
+cargo build --release -p mimobox-python
+# wheel 将生成在 target/wheels/
+pip install target/wheels/*.whl
 ```
 
 ### Rust
