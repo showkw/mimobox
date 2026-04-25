@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
@@ -186,7 +187,15 @@ pub fn execute_http_request(
     let url = reqwest::Url::parse(&request.url)
         .map_err(|err| HttpProxyError::InvalidUrl(err.to_string()))?;
     validate_http_request(config, &url)?;
-    validate_dns_resolution(&url)?;
+    let verified_ip = validate_dns_resolution(&url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing port information".into()))?;
+    let socket_addr = SocketAddr::new(verified_ip, port);
+    let resolve_key = format!("{host}:{port}");
 
     let method = Method::from_bytes(request.method.as_bytes())
         .map_err(|err| HttpProxyError::InvalidUrl(format!("invalid HTTP method: {err}")))?;
@@ -194,6 +203,7 @@ pub fn execute_http_request(
     let client = Client::builder()
         .timeout(timeout)
         .redirect(Policy::none())
+        .resolve(&resolve_key, socket_addr)
         .build()
         .map_err(|err| HttpProxyError::Internal(format!("failed to build HTTP client: {err}")))?;
 
@@ -280,7 +290,7 @@ fn validate_host(config: &SandboxConfig, host: &str) -> Result<(), HttpProxyErro
     Ok(())
 }
 
-fn validate_dns_resolution(url: &reqwest::Url) -> Result<(), HttpProxyError> {
+fn validate_dns_resolution(url: &reqwest::Url) -> Result<IpAddr, HttpProxyError> {
     let host = url
         .host_str()
         .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
@@ -292,16 +302,30 @@ fn validate_dns_resolution(url: &reqwest::Url) -> Result<(), HttpProxyError> {
         .to_socket_addrs()
         .map_err(|err| HttpProxyError::ConnectFail(format!("DNS resolution failed: {err}")))?;
 
+    let mut has_addr = false;
+    let mut verified_ip = None;
+
     for addr in addrs {
-        if is_private_ip(addr.ip()) {
+        has_addr = true;
+        let ip = addr.ip();
+        if is_private_ip(ip) {
             return Err(HttpProxyError::DnsRebind(format!(
                 "{host} resolved to private address {}",
-                addr.ip()
+                ip
             )));
         }
+        verified_ip.get_or_insert(ip);
     }
 
-    Ok(())
+    if !has_addr {
+        return Err(HttpProxyError::ConnectFail(format!(
+            "DNS resolution returned no addresses for {host}"
+        )));
+    }
+
+    verified_ip.ok_or_else(|| {
+        HttpProxyError::DnsRebind(format!("{host} resolved only to private addresses"))
+    })
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
