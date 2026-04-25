@@ -786,26 +786,24 @@ impl Sandbox {
             let inner = self.require_inner()?;
 
             let snapshot = match inner {
-                SandboxInner::MicroVm(sandbox) => sandbox.snapshot().map_err(map_microvm_error)?,
+                SandboxInner::MicroVm(sandbox) => sandbox.snapshot().map_err(map_microvm_error),
                 SandboxInner::PooledMicroVm(sandbox) => {
-                    sandbox.snapshot().map_err(map_microvm_error)?
+                    sandbox.snapshot().map_err(map_microvm_error)
                 }
                 SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                    sandbox.snapshot().map_err(map_microvm_error)?
+                    sandbox.snapshot().map_err(map_microvm_error)
                 }
-                _ => {
-                    return Err(SdkError::sandbox(
-                        ErrorCode::UnsupportedPlatform,
-                        "current backend does not support snapshot",
-                        Some(
-                            "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                                .to_string(),
-                        ),
-                    ));
-                }
-            };
+                _ => Err(SdkError::sandbox(
+                    ErrorCode::UnsupportedPlatform,
+                    "current backend does not support snapshot",
+                    Some(
+                        "set isolation to `MicroVm` and run on Linux with vm feature enabled"
+                            .to_string(),
+                    ),
+                )),
+            }?;
 
-            return Ok(SandboxSnapshot::from_core(snapshot));
+            Ok(SandboxSnapshot::from_core(snapshot))
         }
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
@@ -824,10 +822,10 @@ impl Sandbox {
         {
             let sandbox =
                 mimobox_vm::MicrovmSandbox::restore(&snapshot.inner).map_err(map_microvm_error)?;
-            return Ok(Self::from_initialized_inner(
+            Ok(Self::from_initialized_inner(
                 SandboxInner::MicroVm(sandbox),
                 Config::builder().isolation(IsolationLevel::MicroVm).build(),
-            ));
+            ))
         }
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]

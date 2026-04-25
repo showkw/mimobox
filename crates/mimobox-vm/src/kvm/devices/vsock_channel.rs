@@ -91,11 +91,7 @@ impl VsockStream {
                 "vsock receive timeout seconds cannot be converted to time_t".into(),
             )
         })?;
-        let tv_usec = libc::suseconds_t::try_from(timeout.subsec_micros()).map_err(|_| {
-            MicrovmError::Backend(
-                "vsock receive timeout microseconds cannot be converted to suseconds_t".into(),
-            )
-        })?;
+        let tv_usec = libc::suseconds_t::from(timeout.subsec_micros());
         let timeout_value = libc::timeval { tv_sec, tv_usec };
         let timeout_len =
             libc::socklen_t::try_from(mem::size_of::<libc::timeval>()).map_err(|_| {
@@ -360,10 +356,10 @@ impl VsockCommandChannel {
             .and_then(|_| self.recv_result())
             .and_then(validate_probe_result);
 
-        if let Err(err) = stream.set_recv_timeout(default_timeout) {
-            if probe_result.is_ok() {
-                return Err(err);
-            }
+        if let Err(err) = stream.set_recv_timeout(default_timeout)
+            && probe_result.is_ok()
+        {
+            return Err(err);
         }
 
         probe_result

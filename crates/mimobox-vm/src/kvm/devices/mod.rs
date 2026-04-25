@@ -58,6 +58,7 @@ pub(super) fn emulate_boot_legacy_pio_read(port: u16, data: &mut [u8]) -> bool {
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_serial_write(
     serial_device: &mut SerialDevice,
     serial_buffer: &mut Vec<u8>,

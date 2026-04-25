@@ -1,5 +1,6 @@
 use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
+#[cfg(any(not(all(feature = "vm", target_os = "linux")), test))]
 use mimobox_core::ErrorCode;
 
 /// 智能路由器：根据命令内容和信任级别自动选择最优隔离层级
@@ -90,6 +91,7 @@ fn is_wasm_command(command: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

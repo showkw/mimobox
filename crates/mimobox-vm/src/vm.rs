@@ -578,7 +578,7 @@ impl MicrovmSandbox {
             })();
 
             let _ = std::fs::remove_dir_all(snapshot_dir);
-            return fork_result;
+            fork_result
         }
     }
 
