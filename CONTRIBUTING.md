@@ -1,97 +1,119 @@
-# Contributing Guide
+# 贡献指南
 
-## Welcome
+## 感谢
+感谢你愿意为 mimobox 贡献代码、文档、测试或问题反馈。
 
-Contributions to mimobox are welcome.
+mimobox 是使用 Rust 构建的跨平台 Agent Sandbox，目标是为 AI Agent 工作负载提供安全、可控、高性能的隔离执行环境。
 
-mimobox is a cross-platform Agent Sandbox built with Rust. It aims to provide a secure, controllable, and high-performance isolated execution environment for AI Agent workloads. The project supports OS-level sandboxes, Wasm sandboxes, and microVM sandboxes, and provides default intelligent routing through a unified SDK.
+仓库地址：<https://github.com/showkw/mimobox>
 
-Repository: <https://github.com/showkw/mimobox>
-
-## Development Requirements
-
-- Rust stable, using edition 2024.
-- Linux or macOS.
-- `cargo-nextest` and `cargo-audit`, installed by `scripts/setup.sh`.
-
-## Setting Up the Development Environment
-
-Initialize the development environment through the unified script:
+## 开发环境
+请优先通过统一脚本初始化环境：
 
 ```bash
 scripts/setup.sh
 ```
 
-This script installs or configures:
+基础要求：
+- Rust stable toolchain，项目使用 edition 2024。
+- macOS：安装 Xcode Command Line Tools。
+- Linux：安装 `build-essential`、`libssl-dev`、`python3-dev`。
+- 可选：Linux KVM 访问权限，用于 microVM 测试。
 
+`scripts/setup.sh` 会安装或检查常用工具：
 - `rustup`
-- `clippy`
 - `rustfmt`
+- `clippy`
 - `cargo-nextest`
 - `cargo-audit`
 
-## Development Workflow
+只修改文档时，通常不需要完整 KVM 环境。
 
-1. Fork this repository.
-2. Create a feature branch: `git checkout -b feature/my-feature`.
-3. Complete your code or documentation changes.
-4. Run `scripts/check.sh` to execute `cargo check`, `clippy`, and `fmt --check`.
-5. Run `scripts/test.sh` to execute workspace tests.
-6. Commit and push your branch.
-7. Create a Pull Request targeting the `main` branch.
+## 构建与测试
+常用命令：
 
-## Commit Message Convention
+```bash
+cargo build
+cargo test
+scripts/check.sh
+scripts/test.sh
+```
 
-- Use concise Chinese descriptions.
-- Examples: `修复 XXX 问题`, `新增 YYY 功能`, `重构 ZZZ 模块`.
-- Use a single-line description and do not end it with a period.
+`scripts/check.sh` 用于执行 `clippy` 和 `fmt` 检查。
 
-## Code Standards
+`scripts/test.sh` 用于执行工作区测试；可按平台或能力选择范围，具体参数以脚本帮助信息为准。
 
-- unsafe policy: all unsafe code must include a `// SAFETY:` comment explaining why that unsafe usage is sound.
-- unwrap policy: `unwrap()` is forbidden in non-test code and is enforced by the workspace clippy lint `unwrap_used = deny`. Use `expect()` with a clear message, or propagate errors with `?`.
-- Error handling: define error types with `thiserror`.
-- Cross-platform compilation: platform-specific code must be isolated with `#[cfg(target_os = "...")]`.
-- Read before writing: read and understand the existing code, interfaces, and tests before making changes.
+Feature flags：
+- `wasm`：启用 Wasm 沙箱能力，面向跨平台场景。
+- `kvm`：启用 KVM / microVM 能力，仅支持 Linux。
 
-## Security Standards
+示例：
 
-- Seccomp: Linux sandboxes must apply a seccomp filter and use whitelist mode by default.
-- Landlock: Linux sandboxes must apply Landlock and deny all filesystem access by default.
-- Network: all sandboxes must deny network access by default.
-- Memory: all sandboxes must set memory limits.
+```bash
+cargo test --features wasm
+cargo test --features kvm
+```
 
-## PR Process
+涉及 Linux OS 沙箱、Landlock、Seccomp、KVM 或 microVM 的变更，应在 Linux 环境验证。
 
-1. Fork the repository, create a branch, submit a PR, receive review, and merge into `main`.
-2. Make sure CI passes before requesting review.
-3. At least one approval is required.
+涉及 macOS 沙箱或跨平台路径的变更，应在 macOS 环境验证。
 
-## CI Notes
+## 代码规范
+提交前必须满足以下要求：
+- `cargo fmt` 必须通过。
+- `cargo clippy` 不允许有 warning。
+- 所有 `unsafe` 代码必须带 `// SAFETY:` 注释，说明安全前提。
+- 非测试代码禁止使用 `unwrap()`。
+- 平台特定代码必须用 `#[cfg(target_os = "...")]` 隔离。
+- 错误处理使用 `thiserror` 定义清晰的错误类型。
 
-CI runs on pushes to `main`, `master`, and on Pull Requests. The main jobs include:
+错误处理建议：
+- 优先使用 `?` 向上传递错误。
+- 需要上下文时，使用明确的错误变体或可读的 `expect()` 信息。
+- 不要吞掉错误，也不要用宽泛字符串替代结构化错误。
 
-- `lint-and-check`: runs `cargo check`, `fmt`, and `clippy` on `ubuntu-latest`.
-- `test-linux-os`: runs `mimobox-os` tests.
-- `test-linux-vm`: runs `mimobox-vm` tests, only when triggered manually, and requires `/dev/kvm`.
-- `test-sdk`: builds `mimobox-sdk` and runs lib tests.
-- `docs-check`: runs `cargo doc` and doc tests.
-- `security-audit`: runs `cargo audit` through rustsec.
-- `test-macos`: runs `mimobox-os` and `mimobox-wasm` tests on macOS.
-- `test-linux-wasm`: runs `mimobox-wasm` tests on Linux.
-- `test-mcp`: runs `mimobox-mcp` tests.
-- `check-python`: runs `mimobox-python cargo check`.
+跨平台代码建议：
+- 公共抽象放在平台无关模块。
+- Linux、macOS、Windows 等平台实现放入独立模块。
+- 新增平台能力时，同步补充测试或说明无法测试的原因。
 
-## Script Entrypoints
+安全相关代码必须保持默认拒绝原则：
+- Linux 沙箱默认启用 Seccomp 白名单。
+- Linux 沙箱默认启用 Landlock 并拒绝文件系统访问。
+- 沙箱默认禁止网络访问。
+- 沙箱必须设置内存限制。
 
-All development operations must be executed through script entrypoints under the `scripts/` directory:
+## PR 流程
+推荐流程：
+1. Fork 仓库。
+2. 从最新主分支创建功能分支。
+3. 完成代码、测试和文档变更。
+4. 运行 `scripts/check.sh` 和 `scripts/test.sh`。
+5. 提交并推送分支。
+6. 创建 Pull Request。
 
-- `scripts/setup.sh`: initializes the development environment.
-- `scripts/check.sh`: runs lint and static checks.
-- `scripts/test.sh [default|linux|macos|wasm|all]`: runs tests.
-- `scripts/test-e2e.sh`: runs cross-backend end-to-end tests.
-- `scripts/bench.sh`: runs benchmark.
+PR 要求：
+- PR 标题应简洁描述变更内容。
+- 提交信息使用中文，避免“更新代码”这类空泛描述。
+- 确保 CI 通过后再请求 review。
+- 合并前至少需要一个 approval。
+- 只提交与本 PR 相关的文件，避免混入无关改动。
 
-## License
+提交信息示例：`修复 Linux 沙箱错误传播逻辑`、`新增 Wasm 后端集成测试`。
 
-MIT OR Apache-2.0
+## 安全报告
+如果你发现安全漏洞，请阅读并遵循 `SECURITY.md`。
+
+不要在公开 issue、公开讨论区或公开 PR 中披露安全漏洞细节。
+
+请通过 `SECURITY.md` 中指定的私密渠道报告，并附带复现步骤、影响范围和环境信息。
+
+## CI 说明
+CI 会在 Pull Request 和主分支更新时运行基础检查，通常包括格式化、Clippy、Linux 与 macOS 测试、Wasm 后端测试、文档构建、doctest 和安全审计。
+
+需要 `/dev/kvm` 的 microVM 测试通常只在具备 KVM 权限的 Linux 环境执行。
+
+## 许可证
+mimobox 使用双许可证：`MIT OR Apache-2.0`。
+
+提交贡献即表示你同意自己的贡献按 `MIT OR Apache-2.0` 双许可证发布。
