@@ -1,3 +1,4 @@
+mod asset_download;
 mod doctor;
 
 use std::cell::Cell;
