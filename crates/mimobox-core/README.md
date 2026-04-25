@@ -1,70 +1,56 @@
 # mimobox-core
 
-Core traits and shared types for mimobox Agent Sandbox.
+Core traits and shared types for the mimobox sandbox system.
 
-`mimobox-core` defines the stable interface implemented by all mimobox sandbox backends. It does not provide a concrete sandbox implementation. Most users should start with `mimobox-sdk`, which provides smart routing and backend selection.
+`mimobox-core` is the foundation trait crate: backends implement its contracts, while SDK and higher-level crates consume its backend-neutral types. It does not create sandboxes, spawn processes, or select a backend; application code should usually start with `mimobox-sdk`.
 
 Repository: <https://github.com/showkw/mimobox>
 
+## Responsibilities
+
+- Define backend-neutral traits, data structures, and cross-crate config.
+- Keep errors consistent across OS, VM, WASM, and MCP layers.
+- Avoid platform-specific behavior and runtime dependencies.
+
 ## Key Types
 
-- `Sandbox` trait: common backend interface for create, execute, file transfer, snapshot, fork, and destroy operations.
-- `SandboxConfig`: backend-neutral sandbox configuration.
-- `SandboxResult`: command execution output, exit status, timeout flag, and elapsed time.
-- `SandboxError` and `ErrorCode`: structured error model shared by backends.
-- `SandboxSnapshot`: opaque snapshot handle for backends that support snapshot and restore workflows.
-- `IsolationLevel`: high-level isolation selection used by the SDK.
-- `TrustLevel`: trust policy input used by the SDK router and configuration layer.
+- `Sandbox`, `SandboxConfig`, `SandboxResult`: backend contract, config, and execution result.
+- `SandboxError` / `ErrorCode`: structured failures and stable error codes.
+- `SandboxSnapshot`: opaque snapshot and restore handle.
+- `IsolationLevel` / `TrustLevel`: routing and trust policy inputs.
 
-## Quick Start
+## When To Use It
 
-Most applications should use `mimobox-sdk`:
+Use this crate directly when implementing a backend, sharing types across mimobox crates, or testing backend contracts.
+
+Do not use it as the primary application entry point; `mimobox-sdk` owns backend selection and convenience APIs.
+
+## SDK Example
 
 ```rust
-use mimobox_sdk::Sandbox;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sandbox = Sandbox::new()?;
-    let result = sandbox.execute("/bin/echo hello")?;
-    println!("{}", String::from_utf8_lossy(&result.stdout));
-    Ok(())
-}
+use mimobox_sdk::{Config, Sandbox, TrustLevel};
+let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+let mut sandbox = Sandbox::with_config(config)?;
+let result = sandbox.execute("/bin/echo hi")?;
+println!("{}", String::from_utf8_lossy(&result.stdout));
 ```
 
-## Minimal Backend Implementation
-
-Implement `Sandbox` when building a custom backend:
+## Backend Impl Example
 
 ```rust
 use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
-use std::time::Duration;
-
-struct NoopSandbox;
-
-impl Sandbox for NoopSandbox {
-    fn new(_config: SandboxConfig) -> Result<Self, SandboxError> {
+struct Backend;
+impl Sandbox for Backend {
+    fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
+        let _ = config;
         Ok(Self)
     }
-
-    fn execute(&mut self, _command: &str) -> Result<SandboxResult, SandboxError> {
-        Ok(SandboxResult {
-            stdout: b"noop".to_vec(),
-            stderr: Vec::new(),
-            exit_code: Some(0),
-            elapsed: Duration::from_millis(0),
-            timed_out: false,
-        })
-    }
-
-    fn destroy(self) -> Result<(), SandboxError> {
-        Ok(())
+    fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
+        let _ = cmd;
+        Err(SandboxError::Unsupported)
     }
 }
 ```
-
-## Feature Flags
-
-This crate does not define feature flags. Backend-specific features live in `mimobox-os`, `mimobox-vm`, `mimobox-wasm`, and `mimobox-sdk`.
 
 ## License
 
