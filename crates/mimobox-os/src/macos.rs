@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{DirEntry, FileType, Sandbox, SandboxConfig, SandboxError, SandboxResult};
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
@@ -416,6 +416,32 @@ impl Sandbox for MacOsSandbox {
             child.id() as libc::pid_t,
             config.timeout,
         ))
+    }
+
+    fn list_dir(
+        &mut self,
+        path: &str,
+    ) -> Result<Vec<mimobox_core::DirEntry>, mimobox_core::SandboxError> {
+        let entries = std::fs::read_dir(path)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let metadata = entry.metadata().ok()?;
+                let file_type = if metadata.is_dir() {
+                    FileType::Dir
+                } else if metadata.is_file() {
+                    FileType::File
+                } else {
+                    FileType::Other
+                };
+                Some(DirEntry::new(
+                    entry.file_name().to_string_lossy().into_owned(),
+                    file_type,
+                    metadata.len(),
+                    metadata.file_type().is_symlink(),
+                ))
+            })
+            .collect();
+        Ok(entries)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {

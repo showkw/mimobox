@@ -16,7 +16,7 @@ mod sandbox;
 mod seccomp;
 
 pub use sandbox::{
-    ErrorCode, PtyConfig, PtyEvent, PtySession, PtySize, Sandbox, SandboxConfig, SandboxError,
-    SandboxResult, SandboxSnapshot,
+    DirEntry, ErrorCode, FileType, PtyConfig, PtyEvent, PtySession, PtySize, Sandbox,
+    SandboxConfig, SandboxError, SandboxResult, SandboxSnapshot,
 };
 pub use seccomp::SeccompProfile;

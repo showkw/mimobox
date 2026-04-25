@@ -45,7 +45,7 @@ mod router;
 
 pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLevel};
 pub use error::SdkError;
-pub use mimobox_core::{ErrorCode, PtyConfig, PtyEvent, PtySize};
+pub use mimobox_core::{DirEntry, ErrorCode, FileType, PtyConfig, PtyEvent, PtySize};
 
 use mimobox_core::{Sandbox as CoreSandbox, SandboxResult};
 use router::resolve_isolation;
@@ -885,6 +885,21 @@ impl Sandbox {
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
+    }
+
+    /// 列出指定路径下的目录条目。
+    ///
+    /// 返回目录内所有条目的名称、类型、大小和符号链接标记。
+    pub fn list_dir(&mut self, path: &str) -> Result<Vec<mimobox_core::DirEntry>, SdkError> {
+        self.ensure_backend("/bin/ls")?;
+        let inner = self.require_inner()?;
+
+        dispatch_execute!(inner, s, {
+            mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                other => SdkError::from_sandbox_execute_error(other),
+            })
+        })
     }
 
     /// 创建交互式终端会话。

@@ -32,6 +32,8 @@ pub enum ErrorCode {
     FilePermissionDenied,
     /// The target file or transferred content exceeds the size limit.
     FileTooLarge,
+    /// The target path is not a directory.
+    NotDirectory,
     /// The HTTP proxy target host is not in the allowlist.
     HttpDeniedHost,
     /// The HTTP proxy request times out.
@@ -67,6 +69,7 @@ impl ErrorCode {
             Self::FileNotFound => "file_not_found",
             Self::FilePermissionDenied => "file_permission_denied",
             Self::FileTooLarge => "file_too_large",
+            Self::NotDirectory => "not_directory",
             Self::HttpDeniedHost => "http_denied_host",
             Self::HttpTimeout => "http_timeout",
             Self::HttpBodyTooLarge => "http_body_too_large",
@@ -79,6 +82,46 @@ impl ErrorCode {
             Self::InvalidConfig => "invalid_config",
             Self::UnsupportedPlatform => "unsupported_platform",
             _ => "unknown_error",
+        }
+    }
+}
+
+/// 文件类型枚举，用于目录条目的类型区分。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FileType {
+    /// 普通文件。
+    File,
+    /// 目录。
+    Dir,
+    /// 符号链接。
+    Symlink,
+    /// 其他类型（设备、管道等）。
+    Other,
+}
+
+/// 目录条目，表示 list_dir 返回的单个条目。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirEntry {
+    /// 文件名。
+    pub name: String,
+    /// 文件类型。
+    pub file_type: FileType,
+    /// 文件大小（字节）。
+    pub size: u64,
+    /// 是否为符号链接。
+    pub is_symlink: bool,
+}
+
+impl DirEntry {
+    /// 创建目录条目。
+    pub fn new(name: String, file_type: FileType, size: u64, is_symlink: bool) -> Self {
+        Self {
+            name,
+            file_type,
+            size,
+            is_symlink,
         }
     }
 }
@@ -508,6 +551,14 @@ pub trait Sandbox {
         let _ = data;
         Err(SandboxError::ExecutionFailed(
             "file writing not supported by current backend".into(),
+        ))
+    }
+
+    /// 列出指定路径下的目录条目。
+    fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
+        let _ = path;
+        Err(SandboxError::ExecutionFailed(
+            "list_dir not supported by current backend".into(),
         ))
     }
 

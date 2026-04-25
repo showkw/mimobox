@@ -1,6 +1,6 @@
 //! mimobox MCP Server.
 //!
-//! Exposes 10 tools over stdio:
+//! Exposes 11 tools over stdio:
 //! - create_sandbox
 //! - destroy_sandbox
 //! - list_sandboxes
@@ -8,6 +8,7 @@
 //! - execute_command
 //! - read_file
 //! - write_file
+//! - list_dir
 //! - snapshot
 //! - fork
 //! - http_request
@@ -20,7 +21,7 @@ use std::{
 
 #[cfg(feature = "vm")]
 use base64::{Engine, engine::general_purpose::STANDARD};
-use mimobox_sdk::{Config, ExecuteResult, IsolationLevel, Sandbox, SdkError};
+use mimobox_sdk::{Config, DirEntry, ExecuteResult, FileType, IsolationLevel, Sandbox, SdkError};
 use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::JsonSchema;
 use rmcp::{
@@ -139,6 +140,14 @@ pub struct McpHttpRequest {
     method: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListDirRequest {
+    /// Target sandbox ID.
+    sandbox_id: u64,
+    /// Directory path inside the sandbox.
+    path: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExecuteResponse {
     stdout: String,
@@ -201,6 +210,21 @@ pub struct McpHttpResponse {
     status: u16,
     headers: HashMap<String, String>,
     body: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ListDirEntry {
+    name: String,
+    file_type: String,
+    size: u64,
+    is_symlink: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ListDirResponse {
+    sandbox_id: u64,
+    path: String,
+    entries: Vec<ListDirEntry>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -594,6 +618,26 @@ impl MimoboxServer {
         }
     }
 
+    #[tool(description = "List directory entries in a mimobox sandbox")]
+    async fn list_dir(
+        &self,
+        Parameters(request): Parameters<ListDirRequest>,
+    ) -> Result<Json<ListDirResponse>, Json<ErrorResponse>> {
+        let entries = self
+            .with_managed_sandbox(request.sandbox_id, {
+                let path = request.path.clone();
+                move |sandbox| sandbox.list_dir(&path)
+            })
+            .await
+            .map_err(to_error)?;
+
+        Ok(Json(ListDirResponse {
+            sandbox_id: request.sandbox_id,
+            path: request.path,
+            entries: entries.into_iter().map(format_list_dir_entry).collect(),
+        }))
+    }
+
     async fn execute_with_optional_sandbox(
         &self,
         sandbox_id: Option<u64>,
@@ -711,6 +755,20 @@ fn format_execute_result(result: ExecuteResult) -> ExecuteResponse {
         exit_code: result.exit_code,
         timed_out: result.timed_out,
         elapsed_ms: result.elapsed.as_millis(),
+    }
+}
+
+fn format_list_dir_entry(entry: DirEntry) -> ListDirEntry {
+    ListDirEntry {
+        name: entry.name,
+        file_type: match entry.file_type {
+            FileType::File => "file".to_string(),
+            FileType::Dir => "dir".to_string(),
+            FileType::Symlink => "symlink".to_string(),
+            _ => "other".to_string(),
+        },
+        size: entry.size,
+        is_symlink: entry.is_symlink,
     }
 }
 

@@ -11,7 +11,9 @@ use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
+use mimobox_core::{
+    DirEntry, FileType, Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile,
+};
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 use crate::seccomp;
@@ -760,6 +762,32 @@ impl Sandbox for LinuxSandbox {
                 Self::pty_child_main(&config.command, &child_config, &config, &slave_path);
             }
         }
+    }
+
+    fn list_dir(
+        &mut self,
+        path: &str,
+    ) -> Result<Vec<mimobox_core::DirEntry>, mimobox_core::SandboxError> {
+        let entries = std::fs::read_dir(path)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let metadata = entry.metadata().ok()?;
+                let file_type = if metadata.is_dir() {
+                    FileType::Dir
+                } else if metadata.is_file() {
+                    FileType::File
+                } else {
+                    FileType::Other
+                };
+                Some(DirEntry::new(
+                    entry.file_name().to_string_lossy().into_owned(),
+                    file_type,
+                    metadata.len(),
+                    metadata.file_type().is_symlink(),
+                ))
+            })
+            .collect();
+        Ok(entries)
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
