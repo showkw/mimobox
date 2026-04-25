@@ -1,7 +1,7 @@
 # mimobox-cli
 
-`mimobox-cli` 是 mimobox 的命令行入口，封装统一的运行、检查和基准能力。
+`mimobox-cli` is the command-line entry point for mimobox, wrapping unified capabilities for running, checking, and benchmarking.
 
-该 crate 当前主要服务于仓库内开发与验证流程，不作为首批 crates.io 发布对象。
+This crate currently primarily supports the repository's internal development and validation workflow, and is not part of the initial crates.io release set.
 
-完整项目说明、示例与架构背景见仓库根目录 `README.md`。
+For the complete project overview, examples, and architecture background, see the repository root `README.md`.

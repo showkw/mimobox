@@ -1,43 +1,43 @@
-# mimobox 架构设计
+# mimobox Architecture Design
 
-本文档描述 `/Users/showkw/dev/mimobox` 当前仓库的架构分层、后端实现机制、SDK 智能路由、MCP Server、Python 绑定以及安全边界。文档只记录当前源码中真实存在的能力，不把研究文档中的远期规划写成现状。
+This document describes the architecture layers, backend implementation mechanisms, SDK intelligent routing, MCP Server, Python bindings, and security boundaries of the current `/Users/showkw/dev/mimobox` repository. It only records capabilities that actually exist in the current source code, and does not present long-term plans from research documents as current status.
 
-## 版本记录表
+## Version History
 
-| 版本 | 日期 | 变更摘要 | 变更类型 | 责任人 |
+| Version | Date | Change Summary | Change Type | Owner |
 | --- | --- | --- | --- | --- |
-| v2.0 | 2026-04-25 | 按 8 crate workspace 重写架构，补充 SDK 路由、MCP Server 与 Python SDK 绑定说明 | 更新 | Codex |
-| v1.0 | 2026-04-20 | 首次建立架构设计文档 | 新增 | Codex |
+| v2.0 | 2026-04-25 | Rewrote the architecture around the 8 crate workspace, adding SDK routing, MCP Server, and Python SDK binding notes | Update | Codex |
+| v1.0 | 2026-04-20 | Initial architecture design document | Added | Codex |
 
-## 术语表
+## Glossary
 
-| 术语 | 定义 |
+| Term | Definition |
 | --- | --- |
-| 核心抽象层 | `mimobox-core` 中定义的 trait、配置、结果和错误类型 |
-| OS 级后端 | `mimobox-os` 中的 Linux/macOS 原生沙箱实现 |
-| Wasm 后端 | `mimobox-wasm` 中基于 Wasmtime 的沙箱实现 |
-| microVM 后端 | `mimobox-vm` 中基于 Linux KVM 的硬件级隔离实现 |
-| 智能路由 | `mimobox-sdk` 根据命令类型和信任级别选择隔离后端的逻辑 |
-| MCP Server | `mimobox-mcp` 通过 rmcp + stdio 暴露给 MCP 客户端的工具服务 |
-| Python SDK | `mimobox-python` 通过 PyO3 + maturin 暴露的 Python 绑定 |
+| Core abstraction layer | traits, configuration, result, and error types defined in `mimobox-core` |
+| OS backend | Native Linux/macOS sandbox implementation in `mimobox-os` |
+| Wasm backend | Wasmtime-based sandbox implementation in `mimobox-wasm` |
+| microVM backend | Hardware-level isolation implementation based on Linux KVM in `mimobox-vm` |
+| Intelligent routing | Logic in `mimobox-sdk` that selects an isolation backend based on command type and trust level |
+| MCP Server | Tool service exposed to MCP clients by `mimobox-mcp` through rmcp + stdio |
+| Python SDK | Python bindings exposed by `mimobox-python` through PyO3 + maturin |
 
-## 文章内容大纲目录表
+## Article Outline
 
-| 章节 | 标题 | 目的 |
+| Section | Title | Purpose |
 | --- | --- | --- |
-| 1 | 整体架构 | 解释 8 crate workspace 的职责边界 |
-| 2 | 核心抽象 | 说明 `Sandbox` trait 与通用类型 |
-| 3 | 后端实现 | 展开 OS、Wasm、microVM 三类后端 |
-| 4 | SDK 智能路由 | 说明 `resolve_isolation` 的路由规则 |
-| 5 | MCP Server | 说明 rmcp + stdio 工具服务架构 |
-| 6 | Python SDK | 说明 PyO3 绑定、类型导出和错误映射 |
-| 7 | 池化与快照 | 说明 OS 池、VM 池、RestorePool 和 fork |
-| 8 | 安全边界 | 明确当前已形成的隔离保证 |
-| 9 | 架构阅读顺序 | 给出推荐源码阅读路径 |
+| 1 | Overall Architecture | Explain the responsibility boundaries of the 8 crate workspace |
+| 2 | Core Abstractions | Describe the `Sandbox` trait and common types |
+| 3 | Backend Implementations | Detail the OS, Wasm, and microVM backend categories |
+| 4 | SDK Intelligent Routing | Explain the routing rules of `resolve_isolation` |
+| 5 | MCP Server | Explain the rmcp + stdio tool service architecture |
+| 6 | Python SDK | Explain PyO3 bindings, exported types, and error mapping |
+| 7 | Pooling and Snapshots | Explain the OS pool, VM pool, RestorePool, and fork |
+| 8 | Security Boundaries | Clarify the isolation guarantees currently in place |
+| 9 | Recommended Architecture Reading Order | Provide the recommended source reading path |
 
-## 1. 整体架构
+## 1. Overall Architecture
 
-当前 Cargo workspace 包含 8 个 crate：
+The current Cargo workspace contains 8 crates:
 
 ```text
 /Users/showkw/dev/mimobox
@@ -98,10 +98,10 @@
      `-- Python exception hierarchy
 ```
 
-从上层调用看，统一入口集中在 SDK、CLI、MCP Server 和 Python SDK：
+From the upper-layer caller perspective, the unified entry points are concentrated in the SDK, CLI, MCP Server, and Python SDK:
 
 ```text
-调用方
+Caller
   |
   +--> Rust SDK: mimobox_sdk::Sandbox
   +--> CLI: mimobox-cli
@@ -116,48 +116,48 @@
         `--> mimobox-vm
               |
               v
-        mimobox-core 通用 trait / config / error
+        mimobox-core common trait / config / error
 ```
 
-`mimobox-core` 是底层通用契约，`mimobox-sdk` 是面向应用层的统一门面。CLI、MCP Server 和 Python SDK 都不直接复制后端决策逻辑，而是尽量委托给 SDK。
+`mimobox-core` is the low-level common contract, while `mimobox-sdk` is the unified facade for the application layer. The CLI, MCP Server, and Python SDK do not directly duplicate backend decision logic; they delegate to the SDK as much as possible.
 
-## 2. 核心抽象
+## 2. Core Abstractions
 
 ### 2.1 `Sandbox` trait
 
-`mimobox-core` 的 `Sandbox` trait 用最小生命周期接口覆盖多个隔离后端：
+The `Sandbox` trait in `mimobox-core` covers multiple isolation backends with a minimal lifecycle interface:
 
-- `new`：创建隔离环境，并在执行前完成安全约束配置。
-- `execute`：执行命令或模块入口，返回统一的 `SandboxResult`。
-- `destroy`：释放资源，避免后端生命周期完全依赖析构副作用。
+- `new`: Create the isolation environment and complete security constraint configuration before execution.
+- `execute`: Execute a command or module entry point and return a unified `SandboxResult`.
+- `destroy`: Release resources so backend lifecycle does not depend entirely on destructor side effects.
 
-这个抽象保持了 KISS：上层不需要理解 Landlock、Wasmtime Store 或 KVM vCPU，只需要面向统一生命周期编程。
+This abstraction keeps KISS intact: upper layers do not need to understand Landlock, Wasmtime Store, or KVM vCPU; they only need to program against a unified lifecycle.
 
-### 2.2 通用配置与错误
+### 2.2 Common Configuration and Errors
 
-`SandboxConfig`、`SandboxResult`、`SandboxError` 和 `ErrorCode` 由 `mimobox-core` 统一定义。收益是：
+`SandboxConfig`, `SandboxResult`, `SandboxError`, and `ErrorCode` are defined uniformly by `mimobox-core`. The benefits are:
 
-- 后端实现可以共享资源限制、超时、文件白名单和网络策略语义。
-- SDK 可以把后端错误提升为结构化 `SdkError`。
-- Python SDK 可以把 `SdkError` 映射到 Python 异常层级。
-- MCP Server 可以把错误统一序列化为工具调用错误响应。
+- Backend implementations can share semantics for resource limits, timeouts, file allowlists, and network policies.
+- The SDK can promote backend errors into structured `SdkError` values.
+- The Python SDK can map `SdkError` into the Python exception hierarchy.
+- The MCP Server can serialize errors uniformly as tool invocation error responses.
 
-## 3. 后端实现
+## 3. Backend Implementations
 
-### 3.1 OS 级后端：`mimobox-os`
+### 3.1 OS Backend: `mimobox-os`
 
-Linux 后端主流程：
+Main Linux backend flow:
 
 ```text
-父进程
+Parent process
   |
-  +-- 创建 stdout/stderr 管道
+  +-- Create stdout/stderr pipes
   +-- fork
        |
-       `-- 子进程
+       `-- Child process
             |-- setpgid
-            |-- clearenv + 注入最小环境变量
-            |-- 重定向 stdin/stdout/stderr
+            |-- clearenv + inject minimal environment variables
+            |-- redirect stdin/stdout/stderr
             |-- setrlimit(RLIMIT_AS)
             |-- Landlock restrict_self
             |-- unshare namespaces
@@ -165,9 +165,9 @@ Linux 后端主流程：
             `-- execvp(command)
 ```
 
-Linux 安全顺序是关键约束：先资源限制，再文件系统限制，再 namespace，最后 Seccomp。任何关键隔离步骤失败都会直接失败，不以“半隔离”状态继续执行。
+The Linux security sequence is a critical constraint: resource limits first, then filesystem restrictions, then namespace, and finally Seccomp. If any critical isolation step fails, execution fails immediately instead of continuing in a "partially isolated" state.
 
-macOS 后端使用系统原生 Seatbelt：
+The macOS backend uses the system-native Seatbelt:
 
 ```text
 SandboxConfig
@@ -179,44 +179,44 @@ generate_policy()
 sandbox-exec -p "<policy>" -- <command>
 ```
 
-macOS 当前能可靠限制写入和网络，但读取范围需要保留系统启动依赖路径，无法像 Linux Landlock 一样精确收敛。
+The current macOS backend can reliably restrict writes and network access, but the readable path set must retain system startup dependency paths and cannot be narrowed as precisely as Linux Landlock.
 
-### 3.2 Wasm 后端：`mimobox-wasm`
+### 3.2 Wasm Backend: `mimobox-wasm`
 
-Wasm 后端基于 Wasmtime：
+The Wasm backend is based on Wasmtime:
 
 ```text
 WasmSandbox
   |
-  |-- Engine（长生命周期复用）
-  |-- cache_dir（模块缓存）
+  |-- Engine (long-lived reuse)
+  |-- cache_dir (module cache)
   |-- SandboxConfig
   `-- execute()
-       |-- 加载/编译 Module
-       |-- 创建 WasiP1Ctx
-       |-- 配置 StoreLimits
-       |-- 配置 fuel / epoch deadline
+       |-- Load/compile Module
+       |-- Create WasiP1Ctx
+       |-- Configure StoreLimits
+       |-- Configure fuel / epoch deadline
        |-- instantiate
-       `-- 调用 _start 或 main
+       `-- Call _start or main
 ```
 
-Wasm 后端通过 StoreLimits 控制线性内存、实例数量和表数量，通过 fuel 与 epoch deadline 组合限制执行成本和墙钟时间。
+The Wasm backend uses StoreLimits to control linear memory, instance count, and table count, and uses fuel together with epoch deadline to limit execution cost and wall-clock time.
 
-### 3.3 microVM 后端：`mimobox-vm`
+### 3.3 microVM Backend: `mimobox-vm`
 
-`mimobox-vm` crate 已存在，并且已经实现 Linux KVM 后端。它不是规划占位，也不是研究文档中的虚构模块。
+The `mimobox-vm` crate exists and already implements the Linux KVM backend. It is not a planning placeholder, nor a fictional module from a research document.
 
-当前实现包含：
+The current implementation includes:
 
-- `MicrovmSandbox`：KVM microVM 生命周期与命令执行入口。
-- `VmPool`：预热 microVM 池，降低热路径获取延迟。
-- `RestorePool`：预创建空壳 VM，用于池化快照恢复。
-- 快照 / restore / fork：支持内存快照、恢复和 CoW fork。
-- HTTP 代理：host 侧受控 HTTPS 代理，配合域名白名单。
-- 文件传输：通过 guest/host 串口协议读写 microVM 内文件。
-- 流式输出：`EXECS` 与 `STREAM:*` 帧支持 stdout/stderr 分流。
+- `MicrovmSandbox`: KVM microVM lifecycle and command execution entry point.
+- `VmPool`: Prewarmed microVM pool that reduces acquisition latency on the hot path.
+- `RestorePool`: Pre-created shell VMs used for pooled snapshot restore.
+- Snapshot / restore / fork: Supports memory snapshots, restore, and CoW fork.
+- HTTP proxy: Host-side controlled HTTPS proxy with domain allowlist support.
+- File transfer: Reads and writes files inside the microVM through the guest/host serial protocol.
+- Streaming output: `EXECS` and `STREAM:*` frames support stdout/stderr demultiplexing.
 
-microVM 控制面当前依赖 guest `/init` 与串口命令协议：
+The microVM control plane currently depends on guest `/init` and the serial command protocol:
 
 ```text
 host SDK / VM backend
@@ -230,40 +230,40 @@ host SDK / VM backend
         v
 guest /init
   |
-  +-- 执行命令
-  +-- 回传 stdout/stderr/exit
-  +-- 处理文件传输
-  `-- 转发 HTTP 代理请求
+  +-- Execute command
+  +-- Return stdout/stderr/exit
+  +-- Handle file transfer
+  `-- Forward HTTP proxy requests
 ```
 
-## 4. SDK 智能路由
+## 4. SDK Intelligent Routing
 
-`mimobox-sdk` 是上层推荐入口。核心路由逻辑位于 `router.rs` 的 `resolve_isolation(config, command)`。
+`mimobox-sdk` is the recommended upper-layer entry point. The core routing logic is located in `resolve_isolation(config, command)` in `router.rs`.
 
-### 4.1 Auto 模式
+### 4.1 Auto Mode
 
-当 `Config.isolation == IsolationLevel::Auto` 时：
+When `Config.isolation == IsolationLevel::Auto`:
 
-1. 命令以 `.wasm`、`.wat` 或 `.wast` 结尾时优先选择 `Wasm`。
-2. `TrustLevel::Untrusted` 必须选择 `MicroVm`。
-3. 如果当前平台或 feature 不支持 microVM，不可信代码会 fail-closed，返回错误，不降级到 OS 级。
-4. 其他命令默认选择 `Os`。
+1. Commands ending in `.wasm`, `.wat`, or `.wast` prefer `Wasm`.
+2. `TrustLevel::Untrusted` must select `MicroVm`.
+3. If the current platform or feature does not support microVM, untrusted code fails closed and returns an error instead of downgrading to OS-level isolation.
+4. Other commands default to `Os`.
 
-这使默认路径保持低延迟，同时避免把不可信任务静默降级到弱隔离层。
+This keeps the default path low-latency while avoiding silent downgrades of untrusted tasks to a weaker isolation layer.
 
-### 4.2 显式模式
+### 4.2 Explicit Mode
 
-当用户显式配置隔离层时：
+When the user explicitly configures the isolation layer:
 
-- `IsolationLevel::Os`：直接选择 OS 级后端，缺少 `os` feature 时返回 `BackendUnavailable`。
-- `IsolationLevel::Wasm`：直接选择 Wasm 后端，缺少 `wasm` feature 时返回 `BackendUnavailable`。
-- `IsolationLevel::MicroVm`：直接选择 microVM 后端，仅在 Linux + `vm` feature 可用，否则返回 `BackendUnavailable`。
+- `IsolationLevel::Os`: Selects the OS backend directly, or returns `BackendUnavailable` when the `os` feature is missing.
+- `IsolationLevel::Wasm`: Selects the Wasm backend directly, or returns `BackendUnavailable` when the `wasm` feature is missing.
+- `IsolationLevel::MicroVm`: Selects the microVM backend directly. It is available only on Linux + `vm` feature; otherwise it returns `BackendUnavailable`.
 
-显式模式不再尝试根据命令内容自动改路由，符合“高级用户完全可控”的定位。
+Explicit mode no longer attempts to reroute automatically based on command content, which matches the positioning of "full control for advanced users."
 
 ## 5. MCP Server
 
-`mimobox-mcp` 基于 rmcp 框架，通过 stdio transport 与 MCP 客户端通信。服务端核心结构是 `MimoboxServer`：
+`mimobox-mcp` is based on the rmcp framework and communicates with MCP clients through stdio transport. The core server structure is `MimoboxServer`:
 
 ```text
 MimoboxServer
@@ -273,31 +273,31 @@ MimoboxServer
   `-- tool_router: ToolRouter<Self>
 ```
 
-`ManagedSandbox` 保存 SDK `Sandbox` 实例、创建时间戳和运行时长统计。MCP 工具函数通过 `Parameters<T>` 反序列化请求参数，再调用 SDK 完成创建、执行、文件、快照、fork 和 HTTP 操作。
+`ManagedSandbox` stores an SDK `Sandbox` instance, creation timestamp, and runtime duration statistics. MCP tool functions deserialize request parameters through `Parameters<T>`, then call the SDK to complete creation, execution, file, snapshot, fork, and HTTP operations.
 
-当前暴露 10 个工具：
+The server currently exposes 10 tools:
 
-| 工具 | 说明 |
+| Tool | Description |
 | --- | --- |
-| `create_sandbox` | 创建可复用沙箱实例 |
-| `execute_code` | 执行代码片段，按语言转换为命令 |
-| `execute_command` | 执行 shell 命令 |
-| `destroy_sandbox` | 销毁指定沙箱并释放资源 |
-| `list_sandboxes` | 列出活动沙箱和元数据 |
-| `read_file` | 从 microVM 沙箱读取文件，返回 base64 |
-| `write_file` | 向 microVM 沙箱写入 base64 文件内容 |
-| `snapshot` | 创建 microVM 内存快照 |
-| `fork` | 基于 CoW fork microVM 沙箱 |
-| `http_request` | 通过受控代理发起 HTTP 请求 |
+| `create_sandbox` | Create a reusable sandbox instance |
+| `execute_code` | Execute a code snippet, converting it into a command according to language |
+| `execute_command` | Execute a shell command |
+| `destroy_sandbox` | Destroy the specified sandbox and release resources |
+| `list_sandboxes` | List active sandboxes and metadata |
+| `read_file` | Read a file from a microVM sandbox and return base64 |
+| `write_file` | Write base64 file content into a microVM sandbox |
+| `snapshot` | Create a microVM memory snapshot |
+| `fork` | Fork a microVM sandbox based on CoW |
+| `http_request` | Send an HTTP request through the controlled proxy |
 
-`execute_code` 和 `execute_command` 不提供 `sandbox_id` 时会创建临时沙箱，执行完成后自动销毁。
+When `execute_code` and `execute_command` are called without `sandbox_id`, they create a temporary sandbox and automatically destroy it after execution completes.
 
 ## 6. Python SDK
 
-`mimobox-python` 通过 PyO3 + maturin 把 Rust SDK 暴露为 Python 模块。核心关系是：
+`mimobox-python` exposes the Rust SDK as a Python module through PyO3 + maturin. The core relationship is:
 
 ```text
-Python 调用方
+Python caller
   |
   v
 mimobox.Sandbox (PySandbox)
@@ -310,9 +310,9 @@ mimobox_sdk::Sandbox (RustSandbox)
   `-- microVM backend
 ```
 
-### 6.1 类型导出
+### 6.1 Exported Types
 
-Python 模块导出以下公开类型：
+The Python module exports the following public types:
 
 - `Sandbox`
 - `Snapshot`
@@ -321,18 +321,18 @@ Python 模块导出以下公开类型：
 - `StreamEvent`
 - `StreamIterator`
 
-`PySandbox` 内部持有 `Option<RustSandbox>`。`__exit__` 或显式关闭后会取出内部实例并调用 `destroy()`，避免重复释放。
+`PySandbox` internally holds `Option<RustSandbox>`. After `__exit__` or explicit close, it takes the internal instance and calls `destroy()`, avoiding duplicate release.
 
-### 6.2 错误映射
+### 6.2 Error Mapping
 
-Python 异常层级：
+Python exception hierarchy:
 
-- `SandboxError`：基类。
-- `SandboxProcessError`：命令非零退出或被 kill。
-- `SandboxHttpError`：HTTP 代理拒绝、非法 URL、body 过大等。
-- `SandboxLifecycleError`：沙箱未就绪、已销毁或创建失败。
+- `SandboxError`: Base class.
+- `SandboxProcessError`: Command exits non-zero or is killed.
+- `SandboxHttpError`: HTTP proxy rejection, invalid URL, oversized body, and similar errors.
+- `SandboxLifecycleError`: Sandbox is not ready, has been destroyed, or failed to create.
 
-标准异常映射：
+Standard exception mapping:
 
 - `CommandTimeout` / `HttpTimeout` -> `TimeoutError`
 - `FileNotFound` -> `FileNotFoundError`
@@ -341,21 +341,21 @@ Python 异常层级：
 - `InvalidConfig` -> `ValueError`
 - `UnsupportedPlatform` -> `NotImplementedError`
 
-### 6.3 方法委托
+### 6.3 Method Delegation
 
-Python 方法基本保持对 Rust SDK 的薄封装：
+Python methods remain thin wrappers around the Rust SDK:
 
-- `execute()` 委托 `execute`、`execute_with_env`、`execute_with_timeout` 或 `execute_with_env_and_timeout`。
-- `stream_execute()` 委托 Rust SDK 的 `stream_execute()`，返回 `StreamIterator`。
-- `read_file()` / `write_file()` 委托 microVM 文件传输能力。
-- `snapshot()` / `from_snapshot()` / `fork()` 委托 SDK 快照与 CoW fork 能力。
-- `http_request()` 委托 host 侧 HTTP 代理。
+- `execute()` delegates to `execute`, `execute_with_env`, `execute_with_timeout`, or `execute_with_env_and_timeout`.
+- `stream_execute()` delegates to `stream_execute()` in the Rust SDK and returns `StreamIterator`.
+- `read_file()` / `write_file()` delegate to microVM file transfer capabilities.
+- `snapshot()` / `from_snapshot()` / `fork()` delegate to SDK snapshot and CoW fork capabilities.
+- `http_request()` delegates to the host-side HTTP proxy.
 
-## 7. 池化与快照
+## 7. Pooling and Snapshots
 
-### 7.1 OS 级 `SandboxPool`
+### 7.1 OS-level `SandboxPool`
 
-`mimobox-os` 的 `SandboxPool` 通过预创建和复用 OS 级沙箱降低获取延迟：
+`SandboxPool` in `mimobox-os` reduces acquisition latency by pre-creating and reusing OS-level sandboxes:
 
 ```text
 SandboxPool
@@ -372,58 +372,58 @@ SandboxPool
             `-- evict_count
 ```
 
-回收由 `PooledSandbox::drop` 触发，并在归还前执行健康检查。
+Recycling is triggered by `PooledSandbox::drop`, with a health check performed before returning the sandbox to the pool.
 
-### 7.2 microVM `VmPool` 与 `RestorePool`
+### 7.2 microVM `VmPool` and `RestorePool`
 
-`mimobox-vm` 侧有两类池：
+There are two pool types on the `mimobox-vm` side:
 
-- `VmPool`：预热完整 microVM 实例，优化 acquire + execute 热路径。
-- `RestorePool`：预创建可恢复的 VM 壳，优化 snapshot restore-to-ready 路径。
+- `VmPool`: Prewarms complete microVM instances to optimize the acquire + execute hot path.
+- `RestorePool`: Pre-creates restorable VM shells to optimize the snapshot restore-to-ready path.
 
-快照和 fork 依赖 microVM 后端。OS 与 Wasm 后端不提供等价内存快照能力，SDK 会返回结构化错误。
+Snapshots and fork depend on the microVM backend. OS and Wasm backends do not provide equivalent memory snapshot capabilities, and the SDK returns structured errors.
 
-## 8. 安全边界
+## 8. Security Boundaries
 
-### 8.1 已形成硬边界的部分
+### 8.1 Parts with Hard Boundaries Already in Place
 
-Linux OS 级：
+Linux OS-level:
 
-- 文件系统写入受 Landlock 严格限制。
-- 系统调用被 Seccomp 白名单过滤。
-- 网络栈通过 namespace 隔离。
-- 内存通过 `setrlimit` 收紧。
+- Filesystem writes are strictly restricted by Landlock.
+- System calls are filtered by the Seccomp allowlist.
+- The network stack is isolated through namespace.
+- Memory is tightened through `setrlimit`.
 
-Wasm：
+Wasm:
 
-- 线性内存与实例数量被 `StoreLimits` 限制。
-- 执行时间由 fuel 与 epoch deadline 联合控制。
-- stdout/stderr 通过内存管道捕获，不直接接管宿主标准流。
+- Linear memory and instance count are limited by `StoreLimits`.
+- Execution time is jointly controlled by fuel and epoch deadline.
+- stdout/stderr are captured through in-memory pipes and do not directly take over the host standard streams.
 
-microVM：
+microVM:
 
-- 通过 KVM 提供硬件辅助隔离边界。
-- guest 文件操作、HTTP 代理和命令执行经过 host 控制面协议。
-- 网络仍默认拒绝，HTTP 代理由域名白名单控制。
+- Hardware-assisted isolation boundaries are provided through KVM.
+- guest file operations, HTTP proxy, and command execution pass through the host control-plane protocol.
+- Network remains denied by default, and the HTTP proxy is controlled by a domain allowlist.
 
-### 8.2 只能形成软边界或部分边界的部分
+### 8.2 Parts That Only Form Soft or Partial Boundaries
 
-macOS：
+macOS:
 
-- 写入控制可靠。
-- 网络拒绝可靠。
-- 读取范围无法像 Linux 一样精确收敛。
-- 内存限制当前不是强硬边界。
+- Write controls are reliable.
+- Network denial is reliable.
+- The read scope cannot be narrowed as precisely as on Linux.
+- Memory limits are not currently a hard boundary.
 
-### 8.3 仍需谨慎理解的部分
+### 8.3 Parts That Still Require Careful Interpretation
 
-- Windows 后端仍是规划方向，不属于当前已实现安全边界。
-- microVM 的正式数据面仍以后续 vsock 演进为目标，当前串口控制面已可用但更偏 bring-up 和控制协议。
-- HTTP 代理开放的是 host 控制的请求路径，不等价于沙箱内任意网络访问。
+- The Windows backend is still a planned direction and is not part of the currently implemented security boundary.
+- The formal microVM data plane still targets future vsock evolution. The current serial control plane is usable, but is more oriented toward bring-up and control protocol usage.
+- The HTTP proxy exposes a host-controlled request path, which is not equivalent to arbitrary network access from inside the sandbox.
 
-## 9. 架构阅读顺序
+## 9. Recommended Architecture Reading Order
 
-如果第一次接触 `mimobox`，建议按以下顺序读源码：
+If this is your first time working with `mimobox`, read the source in the following order:
 
 1. `/Users/showkw/dev/mimobox/crates/mimobox-core/src/sandbox.rs`
 2. `/Users/showkw/dev/mimobox/crates/mimobox-core/src/error.rs`
@@ -438,4 +438,4 @@ macOS：
 11. `/Users/showkw/dev/mimobox/crates/mimobox-mcp/src/main.rs`
 12. `/Users/showkw/dev/mimobox/crates/mimobox-python/src/lib.rs`
 
-这条路径对应“通用契约 -> SDK 决策 -> 后端实现 -> 上层入口”的真实依赖关系。
+This path corresponds to the actual dependency relationship: "common contract -> SDK decisions -> backend implementations -> upper-layer entry points."

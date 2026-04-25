@@ -1,35 +1,37 @@
+[中文](README.zh-CN.md)
+
 # mimobox
 
 **mimobox** — A cross-platform Agent Sandbox in Rust with OS-level, Wasm, and microVM isolation, smart routing by default, and full control for advanced users.
 
-Rust 实现的跨平台 Agent Sandbox，为 AI Agent 提供安全隔离的代码执行环境。
+A cross-platform Agent Sandbox implemented in Rust, providing a secure isolated code execution environment for AI Agent workloads.
 
-**默认智能路由，高级用户完全可控。** 默认模式下，SDK `Sandbox::new()` 和 CLI `--backend auto` 会自动选择合适的隔离层；需要精细控制时，又可以显式指定隔离层、资源限制、网络策略和 microVM 资产路径。
+**Smart routing by default, full control for advanced users.** In the default mode, SDK `Sandbox::new()` and CLI `--backend auto` automatically select the appropriate isolation layer. When finer control is needed, users can explicitly specify the isolation layer, resource limits, network policy, and microVM asset paths.
 
-## 版本记录表
+## Version History
 
-| 版本 | 日期 | 变更摘要 | 变更类型 | 责任人 |
+| Version | Date | Summary | Type | Author |
 | --- | --- | --- | --- | --- |
-| v2.2 | 2026-04-25 | 刷新 README：同步 8 crate workspace、MCP Server、Python SDK 能力、章节编号和 Quick Start 版本号 | 更新 | Codex |
-| v2.1 | 2026-04-23 | 新增 `doctor` 环境诊断与 `setup` 资产引导命令，并统一 microVM 默认资产目录到 `~/.mimobox/assets` | 更新 | Codex |
-| v2.0 | 2026-04-23 | 同步流式输出、HTTP 代理、结构化错误模型、命令级 env/timeout、Getting Started 文档与 GitHub Actions CI 现状 | 更新 | Codex |
-| v1.6 | 2026-04-23 | 同步 GitHub Actions CI 为 5-job 精简版，并补充 KVM 手动触发与 hosted runner 限制说明 | 更新 | Codex |
-| v1.5 | 2026-04-21 | 最终核对 README：同步目录结构、三层隔离现状、SDK/CLI 示例、竞品对比口径与路线图状态 | 更新 | Codex |
-| v1.4 | 2026-04-21 | 同步 SDK、智能路由、microVM 串口命令通道与 Guest 协议现状 | 更新 | Codex |
-| v1.3 | 2026-04-21 | 更新产品定位、性能数据与文档索引 | 更新 | — |
-| v1.2 | 2026-04-21 | 按当前 workspace、CLI、脚本和 CI 状态重写 README | 更新 | Codex |
-| v1.1 | 2026-04-21 | 同步文档与代码现状，补充 `mimobox-vm`、KVM、性能与 CI 信息 | 更新 | Codex |
-| v1.0 | 2026-04-20 | 重写根目录 README，补齐架构、API、性能、脚本与安全模型说明 | 新增 | Codex |
+| v2.2 | 2026-04-25 | Refreshed README: synchronized the 8-crate workspace, MCP Server, Python SDK capabilities, section numbering, and Quick Start version number | Update | Codex |
+| v2.1 | 2026-04-23 | Added the `doctor` environment diagnostics command and `setup` asset bootstrap command, and unified the default microVM asset directory to `~/.mimobox/assets` | Update | Codex |
+| v2.0 | 2026-04-23 | Synchronized streaming output, HTTP proxy, structured error model, command-level env/timeout, Getting Started docs, and GitHub Actions CI status | Update | Codex |
+| v1.6 | 2026-04-23 | Synchronized GitHub Actions CI to the streamlined 5-job version and documented KVM manual trigger plus hosted runner limitations | Update | Codex |
+| v1.5 | 2026-04-21 | Final README review: synchronized directory structure, three-layer isolation status, SDK/CLI examples, competitive comparison framing, and roadmap status | Update | Codex |
+| v1.4 | 2026-04-21 | Synchronized SDK, smart routing, microVM serial command channel, and Guest protocol status | Update | Codex |
+| v1.3 | 2026-04-21 | Updated product positioning, performance data, and documentation index | Update | — |
+| v1.2 | 2026-04-21 | Rewrote README according to the current workspace, CLI, scripts, and CI status | Update | Codex |
+| v1.1 | 2026-04-21 | Synchronized documentation with the current codebase and added `mimobox-vm`, KVM, performance, and CI information | Update | Codex |
+| v1.0 | 2026-04-20 | Rewrote the root README with architecture, API, performance, scripts, and security model details | Added | Codex |
 
-## 术语表
+## Glossary
 
-| 术语 | 定义 |
+| Term | Definition |
 | --- | --- |
-| OS 级沙箱 | 基于 Linux/macOS 原生系统机制隔离进程的后端 |
-| Wasm 沙箱 | 基于 Wasmtime 执行 Wasm 模块的后端 |
-| microVM 沙箱 | 基于 Linux KVM 的硬件级隔离后端 |
-| 预热池 | 预创建沙箱实例池（OS 级 / microVM 级），实现微秒级获取与复用 |
-| 智能路由 | 根据命令类型、隔离偏好和信任级别自动选择后端 |
+| OS-level sandbox | Backend that isolates processes using native Linux/macOS system mechanisms |
+| Wasm sandbox | Backend that executes Wasm modules with Wasmtime |
+| microVM sandbox | Hardware-level isolation backend based on Linux KVM |
+| Warm pool | Pool of pre-created sandbox instances (OS-level / microVM-level) for microsecond-level acquisition and reuse |
+| Smart routing | Backend selection that is automatic based on command type, isolation preference, and trust level |
 
 ## Quick Start (30 Seconds)
 
@@ -68,71 +70,71 @@ with Sandbox() as sandbox:
     print(result.stdout, end="")
 ```
 
-Python SDK 当前能力包括：
+Current Python SDK capabilities include:
 
-- streaming：`stream_execute()` 返回 `StreamIterator`，迭代产出 `StreamEvent`。
-- HTTP proxy：`http_request()` 返回 `HttpResponse`，通过 host 侧受控代理发起请求。
-- file operations：`read_file()` 和 `write_file()` 读写 microVM 沙箱内文件。
-- env vars injection：`execute(command, env={...})` 支持命令级环境变量注入。
-- snapshot/fork：`snapshot()`、`Sandbox.from_snapshot()` 和 `fork()` 支持 microVM 快照与 CoW fork。
-- 错误层级：`SandboxError`、`SandboxProcessError`、`SandboxHttpError`、`SandboxLifecycleError`，并映射 `TimeoutError`、`FileNotFoundError`、`PermissionError`、`ConnectionError` 等标准异常。
+- streaming: `stream_execute()` returns `StreamIterator`, which yields `StreamEvent` values during iteration.
+- HTTP proxy: `http_request()` returns `HttpResponse` and sends requests through a controlled host-side proxy.
+- file operations: `read_file()` and `write_file()` read and write files inside the microVM sandbox.
+- env vars injection: `execute(command, env={...})` supports command-level environment variable injection.
+- snapshot/fork: `snapshot()`, `Sandbox.from_snapshot()`, and `fork()` support microVM snapshots and CoW forks.
+- error hierarchy: `SandboxError`, `SandboxProcessError`, `SandboxHttpError`, and `SandboxLifecycleError`, with mappings to standard exceptions such as `TimeoutError`, `FileNotFoundError`, `PermissionError`, and `ConnectionError`.
 
-## 1. 项目简介
+## 1. Project Overview
 
-`mimobox` 面向 AI Agent 安全执行代码的场景，目标是把**极低延迟**、**多层隔离**和**自托管可控性**放到同一个统一接口里。
+`mimobox` targets secure code execution for AI Agent workloads. Its goal is to provide **ultra-low latency**, **multi-layer isolation**, and **self-hosted controllability** behind one unified interface.
 
-核心定位不是“只做一个更快的后端”，而是两件事同时成立：
+Its core positioning is not “just another faster backend”; instead, two properties hold at the same time:
 
-- **默认智能路由**：零配置就能跑。SDK `Sandbox::new()` 和 CLI `--backend auto` 会优先走最合适的隔离层。
-- **高级用户完全可控**：SDK `Config::builder()` 和 CLI 显式 `--backend os|wasm|kvm` 允许你覆盖默认决策，精确控制隔离层、超时、内存、网络和 microVM 资源。
+- **Smart routing by default**: works with zero configuration. SDK `Sandbox::new()` and CLI `--backend auto` prefer the most suitable isolation layer.
+- **Full control for advanced users**: SDK `Config::builder()` and explicit CLI `--backend os|wasm|kvm` let you override the default decision and precisely control the isolation layer, timeout, memory, network, and microVM resources.
 
-当前 Cargo workspace 拆分为 8 个 crate：
+The current Cargo workspace is split into 8 crates:
 
-- `mimobox-core`：统一 trait、配置、结果和错误类型。
-- `mimobox-os`：OS 级沙箱，覆盖 Linux + macOS，并提供 `SandboxPool`。
-- `mimobox-wasm`：Wasm 沙箱，基于 Wasmtime。
-- `mimobox-vm`：microVM 沙箱，当前聚焦 Linux KVM，包含 `VmPool`、`RestorePool`、HTTP 代理、快照和 fork。
-- `mimobox-sdk`：统一 SDK API，负责默认智能路由和高级配置。
-- `mimobox-cli`：CLI 入口、JSON 输出、诊断和资产引导命令。
-- `mimobox-mcp`：MCP Server，基于 rmcp + stdio 暴露 10 个工具。
-- `mimobox-python`：Python SDK，基于 PyO3 + maturin 绑定 Rust SDK。
+- `mimobox-core`: shared trait, configuration, result, and error types.
+- `mimobox-os`: OS-level sandbox covering Linux + macOS, with `SandboxPool`.
+- `mimobox-wasm`: Wasm sandbox based on Wasmtime.
+- `mimobox-vm`: microVM sandbox currently focused on Linux KVM, including `VmPool`, `RestorePool`, HTTP proxy, snapshot, and fork.
+- `mimobox-sdk`: unified SDK API responsible for smart routing by default and advanced configuration.
+- `mimobox-cli`: CLI entrypoint, JSON output, diagnostics, and asset bootstrap commands.
+- `mimobox-mcp`: MCP Server exposing 10 tools based on rmcp + stdio.
+- `mimobox-python`: Python SDK binding the Rust SDK with PyO3 + maturin.
 
-### 智能路由的当前语义
+### Current Smart Routing Semantics
 
-- SDK 中，`IsolationLevel::Auto` 会结合**命令类型**和 `TrustLevel` 自动选路：
-  - `.wasm/.wat/.wast` 优先走 Wasm。
-  - `TrustLevel::Untrusted` 在 Linux + `vm` feature 下优先走 microVM。
-  - `TrustLevel::Untrusted` 在 microVM 不可用时 fail-closed，不静默降级。
-  - 其余默认走 OS 级。
-- CLI 中，`--backend auto` 是默认值，当前走 SDK 默认配置，也就是默认 `TrustLevel::SemiTrusted`。
-  - 因此 CLI 的 `auto` 会把 Wasm 文件自动路由到 Wasm。
-  - 普通命令默认路由到 OS 级。
-  - 如果你希望不可信命令优先走 microVM，请显式使用 `--backend kvm`，或者在 SDK 中设置 `TrustLevel::Untrusted`。
+- In the SDK, `IsolationLevel::Auto` routes automatically based on **command type** and `TrustLevel`:
+  - `.wasm/.wat/.wast` prefers Wasm.
+  - `TrustLevel::Untrusted` prefers microVM on Linux with the `vm` feature.
+  - `TrustLevel::Untrusted` fails closed when microVM is unavailable, without silently degrading.
+  - Everything else defaults to OS-level isolation.
+- In the CLI, `--backend auto` is the default and currently uses the SDK default configuration, meaning the default `TrustLevel::SemiTrusted`.
+  - Therefore CLI `auto` routes Wasm files to Wasm automatically.
+  - Regular commands route to OS-level isolation by default.
+  - If you want untrusted commands to prefer microVM, explicitly use `--backend kvm`, or set `TrustLevel::Untrusted` in the SDK.
 
-## 2. 三层隔离的当前实现状态
+## 2. Current Implementation Status of the Three Isolation Layers
 
-README 只记录当前源码里真实存在的实现，不把研究文档里的规划写成现状。
+This README only records what is actually implemented in the current source tree. It does not promote plans from research documents to current capabilities.
 
-| 隔离层 | 当前状态 | 真实实现说明 |
+| Isolation Layer | Current Status | Actual Implementation Notes |
 | --- | --- | --- |
-| OS 级 | 已完成 | Linux：Landlock + Seccomp-bpf + Namespaces + `setrlimit`；macOS：Seatbelt / `sandbox-exec`；Windows 仍为规划中 |
-| Wasm 级 | 已完成 | 基于 Wasmtime + WASI，按需通过 `wasm` feature 启用 |
-| microVM 级 | 已完成首版 | 基于 Linux KVM，已打通 guest `/init` + 串口命令协议 + snapshot/restore/fork，并支持流式输出、文件传输和 HTTP 代理等 guest/host 控制面能力 |
+| OS-level | Completed | Linux: Landlock + Seccomp-bpf + Namespaces + `setrlimit`; macOS: Seatbelt / `sandbox-exec`; Windows is still planned |
+| Wasm-level | Completed | Based on Wasmtime + WASI, enabled on demand through the `wasm` feature |
+| microVM-level | First version completed | Based on Linux KVM, with guest `/init` + serial command protocol + snapshot/restore/fork connected, and guest/host control-plane capabilities such as streaming output, file transfer, and HTTP proxy |
 
-### 当前功能状态
+### Current Feature Status
 
-| 能力 | 状态 | 说明 |
+| Capability | Status | Notes |
 | --- | --- | --- |
-| SDK crate | 已完成 | `crates/mimobox-sdk/` 已提供统一 API、配置构建器、执行结果与实际后端查询 |
-| 默认智能路由 | 已完成 | `IsolationLevel::Auto` 已在 SDK 中落地，CLI `--backend auto` 默认接入 |
-| MCP Server | 已完成 | `crates/mimobox-mcp/` 基于 rmcp + stdio 暴露 10 个工具 |
-| Python SDK | 已完成 | `crates/mimobox-python/` 基于 PyO3 暴露 Python 类、类型桩和异常层级 |
-| 命令级环境变量注入与超时 | 已完成 | `execute_with_env()`、`execute_with_timeout()`、`execute_with_env_and_timeout()` 已落地；当前主要服务 Linux + microVM 后端 |
-| 流式输出 | 已完成 | `stream_execute()` 已落地，输出 `StreamEvent::Stdout` / `Stderr` / `Exit` / `TimedOut` 事件 |
-| HTTP 代理 + 域名白名单 | 已完成 | `http_request()` 已落地，通过 host 代理发起 HTTPS 请求；`allowed_http_domains` 控制白名单，默认网络策略仍是拒绝 |
-| 结构化错误模型 | 已完成 | Rust 侧提供 `ErrorCode` 和 `SdkError::Sandbox`，Python 侧映射为异常层级 |
+| SDK crate | Completed | `crates/mimobox-sdk/` provides unified API, configuration builder, execution result, and actual backend query |
+| Smart routing by default | Completed | `IsolationLevel::Auto` is implemented in the SDK, and CLI `--backend auto` is wired in by default |
+| MCP Server | Completed | `crates/mimobox-mcp/` exposes 10 tools based on rmcp + stdio |
+| Python SDK | Completed | `crates/mimobox-python/` exposes Python classes, type stubs, and exception hierarchy through PyO3 |
+| Command-level environment variable injection and timeout | Completed | `execute_with_env()`, `execute_with_timeout()`, and `execute_with_env_and_timeout()` are implemented; currently mainly serving Linux + microVM backends |
+| Streaming output | Completed | `stream_execute()` is implemented and emits `StreamEvent::Stdout` / `Stderr` / `Exit` / `TimedOut` events |
+| HTTP proxy + domain allowlist | Completed | `http_request()` is implemented and sends HTTPS requests through the host proxy; `allowed_http_domains` controls the allowlist, while the default network policy remains deny |
+| Structured error model | Completed | Rust exposes structured error codes through `ErrorCode` and `SdkError::Sandbox`; Python maps them to an exception hierarchy |
 
-## 3. 目录结构
+## 3. Directory Structure
 
 ```text
 mimobox/
@@ -163,52 +165,52 @@ mimobox/
 └── logs/                        # 日志目录
 ```
 
-`vendor/` 如存在，仅保留历史 shim，不属于默认 workspace 使用路径。
+If `vendor/` exists, it only keeps historical shims and is not part of the default workspace path.
 
-## 4. 性能数据
+## 4. Performance Data
 
-| 场景 | 目标 | 当前 README 基线 | 状态 |
+| Scenario | Target | Current README Baseline | Status |
 | --- | --- | --- | --- |
-| OS 级冷启动 | <10ms | P50: 8.24ms | 达标 |
-| Wasm 级冷启动 | <5ms | P50: 1.01ms（清缓存） | 达标 |
-| OS 预热池热获取 | <100us | P50: 0.19us | 达标 |
-| microVM 冷启动 | <300ms | P50: 253ms | 达标 |
-| microVM 快照恢复 | <50ms | P50: 69ms（非池化）/ 28ms（池化 restore-to-ready） | 池化达标 |
-| microVM 预热池热路径 | <1ms | P50: 773us | 达标 |
+| OS-level cold start | <10ms | P50: 8.24ms | Meets target |
+| Wasm-level cold start | <5ms | P50: 1.01ms (cold cache) | Meets target |
+| OS warm pool hot acquisition | <100us | P50: 0.19us | Meets target |
+| microVM cold start | <300ms | P50: 253ms | Meets target |
+| microVM snapshot restore | <50ms | P50: 69ms (non-pooled) / 28ms (pooled restore-to-ready) | Pooled path meets target |
+| microVM warm pool hot path | <1ms | P50: 773us | Meets target |
 
-*OS 预热池数字为 acquire()+drop() 对象获取成本，不包含命令执行。*
-*池化快照恢复为 restore-to-ready，不含命令执行和池补充开销。非池化快照恢复含全生命周期。*
+*The OS warm pool number measures the object acquisition cost of acquire()+drop(), excluding command execution.*
+*Pooled snapshot restore measures restore-to-ready, excluding command execution and pool refill overhead. Non-pooled snapshot restore includes the full lifecycle.*
 
-### 指标定义
+### Metric Definitions
 
-| 指标 | 起点 | 终点 | 说明 |
+| Metric | Start | End | Notes |
 | --- | --- | --- | --- |
-| OS 级冷启动 | `PlatformSandbox::new()` 前 | `execute(/bin/true)` 返回后 | 含创建、执行、销毁全生命周期 |
-| Wasm 冷启动 | `WasmSandbox::new()` 前 | `execute(wasm)` 返回后 | 可能受模块缓存影响 |
-| 预热池热获取 | `pool.acquire()` 前 | `drop()` 完成 | 仅测对象获取，不含命令执行 |
-| microVM 冷启动 | `create_vm()` 前 | `run_command(echo)` 返回后 | 含创建、启动、执行、关闭全生命周期 |
-| microVM 快照恢复 | `create_vm_for_restore()` 前 | `run_command(echo)` 返回后 | 内存中快照，非文件恢复 |
-| microVM 池化快照恢复 | `RestorePool::restore()` 取出空壳 VM | memory 写入 + vCPU 恢复完成 | 不含命令执行，空壳 VM 由池预创建 |
-| microVM 预热池热路径 | `pool.acquire()` 前 | `pooled.execute(echo)` 返回后 | 轻载 |
+| OS-level cold start | Before `PlatformSandbox::new()` | After `execute(/bin/true)` returns | Includes the full create, execute, and destroy lifecycle |
+| Wasm cold start | Before `WasmSandbox::new()` | After `execute(wasm)` returns | May be affected by module cache |
+| Warm pool hot acquisition | Before `pool.acquire()` | After `drop()` completes | Measures object acquisition only, excluding command execution |
+| microVM cold start | Before `create_vm()` | After `run_command(echo)` returns | Includes the full create, boot, execute, and shutdown lifecycle |
+| microVM snapshot restore | Before `create_vm_for_restore()` | After `run_command(echo)` returns | In-memory snapshot, not file restore |
+| microVM pooled snapshot restore | `RestorePool::restore()` takes out an empty-shell VM | memory write + vCPU restore complete | Excludes command execution; the empty-shell VM is pre-created by the pool |
+| microVM warm pool hot path | Before `pool.acquire()` | After `pooled.execute(echo)` returns | Light load |
 
-这些是 README 当前维护的性能基线。只要基准结果变化，就应该同步更新这里。
+These are the performance baselines currently maintained in the README. Whenever benchmark results change, this section should be updated as well.
 
-## 5. 竞品对比口径
+## 5. Competitive Comparison Framing
 
-外部产品的延迟、部署形态和默认能力会随着版本、模板、区域和 warm state 快速变化。为了避免 README 维护一组很快过时的第三方毫秒级数字，这里只保留**能力级对比**，把更细的市场分析放到 [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md)。
+External products' latency, deployment form, and default capabilities can change quickly with versions, templates, regions, and warm state. To avoid maintaining third-party millisecond-level numbers that become stale quickly, this README keeps only a **capability-level comparison** and leaves more detailed market analysis to [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md).
 
-| 产品 | 当前公开定位 | 与 mimobox 的主要差异 |
+| Product | Current Public Positioning | Main Differences from mimobox |
 | --- | --- | --- |
-| mimobox | 本地 / 自托管 Agent Sandbox，统一封装 OS + Wasm + microVM 三层隔离 | 当前仓库同时提供三层隔离，并把默认智能路由和显式高级控制放进同一 SDK / CLI / MCP / Python 入口 |
-| Anthropic Sandbox Runtime | 基于 `sandbox-exec` / `bubblewrap` 的 OS 级 sandbox runtime + 网络代理 | 更偏 OS 级 runtime 包装，不提供 Wasm / microVM 分层 |
-| E2B | 面向 Agent 的云端 sandbox / snapshot API | 更偏托管式 Linux sandbox 服务，不是本地统一三层路由 |
-| Daytona | 基于 Sysbox 的 sandbox 基础设施和 API | 走容器 / sandbox 基础设施路线，不提供 Wasm / microVM 双层选择 |
+| mimobox | Local / self-hosted Agent Sandbox that unifies OS + Wasm + microVM three-layer isolation | The current repository provides all three isolation layers and puts smart routing by default plus explicit advanced control into the same SDK / CLI / MCP / Python entrypoints |
+| Anthropic Sandbox Runtime | OS-level sandbox runtime + network proxy based on `sandbox-exec` / `bubblewrap` | More focused on OS-level runtime wrapping, without Wasm / microVM layering |
+| E2B | Cloud sandbox / snapshot API for Agent workloads | More like a hosted Linux sandbox service, not local unified three-layer routing |
+| Daytona | Sysbox-based sandbox infrastructure and API | Follows a container / sandbox infrastructure route and does not provide both Wasm and microVM choices |
 
-如果你需要**精确的市场背景、功能矩阵和产品定位讨论**，请阅读 [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md)。如果你需要 README 级别的稳定说明，请以上表为准。
+If you need **precise market background, feature matrices, and product positioning discussion**, read [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md). If you need stable README-level guidance, use the table above.
 
-## 6. SDK 使用示例
+## 6. SDK Usage Examples
 
-### 6.1 零配置：默认智能路由
+### 6.1 Zero Configuration: Smart Routing by Default
 
 ```rust
 use mimobox_sdk::{IsolationLevel, Sandbox};
@@ -226,9 +228,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 6.2 高级控制：显式配置路由、环境变量注入和命令级超时
+### 6.2 Advanced Control: Explicit Routing, Environment Variable Injection, and Command-Level Timeout
 
-<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+<!-- Note: the microVM backend requires Linux + KVM. Run mimobox setup to download VM assets. -->
 
 ```rust
 use std::collections::HashMap;
@@ -259,15 +261,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-说明：
+Notes:
 
-- `execute_with_env()`、`execute_with_timeout()`、`execute_with_env_and_timeout()` 当前主要支持 Linux + `vm` feature 的 microVM 后端。
-- 如果当前平台或构建没有启用 `vm` feature，SDK 会返回 `UnsupportedPlatform` 或 `BackendUnavailable`。
-- 如果你要继续使用自动路由，可以把 `IsolationLevel::MicroVm` 改回 `IsolationLevel::Auto`；如果要**强制**走 microVM，则保留显式 `MicroVm` 并按需补上 `kernel_path()` / `rootfs_path()`。
+- `execute_with_env()`, `execute_with_timeout()`, and `execute_with_env_and_timeout()` currently mainly support the Linux + `vm` feature microVM backend.
+- If the current platform or build does not enable the `vm` feature, the SDK returns `UnsupportedPlatform` or `BackendUnavailable`.
+- If you want to continue using automatic routing, change `IsolationLevel::MicroVm` back to `IsolationLevel::Auto`; if you want to **force** microVM, keep the explicit `MicroVm` and add `kernel_path()` / `rootfs_path()` as needed.
 
-### 6.3 流式输出：`stream_execute`
+### 6.3 Streaming Output: `stream_execute`
 
-<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+<!-- Note: the microVM backend requires Linux + KVM. Run mimobox setup to download VM assets. -->
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
@@ -296,9 +298,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 6.4 HTTP 代理：`http_request`
+### 6.4 HTTP Proxy: `http_request`
 
-<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+<!-- Note: the microVM backend requires Linux + KVM. Run mimobox setup to download VM assets. -->
 
 ```rust
 use std::collections::HashMap;
@@ -327,29 +329,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 6.5 结构化错误模型
+### 6.5 Structured Error Model
 
-- Rust 侧统一通过 `mimobox_core::ErrorCode` 暴露结构化错误码，`mimobox_sdk::SdkError::Sandbox` 额外提供 `message` 和 `suggestion`。
-- Python 绑定会在保留错误细节的同时映射为更易处理的异常层级，包括 `SandboxProcessError`、`SandboxHttpError`、`SandboxLifecycleError`，并复用 `TimeoutError`、`FileNotFoundError`、`PermissionError` 等标准异常。
+- On the Rust side, structured error codes are exposed uniformly through `mimobox_core::ErrorCode`; `mimobox_sdk::SdkError::Sandbox` additionally provides `message` and `suggestion`.
+- Python bindings preserve error details while mapping them to an easier-to-handle exception hierarchy, including `SandboxProcessError`, `SandboxHttpError`, and `SandboxLifecycleError`, and reuse standard exceptions such as `TimeoutError`, `FileNotFoundError`, and `PermissionError`.
 
 ## 7. MCP Server
 
-`mimobox-mcp` 基于 rmcp 框架，通过 stdio 与 MCP 客户端通信，当前暴露 10 个工具。
+`mimobox-mcp` is based on the rmcp framework and communicates with MCP clients through stdio. It currently exposes 10 tools.
 
-| 工具 | 简要说明 |
+| Tool | Brief Description |
 | --- | --- |
-| `create_sandbox` | 创建可复用沙箱实例，返回 `sandbox_id` 和隔离层级 |
-| `execute_code` | 在沙箱中执行代码片段，支持 `python`、`javascript` / `node`、`bash` / `sh` |
-| `execute_command` | 在沙箱中执行 shell 命令 |
-| `destroy_sandbox` | 销毁指定沙箱并释放资源 |
-| `list_sandboxes` | 列出活动沙箱及其元数据 |
-| `read_file` | 从 microVM 沙箱读取文件，内容以 base64 返回 |
-| `write_file` | 向 microVM 沙箱写入 base64 文件内容 |
-| `snapshot` | 创建 microVM 沙箱内存快照 |
-| `fork` | Fork microVM 沙箱，生成 CoW 副本 |
-| `http_request` | 通过受控 HTTP 代理发起请求 |
+| `create_sandbox` | Creates a reusable sandbox instance and returns `sandbox_id` plus isolation level |
+| `execute_code` | Executes a code snippet in the sandbox, supporting `python`, `javascript` / `node`, and `bash` / `sh` |
+| `execute_command` | Executes a shell command in the sandbox |
+| `destroy_sandbox` | Destroys the specified sandbox and releases resources |
+| `list_sandboxes` | Lists active sandboxes and their metadata |
+| `read_file` | Reads a file from a microVM sandbox and returns its content as base64 |
+| `write_file` | Writes base64 file content into a microVM sandbox |
+| `snapshot` | Creates a microVM sandbox memory snapshot |
+| `fork` | Forks a microVM sandbox to create a CoW copy |
+| `http_request` | Sends a request through the controlled HTTP proxy |
 
-启动方式：
+Startup commands:
 
 ```bash
 # 默认 OS 级后端
@@ -359,13 +361,13 @@ cargo run -p mimobox-mcp
 cargo run -p mimobox-mcp --features vm
 ```
 
-更完整的 MCP 使用说明见 [`docs/mcp-server.md`](docs/mcp-server.md)。
+For more complete MCP usage instructions, see [`docs/mcp-server.md`](docs/mcp-server.md).
 
-## 8. CLI 用法示例
+## 8. CLI Usage Examples
 
-下面示例优先用仓库里当前真实可执行的命令形式：`cargo run -p mimobox-cli -- ...`。如果你已经构建好二进制，也可以直接调用 `target/release/mimobox-cli`。
+The examples below prefer the command form that is currently executable in this repository: `cargo run -p mimobox-cli -- ...`. If you have already built the binary, you can also call `target/release/mimobox-cli` directly.
 
-### 8.1 默认智能路由
+### 8.1 Smart Routing by Default
 
 ```bash
 # 显式写法：使用 auto 路由
@@ -380,7 +382,7 @@ cargo run -p mimobox-cli -- \
   --command "/bin/echo hello"
 ```
 
-### 8.2 Wasm 后端
+### 8.2 Wasm Backend
 
 ```bash
 cargo run -p mimobox-cli --features wasm -- \
@@ -389,9 +391,9 @@ cargo run -p mimobox-cli --features wasm -- \
   --command "app.wasm"
 ```
 
-### 8.3 KVM microVM 后端
+### 8.3 KVM microVM Backend
 
-<!-- 注意：microVM 后端需要 Linux + KVM，运行 mimobox setup 下载 VM assets -->
+<!-- Note: the microVM backend requires Linux + KVM. Run mimobox setup to download VM assets. -->
 
 ```bash
 cargo run -p mimobox-cli --features kvm -- \
@@ -402,7 +404,7 @@ cargo run -p mimobox-cli --features kvm -- \
   --command "/bin/echo hello"
 ```
 
-### 8.4 环境诊断与资产引导
+### 8.4 Environment Diagnostics and Asset Bootstrap
 
 ```bash
 # 输出当前主机环境诊断报告
@@ -412,28 +414,28 @@ cargo run -p mimobox-cli -- doctor
 cargo run -p mimobox-cli --features kvm -- setup
 ```
 
-`doctor` 会检查操作系统、KVM/Seatbelt、内存、Linux 安全特性、feature flags、microVM 资产、Rust 工具链和可选 Python SDK，并返回：
+`doctor` checks the operating system, KVM/Seatbelt, memory, Linux security features, feature flags, microVM assets, Rust toolchain, and optional Python SDK, then returns:
 
-- `0`：无警告、无错误。
-- `1`：存在警告，但没有阻断错误。
-- `2`：存在错误。
+- `0`: no warnings and no errors.
+- `1`: warnings exist, but there are no blocking errors.
+- `2`: errors exist.
 
-### 8.5 CLI 输出约定
+### 8.5 CLI Output Contract
 
-CLI 默认输出 JSON，便于上层 Agent 或脚本消费；日志则写入 `logs/`。`doctor` 与 `setup` 例外，它们默认输出面向终端的人类可读报告。
+By default, the CLI outputs JSON for consumption by upper-level Agent systems or scripts; logs are written to `logs/`. `doctor` and `setup` are exceptions: by default, they output human-readable terminal reports.
 
-microVM 路径当前通过 guest `/init` 驱动串口控制面，当前帧族包括：
+The microVM path is currently driven through the guest `/init` serial control plane. The current frame families include:
 
-1. guest 启动后输出 `READY`。
-2. host 可发送 `EXEC:<len>:<payload>\n`、`EXECS:<id>:<len>:<payload>\n`、`HTTP:REQUEST:<id>:<len>:<json>\n` 等命令帧。
-3. guest 对普通执行回传 `OUTPUT:` / `EXIT:`，对流式执行回传 `STREAM:START:` / `STREAM:STDOUT:` / `STREAM:STDERR:` / `STREAM:END:` / `STREAM:TIMEOUT:`，对 HTTP 代理回传 `HTTPRESP:HEADERS:` / `HTTPRESP:BODY:` / `HTTPRESP:END:` / `HTTPRESP:ERROR:`。
-4. 文件传输继续通过 `FS:READ:` / `FS:WRITE:` 帧族完成。
+1. The guest outputs `READY` after booting.
+2. The host can send command frames such as `EXEC:<len>:<payload>\n`, `EXECS:<id>:<len>:<payload>\n`, and `HTTP:REQUEST:<id>:<len>:<json>\n`.
+3. For regular execution, the guest sends back `OUTPUT:` / `EXIT:`. For streaming execution, it sends back `STREAM:START:` / `STREAM:STDOUT:` / `STREAM:STDERR:` / `STREAM:END:` / `STREAM:TIMEOUT:`. For HTTP proxy responses, it sends back `HTTPRESP:HEADERS:` / `HTTPRESP:BODY:` / `HTTPRESP:END:` / `HTTPRESP:ERROR:`.
+4. File transfer continues to use the `FS:READ:` / `FS:WRITE:` frame families.
 
-这条链路已经是 guest 内真实执行，不再依赖 host 侧 stub。
+This path is already real execution inside the guest and no longer depends on a host-side stub.
 
-## 9. 开发与验证
+## 9. Development and Verification
 
-### 常用脚本
+### Common Scripts
 
 ```bash
 scripts/setup.sh
@@ -446,33 +448,33 @@ scripts/build-kernel.sh
 scripts/extract-vmlinux.sh <output_path>
 ```
 
-### 当前脚本职责
+### Current Script Responsibilities
 
-- `scripts/check.sh`：`cargo check` / `clippy` / `fmt --check`。
-- `scripts/test.sh`：按目标运行 workspace 测试。
-- `scripts/test-e2e.sh`：跨后端 e2e 验证。
-- `scripts/bench.sh [crate-name] [bench-name|all]`：运行 criterion 基准。
-- `scripts/build-rootfs.sh`：构建 KVM rootfs，默认输出到 `VM_ASSETS_DIR/rootfs.cpio.gz`，未设置时回退到 `~/.mimobox/assets/rootfs.cpio.gz`。
-- `scripts/build-kernel.sh`：构建极简 KVM guest `vmlinux`，默认输出到 `VM_ASSETS_DIR/vmlinux`，未设置时回退到 `~/.mimobox/assets/vmlinux`。
-- `scripts/extract-vmlinux.sh`：提取可用于 KVM 测试的 `vmlinux`。
+- `scripts/check.sh`: `cargo check` / `clippy` / `fmt --check`.
+- `scripts/test.sh`: runs workspace tests by target.
+- `scripts/test-e2e.sh`: cross-backend e2e verification.
+- `scripts/bench.sh [crate-name] [bench-name|all]`: runs criterion benchmarks.
+- `scripts/build-rootfs.sh`: builds the KVM rootfs, defaulting to `VM_ASSETS_DIR/rootfs.cpio.gz`, and falling back to `~/.mimobox/assets/rootfs.cpio.gz` when unset.
+- `scripts/build-kernel.sh`: builds the minimal KVM guest `vmlinux`, defaulting to `VM_ASSETS_DIR/vmlinux`, and falling back to `~/.mimobox/assets/vmlinux` when unset.
+- `scripts/extract-vmlinux.sh`: extracts a `vmlinux` usable for KVM tests.
 
-## 10. 文档与 CI 状态
+## 10. Documentation and CI Status
 
-### 文档索引
+### Documentation Index
 
-- [`docs/getting-started.md`](docs/getting-started.md) — 快速上手、SDK 能力示例与平台约束。
-- [`docs/architecture.md`](docs/architecture.md) — 当前仓库架构分层说明。
-- [`docs/mcp-server.md`](docs/mcp-server.md) — MCP Server 工具、参数和客户端集成说明。
-- [`docs/python-sdk.md`](docs/python-sdk.md) — Python SDK 安装、公开 API、异常和示例。
-- [`docs/research/00-executive-summary.md`](docs/research/00-executive-summary.md) — 综合研究报告。
-- [`docs/research/10-code-review-round2.md`](docs/research/10-code-review-round2.md) — Phase 1 代码审查。
-- [`docs/research/14-microvm-design.md`](docs/research/14-microvm-design.md) — microVM 设计与路线。
-- [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md) — 竞品与市场分析。
-- [`discuss/product-strategy-review.md`](discuss/product-strategy-review.md) — 产品战略评审记录。
+- [`docs/getting-started.md`](docs/getting-started.md) — Quick start, SDK capability examples, and platform constraints.
+- [`docs/architecture.md`](docs/architecture.md) — Current repository architecture and layer breakdown.
+- [`docs/mcp-server.md`](docs/mcp-server.md) — MCP Server tools, parameters, and client integration instructions.
+- [`docs/python-sdk.md`](docs/python-sdk.md) — Python SDK installation, public API, exceptions, and examples.
+- [`docs/research/00-executive-summary.md`](docs/research/00-executive-summary.md) — Comprehensive research report.
+- [`docs/research/10-code-review-round2.md`](docs/research/10-code-review-round2.md) — Phase 1 code review.
+- [`docs/research/14-microvm-design.md`](docs/research/14-microvm-design.md) — microVM design and roadmap.
+- [`discuss/competitive-analysis.md`](discuss/competitive-analysis.md) — Competitor and market analysis.
+- [`discuss/product-strategy-review.md`](discuss/product-strategy-review.md) — Product strategy review notes.
 
-### CI 状态
+### CI Status
 
-当前 `.github/workflows/ci.yml` 包含 5 个 job：
+The current `.github/workflows/ci.yml` contains 5 jobs:
 
 - `lint-and-check`
 - `test-linux-os`
@@ -480,25 +482,25 @@ scripts/extract-vmlinux.sh <output_path>
 - `test-sdk`
 - `docs-check`
 
-其中：
+Details:
 
-- `test-linux-vm` 仅在 `workflow_dispatch` 手动触发时启用，并先检查 `/dev/kvm`；在 GitHub-hosted `ubuntu-latest` runner 上会因缺少 KVM 而显示为跳过。
-- `test-sdk` 会先编译 `mimobox-sdk` 的 `vm` feature 测试目标，再执行 library tests；完整的 microVM 集成测试仍需 Linux + KVM + VM assets 环境。
+- `test-linux-vm` is enabled only for manual `workflow_dispatch` runs and checks `/dev/kvm` first; on GitHub-hosted `ubuntu-latest` runners, it is skipped because KVM is unavailable.
+- `test-sdk` first compiles the `vm` feature test target for `mimobox-sdk`, then runs library tests; full microVM integration tests still require Linux + KVM + VM assets.
 
-## 11. 路线图状态
+## 11. Roadmap Status
 
-| 状态 | 方向 | 说明 |
+| Status | Direction | Notes |
 | --- | --- | --- |
-| 已完成 | 统一 SDK + 默认智能路由 | SDK `Sandbox` 与 CLI `--backend auto` 已落地 |
-| 已完成 | OS 级、Wasm 级、microVM 级三层基础能力 | Linux KVM 与 snapshot/restore/fork 已进入可验证状态 |
-| 已完成 | MCP Server | rmcp + stdio 暴露 10 个工具，覆盖生命周期、执行、文件、快照、fork 和 HTTP |
-| 已完成 | Python SDK | PyO3 绑定、类型桩、流式输出、HTTP、文件、快照和错误层级已落地 |
-| 已完成 | P0：microVM 串口协议增强与代理基础能力 | `EXECS` / `STREAM:*` / `HTTP:REQUEST` 已落地，`stdout` / `stderr` 分流、命令级 env/timeout 与域名白名单代理已接入 |
-| 规划中 | vsock 正式数据面 + 网络代理 | 当前串口更适合作为 bring-up 控制面，vsock 仍是后续正式方向 |
-| 规划中 | Windows 后端 + GPU / SaaS 选项 | 当前仍以 Linux + macOS 能力完善为先 |
+| Completed | Unified SDK + smart routing by default | SDK `Sandbox` and CLI `--backend auto` are implemented |
+| Completed | Three foundational isolation layers: OS-level, Wasm-level, and microVM-level | Linux KVM and snapshot/restore/fork are now verifiable |
+| Completed | MCP Server | rmcp + stdio exposes 10 tools covering lifecycle, execution, files, snapshots, fork, and HTTP |
+| Completed | Python SDK | PyO3 bindings, type stubs, streaming output, HTTP, files, snapshots, and error hierarchy are implemented |
+| Completed | P0: microVM serial protocol enhancement and proxy foundation | `EXECS` / `STREAM:*` / `HTTP:REQUEST` are implemented, with `stdout` / `stderr` splitting, command-level env/timeout, and domain allowlist proxy connected |
+| Planned | Formal vsock data plane + network proxy | The current serial path is better suited as a bring-up control plane; vsock remains the formal future direction |
+| Planned | Windows backend + GPU / SaaS options | Current work still prioritizes completing Linux + macOS capabilities |
 
-## 12. 维护约定
+## 12. Maintenance Conventions
 
-- 修改 crate、CLI 参数、脚本入口、性能基线或 CI 结构时，同步更新 README。
-- README 只写**当前真实实现**，不要把研究文档中的远期设计直接提升为“已实现能力”。
-- 外部竞品的精确延迟、定价和部署细节属于高时效信息；README 保持能力级对比，详细分析放到 `discuss/competitive-analysis.md`。
+- Update the README whenever crates, CLI parameters, script entrypoints, performance baselines, or CI structure change.
+- The README should describe only the **currently real implementation**; do not directly promote long-term designs from research documents into “implemented capabilities”.
+- Precise external competitor latency, pricing, and deployment details are highly time-sensitive; the README keeps capability-level comparisons, while detailed analysis lives in `discuss/competitive-analysis.md`.

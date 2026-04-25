@@ -1,63 +1,63 @@
-# mimobox 快速入门
+# mimobox Getting Started
 
-## 1. 简介
+## 1. Introduction
 
-`mimobox` 是一个用 Rust 实现的跨平台 Agent Sandbox，面向 AI Agent 的安全代码执行场景，统一封装 OS 级、Wasm 级和 microVM 级三层隔离，在保证可控隔离边界的同时追求极致性能：OS 级冷启动 P50 8.24ms、Wasm 冷启动 P50 1.01ms、microVM 冷启动 P50 253ms，并支持预热池与快照恢复路径。
+`mimobox` is a cross-platform Agent Sandbox implemented in Rust for secure code execution scenarios used by AI Agent workloads. It provides a unified abstraction over three isolation layers: OS, Wasm, and microVM. It aims for strict, controllable isolation boundaries while preserving high performance: OS cold start P50 8.24ms, Wasm cold start P50 1.01ms, and microVM cold start P50 253ms. It also supports warm pools and snapshot restore paths.
 
-## 2. 安装
+## 2. Installation
 
-### 2.1 前置条件
+### 2.1 Prerequisites
 
 - Rust 1.82+
-- Linux 上启用 microVM 时需要 KVM 支持
-- Linux 上执行完整沙箱测试时建议具备 `sudo` 权限、cgroups v2 和常见系统路径（`/usr`、`/bin`、`/proc` 等）
-- macOS 当前支持 OS 级后端；Windows 仍处于规划中
+- KVM support is required when enabling microVM on Linux
+- Full sandbox tests on Linux should have `sudo` privileges, cgroups v2, and common system paths (`/usr`, `/bin`, `/proc`, etc.)
+- macOS currently supports the OS backend; Windows is still planned
 
-### 2.2 基本构建
+### 2.2 Basic Build
 
-仓库根目录执行：
+Run this from the repository root:
 
 ```bash
 cargo build --workspace
 ```
 
-这会构建 workspace 默认成员，默认聚焦 OS 级后端，不包含 Wasm crate 和 microVM CLI feature。
+This builds the default workspace members. By default, it focuses on the OS backend and does not include the Wasm crate or the microVM CLI feature.
 
-### 2.3 Feature 说明
+### 2.3 Feature Notes
 
-当前仓库里 feature 名称分两层，不是一个统一的全局开关，必须区分：
+The current repository has two layers of feature names. They are not a single unified global switch, so keep the distinction clear:
 
-- 默认构建：直接执行 `cargo build --workspace`
-  - `mimobox-sdk` 默认启用 `os`
-  - workspace 默认成员不包含 `mimobox-wasm`
-  - 适合先验证 OS 级能力和 SDK 基本接口
-- `kvm`：CLI 层的 microVM 开关
-  - `mimobox-cli` 使用 `kvm`
-  - `mimobox-sdk` 对应的是 `vm`，不是 `kvm`
-  - 常用构建方式：
+- Default build: run `cargo build --workspace` directly
+  - `mimobox-sdk` enables `os` by default
+  - The default workspace members do not include `mimobox-wasm`
+  - Suitable for validating OS capabilities and the basic SDK interfaces first
+- `kvm`: the microVM switch at the CLI layer
+  - `mimobox-cli` uses `kvm`
+  - The corresponding feature in `mimobox-sdk` is `vm`, not `kvm`
+  - Common build command:
 
 ```bash
 cargo build --workspace --features mimobox-cli/kvm,mimobox-sdk/vm
 ```
 
-- `wasm`：Wasm 后端开关
-  - `mimobox-cli` 使用 `wasm`
-  - `mimobox-sdk` 也使用 `wasm`
-  - 由于 workspace 默认排除了 `mimobox-wasm`，需要显式启用：
+- `wasm`: the Wasm backend switch
+  - `mimobox-cli` uses `wasm`
+  - `mimobox-sdk` also uses `wasm`
+  - Because the workspace excludes `mimobox-wasm` by default, enable it explicitly:
 
 ```bash
 cargo build --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
 ```
 
-如果你要同时启用 Wasm 和 microVM：
+If you want to enable both Wasm and microVM:
 
 ```bash
 cargo build --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
 ```
 
-## 3. 30 秒上手（Rust SDK）
+## 3. 30-Second Start (Rust SDK)
 
-下面示例按当前 `mimobox-sdk` API 调整为可编译版本。注意：`exit_code` 在当前 SDK 中是 `Option<i32>`，不能直接按整数格式化输出。
+The example below is adjusted to the current `mimobox-sdk` API and is compilable. Note: `exit_code` is `Option<i32>` in the current SDK, so it cannot be formatted directly as an integer.
 
 ```rust
 use mimobox_sdk::Sandbox;
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-如果只想快速验证命令执行，不关心 Python 是否存在，使用 `/bin/echo` 更稳妥：
+If you only want to quickly verify command execution and do not care whether Python exists, using `/bin/echo` is more reliable:
 
 ```rust
 use mimobox_sdk::Sandbox;
@@ -94,11 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## 4. 核心功能示例
+## 4. Core Feature Examples
 
-### 4.1 命令执行（`execute`）
+### 4.1 Command Execution (`execute`)
 
-#### 基本用法
+#### Basic Usage
 
 ```rust
 use mimobox_sdk::Sandbox;
@@ -118,9 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-#### 超时设置
+#### Timeout Settings
 
-`Config.timeout` 是 SDK 级统一超时，当前会向上取整到秒传给底层沙箱。
+`Config.timeout` is the unified SDK-level timeout. It is currently rounded up to seconds before being passed to the underlying sandbox.
 
 ```rust
 use std::time::Duration;
@@ -143,11 +143,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 4.2 流式输出（`stream_execute`）
+### 4.2 Streaming Output (`stream_execute`)
 
-`stream_execute` 当前只支持 Linux 上的 microVM 后端。OS 级和 Wasm 后端调用会返回 `UnsupportedPlatform`。
+`stream_execute` currently supports only the microVM backend on Linux. Calls against the OS and Wasm backends return `UnsupportedPlatform`.
 
-#### 迭代器模式
+#### Iterator Mode
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
@@ -182,25 +182,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-#### 适合长时间命令
+#### Suitable for Long-Running Commands
 
-适用场景：
+Suitable scenarios:
 
 - `pip install`
-- 长日志编译
-- 模型下载或训练脚本
-- 需要边执行边消费输出的 Agent 任务
+- Builds with long logs
+- Model download or training scripts
+- Agent tasks that need to consume output while the command is still running
 
-不适合的场景：
+Unsuitable scenarios:
 
-- 仅执行一次短命令，直接用 `execute`
-- 非 Linux 或未启用 microVM 构建
+- One-off short commands; use `execute` directly
+- Non-Linux environments or builds without microVM enabled
 
-### 4.3 文件操作（`read_file` / `write_file`）
+### 4.3 File Operations (`read_file` / `write_file`)
 
-文件传输当前只支持 Linux 上的 microVM 后端。`IsolationLevel::Auto` 调这两个接口时，也会强制走 microVM 路径。
+File transfer currently supports only the microVM backend on Linux. When these two APIs are called with `IsolationLevel::Auto`, the microVM path is also forced.
 
-#### 读写沙箱内文件
+#### Read and Write Files Inside the Sandbox
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox};
@@ -224,14 +224,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 4.4 HTTP 代理（`http_request`）
+### 4.4 HTTP Proxy (`http_request`)
 
-HTTP 代理当前只支持 Linux 上的 microVM 后端，通过 host 代理执行请求。文档里必须把两个事实说清楚：
+The HTTP proxy currently supports only the microVM backend on Linux and executes requests through a host proxy. The documentation must make two facts clear:
 
-- 默认网络策略仍是拒绝全部网络访问
-- `allowed_http_domains` 是 host 代理层的域名白名单，不等价于“沙箱内任意网络已开放”
+- The default network policy still denies all network access
+- `allowed_http_domains` is a domain allowlist at the host proxy layer; it does not mean “arbitrary networking is enabled inside the sandbox”
 
-#### 域名白名单配置
+#### Domain Allowlist Configuration
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox};
@@ -262,35 +262,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-#### 调用外部 API
+#### Calling External APIs
 
-建议做法：
+Recommended practice:
 
-- 只把必要域名加入 `allowed_http_domains`
-- 对请求体大小、超时和错误返回做显式处理
-- 不要把该接口当成通用网络已开放的替代说法
+- Add only the necessary domains to `allowed_http_domains`
+- Handle request body size, timeouts, and error responses explicitly
+- Do not describe this API as a general substitute for enabling arbitrary networking
 
 ### 4.5 Python SDK
 
-当前 Python 绑定 crate 名为 `mimobox-python`，导出的 Python 模块名为 `mimobox`，基于 `PyO3 + maturin` 构建。
+The current Python binding crate is named `mimobox-python`. The exported Python module is named `mimobox`, and it is built with `PyO3 + maturin`.
 
-#### 安装方式
+#### Installation Methods
 
-方式一：在绑定目录直接安装开发版
+Method one: install the development version directly from the binding directory
 
 ```bash
 cd crates/mimobox-python
 pip install -e .
 ```
 
-方式二：显式使用 `maturin`
+Method two: use `maturin` explicitly
 
 ```bash
 cd crates/mimobox-python
 maturin develop
 ```
 
-#### 基本用法示例
+#### Basic Usage Example
 
 ```python
 from mimobox import Sandbox
@@ -307,123 +307,123 @@ if __name__ == "__main__":
     main()
 ```
 
-#### Python API 现状
+#### Current Python API Status
 
-- `Sandbox()` 当前等价于 Rust 侧 `Sandbox::new()`，没有单独暴露 `ConfigBuilder`
-- `execute(command: str)` 返回 `ExecuteResult`
-- `stream_execute(command: str)` 返回 Python 迭代器
-- `read_file` / `write_file` / `http_request` 已暴露
-- `stdout` / `stderr` 在 Python 侧会做 UTF-8 lossy 解码
-- 缺失退出码时，Python 侧会把 `exit_code` 映射成 `-1`
+- `Sandbox()` is currently equivalent to `Sandbox::new()` on the Rust side and does not expose a separate `ConfigBuilder`
+- `execute(command: str)` returns `ExecuteResult`
+- `stream_execute(command: str)` returns a Python iterator
+- `read_file` / `write_file` / `http_request` are exposed
+- `stdout` / `stderr` are decoded with UTF-8 lossy decoding on the Python side
+- When the exit code is missing, the Python side maps `exit_code` to `-1`
 
-## 5. 配置参考
+## 5. Configuration Reference
 
-`mimobox_sdk::Config` 当前字段如下。
+The current fields of `mimobox_sdk::Config` are as follows.
 
-| 字段 | 类型 | 默认值 | 说明 |
+| Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `isolation` | `IsolationLevel` | `Auto` | 隔离层级选择 |
-| `trust_level` | `TrustLevel` | `SemiTrusted` | 影响 `Auto` 路由 |
-| `network` | `NetworkPolicy` | `DenyAll` | 网络策略抽象 |
-| `timeout` | `Option<Duration>` | `Some(30s)` | 执行超时 |
-| `memory_limit_mb` | `Option<u64>` | `Some(512)` | 统一内存上限 |
-| `fs_readonly` | `Vec<PathBuf>` | `/usr`、`/lib`、`/lib64`、`/bin`、`/sbin`、`/dev`、`/proc`、`/etc` | 沙箱内只读挂载路径 |
-| `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | 沙箱内读写路径 |
-| `allowed_http_domains` | `Vec<String>` | 空 | host HTTP 代理白名单 |
-| `allow_fork` | `bool` | `false` | 是否允许 fork |
-| `vm_vcpu_count` | `u8` | `1` | microVM vCPU 数量 |
-| `vm_memory_mb` | `u32` | `256` | microVM Guest 内存 |
-| `kernel_path` | `Option<PathBuf>` | `None` | 自定义 microVM 内核路径 |
-| `rootfs_path` | `Option<PathBuf>` | `None` | 自定义 microVM rootfs 路径 |
+| `isolation` | `IsolationLevel` | `Auto` | Isolation layer selection |
+| `trust_level` | `TrustLevel` | `SemiTrusted` | Affects `Auto` routing |
+| `network` | `NetworkPolicy` | `DenyAll` | Network policy abstraction |
+| `timeout` | `Option<Duration>` | `Some(30s)` | Execution timeout |
+| `memory_limit_mb` | `Option<u64>` | `Some(512)` | Unified memory limit |
+| `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths inside the sandbox |
+| `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write paths inside the sandbox |
+| `allowed_http_domains` | `Vec<String>` | empty | host HTTP proxy allowlist |
+| `allow_fork` | `bool` | `false` | Whether fork is allowed |
+| `vm_vcpu_count` | `u8` | `1` | Number of microVM vCPUs |
+| `vm_memory_mb` | `u32` | `256` | microVM Guest memory |
+| `kernel_path` | `Option<PathBuf>` | `None` | Custom microVM kernel path |
+| `rootfs_path` | `Option<PathBuf>` | `None` | Custom microVM rootfs path |
 
-### 5.1 常用字段说明
+### 5.1 Common Field Notes
 
 #### `timeout`
 
-- 作用于命令执行超时
-- 当前向底层换算时按秒向上取整
-- 例如 `1500ms` 会映射为 `2s`
+- Applies to command execution timeout
+- Currently rounded up to seconds when converted for the underlying backend
+- For example, `1500ms` maps to `2s`
 
 #### `memory_limit_mb`
 
-- 是统一资源限制
-- 对 microVM 路径会与 `vm_memory_mb` 取较小值
-- 例如 `memory_limit_mb = 256` 且 `vm_memory_mb = 768` 时，最终 guest 内存为 `256MB`
+- It is the unified resource limit
+- On the microVM path, the smaller value between this and `vm_memory_mb` is used
+- For example, when `memory_limit_mb = 256` and `vm_memory_mb = 768`, the final guest memory is `256MB`
 
 #### `vm_memory_mb`
 
-- 仅对 microVM 后端生效
-- 默认值 `256MB`
-- 如果未显式覆盖内核和 rootfs 路径，会走后端默认路径：
+- Applies only to the microVM backend
+- Default value is `256MB`
+- If the kernel and rootfs paths are not explicitly overridden, the backend default paths are used:
   - `VM_ASSETS_DIR/vmlinux`
   - `VM_ASSETS_DIR/rootfs.cpio.gz`
-  - 未设置 `VM_ASSETS_DIR` 时，回退到 `~/.mimobox/assets/`
+  - If `VM_ASSETS_DIR` is not set, it falls back to `~/.mimobox/assets/`
 
 #### `allowed_http_domains`
 
-- 用于 host HTTP 代理白名单
-- 不是通用网络放行开关
-- 应与 `IsolationLevel::MicroVm` 配合使用
+- Used for the host HTTP proxy allowlist
+- Not a general networking allow switch
+- Should be used together with `IsolationLevel::MicroVm`
 
 #### `network`
 
-- `NetworkPolicy::DenyAll`：拒绝所有网络访问
-- `NetworkPolicy::AllowDomains([...])`：保持沙箱内直接网络关闭，仅允许通过 host HTTP 代理访问白名单域名
-- `NetworkPolicy::AllowAll`：允许任意网络访问
-- 当 `trust_level = TrustLevel::Untrusted` 且当前平台不支持 microVM 时，SDK 会直接报错，不会静默降级到 OS
+- `NetworkPolicy::DenyAll`: denies all network access
+- `NetworkPolicy::AllowDomains([...])`: keeps direct networking inside the sandbox disabled and allows access to allowlisted domains only through the host HTTP proxy
+- `NetworkPolicy::AllowAll`: allows arbitrary network access
+- When `trust_level = TrustLevel::Untrusted` and the current platform does not support microVM, the SDK returns an error directly and does not silently downgrade to OS
 
-### 5.2 隔离层级选择
+### 5.2 Isolation Layer Selection
 
-| 选项 | 含义 | 当前行为 |
+| Option | Meaning | Current behavior |
 | --- | --- | --- |
-| `auto` | 智能路由 | 根据命令类型和 `trust_level` 选择后端 |
-| `os` | OS 级隔离 | Linux 为 Landlock + Seccomp + Namespaces；macOS 为 Seatbelt |
-| `vm` | microVM 隔离 | 当前仅 Linux + KVM 支持 |
-| `wasm` | Wasm 隔离 | 适合 `.wasm/.wat/.wast` 负载 |
+| `auto` | Smart routing | Selects the backend based on command type and `trust_level` |
+| `os` | OS isolation | Linux uses Landlock + Seccomp + Namespaces; macOS uses Seatbelt |
+| `vm` | microVM isolation | Currently supports only Linux + KVM |
+| `wasm` | Wasm isolation | Suitable for `.wasm/.wat/.wast` workloads |
 
-当前 `IsolationLevel` 的 Rust 枚举名是：
+The current Rust enum names for `IsolationLevel` are:
 
 - `IsolationLevel::Auto`
 - `IsolationLevel::Os`
 - `IsolationLevel::MicroVm`
 - `IsolationLevel::Wasm`
 
-`auto` 路由的当前语义：
+Current semantics of `auto` routing:
 
-- `.wasm` / `.wat` / `.wast` 文件优先走 Wasm
-- `TrustLevel::Untrusted` 在 Linux 且启用 `vm` feature 时优先走 microVM
-- 其他普通命令默认走 OS 级
+- `.wasm` / `.wat` / `.wast` files prefer Wasm
+- `TrustLevel::Untrusted` prefers microVM on Linux when the `vm` feature is enabled
+- Other regular commands use OS by default
 
-## 6. 性能数据
+## 6. Performance Data
 
-以下数据来自当前仓库维护的基线，口径以 `CLAUDE.md` 和 `README.md` 为准：
+The following data comes from the baseline maintained in the current repository. Use `CLAUDE.md` and `README.md` as the source of truth for measurement definitions:
 
-| 路径 | 指标 | 实测 |
+| Path | Metric | Measured |
 | --- | --- | --- |
-| OS 级 | 冷启动 | P50 8.24ms |
-| Wasm | 冷启动（清缓存） | P50 1.01ms |
-| OS 级预热池 | 热获取 | P50 0.19us（仅 acquire） |
-| microVM | 冷启动 | P50 253ms |
-| microVM | 快照恢复 | P50 69ms（非池化） |
-| microVM | 池化快照恢复 | P50 28ms（restore-to-ready） |
-| microVM 预热池 | 热路径 | P50 773us |
+| OS | Cold start | P50 8.24ms |
+| Wasm | Cold start (cold cache) | P50 1.01ms |
+| OS warm pool | Hot acquire | P50 0.19us (acquire only) |
+| microVM | Cold start | P50 253ms |
+| microVM | Snapshot restore | P50 69ms (non-pooled) |
+| microVM | Pooled snapshot restore | P50 28ms (restore-to-ready) |
+| microVM warm pool | Hot path | P50 773us |
 
-解读要点：
+Key interpretation points:
 
-- `0.19us` 是 OS 预热池对象获取成本，不包含命令执行
-- `28ms` 是池化快照恢复到 ready 状态，不包含命令执行
-- `773us` 是 microVM 预热池热路径，包含轻载命令执行
+- `0.19us` is the cost of acquiring an OS warm-pool object; it does not include command execution
+- `28ms` is pooled snapshot restore to the ready state; it does not include command execution
+- `773us` is the microVM warm-pool hot path, including lightweight command execution
 
-## 7. 下一步
+## 7. Next Steps
 
-如果你要继续深入，建议按下面顺序看：
+If you want to go deeper, read these in order:
 
-- 架构总览：[docs/architecture.md](./architecture.md)
-- API 细节：[docs/api.md](./api.md)
-- 综合研究：[docs/research/00-executive-summary.md](./research/00-executive-summary.md)
-- Wasm 设计：[docs/research/11-wasmtime-api-research.md](./research/11-wasmtime-api-research.md)
-- microVM 设计：[docs/research/14-microvm-design.md](./research/14-microvm-design.md)
-- 产品与竞品讨论：[discuss/product-strategy-review.md](../discuss/product-strategy-review.md)
-- 竞品分析：[discuss/competitive-analysis.md](../discuss/competitive-analysis.md)
-- 流式输出方案：[discuss/streaming-output-design.md](../discuss/streaming-output-design.md)
-- HTTP 代理方案：[discuss/http-proxy-design.md](../discuss/http-proxy-design.md)
+- Architecture overview: [docs/architecture.md](./architecture.md)
+- API details: [docs/api.md](./api.md)
+- Comprehensive research: [docs/research/00-executive-summary.md](./research/00-executive-summary.md)
+- Wasm design: [docs/research/11-wasmtime-api-research.md](./research/11-wasmtime-api-research.md)
+- microVM design: [docs/research/14-microvm-design.md](./research/14-microvm-design.md)
+- Product and competitor discussion: [discuss/product-strategy-review.md](../discuss/product-strategy-review.md)
+- Competitive analysis: [discuss/competitive-analysis.md](../discuss/competitive-analysis.md)
+- Streaming output proposal: [discuss/streaming-output-design.md](../discuss/streaming-output-design.md)
+- HTTP proxy proposal: [discuss/http-proxy-design.md](../discuss/http-proxy-design.md)
