@@ -423,19 +423,25 @@ impl PySandbox {
         cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
-        let result = if env.is_some() || timeout.is_some() || cwd.is_some() {
-            sandbox
-                .execute_with_vm_options_full(
-                    command,
-                    mimobox_vm::GuestExecOptions {
-                        env: env.unwrap_or_default(),
-                        timeout: timeout.map(parse_python_timeout).transpose()?,
-                        cwd: cwd.map(str::to_string),
-                    },
+        let effective_command = match cwd {
+            Some(dir) => format!("cd {} && {}", dir, command),
+            None => command.to_string(),
+        };
+        let result = match (env, timeout) {
+            (Some(env), Some(timeout)) => sandbox
+                .execute_with_env_and_timeout(
+                    &effective_command,
+                    env,
+                    parse_python_timeout(timeout)?,
                 )
-                .map_err(map_sdk_error)?
-        } else {
-            sandbox.execute(command).map_err(map_sdk_error)?
+                .map_err(map_sdk_error)?,
+            (Some(env), None) => sandbox
+                .execute_with_env(&effective_command, env)
+                .map_err(map_sdk_error)?,
+            (None, Some(timeout)) => sandbox
+                .execute_with_timeout(&effective_command, parse_python_timeout(timeout)?)
+                .map_err(map_sdk_error)?,
+            (None, None) => sandbox.execute(&effective_command).map_err(map_sdk_error)?,
         };
         Ok(result.into())
     }
