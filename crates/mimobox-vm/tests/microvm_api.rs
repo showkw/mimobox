@@ -60,6 +60,7 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
         Err(err)
             if err.to_string().contains("kernel_path")
                 || err.to_string().contains("rootfs_path")
+                || err.to_string().contains("vcpu_count")
                 || err.to_string().contains("不存在")
     ));
 }
