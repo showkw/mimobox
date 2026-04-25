@@ -1,3 +1,5 @@
+> **Note**: The `mimobox-mcp` binary is currently built for Linux only. macOS users can use the CLI and SDK but cannot run the MCP server at this time.
+
 # mimobox MCP Server
 
 This document describes how `mimobox-mcp` runs, its tool list, parameter structures, and Claude Desktop integration.
@@ -213,6 +215,18 @@ Note: This tool requires the `vm` feature.
 
 ## 4. Claude Desktop Integration Configuration
 
+### Quick Setup (Linux)
+
+If you have `mimobox` CLI installed:
+
+```bash
+mimobox mcp init claude    # Configure Claude Desktop
+mimobox mcp init cursor    # Configure Cursor IDE
+mimobox mcp init windsurf  # Configure Windsurf
+```
+
+This automatically detects your MCP client and writes the correct configuration.
+
 Install `mimobox-mcp` before configuring Claude Desktop. Download the
 precompiled `mimobox-mcp` binary from the
 [latest GitHub Release](https://github.com/showkw/mimobox/releases/latest) and
@@ -228,22 +242,6 @@ MCP server, download `mimobox-mcp` separately from GitHub Releases, or build it
 from source as a fallback.
 
 Add the following to the MCP configuration in Claude Desktop:
-
-```json
-{
-  "mcpServers": {
-    "mimobox": {
-      "command": "mimobox-mcp",
-      "args": [],
-      "env": {
-        "RUST_LOG": "info"
-      }
-    }
-  }
-}
-```
-
-Use the same command shape for the OS-level backend:
 
 ```json
 {

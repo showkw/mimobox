@@ -1,4 +1,6 @@
 ---
+> **Note**: The `mimobox-mcp` binary is currently available for Linux only. macOS users can use the CLI and SDK but cannot run the MCP server at this time.
+
 # MCP Client Integration Guide
 
 This guide explains how to configure MCP clients (Claude Desktop, Cursor IDE) to connect to the mimobox MCP server.
@@ -84,6 +86,7 @@ Notes:
    [latest GitHub Release](https://github.com/showkw/mimobox/releases/latest).
    Choose the binary for your platform. Use the default binary for OS-level
    sandboxing, or the VM binary variant for microVM capabilities.
+   **macOS users**: There is currently no precompiled `mimobox-mcp` binary for macOS. You must use Linux to run the MCP server, or build from source with `cargo build --features vm` (KVM tools will be unavailable).
 
 3. **Install to PATH** by placing the downloaded `mimobox-mcp` binary in a
    directory such as `/usr/local/bin/`, and ensure it is executable.
