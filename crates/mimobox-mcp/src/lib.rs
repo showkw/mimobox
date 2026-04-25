@@ -198,6 +198,7 @@ pub struct ForkResponse {
 pub struct McpHttpResponse {
     sandbox_id: u64,
     status: u16,
+    headers: HashMap<String, String>,
     body: String,
 }
 
@@ -458,19 +459,27 @@ impl MimoboxServer {
         #[cfg(feature = "vm")]
         {
             let mut sandboxes = self.sandboxes.lock().await;
-            let managed = sandboxes
-                .get_mut(&request.sandbox_id)
+            let mut managed = sandboxes
+                .remove(&request.sandbox_id)
                 .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
-            let forked = managed
-                .sandbox
-                .fork()
-                .map_err(|error| to_error(format_sdk_error(error)))?;
+            drop(sandboxes);
+
+            let forked = match managed.sandbox.fork() {
+                Ok(forked) => forked,
+                Err(error) => {
+                    let mut sandboxes = self.sandboxes.lock().await;
+                    sandboxes.insert(request.sandbox_id, managed);
+                    return Err(to_error(format_sdk_error(error)));
+                }
+            };
 
             let mut next_id = self.next_id.lock().await;
             let new_id = *next_id;
             *next_id = next_id.saturating_add(1);
             drop(next_id);
 
+            let mut sandboxes = self.sandboxes.lock().await;
+            sandboxes.insert(request.sandbox_id, managed);
             sandboxes.insert(
                 new_id,
                 ManagedSandbox {
@@ -519,6 +528,7 @@ impl MimoboxServer {
             Ok(Json(McpHttpResponse {
                 sandbox_id: request.sandbox_id,
                 status: response.status,
+                headers: response.headers,
                 body: String::from_utf8_lossy(&response.body).into_owned(),
             }))
         }
