@@ -2,6 +2,8 @@
 
 # mimobox
 
+[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
 **mimobox** — A cross-platform Agent Sandbox in Rust with OS-level, Wasm, and microVM isolation, smart routing by default, and full control for advanced users.
 
 `mimobox` provides secure, self-hosted code execution for AI Agent workloads through one SDK, CLI, MCP server, and Python binding surface.
