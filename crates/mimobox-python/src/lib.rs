@@ -5,7 +5,7 @@
 //! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
-    Config, ErrorCode, ExecuteResult, IsolationLevel, Sandbox as RustSandbox,
+    Config, DirEntry, ErrorCode, ExecuteResult, FileType, IsolationLevel, Sandbox as RustSandbox,
     SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
 };
 use pyo3::create_exception;
@@ -111,6 +111,44 @@ impl From<mimobox_sdk::HttpResponse> for PyHttpResponse {
             status: value.status,
             headers: value.headers,
             body: value.body,
+        }
+    }
+}
+
+/// A single directory entry returned by `Sandbox.list_dir()`.
+///
+/// # Attributes
+///
+/// * `name` - File or directory name.
+/// * `file_type` - Type string: "file", "dir", "symlink", or "other".
+/// * `size` - File size in bytes.
+/// * `is_symlink` - Whether this entry is a symbolic link.
+#[pyclass(name = "DirEntry")]
+#[derive(Debug, Clone)]
+struct PyDirEntry {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    file_type: String,
+    #[pyo3(get)]
+    size: u64,
+    #[pyo3(get)]
+    is_symlink: bool,
+}
+
+impl From<DirEntry> for PyDirEntry {
+    fn from(value: DirEntry) -> Self {
+        Self {
+            name: value.name,
+            file_type: match value.file_type {
+                FileType::File => "file",
+                FileType::Dir => "dir",
+                FileType::Symlink => "symlink",
+                _ => "other",
+            }
+            .to_string(),
+            size: value.size,
+            is_symlink: value.is_symlink,
         }
     }
 }
@@ -429,6 +467,25 @@ impl PySandbox {
         self.inner.as_ref().is_some_and(|s| s.is_ready())
     }
 
+    /// List directory entries inside the sandbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path inside the sandbox filesystem.
+    ///
+    /// # Returns
+    ///
+    /// A list of `DirEntry` objects with name, file_type, size, and is_symlink.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If the directory cannot be read.
+    fn list_dir(&mut self, path: &str) -> PyResult<Vec<PyDirEntry>> {
+        let sandbox = self.inner_mut()?;
+        let entries = sandbox.list_dir(path).map_err(map_sdk_error)?;
+        Ok(entries.into_iter().map(PyDirEntry::from).collect())
+    }
+
     /// Read a file from inside the sandbox.
     ///
     /// # Arguments
@@ -656,6 +713,7 @@ fn map_sdk_error(error: SdkError) -> PyErr {
                 ErrorCode::SandboxNotReady
                 | ErrorCode::SandboxDestroyed
                 | ErrorCode::SandboxCreateFailed => SandboxLifecycleError::new_err(detail),
+                ErrorCode::NotDirectory => PyValueError::new_err(detail),
                 ErrorCode::FileTooLarge => SandboxError::new_err(detail),
                 _ => SandboxError::new_err(detail),
             }
@@ -681,6 +739,7 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySnapshot>()?;
     module.add_class::<PyExecuteResult>()?;
     module.add_class::<PyHttpResponse>()?;
+    module.add_class::<PyDirEntry>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
     module.add("SandboxError", py.get_type::<SandboxError>())?;

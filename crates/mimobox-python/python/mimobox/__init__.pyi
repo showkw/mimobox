@@ -19,6 +19,22 @@ class ExecuteResult:
     elapsed: Optional[float]
 
 
+class DirEntry:
+    """A single directory entry returned by ``Sandbox.list_dir()``.
+
+    Attributes:
+        name: File or directory name.
+        file_type: Type string: ``"file"``, ``"dir"``, ``"symlink"``, or ``"other"``.
+        size: File size in bytes.
+        is_symlink: Whether this entry is a symbolic link.
+    """
+
+    name: str
+    file_type: str
+    size: int
+    is_symlink: bool
+
+
 class HttpResponse:
     """HTTP response from the host-side proxy.
 
@@ -197,6 +213,20 @@ class Sandbox:
         """
         ...
 
+    def list_dir(self, path: str) -> List[DirEntry]:
+        """List directory entries inside the sandbox.
+
+        Args:
+            path: Absolute path inside the sandbox filesystem.
+
+        Returns:
+            A list of ``DirEntry`` objects.
+
+        Raises:
+            SandboxError: If the directory cannot be read.
+        """
+        ...
+
     def read_file(self, path: str) -> bytes:
         """Read a file from inside the sandbox.
 
@@ -332,6 +362,7 @@ class SandboxLifecycleError(SandboxError):
 
 
 __all__ = [
+    "DirEntry",
     "ExecuteResult",
     "HttpResponse",
     "Sandbox",
