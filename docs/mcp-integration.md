@@ -75,7 +75,7 @@ Notes:
 
 1. **Install the mimobox CLI helper**:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash
    ```
    This helper currently installs the `mimobox` CLI only. Download the
    `mimobox-mcp` server binary separately from GitHub Releases.

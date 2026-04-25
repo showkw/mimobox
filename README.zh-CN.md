@@ -15,7 +15,7 @@ mimobox 通过统一的 SDK、CLI、MCP server 和 Python binding，为 AI Agent
 ### 安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash
 ```
 
 ### Python
