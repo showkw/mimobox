@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::vm::{MicrovmConfig, MicrovmError};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
-const SNAPSHOT_VERSION: u16 = 1;
+const SNAPSHOT_VERSION: u16 = 2;
 pub(crate) const FILE_SNAPSHOT_VERSION: u16 = 1;
 const SNAPSHOT_MEMORY_FILE_NAME: &str = "memory.bin";
 const SNAPSHOT_STATE_FILE_NAME: &str = "state.json";
@@ -81,7 +81,7 @@ impl MicrovmSnapshot {
         }
 
         let sandbox_config = decode_sandbox_config(&mut cursor)?;
-        let microvm_config = decode_microvm_config(&mut cursor)?;
+        let microvm_config = decode_microvm_config(&mut cursor, version)?;
         let memory = cursor.read_bytes()?;
         let vcpu_state = cursor.read_bytes()?;
 
@@ -268,15 +268,24 @@ fn decode_sandbox_config(cursor: &mut SnapshotCursor<'_>) -> Result<SandboxConfi
 fn encode_microvm_config(out: &mut Vec<u8>, config: &MicrovmConfig) -> Result<(), MicrovmError> {
     out.push(config.vcpu_count);
     out.extend_from_slice(&config.memory_mb.to_le_bytes());
+    encode_opt_u64(out, config.cpu_quota_us);
     encode_path(out, &config.kernel_path)?;
     encode_path(out, &config.rootfs_path)?;
     Ok(())
 }
 
-fn decode_microvm_config(cursor: &mut SnapshotCursor<'_>) -> Result<MicrovmConfig, MicrovmError> {
+fn decode_microvm_config(
+    cursor: &mut SnapshotCursor<'_>,
+    version: u16,
+) -> Result<MicrovmConfig, MicrovmError> {
     Ok(MicrovmConfig {
         vcpu_count: cursor.read_u8()?,
         memory_mb: cursor.read_u32()?,
+        cpu_quota_us: if version >= 2 {
+            cursor.read_opt_u64()?
+        } else {
+            None
+        },
         kernel_path: decode_path(cursor)?,
         rootfs_path: decode_path(cursor)?,
     })

@@ -4,6 +4,10 @@ use std::time::Duration;
 
 use crate::seccomp::SeccompProfile;
 
+fn default_cpu_period_us() -> u64 {
+    100_000
+}
+
 /// Structured error code for programmatic error matching.
 ///
 /// Each variant has a stable string representation via [`ErrorCode::as_str()`],
@@ -152,6 +156,15 @@ pub struct SandboxConfig {
     pub deny_network: bool,
     /// Memory limit in MB, enforced through cgroups v2 or `setrlimit`.
     pub memory_limit_mb: Option<u64>,
+    /// CPU 时间配额（微秒），配合 `cpu_period_us` 使用。
+    ///
+    /// 例如 quota=50000, period=100000 表示最多使用 50% CPU。
+    /// 设为 `None` 表示不限制。
+    #[serde(default)]
+    pub cpu_quota_us: Option<u64>,
+    /// CPU 周期（微秒），默认 100000（100ms）。
+    #[serde(default = "default_cpu_period_us")]
+    pub cpu_period_us: u64,
     /// Timeout in seconds.
     pub timeout_secs: Option<u64>,
     /// Seccomp filter policy.
@@ -180,11 +193,27 @@ impl Default for SandboxConfig {
             fs_readwrite: vec!["/tmp".into()],
             deny_network: true,
             memory_limit_mb: Some(512),
+            cpu_quota_us: None,
+            cpu_period_us: default_cpu_period_us(),
             timeout_secs: Some(30),
             seccomp_profile: SeccompProfile::Essential,
             allow_fork: false,
             allowed_http_domains: Vec::new(),
         }
+    }
+}
+
+impl SandboxConfig {
+    /// Set the CPU time quota in microseconds.
+    pub fn cpu_quota(mut self, quota_us: u64) -> Self {
+        self.cpu_quota_us = Some(quota_us);
+        self
+    }
+
+    /// Set the CPU period in microseconds.
+    pub fn cpu_period(mut self, period_us: u64) -> Self {
+        self.cpu_period_us = period_us;
+        self
     }
 }
 

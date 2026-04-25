@@ -130,6 +130,10 @@ pub struct Config {
     pub timeout: Option<Duration>,
     /// Memory limit in MiB. Applied via cgroups v2 or setrlimit.
     pub memory_limit_mb: Option<u64>,
+    /// CPU 时间配额（微秒）。`None` 表示不限制。
+    pub cpu_quota_us: Option<u64>,
+    /// CPU 周期（微秒）。默认 100000（100ms）。
+    pub cpu_period_us: u64,
     /// Read-only mount paths inside the sandbox.
     pub fs_readonly: Vec<PathBuf>,
     /// Read-write mount paths inside the sandbox.
@@ -156,6 +160,8 @@ impl Default for Config {
             network: NetworkPolicy::default(),
             timeout: Some(Duration::from_secs(30)),
             memory_limit_mb: Some(512),
+            cpu_quota_us: None,
+            cpu_period_us: 100_000,
             fs_readonly: vec![
                 "/usr".into(),
                 "/lib".into(),
@@ -206,6 +212,8 @@ impl Config {
         config.fs_readwrite = self.fs_readwrite.clone();
         config.deny_network = deny_network;
         config.memory_limit_mb = self.memory_limit_mb;
+        config.cpu_quota_us = self.cpu_quota_us;
+        config.cpu_period_us = self.cpu_period_us;
         config.timeout_secs = self.timeout.map(round_up_timeout_secs);
         config.seccomp_profile = resolve_seccomp_profile(deny_network, self.allow_fork);
         config.allow_fork = self.allow_fork;
@@ -222,6 +230,7 @@ impl Config {
         Ok(mimobox_vm::MicrovmConfig {
             vcpu_count: self.vm_vcpu_count,
             memory_mb,
+            cpu_quota_us: self.cpu_quota_us,
             kernel_path: self
                 .kernel_path
                 .clone()
@@ -406,6 +415,21 @@ impl ConfigBuilder {
     /// ```
     pub fn memory_limit_mb(mut self, mb: u64) -> Self {
         self.inner.memory_limit_mb = Some(mb);
+        self
+    }
+
+    /// Set the CPU time quota in microseconds.
+    ///
+    /// Linux OS backend maps this to cgroup v2 `cpu.max`; microVM stores the
+    /// value for backend-specific enforcement. Other backends ignore it.
+    pub fn cpu_quota(mut self, quota_us: u64) -> Self {
+        self.inner.cpu_quota_us = Some(quota_us);
+        self
+    }
+
+    /// Set the CPU period in microseconds.
+    pub fn cpu_period(mut self, period_us: u64) -> Self {
+        self.inner.cpu_period_us = period_us;
         self
     }
 
@@ -734,6 +758,8 @@ mod tests {
             .vm_vcpu_count(4)
             .vm_memory_mb(768)
             .memory_limit_mb(1024)
+            .cpu_quota(50_000)
+            .cpu_period(100_000)
             .kernel_path("/srv/mimobox/vmlinux")
             .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
             .build();
@@ -741,6 +767,8 @@ mod tests {
 
         assert_eq!(microvm_config.vcpu_count, 4);
         assert_eq!(microvm_config.memory_mb, 768);
+        assert_eq!(microvm_config.cpu_quota_us, Some(50_000));
+        assert_eq!(config.to_sandbox_config().cpu_period_us, 100_000);
         assert_eq!(
             microvm_config.kernel_path,
             PathBuf::from("/srv/mimobox/vmlinux")

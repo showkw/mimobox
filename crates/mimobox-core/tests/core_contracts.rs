@@ -21,6 +21,8 @@ struct SandboxConfigJson {
     fs_readwrite: Vec<PathBuf>,
     deny_network: bool,
     memory_limit_mb: Option<u64>,
+    cpu_quota_us: Option<u64>,
+    cpu_period_us: u64,
     timeout_secs: Option<u64>,
     #[serde(with = "SeccompProfileDef")]
     seccomp_profile: SeccompProfile,
@@ -35,6 +37,8 @@ impl From<&SandboxConfig> for SandboxConfigJson {
             fs_readwrite: config.fs_readwrite.clone(),
             deny_network: config.deny_network,
             memory_limit_mb: config.memory_limit_mb,
+            cpu_quota_us: config.cpu_quota_us,
+            cpu_period_us: config.cpu_period_us,
             timeout_secs: config.timeout_secs,
             seccomp_profile: config.seccomp_profile,
             allow_fork: config.allow_fork,
@@ -50,6 +54,8 @@ impl From<SandboxConfigJson> for SandboxConfig {
         config.fs_readwrite = json.fs_readwrite;
         config.deny_network = json.deny_network;
         config.memory_limit_mb = json.memory_limit_mb;
+        config.cpu_quota_us = json.cpu_quota_us;
+        config.cpu_period_us = json.cpu_period_us;
         config.timeout_secs = json.timeout_secs;
         config.seccomp_profile = json.seccomp_profile;
         config.allow_fork = json.allow_fork;
@@ -77,6 +83,8 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     config.fs_readwrite = vec![PathBuf::from("/tmp/workdir"), PathBuf::from("/srv/output")];
     config.deny_network = false;
     config.memory_limit_mb = Some(256);
+    config.cpu_quota_us = Some(50_000);
+    config.cpu_period_us = 100_000;
     config.timeout_secs = Some(9);
     config.seccomp_profile = SeccompProfile::NetworkWithFork;
     config.allow_fork = true;
@@ -89,6 +97,8 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     assert_eq!(decoded.fs_readwrite, config.fs_readwrite);
     assert_eq!(decoded.deny_network, config.deny_network);
     assert_eq!(decoded.memory_limit_mb, config.memory_limit_mb);
+    assert_eq!(decoded.cpu_quota_us, config.cpu_quota_us);
+    assert_eq!(decoded.cpu_period_us, config.cpu_period_us);
     assert_eq!(decoded.timeout_secs, config.timeout_secs);
     assert_eq!(
         seccomp_profile_name(decoded.seccomp_profile),
@@ -99,8 +109,19 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     assert!(json.contains("\"deny_network\": false"));
     assert!(json.contains("\"allow_fork\": true"));
     assert!(json.contains("\"allowed_http_domains\""));
+    assert!(json.contains("\"cpu_quota_us\": 50000"));
 
     Ok(())
+}
+
+#[test]
+fn sandbox_config_cpu_builder_sets_quota_and_period() {
+    let config = SandboxConfig::default()
+        .cpu_quota(25_000)
+        .cpu_period(100_000);
+
+    assert_eq!(config.cpu_quota_us, Some(25_000));
+    assert_eq!(config.cpu_period_us, 100_000);
 }
 
 #[test]

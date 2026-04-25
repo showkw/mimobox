@@ -29,6 +29,7 @@ fn snapshot_round_trip_restores_same_bytes() {
         MicrovmConfig {
             vcpu_count: 2,
             memory_mb: 256,
+            cpu_quota_us: Some(50_000),
             kernel_path: PathBuf::from("/opt/mimobox/vmlinux"),
             rootfs_path: PathBuf::from("/opt/mimobox/rootfs.ext4"),
         },
