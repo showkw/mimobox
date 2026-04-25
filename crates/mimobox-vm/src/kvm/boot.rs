@@ -148,10 +148,7 @@ impl KvmBackend {
             return None;
         }
 
-        let vcpu = match self.vcpus.first() {
-            Some(vcpu) => vcpu,
-            None => return None,
-        };
+        let vcpu = self.vcpus.first()?;
 
         match vcpu.get_tsc_khz() {
             Ok(0) => None,

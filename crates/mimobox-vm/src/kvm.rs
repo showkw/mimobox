@@ -2441,7 +2441,7 @@ impl KvmBackend {
     }
 
     fn zero_guest_range(&self, guest_addr: u64, len: usize) -> Result<(), MicrovmError> {
-        const ZEROES: [u8; 65536] = [0; 65536];
+        static ZEROES: [u8; 65536] = [0; 65536];
         let mut written = 0usize;
         while written < len {
             let chunk = ZEROES.len().min(len - written);
