@@ -11,7 +11,7 @@ categories = ["development-tools", "api-bindings"]
 
 [dependencies]
 base64 = "0.22"
-rmcp = { version = "1.5", features = ["server", "schemars", "transport-io"] }
+rmcp = { version = "1.5", features = ["client", "server", "schemars", "transport-async-rw", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 schemars = "1"
 serde = { workspace = true, features = ["derive"] }
@@ -34,4 +34,5 @@ default-target = "x86_64-unknown-linux-gnu"
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
+anyhow = "1"
 mimobox-core.workspace = true
