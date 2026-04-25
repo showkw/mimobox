@@ -1,5 +1,4 @@
 langchain>=0.3
 langchain-openai>=0.2
 pydantic>=2.0
-mimobox
-
+# mimobox -- install via: cd crates/mimobox-python && maturin develop

@@ -52,7 +52,8 @@ pub fn download_vm_assets(assets_dir: &Path, writer: &mut impl Write) -> Result<
 
 fn build_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
         .user_agent(format!("mimobox/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| {
