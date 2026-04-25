@@ -162,8 +162,8 @@ impl PySnapshot {
     /// * `SandboxError` - If the snapshot file is invalid.
     #[classmethod]
     fn from_file(_cls: &Bound<'_, PyType>, path: &str) -> PyResult<Self> {
-        let snapshot = RustSnapshot::from_file(std::path::PathBuf::from(path))
-            .map_err(map_sdk_error)?;
+        let snapshot =
+            RustSnapshot::from_file(std::path::PathBuf::from(path)).map_err(map_sdk_error)?;
         Ok(Self { inner: snapshot })
     }
 
@@ -590,7 +590,6 @@ impl PySandbox {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))
     }
-
 }
 
 fn build_python_config(
