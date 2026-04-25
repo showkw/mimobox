@@ -381,6 +381,9 @@ trait HttpRequestForSdk {
     ) -> Result<HttpResponse, SdkError>;
 }
 
+
+// ── ExecuteForSdk: OS/Wasm 后端（使用 CoreSandbox trait） ──
+
 #[cfg(all(feature = "os", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_os::LinuxSandbox {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
@@ -399,6 +402,17 @@ impl ExecuteForSdk for mimobox_os::MacOsSandbox {
     }
 }
 
+#[cfg(feature = "wasm")]
+impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
+    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+        CoreSandbox::execute(self, args)
+            .map(ExecuteResult::from)
+            .map_err(SdkError::from_sandbox_execute_error)
+    }
+}
+
+// ── VM 后端 MicrovmSandbox 的 ExecuteForSdk（走 CoreSandbox trait） ──
+
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
@@ -408,154 +422,93 @@ impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
     }
 }
 
+// ── VM 池化/恢复类型 trait 实现：宏消除三种类型的重复 ──
+
+/// VM 池化/恢复类型共享的 execute 实现（使用 start.elapsed() 而非后端自带计时）
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl StreamExecuteForSdk for mimobox_vm::MicrovmSandbox {
-    fn stream_execute_for_sdk(
-        &mut self,
-        args: &[String],
-    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
-        self.stream_execute(args)
-            .map(bridge_vm_stream)
-            .map_err(map_microvm_error)
-    }
+macro_rules! impl_execute_for_sdk_pooled {
+    ($ty:ty) => {
+        impl ExecuteForSdk for $ty {
+            fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
+                let start = std::time::Instant::now();
+                self.execute(args)
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(map_microvm_error)
+            }
+        }
+    };
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl HttpRequestForSdk for mimobox_vm::MicrovmSandbox {
-    fn http_request_for_sdk(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: std::collections::HashMap<String, String>,
-        body: Option<&[u8]>,
-    ) -> Result<HttpResponse, SdkError> {
-        let request = mimobox_vm::HttpRequest::new(
-            method,
-            url,
-            headers,
-            body.map(|item| item.to_vec()),
-            None,
-            None,
-        )
-        .map_err(map_http_proxy_error)?;
-        self.http_request(request)
-            .map(HttpResponse::from)
-            .map_err(map_microvm_error)
-    }
+impl_execute_for_sdk_pooled!(mimobox_vm::PooledVm);
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl_execute_for_sdk_pooled!(mimobox_vm::PooledRestoreVm);
+
+/// StreamExecuteForSdk 的 VM 类型共享实现
+#[cfg(all(feature = "vm", target_os = "linux"))]
+macro_rules! impl_stream_execute_for_sdk {
+    ($ty:ty) => {
+        impl StreamExecuteForSdk for $ty {
+            fn stream_execute_for_sdk(
+                &mut self,
+                args: &[String],
+            ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+                self.stream_execute(args)
+                    .map(bridge_vm_stream)
+                    .map_err(map_microvm_error)
+            }
+        }
+    };
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl ExecuteForSdk for mimobox_vm::PooledVm {
-    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
-        let start = std::time::Instant::now();
-        self.execute(args)
-            .map(|result| ExecuteResult {
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                timed_out: result.timed_out,
-                elapsed: start.elapsed(),
-            })
-            .map_err(map_microvm_error)
-    }
+impl_stream_execute_for_sdk!(mimobox_vm::MicrovmSandbox);
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl_stream_execute_for_sdk!(mimobox_vm::PooledVm);
+#[cfg(all(feature = "vm", target_os = "linux"))]
+impl_stream_execute_for_sdk!(mimobox_vm::PooledRestoreVm);
+
+/// HttpRequestForSdk 的 VM 类型共享实现
+#[cfg(all(feature = "vm", target_os = "linux"))]
+macro_rules! impl_http_request_for_sdk {
+    ($ty:ty) => {
+        impl HttpRequestForSdk for $ty {
+            fn http_request_for_sdk(
+                &mut self,
+                method: &str,
+                url: &str,
+                headers: std::collections::HashMap<String, String>,
+                body: Option<&[u8]>,
+            ) -> Result<HttpResponse, SdkError> {
+                let request = mimobox_vm::HttpRequest::new(
+                    method,
+                    url,
+                    headers,
+                    body.map(|item| item.to_vec()),
+                    None,
+                    None,
+                )
+                .map_err(map_http_proxy_error)?;
+                self.http_request(request)
+                    .map(HttpResponse::from)
+                    .map_err(map_microvm_error)
+            }
+        }
+    };
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl StreamExecuteForSdk for mimobox_vm::PooledVm {
-    fn stream_execute_for_sdk(
-        &mut self,
-        args: &[String],
-    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
-        self.stream_execute(args)
-            .map(bridge_vm_stream)
-            .map_err(map_microvm_error)
-    }
-}
-
+impl_http_request_for_sdk!(mimobox_vm::MicrovmSandbox);
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl HttpRequestForSdk for mimobox_vm::PooledVm {
-    fn http_request_for_sdk(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: std::collections::HashMap<String, String>,
-        body: Option<&[u8]>,
-    ) -> Result<HttpResponse, SdkError> {
-        let request = mimobox_vm::HttpRequest::new(
-            method,
-            url,
-            headers,
-            body.map(|item| item.to_vec()),
-            None,
-            None,
-        )
-        .map_err(map_http_proxy_error)?;
-        self.http_request(request)
-            .map(HttpResponse::from)
-            .map_err(map_microvm_error)
-    }
-}
-
+impl_http_request_for_sdk!(mimobox_vm::PooledVm);
 #[cfg(all(feature = "vm", target_os = "linux"))]
-impl ExecuteForSdk for mimobox_vm::PooledRestoreVm {
-    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
-        let start = std::time::Instant::now();
-        self.execute(args)
-            .map(|result| ExecuteResult {
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                timed_out: result.timed_out,
-                elapsed: start.elapsed(),
-            })
-            .map_err(map_microvm_error)
-    }
-}
-
-#[cfg(all(feature = "vm", target_os = "linux"))]
-impl StreamExecuteForSdk for mimobox_vm::PooledRestoreVm {
-    fn stream_execute_for_sdk(
-        &mut self,
-        args: &[String],
-    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
-        self.stream_execute(args)
-            .map(bridge_vm_stream)
-            .map_err(map_microvm_error)
-    }
-}
-
-#[cfg(all(feature = "vm", target_os = "linux"))]
-impl HttpRequestForSdk for mimobox_vm::PooledRestoreVm {
-    fn http_request_for_sdk(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: std::collections::HashMap<String, String>,
-        body: Option<&[u8]>,
-    ) -> Result<HttpResponse, SdkError> {
-        let request = mimobox_vm::HttpRequest::new(
-            method,
-            url,
-            headers,
-            body.map(|item| item.to_vec()),
-            None,
-            None,
-        )
-        .map_err(map_http_proxy_error)?;
-        self.http_request(request)
-            .map(HttpResponse::from)
-            .map_err(map_microvm_error)
-    }
-}
-
-#[cfg(feature = "wasm")]
-impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
-    fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError> {
-        CoreSandbox::execute(self, args)
-            .map(ExecuteResult::from)
-            .map_err(SdkError::from_sandbox_execute_error)
-    }
-}
+impl_http_request_for_sdk!(mimobox_vm::PooledRestoreVm);
 
 /// Internal backend instance enum.
 ///
@@ -673,6 +626,24 @@ macro_rules! dispatch_execute {
     };
 }
 
+
+/// VM-only 三变体分派宏（MicroVm / PooledMicroVm / RestoredPooledMicroVm）。
+/// 用于 read_file、write_file、http_request、stream_execute、execute_with_vm_options 等
+/// 仅 VM 后端支持的方法。非 VM 变体统一走 fallback 表达式。
+macro_rules! dispatch_vm {
+    ($inner:expr, $binding:ident, $expr:expr, $fallback:expr) => {
+        match $inner {
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm($binding) => $expr,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm($binding) => $expr,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm($binding) => $expr,
+            _ => $fallback,
+        }
+    };
+}
+
 impl Sandbox {
     /// Creates a sandbox with default configuration.
     ///
@@ -783,13 +754,7 @@ impl Sandbox {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         {
             self.ensure_backend_for_snapshot()?;
-            let inner = self.inner.as_mut().ok_or_else(|| {
-                SdkError::sandbox(
-                    ErrorCode::SandboxCreateFailed,
-                    "后端初始化后缺失实例",
-                    Some("检查沙箱初始化流程是否被中断".to_string()),
-                )
-            })?;
+            let inner = self.require_inner()?;
 
             let snapshot = match inner {
                 SandboxInner::MicroVm(sandbox) => sandbox.snapshot().map_err(map_microvm_error)?,
@@ -854,13 +819,7 @@ impl Sandbox {
     #[cfg(all(feature = "vm", target_os = "linux"))]
     pub fn fork(&mut self) -> Result<Self, SdkError> {
         self.ensure_backend_for_snapshot()?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
         match inner {
             SandboxInner::MicroVm(sandbox) => {
@@ -897,13 +856,7 @@ impl Sandbox {
     pub fn execute(&mut self, command: &str) -> Result<ExecuteResult, SdkError> {
         let args = parse_command(command)?;
         self.ensure_backend(command)?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
     }
 
@@ -943,13 +896,7 @@ impl Sandbox {
         }
 
         self.ensure_backend_for_pty()?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
         let session =
             match inner {
@@ -1026,97 +973,45 @@ impl Sandbox {
         let args = parse_command(command)?;
         let _ = &args;
         self.ensure_backend(command)?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => sandbox.stream_execute_for_sdk(&args),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => sandbox.stream_execute_for_sdk(&args),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => sandbox.stream_execute_for_sdk(&args),
-            _ => Err(SdkError::sandbox(
+        dispatch_vm!(inner, sandbox, sandbox.stream_execute_for_sdk(&args),
+            Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
                 "流式执行仅支持 microVM 后端",
-                Some(
-                    "将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string(),
-                ),
-            )),
-        }
+                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+            ))
+        )
     }
 
     #[cfg(feature = "vm")]
     /// 从 microVM 沙箱中读取文件内容。
     pub fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SdkError> {
         self.ensure_backend_for_file_ops()?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => sandbox.read_file(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                sandbox.read_file(_path).map_err(map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                sandbox.read_file(_path).map_err(map_microvm_error)
-            }
-            _ => Err(SdkError::sandbox(
+        dispatch_vm!(inner, sandbox, sandbox.read_file(_path).map_err(map_microvm_error),
+            Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
                 "文件传输仅支持 microVM 后端",
-                Some(
-                    "将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string(),
-                ),
-            )),
-        }
+                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+            ))
+        )
     }
 
     #[cfg(feature = "vm")]
     /// 向 microVM 沙箱中写入文件内容。
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), SdkError> {
         self.ensure_backend_for_file_ops()?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                sandbox.write_file(_path, _data).map_err(map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                sandbox.write_file(_path, _data).map_err(map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                sandbox.write_file(_path, _data).map_err(map_microvm_error)
-            }
-            _ => Err(SdkError::sandbox(
+        dispatch_vm!(inner, sandbox, sandbox.write_file(_path, _data).map_err(map_microvm_error),
+            Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
                 "文件传输仅支持 microVM 后端",
-                Some(
-                    "将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string(),
-                ),
-            )),
-        }
+                Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+            ))
+        )
     }
 
     #[cfg(feature = "vm")]
@@ -1130,33 +1025,15 @@ impl Sandbox {
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, SdkError> {
         self.ensure_backend_for_file_ops()?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                sandbox.http_request_for_sdk(method, url, headers, body)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                sandbox.http_request_for_sdk(method, url, headers, body)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                sandbox.http_request_for_sdk(method, url, headers, body)
-            }
-            _ => Err(SdkError::sandbox(
+        dispatch_vm!(inner, sandbox, sandbox.http_request_for_sdk(method, url, headers, body),
+            Err(SdkError::sandbox(
                 ErrorCode::UnsupportedPlatform,
                 "HTTP 代理仅支持 microVM 后端",
                 Some("将 isolation 设置为 `MicroVm` 并配置 allowed_http_domains".to_string()),
-            )),
-        }
+            ))
+        )
     }
 
     /// Returns the isolation level of the currently active backend.
@@ -1232,6 +1109,19 @@ impl Sandbox {
         self.destroy_inner()
     }
 
+    // ── 私有辅助方法 ──
+
+    /// 获取已初始化的后端实例引用，若不存在则返回统一错误。
+    fn require_inner(&mut self) -> Result<&mut SandboxInner, SdkError> {
+        self.inner.as_mut().ok_or_else(|| {
+            SdkError::sandbox(
+                ErrorCode::SandboxCreateFailed,
+                "后端初始化后缺失实例",
+                Some("检查沙箱初始化流程是否被中断".to_string()),
+            )
+        })
+    }
+
     fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
         let isolation = resolve_isolation(&self.config, command)?;
 
@@ -1250,13 +1140,7 @@ impl Sandbox {
 
     fn wait_ready_inner(&mut self, timeout: std::time::Duration) -> Result<(), SdkError> {
         let _ = timeout;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -1284,63 +1168,27 @@ impl Sandbox {
     ) -> Result<ExecuteResult, SdkError> {
         let args = parse_command(command)?;
         self.ensure_backend(command)?;
-        let inner = self.inner.as_mut().ok_or_else(|| {
-            SdkError::sandbox(
-                ErrorCode::SandboxCreateFailed,
-                "后端初始化后缺失实例",
-                Some("检查沙箱初始化流程是否被中断".to_string()),
-            )
-        })?;
+        let inner = self.require_inner()?;
         let options = mimobox_vm::GuestExecOptions { env, timeout };
 
-        match inner {
-            SandboxInner::MicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options)
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            SandboxInner::PooledMicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options)
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options)
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            _ => Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "命令级 env/timeout 仅支持 microVM 后端",
-                Some(
-                    "将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string(),
-                ),
-            )),
-        }
+        dispatch_vm!(inner, sandbox, {
+            let start = std::time::Instant::now();
+            sandbox
+                .execute_with_options(&args, options)
+                .map(|result| ExecuteResult {
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    exit_code: result.exit_code,
+                    timed_out: result.timed_out,
+                    elapsed: start.elapsed(),
+                })
+                .map_err(map_microvm_error)
+        },
+        Err(SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            "命令级 env/timeout 仅支持 microVM 后端",
+            Some("将 isolation 设置为 `MicroVm` 并在 Linux + vm feature 构建上运行".to_string()),
+        )))
     }
 
     #[cfg(all(feature = "vm", not(target_os = "linux")))]
@@ -1530,7 +1378,6 @@ impl Sandbox {
         }
     }
 }
-
 impl Drop for Sandbox {
     fn drop(&mut self) {
         if let Err(error) = self.destroy_inner() {
