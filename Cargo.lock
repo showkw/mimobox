@@ -1684,6 +1684,7 @@ dependencies = [
 name = "mimobox-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "mimobox-sdk",
  "rmcp",
  "schemars",

@@ -10,6 +10,7 @@ keywords = ["sandbox", "mcp", "agent", "security", "llm"]
 categories = ["development-tools", "api-bindings"]
 
 [dependencies]
+base64 = "0.22"
 rmcp = { version = "1.5", features = ["server", "schemars", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 schemars = "1"
