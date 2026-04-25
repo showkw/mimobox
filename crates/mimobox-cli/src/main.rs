@@ -7,8 +7,7 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe};
-#[cfg(all(target_os = "linux", feature = "kvm"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +72,8 @@ enum CliCommand {
     Doctor,
     /// Initialize mimobox local assets and directories
     Setup,
+    /// Configure mimobox MCP server for a desktop client
+    McpInit(McpInitArgs),
     /// Print version information
     Version,
 }
@@ -93,6 +94,13 @@ enum BenchTarget {
     ColdStart,
     HotAcquire,
     WarmThroughput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum McpClient {
+    Claude,
+    Cursor,
+    Windsurf,
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +232,17 @@ struct BenchArgs {
     /// Benchmark target
     #[arg(long, value_enum)]
     target: BenchTarget,
+}
+
+#[derive(Debug, Args)]
+struct McpInitArgs {
+    /// MCP client to configure
+    #[arg(value_enum, required_unless_present = "all", conflicts_with = "all")]
+    client: Option<McpClient>,
+
+    /// Configure all supported MCP clients
+    #[arg(long, action = ArgAction::SetTrue)]
+    all: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,6 +380,9 @@ enum CliError {
     #[error("benchmark execution failed: {0}")]
     Benchmark(String),
 
+    #[error("MCP initialization failed: {0}")]
+    McpInit(String),
+
     #[error("unexpected runtime panic: {0}")]
     Panic(String),
 }
@@ -383,6 +405,7 @@ impl CliError {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::BenchUnsupported => "bench_unsupported",
             Self::Benchmark(_) => "benchmark_error",
+            Self::McpInit(_) => "mcp_init_error",
             Self::Panic(_) => "panic",
         }
     }
@@ -467,7 +490,10 @@ fn run_with_panic_guard() -> ExitCode {
 
 fn run() -> Result<Option<i32>, CliError> {
     let cli = Cli::try_parse().map_err(|error| CliError::Args(error.to_string()))?;
-    let is_human_readable_command = matches!(cli.command, CliCommand::Doctor | CliCommand::Setup);
+    let is_human_readable_command = matches!(
+        cli.command,
+        CliCommand::Doctor | CliCommand::Setup | CliCommand::McpInit(_)
+    );
 
     if !is_human_readable_command {
         info!("mimobox CLI starting");
@@ -497,6 +523,13 @@ fn run() -> Result<Option<i32>, CliError> {
                 info!(exit_code, "setup subcommand completed");
             }
             return Ok(Some(exit_code));
+        }
+        CliCommand::McpInit(args) => {
+            if let Err(error) = handle_mcp_init(args) {
+                eprintln!("{error}");
+                return Ok(Some(1));
+            }
+            return Ok(None);
         }
         CliCommand::Version => CommandResponse::Version(handle_version()),
     };
@@ -723,7 +756,10 @@ fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
                     "init command failed: exit_code={:?}, timed_out={}, stderr={stderr}",
                     init_result.exit_code, init_result.timed_out,
                 ));
-                destroy_sdk_sandbox_quietly(sandbox, "cleaning up sandbox after snapshot init failure");
+                destroy_sdk_sandbox_quietly(
+                    sandbox,
+                    "cleaning up sandbox after snapshot init failure",
+                );
                 return Err(cli_error);
             }
         }
@@ -775,7 +811,10 @@ fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliError> {
             Ok(result) => result,
             Err(error) => {
                 let cli_error = map_sdk_error(error);
-                destroy_sdk_sandbox_quietly(sandbox, "cleaning up sandbox after restore execution failure");
+                destroy_sdk_sandbox_quietly(
+                    sandbox,
+                    "cleaning up sandbox after restore execution failure",
+                );
                 return Err(cli_error);
             }
         };
@@ -986,6 +1025,176 @@ fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
         raw_output: raw_output.trim().to_string(),
         note,
     })
+}
+
+fn handle_mcp_init(args: McpInitArgs) -> Result<(), CliError> {
+    let clients = if args.all {
+        vec![McpClient::Claude, McpClient::Cursor, McpClient::Windsurf]
+    } else {
+        vec![
+            args.client
+                .ok_or_else(|| CliError::McpInit("missing MCP client".to_string()))?,
+        ]
+    };
+
+    let home_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| CliError::McpInit("HOME environment variable is not set".to_string()))?;
+    let binary_path = resolve_mimobox_mcp_binary();
+
+    for client in clients {
+        let config_path = mcp_config_path(client, current_mcp_os(), &home_dir);
+        configure_mcp_client(client, &config_path, &binary_path)?;
+    }
+
+    Ok(())
+}
+
+fn configure_mcp_client(
+    client: McpClient,
+    config_path: &Path,
+    binary_path: &str,
+) -> Result<(), CliError> {
+    let existing_config = read_existing_mcp_config(config_path)?;
+    let updated_config = inject_mcp_config(existing_config, binary_path)?;
+
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CliError::McpInit(format!(
+                "failed to create config directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let json = serde_json::to_string_pretty(&updated_config)?;
+    fs::write(config_path, format!("{json}\n")).map_err(|error| {
+        CliError::McpInit(format!(
+            "failed to write MCP config {}: {error}",
+            config_path.display()
+        ))
+    })?;
+
+    println!("Configured mimobox-mcp for {}", client.display_name());
+    println!("Config: {}", config_path.display());
+    println!("Binary: {binary_path}");
+    println!("Restart {} to apply changes.", client.display_name());
+
+    Ok(())
+}
+
+fn read_existing_mcp_config(config_path: &Path) -> Result<serde_json::Value, CliError> {
+    match fs::read_to_string(config_path) {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                Ok(serde_json::json!({}))
+            } else {
+                serde_json::from_str(&content).map_err(|error| {
+                    CliError::McpInit(format!(
+                        "failed to parse MCP config {}: {error}",
+                        config_path.display()
+                    ))
+                })
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(error) => Err(CliError::McpInit(format!(
+            "failed to read MCP config {}: {error}",
+            config_path.display()
+        ))),
+    }
+}
+
+fn inject_mcp_config(
+    mut config: serde_json::Value,
+    binary_path: &str,
+) -> Result<serde_json::Value, CliError> {
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| CliError::McpInit("MCP config root must be a JSON object".to_string()))?;
+
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| CliError::McpInit("mcpServers must be a JSON object".to_string()))?;
+    servers.insert(
+        "mimobox-mcp".to_string(),
+        serde_json::json!({
+            "command": binary_path,
+            "args": []
+        }),
+    );
+
+    Ok(config)
+}
+
+fn resolve_mimobox_mcp_binary() -> String {
+    let binary_name = "mimobox-mcp";
+
+    std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join(binary_name))
+                .find(|candidate| candidate.is_file())
+        })
+        .and_then(|path| fs::canonicalize(&path).ok().or(Some(path)))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| binary_name.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpOs {
+    Macos,
+    Linux,
+}
+
+fn current_mcp_os() -> McpOs {
+    if cfg!(target_os = "macos") {
+        McpOs::Macos
+    } else {
+        McpOs::Linux
+    }
+}
+
+fn mcp_config_path(client: McpClient, os: McpOs, home_dir: &Path) -> PathBuf {
+    match client {
+        McpClient::Claude => match os {
+            McpOs::Macos => home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+            McpOs::Linux => home_dir
+                .join(".config")
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+        },
+        McpClient::Cursor => home_dir.join(".cursor").join("mcp.json"),
+        McpClient::Windsurf => home_dir
+            .join(".codeium")
+            .join("windsurf")
+            .join("mcp_config.json"),
+    }
+}
+
+impl McpClient {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Cursor => "Cursor",
+            Self::Windsurf => "Windsurf",
+        }
+    }
 }
 
 fn handle_version() -> VersionResponse {
@@ -1709,7 +1918,8 @@ mod tests {
 
     #[test]
     fn shell_subcommand_parses_expected_defaults() {
-        let cli = Cli::try_parse_from(["mimobox", "shell"]).expect("shell subcommand should parse successfully");
+        let cli = Cli::try_parse_from(["mimobox", "shell"])
+            .expect("shell subcommand should parse successfully");
 
         match cli.command {
             CliCommand::Shell(args) => {
@@ -1964,22 +2174,118 @@ mod tests {
     }
 
     #[test]
+    fn mcp_init_subcommand_parses_clients() {
+        for (raw_client, expected_client) in [
+            ("claude", McpClient::Claude),
+            ("cursor", McpClient::Cursor),
+            ("windsurf", McpClient::Windsurf),
+        ] {
+            let cli = Cli::try_parse_from(["mimobox", "mcp-init", raw_client])
+                .expect("mcp-init client should parse successfully");
+
+            match cli.command {
+                CliCommand::McpInit(args) => {
+                    assert_eq!(args.client, Some(expected_client));
+                    assert!(!args.all);
+                }
+                _ => panic!("expected mcp-init subcommand"),
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_init_subcommand_parses_all_flag() {
+        let cli = Cli::try_parse_from(["mimobox", "mcp-init", "--all"])
+            .expect("mcp-init --all should parse successfully");
+
+        match cli.command {
+            CliCommand::McpInit(args) => {
+                assert_eq!(args.client, None);
+                assert!(args.all);
+            }
+            _ => panic!("expected mcp-init subcommand"),
+        }
+    }
+
+    #[test]
+    fn inject_mcp_config_preserves_existing_servers() {
+        let input = serde_json::json!({
+            "mcpServers": {
+                "existing-server": {
+                    "command": "/usr/bin/existing",
+                    "args": ["--keep"]
+                },
+                "mimobox-mcp": {
+                    "command": "/old/mimobox-mcp"
+                }
+            },
+            "other": true
+        });
+
+        let output = inject_mcp_config(input, "/usr/local/bin/mimobox-mcp")
+            .expect("JSON config injection should succeed");
+
+        assert_eq!(output["other"], serde_json::json!(true));
+        assert_eq!(
+            output["mcpServers"]["existing-server"],
+            serde_json::json!({
+                "command": "/usr/bin/existing",
+                "args": ["--keep"]
+            })
+        );
+        assert_eq!(
+            output["mcpServers"]["mimobox-mcp"],
+            serde_json::json!({
+                "command": "/usr/local/bin/mimobox-mcp",
+                "args": []
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_config_path_calculates_platform_specific_paths() {
+        let home = PathBuf::from("/home/alice");
+
+        assert_eq!(
+            mcp_config_path(McpClient::Claude, McpOs::Linux, &home),
+            PathBuf::from("/home/alice/.config/Claude/claude_desktop_config.json")
+        );
+        assert_eq!(
+            mcp_config_path(McpClient::Claude, McpOs::Macos, &home),
+            PathBuf::from(
+                "/home/alice/Library/Application Support/Claude/claude_desktop_config.json"
+            )
+        );
+        assert_eq!(
+            mcp_config_path(McpClient::Cursor, McpOs::Linux, &home),
+            PathBuf::from("/home/alice/.cursor/mcp.json")
+        );
+        assert_eq!(
+            mcp_config_path(McpClient::Windsurf, McpOs::Macos, &home),
+            PathBuf::from("/home/alice/.codeium/windsurf/mcp_config.json")
+        );
+    }
+
+    #[test]
     fn doctor_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "doctor"]).expect("doctor subcommand should parse successfully");
+        let cli = Cli::try_parse_from(["mimobox", "doctor"])
+            .expect("doctor subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Doctor));
     }
 
     #[test]
     fn setup_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "setup"]).expect("setup subcommand should parse successfully");
+        let cli = Cli::try_parse_from(["mimobox", "setup"])
+            .expect("setup subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Setup));
     }
 
     #[test]
     fn version_subcommand_parses() {
-        let cli = Cli::try_parse_from(["mimobox", "version"]).expect("version subcommand should parse successfully");
+        let cli = Cli::try_parse_from(["mimobox", "version"])
+            .expect("version subcommand should parse successfully");
 
         assert!(matches!(cli.command, CliCommand::Version));
     }
@@ -2018,7 +2324,8 @@ mod tests {
 
     #[test]
     fn command_parser_rejects_unbalanced_quotes() {
-        let error = parse_command("/bin/sh -c 'echo").expect_err("unclosed quotes should return error");
+        let error =
+            parse_command("/bin/sh -c 'echo").expect_err("unclosed quotes should return error");
 
         assert_eq!(error.code(), "command_parse_error");
     }
