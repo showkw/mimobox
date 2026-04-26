@@ -8,7 +8,16 @@ use super::*;
 fn language_needs_fork(language: &str) -> bool {
     matches!(
         language,
-        "python" | "python3" | "py" | "bash" | "sh" | "shell" | "javascript" | "js" | "node" | "nodejs"
+        "python"
+            | "python3"
+            | "py"
+            | "bash"
+            | "sh"
+            | "shell"
+            | "javascript"
+            | "js"
+            | "node"
+            | "nodejs"
     )
 }
 
