@@ -644,6 +644,7 @@ enum SeccompArgConstraint {
     BindAddrlen,
     ConnectAddrlen,
     SendtoAddrlen,
+    RecvfromAddrlen,
     ListenBacklog,
     IoctlRequest,
     CloneFlags,
@@ -743,7 +744,7 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(10);
+    let mut constraints = Vec::with_capacity(12);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
@@ -794,6 +795,14 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::SENDTO,
             constraint: SeccompArgConstraint::SendtoAddrlen,
+        });
+    }
+
+    // recvfrom(45) 的 addrlen 约束（args[5]）：与 sendto 一致，高 32 位为 0，低 32 位 <= 128。
+    if is_network_profile && allowed.contains(&syscall_nr::RECVFROM) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::RECVFROM,
+            constraint: SeccompArgConstraint::RecvfromAddrlen,
         });
     }
 
@@ -939,6 +948,27 @@ fn build_sendto_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
+/// recvfrom 系统调用的参数约束块。
+///
+/// recvfrom(sockfd, void *buf, size_t len, int flags,
+///          struct sockaddr *src_addr, socklen_t addrlen)
+/// - args[5] = addrlen：源地址结构长度，可约束上限
+///
+/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
+/// 注意：recvfrom 的 addrlen 位于 args[5]（非 args[2]），这是与 bind/connect 的关键区别。
+fn build_recvfrom_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        load_abs(seccomp_arg_hi_offset(5)),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_TRAP),
+        load_abs(seccomp_arg_lo_offset(5)),
+        jump_gt(BIND_MAX_ADDRLEN, 0, 1),
+        ret(SECCOMP_RET_TRAP),
+        ret(SECCOMP_RET_ALLOW),
+    ]
+}
+
 fn build_listen_arg_check_block() -> Vec<SockFilter> {
     vec![
         // backlog 是 int 参数；高 32 位非零视为非法扩展。
@@ -1044,6 +1074,7 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
         SeccompArgConstraint::BindAddrlen => build_bind_arg_check_block(),
         SeccompArgConstraint::ConnectAddrlen => build_connect_arg_check_block(),
         SeccompArgConstraint::SendtoAddrlen => build_sendto_arg_check_block(),
+        SeccompArgConstraint::RecvfromAddrlen => build_recvfrom_arg_check_block(),
         SeccompArgConstraint::ListenBacklog => build_listen_arg_check_block(),
         SeccompArgConstraint::IoctlRequest => build_ioctl_arg_check_block(),
         SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
@@ -1197,7 +1228,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        BIND, CLONE, CLONE3, CONNECT, FUTEX, IOCTL, LISTEN, MMAP, READ, RT_SIGQUEUEINFO,
+        BIND, CLONE, CLONE3, CONNECT, FUTEX, IOCTL, LISTEN, MMAP, READ, RECVFROM, RT_SIGQUEUEINFO,
         RT_TGSIGQUEUEINFO, SENDTO, SETPGID, SETSID, SOCKET, TGKILL,
     };
     use super::{
@@ -1691,6 +1722,39 @@ mod tests {
         let program = program_for_profile(SeccompProfile::Network);
 
         let high_bits_set = FakeSeccompData::new(SENDTO).with_arg(5, 1_u64 << 32);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_recvfrom_constraint_allows_reasonable_addrlen() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        // sockaddr_in 长度 = 16（args[5]）
+        let sockaddr_in = FakeSeccompData::new(RECVFROM).with_arg(5, 16);
+        assert_eq!(run_bpf(&program, sockaddr_in), SECCOMP_RET_ALLOW);
+
+        // sockaddr_storage 最大长度 = 128（args[5]）
+        let sockaddr_storage = FakeSeccompData::new(RECVFROM).with_arg(5, BIND_MAX_ADDRLEN as u64);
+        assert_eq!(run_bpf(&program, sockaddr_storage), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_recvfrom_constraint_blocks_oversized_addrlen() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let oversized_addrlen =
+            FakeSeccompData::new(RECVFROM).with_arg(5, BIND_MAX_ADDRLEN as u64 + 1);
+        assert_eq!(run_bpf(&program, oversized_addrlen), SECCOMP_RET_TRAP);
+
+        let addrlen_256 = FakeSeccompData::new(RECVFROM).with_arg(5, 256);
+        assert_eq!(run_bpf(&program, addrlen_256), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_recvfrom_constraint_blocks_high_bits() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let high_bits_set = FakeSeccompData::new(RECVFROM).with_arg(5, 1_u64 << 32);
         assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
     }
 }
