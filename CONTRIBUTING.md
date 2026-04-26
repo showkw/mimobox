@@ -1,38 +1,38 @@
-[English](CONTRIBUTING.en.md) | **中文**
+**English** | [中文](CONTRIBUTING.zh-CN.md)
 
-# 贡献指南
+# Contributing Guide
 
-## 感谢
-感谢你愿意为 mimobox 贡献代码、文档、测试或问题反馈。
+## Thank You
+Thank you for your interest in contributing code, documentation, tests, or issue reports to mimobox.
 
-mimobox 是使用 Rust 构建的跨平台 Agent Sandbox，目标是为 AI Agent 工作负载提供安全、可控、高性能的隔离执行环境。
+mimobox is a cross-platform Agent Sandbox built with Rust. Its goal is to provide a secure, controllable, and high-performance isolated execution environment for AI Agent workloads.
 
-仓库地址：<https://github.com/showkw/mimobox>
+Repository: <https://github.com/showkw/mimobox>
 
-## 开发环境
-请优先通过统一脚本初始化环境：
+## Development Environment
+Prefer using the unified setup script to initialize the environment:
 
 ```bash
 scripts/setup.sh
 ```
 
-基础要求：
-- Rust stable toolchain，项目使用 edition 2024。
-- macOS：安装 Xcode Command Line Tools。
-- Linux：安装 `build-essential`、`libssl-dev`、`python3-dev`。
-- 可选：Linux KVM 访问权限，用于 microVM 测试。
+Basic requirements:
+- Rust stable toolchain. This project uses edition 2024.
+- macOS: install Xcode Command Line Tools.
+- Linux: install `build-essential`, `libssl-dev`, and `python3-dev`.
+- Optional: Linux KVM access for microVM testing.
 
-`scripts/setup.sh` 会安装或检查常用工具：
+`scripts/setup.sh` installs or checks common tools:
 - `rustup`
 - `rustfmt`
 - `clippy`
 - `cargo-nextest`
 - `cargo-audit`
 
-只修改文档时，通常不需要完整 KVM 环境。
+If you are only changing documentation, a full KVM environment is usually not required.
 
-## 构建与测试
-常用命令：
+## Build and Test
+Common commands:
 
 ```bash
 cargo build
@@ -41,81 +41,81 @@ scripts/check.sh
 scripts/test.sh
 ```
 
-`scripts/check.sh` 用于执行 `clippy` 和 `fmt` 检查。
+`scripts/check.sh` runs `clippy` and `fmt` checks.
 
-`scripts/test.sh` 用于执行工作区测试；可按平台或能力选择范围，具体参数以脚本帮助信息为准。
+`scripts/test.sh` runs workspace tests. Test scope can be selected by platform or capability; see the script help output for the exact parameters.
 
-Feature flags：
-- `wasm`：启用 Wasm 沙箱能力，面向跨平台场景。
-- `kvm`：启用 KVM / microVM 能力，仅支持 Linux。
+Feature flags:
+- `wasm`: enables the Wasm sandbox capability for cross-platform scenarios.
+- `kvm`: enables KVM / microVM capability. Linux only.
 
-示例：
+Examples:
 
 ```bash
 cargo test --features wasm
 cargo test --features kvm
 ```
 
-涉及 Linux OS 沙箱、Landlock、Seccomp、KVM 或 microVM 的变更，应在 Linux 环境验证。
+Changes involving the Linux OS sandbox, Landlock, Seccomp, KVM, or microVM should be verified in a Linux environment.
 
-涉及 macOS 沙箱或跨平台路径的变更，应在 macOS 环境验证。
+Changes involving the macOS sandbox or cross-platform paths should be verified in a macOS environment.
 
-## 代码规范
-提交前必须满足以下要求：
-- `cargo fmt` 必须通过。
-- `cargo clippy` 不允许有 warning。
-- 所有 `unsafe` 代码必须带 `// SAFETY:` 注释，说明安全前提。
-- 非测试代码禁止使用 `unwrap()`。
-- 平台特定代码必须用 `#[cfg(target_os = "...")]` 隔离。
-- 错误处理使用 `thiserror` 定义清晰的错误类型。
+## Code Style
+Before submitting, the following requirements must be met:
+- `cargo fmt` must pass.
+- `cargo clippy` must not report any warnings.
+- All `unsafe` code must include a `// SAFETY:` comment explaining the safety assumptions.
+- `unwrap()` is forbidden in non-test code.
+- Platform-specific code must be isolated with `#[cfg(target_os = "...")]`.
+- Error handling should use `thiserror` to define clear error types.
 
-错误处理建议：
-- 优先使用 `?` 向上传递错误。
-- 需要上下文时，使用明确的错误变体或可读的 `expect()` 信息。
-- 不要吞掉错误，也不要用宽泛字符串替代结构化错误。
+Error handling recommendations:
+- Prefer `?` to propagate errors upward.
+- When context is needed, use explicit error variants or readable `expect()` messages.
+- Do not swallow errors, and do not replace structured errors with broad strings.
 
-跨平台代码建议：
-- 公共抽象放在平台无关模块。
-- Linux、macOS、Windows 等平台实现放入独立模块。
-- 新增平台能力时，同步补充测试或说明无法测试的原因。
+Cross-platform code recommendations:
+- Put common abstractions in platform-independent modules.
+- Put Linux, macOS, Windows, and other platform implementations in separate modules.
+- When adding platform capabilities, add corresponding tests or document why testing is not possible.
 
-安全相关代码必须保持默认拒绝原则：
-- Linux 沙箱默认启用 Seccomp 白名单。
-- Linux 沙箱默认启用 Landlock 并拒绝文件系统访问。
-- 沙箱默认禁止网络访问。
-- 沙箱必须设置内存限制。
+Security-related code must preserve the default-deny principle:
+- The Linux sandbox enables a Seccomp whitelist by default.
+- The Linux sandbox enables Landlock by default and denies filesystem access.
+- Sandboxes deny network access by default.
+- Sandboxes must enforce memory limits.
 
-## PR 流程
-推荐流程：
-1. Fork 仓库。
-2. 从最新主分支创建功能分支。
-3. 完成代码、测试和文档变更。
-4. 运行 `scripts/check.sh` 和 `scripts/test.sh`。
-5. 提交并推送分支。
-6. 创建 Pull Request。
+## PR Process
+Recommended workflow:
+1. Fork the repository.
+2. Create a feature branch from the latest main branch.
+3. Complete the code, test, and documentation changes.
+4. Run `scripts/check.sh` and `scripts/test.sh`.
+5. Commit and push the branch.
+6. Create a Pull Request.
 
-PR 要求：
-- PR 标题应简洁描述变更内容。
-- 提交信息使用中文，避免“更新代码”这类空泛描述。
-- 确保 CI 通过后再请求 review。
-- 合并前至少需要一个 approval。
-- 只提交与本 PR 相关的文件，避免混入无关改动。
+PR requirements:
+- The PR title should describe the change concisely.
+- Commit messages should be concise and descriptive, avoid vague messages like "update code".
+- Request review only after CI passes.
+- At least one approval is required before merging.
+- Commit only files related to this PR, and avoid mixing in unrelated changes.
 
-提交信息示例：`修复 Linux 沙箱错误传播逻辑`、`新增 Wasm 后端集成测试`。
+Commit message examples: `Fix Linux sandbox error propagation logic`, `Add Wasm backend integration tests`.
 
-## 安全报告
-如果你发现安全漏洞，请阅读并遵循 `SECURITY.md`。
+## Security Reports
+If you discover a security vulnerability, please read and follow `SECURITY.md`.
 
-不要在公开 issue、公开讨论区或公开 PR 中披露安全漏洞细节。
+Do not disclose security vulnerability details in public issues, public discussions, or public PRs.
 
-请通过 `SECURITY.md` 中指定的私密渠道报告，并附带复现步骤、影响范围和环境信息。
+Please report through the private channel specified in `SECURITY.md`, and include reproduction steps, impact scope, and environment information.
 
-## CI 说明
-CI 会在 Pull Request 和主分支更新时运行基础检查，通常包括格式化、Clippy、Linux 与 macOS 测试、Wasm 后端测试、文档构建、doctest 和安全审计。
+## CI Notes
+CI runs baseline checks on Pull Requests and main branch updates. These usually include formatting, Clippy, Linux and macOS tests, Wasm backend tests, documentation builds, doctest, and security audits.
 
-需要 `/dev/kvm` 的 microVM 测试通常只在具备 KVM 权限的 Linux 环境执行。
+microVM tests that require `/dev/kvm` are usually run only in Linux environments with KVM permissions.
 
-## 许可证
-mimobox 使用双许可证：`MIT OR Apache-2.0`。
+## License
+mimobox is dual-licensed as `MIT OR Apache-2.0`.
 
-提交贡献即表示你同意自己的贡献按 `MIT OR Apache-2.0` 双许可证发布。
+By submitting a contribution, you agree that your contribution is released under the `MIT OR Apache-2.0` dual license.

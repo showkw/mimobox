@@ -25,8 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
-cargo build --release -p mimobox-python
-# wheel will be at target/wheels/
+pip install maturin
+maturin build --release -m crates/mimobox-python/Cargo.toml
 pip install target/wheels/*.whl
 ```
 
