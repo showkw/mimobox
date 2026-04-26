@@ -1,0 +1,8 @@
+target/
+.git/
+logs/
+.env
+.DS_Store
+.idea/
+vm-assets/
+__pycache__/

@@ -23,7 +23,55 @@ cargo build --workspace
 
 This builds the default workspace members. By default, it focuses on the OS backend and does not include the Wasm crate or the microVM CLI feature.
 
-### 2.3 Feature Notes
+### 2.3 Docker One-Command Trial
+
+如果只想快速试用 mimobox，可以直接构建 Docker 镜像。镜像会在 builder 阶段编译 `mimobox` CLI，并把 microVM 所需的 `vmlinux` 与 `rootfs.cpio.gz` 打包到 `/opt/mimobox-assets`。
+
+```bash
+docker build -t mimobox:local .
+```
+
+启动交互式 shell：
+
+```bash
+docker run --rm -it --device /dev/kvm mimobox:local
+```
+
+执行单条命令：
+
+```bash
+docker run --rm -it --device /dev/kvm mimobox:local run --backend auto --command '/bin/echo hello'
+```
+
+KVM 说明：
+
+- microVM 后端需要宿主机暴露 `/dev/kvm`，因此 Linux 上推荐带 `--device /dev/kvm` 运行。
+- 如果 `/dev/kvm` 不存在或权限不足，入口脚本只会输出警告，不会退出；`--backend auto` 会尝试回退到可用后端。
+- macOS 与 Windows 的 Docker Desktop 通常不会向容器暴露 KVM，因此不能在该路径下使用 microVM 后端。
+
+也可以使用 docker-compose：
+
+```yaml
+services:
+  mimobox:
+    build: .
+    image: mimobox:local
+    stdin_open: true
+    tty: true
+    devices:
+      - /dev/kvm:/dev/kvm
+    environment:
+      VM_ASSETS_DIR: /opt/mimobox-assets
+    command: ["shell", "--backend", "auto"]
+```
+
+然后运行：
+
+```bash
+docker compose run --rm mimobox
+```
+
+### 2.4 Feature Notes
 
 The current repository has two layers of feature names. They are not a single unified global switch, so keep the distinction clear:
 
@@ -55,7 +103,7 @@ If you want to enable both Wasm and microVM:
 cargo build --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
 ```
 
-## 2.4 Platform Limitations
+## 2.5 Platform Limitations
 
 ### macOS Limitations
 
