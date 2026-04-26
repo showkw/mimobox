@@ -8,6 +8,8 @@ use mimobox_sdk::Sandbox as SdkSandbox;
 use mimobox_vm::{MicrovmConfig, MicrovmSandbox};
 #[cfg(feature = "wasm")]
 use mimobox_wasm::WasmSandbox;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tracing::{error, info, warn};
