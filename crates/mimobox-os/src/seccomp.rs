@@ -98,6 +98,38 @@ const FUTEX_ALLOWED_OPS: &[u32] = &[
 // 避免误杀 bash 等程序创建子进程时的正常 clone 调用。
 // 包含：CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET
 const CLONE_NAMESPACE_MASK: u32 = 0x4C02_0000;
+
+// mmap flags 约束（x86_64）
+// args[3] = flags 参数需要检查
+const MAP_SHARED: u32 = 0x01;
+const MAP_PRIVATE: u32 = 0x02;
+#[allow(dead_code)]
+const MAP_SHARED_VALIDATE: u32 = 0x03;
+#[allow(dead_code)]
+const MAP_ANONYMOUS: u32 = 0x20;
+#[allow(dead_code)]
+const MAP_FIXED: u32 = 0x10;
+#[allow(dead_code)]
+const MAP_NORESERVE: u32 = 0x4000;
+#[allow(dead_code)]
+const MAP_POPULATE: u32 = 0x8000;
+#[allow(dead_code)]
+const MAP_STACK: u32 = 0x20000;
+#[allow(dead_code)]
+const MAP_HUGETLB: u32 = 0x40000;
+// 危险 flags（需要阻止）
+const MAP_DENYWRITE: u32 = 0x0800;
+const MAP_EXECUTABLE: u32 = 0x1000;
+#[allow(dead_code)]
+const MAP_LOCKED: u32 = 0x2000;
+const MAP_GROWSDOWN: u32 = 0x0100;
+// 允许的安全 flags 位组合掩码
+#[allow(dead_code)]
+const MMAP_ALLOWED_FLAGS_MASK: u32 =
+    MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE | MAP_POPULATE | MAP_STACK;
+// 危险 flags 位掩码（必须全部为0）
+const MMAP_DANGEROUS_FLAGS_MASK: u32 = MAP_DENYWRITE | MAP_EXECUTABLE | MAP_GROWSDOWN;
+
 const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
 // prctl 常量
@@ -615,6 +647,7 @@ enum SeccompArgConstraint {
     CloneFlags,
     PrctlOp,
     FutexOp,
+    MmapFlags,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -699,11 +732,20 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(5);
+    let mut constraints = Vec::with_capacity(6);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
     );
+
+    // mmap(9) 的 flags 参数（args[3]）约束：必须含 MAP_PRIVATE 或 MAP_SHARED，
+    // 不含 MAP_DENYWRITE/MAP_EXECUTABLE/MAP_GROWSDOWN 等危险 flags。
+    if allowed.contains(&syscall_nr::MMAP) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::MMAP,
+            constraint: SeccompArgConstraint::MmapFlags,
+        });
+    }
 
     // 任何放行 socket 的 profile 都必须限制 domain/type；Network 模式额外允许 AF_INET。
     if allowed.contains(&syscall_nr::SOCKET) {
@@ -859,6 +901,28 @@ fn build_clone_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
+fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // flags 是 int 参数；高 32 位不应携带额外 flag。
+        load_abs(seccomp_arg_hi_offset(3)),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_KILL_PROCESS),
+        // 加载 flags 低 32 位。
+        load_abs(seccomp_arg_lo_offset(3)),
+        // 检查危险 flags：DENYWRITE | EXECUTABLE | GROWSDOWN。
+        alu_and(MMAP_DANGEROUS_FLAGS_MASK),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_KILL_PROCESS),
+        // 重新加载 flags 低 32 位（AND 已修改累加器）。
+        load_abs(seccomp_arg_lo_offset(3)),
+        // 必须包含 MAP_PRIVATE 或 MAP_SHARED，否则拒绝 mmap。
+        alu_and(MAP_PRIVATE | MAP_SHARED),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_ALLOW),
+        ret(SECCOMP_RET_KILL_PROCESS),
+    ]
+}
+
 fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
     match constraint {
         SeccompArgConstraint::Socket { allow_inet } => build_socket_arg_check_block(allow_inet),
@@ -866,6 +930,7 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
         SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
         SeccompArgConstraint::PrctlOp => build_prctl_arg_check_block(),
         SeccompArgConstraint::FutexOp => build_futex_arg_check_block(),
+        SeccompArgConstraint::MmapFlags => build_mmap_flags_arg_check_block(),
     }
 }
 
@@ -1013,17 +1078,19 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        CLONE, CLONE3, FUTEX, IOCTL, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID,
-        SOCKET, TGKILL,
+        CLONE, CLONE3, FUTEX, IOCTL, MMAP, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID,
+        SETSID, SOCKET, TGKILL,
     };
     use super::{
         AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ, BPF_JMP, BPF_JSET,
         BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
         FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
-        SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
-        SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
-        SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints,
-        build_bpf_program, essential_syscalls, fork_allowed_syscalls, network_syscalls,
+        MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_GROWSDOWN, MAP_PRIVATE,
+        MAP_SHARED, SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE,
+        SECCOMP_DATA_NR, SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK,
+        SOCK_STREAM, SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP,
+        build_arg_constraints, build_bpf_program, essential_syscalls, fork_allowed_syscalls,
+        network_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1334,5 +1401,63 @@ mod tests {
 
         let high_bits_set = FakeSeccompData::new(CLONE).with_arg(0, 1_u64 << 32);
         assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_mmap_constraint_allows_safe_flags() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // MAP_PRIVATE | MAP_ANONYMOUS -> ALLOW
+        let private_anon =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_ANONYMOUS) as u64);
+        assert_eq!(run_bpf(&program, private_anon), SECCOMP_RET_ALLOW);
+
+        // MAP_SHARED | MAP_ANONYMOUS -> ALLOW
+        let shared_anon =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_SHARED | MAP_ANONYMOUS) as u64);
+        assert_eq!(run_bpf(&program, shared_anon), SECCOMP_RET_ALLOW);
+
+        // MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS -> ALLOW
+        let private_fixed_anon = FakeSeccompData::new(MMAP)
+            .with_arg(3, (MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS) as u64);
+        assert_eq!(run_bpf(&program, private_fixed_anon), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_no_private_nor_shared() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // flags=0（无 MAP_PRIVATE 也无 MAP_SHARED）-> KILL
+        let no_flags = FakeSeccompData::new(MMAP).with_arg(3, 0);
+        assert_eq!(run_bpf(&program, no_flags), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_dangerous_flags() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // MAP_PRIVATE | MAP_DENYWRITE -> KILL
+        let denywrite =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_DENYWRITE) as u64);
+        assert_eq!(run_bpf(&program, denywrite), SECCOMP_RET_KILL_PROCESS);
+
+        // MAP_PRIVATE | MAP_EXECUTABLE -> KILL
+        let executable =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_EXECUTABLE) as u64);
+        assert_eq!(run_bpf(&program, executable), SECCOMP_RET_KILL_PROCESS);
+
+        // MAP_PRIVATE | MAP_GROWSDOWN -> KILL
+        let growsdown =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_GROWSDOWN) as u64);
+        assert_eq!(run_bpf(&program, growsdown), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_high_bits() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // 高 32 位非零 -> KILL
+        let high_bits = FakeSeccompData::new(MMAP).with_arg(3, (1_u64 << 32) | MAP_PRIVATE as u64);
+        assert_eq!(run_bpf(&program, high_bits), SECCOMP_RET_KILL_PROCESS);
     }
 }
