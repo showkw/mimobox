@@ -8,6 +8,7 @@
 use mimobox_core::{SandboxError, SeccompProfile};
 
 // BPF 指令结构体（对应 Linux sock_filter）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 struct SockFilter {
     code: u16,
@@ -29,6 +30,9 @@ const BPF_W: u16 = 0x00;
 const BPF_ABS: u16 = 0x20;
 const BPF_JMP: u16 = 0x05;
 const BPF_JEQ: u16 = 0x10;
+const BPF_JSET: u16 = 0x40;
+const BPF_ALU: u16 = 0x04;
+const BPF_AND: u16 = 0x50;
 const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
@@ -39,6 +43,36 @@ const SECCOMP_RET_ALLOW: u32 = 0x7FFF0000;
 
 // seccomp_data 偏移量
 const SECCOMP_DATA_NR: u32 = 0; // offsetof(struct seccomp_data, nr)
+const SECCOMP_DATA_ARCH: u32 = 4; // offsetof(struct seccomp_data, arch)
+const SECCOMP_DATA_ARGS_BASE: u32 = 16; // offsetof(struct seccomp_data, args)
+const SECCOMP_DATA_ARG_SIZE: u32 = 8;
+const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+
+// socket 参数约束
+const AF_UNIX: u32 = 1;
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_CLOEXEC: u32 = 0x80000;
+const SOCK_NONBLOCK: u32 = 0x800;
+const SOCK_ALLOWED_TYPE_MASK: u32 = SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK;
+
+// ioctl request 白名单（x86_64）
+const TCGETS: u32 = 0x5401;
+const TCSETS: u32 = 0x5402;
+const TCSETSW: u32 = 0x5403;
+const TCSETSF: u32 = 0x5404;
+const TIOCGWINSZ: u32 = 0x5413;
+const TIOCSWINSZ: u32 = 0x5414;
+const FIONBIO: u32 = 0x5421;
+const FIONREAD: u32 = 0x541B;
+const TIOCNOTTY: u32 = 0x5422;
+const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
+    TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ, TIOCSWINSZ, FIONBIO, FIONREAD, TIOCNOTTY,
+];
+
+// clone namespace flags 约束
+const CLONE_NAMESPACE_MASK: u32 = 0x4E02_0000;
+const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
 // prctl 常量
 const PR_SET_NO_NEW_PRIVS: i32 = 38;
@@ -479,7 +513,8 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
         FORK,
         // shell 执行外部命令时可能经由 vfork/posix_spawn 进入子进程路径。
         VFORK,
-        CLONE3,
+        // clone3 的 flags 位于用户态指针，经典 seccomp-bpf 无法解引用检查；
+        // 为避免绕过 clone flags 约束，这里不放行 clone3。
         WAIT4,
         // shell 运行需要 ioctl（终端 TCGETS/TCSETS 等）
         IOCTL,
@@ -515,72 +550,265 @@ fn network_syscalls() -> Vec<u32> {
     syscalls
 }
 
-/// Generates a BPF system call allowlist filter.
-///
-/// BPF program structure, with `N + 3` instructions where `N = allowed.len()`:
-///
-/// ```text
-/// [0]     BPF_LD:   Load seccomp_data.nr into accumulator A
-/// [1]     BPF_JEQ:  If A == allowed[0], skip (N-0) instructions -> ALLOW
-/// [2]     BPF_JEQ:  If A == allowed[1], skip (N-1) instructions -> ALLOW
-/// ...
-/// [i+1]   BPF_JEQ:  If A == allowed[i], skip (N-i) instructions -> ALLOW
-/// ...
-/// [N]     BPF_JEQ:  If A == allowed[N-1], skip 1 instruction -> ALLOW
-/// [N+1]   BPF_RET:  SECCOMP_RET_KILL_PROCESS (does not match any allowlist entry)
-/// [N+2]   BPF_RET:  SECCOMP_RET_ALLOW (allowlist hit)
-/// ```
-///
-/// Jump offset calculation: for the `i`th JEQ (0-indexed), the following instructions remain:
-///   - (N - i - 1) JEQ instructions + 1 KILL instruction
-///   - jt = (N - i - 1) + 1 = N - i
-fn build_bpf_program(allowed: &[u32]) -> Vec<SockFilter> {
-    // FATAL-01 / IMPORTANT-07 修复：防御性断言，防止 BPF jt 偏移 u8 溢出
-    // jt 最大 255，跳过指令数 = total_jeq - i，所以 total_jeq 最大 253（首条 jt=total_jeq ≤ 253）
-    // 同时确保总指令数 N+3 ≤ u16::MAX
-    assert!(
-        allowed.len() <= 253,
-        "BPF 白名单过长（最多 253 条），当前 {} 条",
-        allowed.len()
-    );
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeccompArgConstraint {
+    Socket { allow_inet: bool },
+    IoctlRequest,
+    CloneFlags,
+}
 
-    let total_jeq = allowed.len();
-    let mut prog = Vec::with_capacity(2 + total_jeq + 1);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConstrainedSyscall {
+    nr: u32,
+    constraint: SeccompArgConstraint,
+}
 
-    // [0] 加载系统调用号到累加器
-    prog.push(SockFilter {
+const fn seccomp_arg_lo_offset(index: u32) -> u32 {
+    SECCOMP_DATA_ARGS_BASE + index * SECCOMP_DATA_ARG_SIZE
+}
+
+const fn seccomp_arg_hi_offset(index: u32) -> u32 {
+    seccomp_arg_lo_offset(index) + 4
+}
+
+fn load_abs(offset: u32) -> SockFilter {
+    SockFilter {
         code: BPF_LD | BPF_W | BPF_ABS,
         jt: 0,
         jf: 0,
-        k: SECCOMP_DATA_NR,
-    });
+        k: offset,
+    }
+}
 
-    // [1..N+1] JEQ 匹配链：对每个允许的系统调用号生成条件跳转
-    for (i, &syscall_nr) in allowed.iter().enumerate() {
-        let instructions_to_skip = (total_jeq - i) as u8;
-        prog.push(SockFilter {
-            code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: instructions_to_skip, // 匹配时跳过后续 JEQ + KILL，直达 ALLOW
-            jf: 0,                    // 不匹配则继续下一条 JEQ
-            k: syscall_nr,
+fn jump_eq(k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt,
+        jf,
+        k,
+    }
+}
+
+fn jump_set(k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter {
+        code: BPF_JMP | BPF_JSET | BPF_K,
+        jt,
+        jf,
+        k,
+    }
+}
+
+fn alu_and(k: u32) -> SockFilter {
+    SockFilter {
+        code: BPF_ALU | BPF_AND | BPF_K,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn ret(action: u32) -> SockFilter {
+    SockFilter {
+        code: BPF_RET | BPF_K,
+        jt: 0,
+        jf: 0,
+        k: action,
+    }
+}
+
+fn forward_jump_offset(from: usize, to: usize, target: &str) -> u8 {
+    assert!(to > from, "BPF 跳转目标 {target} 必须位于当前指令之后");
+
+    let offset = to - from - 1;
+    assert!(
+        offset <= u8::MAX as usize,
+        "BPF 跳转到 {target} 的偏移过大: {offset}"
+    );
+
+    offset as u8
+}
+
+fn arg_constraint_for_syscall(
+    nr: u32,
+    constraints: &[ConstrainedSyscall],
+) -> Option<SeccompArgConstraint> {
+    constraints
+        .iter()
+        .find(|constraint| constraint.nr == nr)
+        .map(|constraint| constraint.constraint)
+}
+
+fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
+    let mut constraints = Vec::with_capacity(3);
+    let is_network_profile = matches!(
+        profile,
+        SeccompProfile::Network | SeccompProfile::NetworkWithFork
+    );
+
+    // 任何放行 socket 的 profile 都必须限制 domain/type；Network 模式额外允许 AF_INET。
+    if allowed.contains(&syscall_nr::SOCKET) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::SOCKET,
+            constraint: SeccompArgConstraint::Socket {
+                allow_inet: is_network_profile,
+            },
         });
     }
 
-    // [N+1] 默认动作：未命中白名单 → 终止进程
-    prog.push(SockFilter {
-        code: BPF_RET | BPF_K,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_KILL_PROCESS,
-    });
+    // 目前只有 fork profile 放行 ioctl；这里只允许终端启动和非阻塞查询所需 request。
+    if allowed.contains(&syscall_nr::IOCTL) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::IOCTL,
+            constraint: SeccompArgConstraint::IoctlRequest,
+        });
+    }
 
-    // [N+2] ALLOW 目标：白名单命中 → 放行
-    prog.push(SockFilter {
-        code: BPF_RET | BPF_K,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_ALLOW,
-    });
+    if matches!(
+        profile,
+        SeccompProfile::EssentialWithFork | SeccompProfile::NetworkWithFork
+    ) && allowed.contains(&syscall_nr::CLONE)
+    {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::CLONE,
+            constraint: SeccompArgConstraint::CloneFlags,
+        });
+    }
+
+    constraints
+}
+
+fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(18);
+
+    // domain 是 int 参数。低 32 位必须命中白名单，高 32 位必须为 0。
+    block.push(load_abs(seccomp_arg_hi_offset(0)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(0)));
+
+    if allow_inet {
+        block.push(jump_eq(AF_UNIX, 2, 0));
+        block.push(jump_eq(AF_INET, 1, 0));
+        block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    } else {
+        block.push(jump_eq(AF_UNIX, 1, 0));
+        block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    }
+
+    // type 必须是 SOCK_STREAM 加上 CLOEXEC/NONBLOCK 的任意组合。
+    block.push(load_abs(seccomp_arg_hi_offset(1)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(1)));
+    block.push(alu_and(!SOCK_ALLOWED_TYPE_MASK));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(1)));
+    block.push(alu_and(SOCK_STREAM));
+    block.push(jump_eq(SOCK_STREAM, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_ALLOW));
+
+    block
+}
+
+fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(IOCTL_ALLOWED_REQUESTS.len() + 5);
+
+    // request 是 ioctl 的第二个参数。只接受 x86_64 终端相关 request code。
+    block.push(load_abs(seccomp_arg_hi_offset(1)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(1)));
+
+    for (index, &request) in IOCTL_ALLOWED_REQUESTS.iter().enumerate() {
+        let instructions_to_skip = (IOCTL_ALLOWED_REQUESTS.len() - index) as u8;
+        block.push(jump_eq(request, instructions_to_skip, 0));
+    }
+
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_ALLOW));
+    block
+}
+
+fn build_clone_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // flags 是 unsigned long；高 32 位不应携带额外 flag。
+        load_abs(seccomp_arg_hi_offset(0)),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_KILL_PROCESS),
+        load_abs(seccomp_arg_lo_offset(0)),
+        jump_set(CLONE_NAMESPACE_MASK, 0, 1),
+        ret(SECCOMP_RET_KILL_PROCESS),
+        ret(SECCOMP_RET_ALLOW),
+    ]
+}
+
+fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
+    match constraint {
+        SeccompArgConstraint::Socket { allow_inet } => build_socket_arg_check_block(allow_inet),
+        SeccompArgConstraint::IoctlRequest => build_ioctl_arg_check_block(),
+        SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
+    }
+}
+
+/// Generates a BPF system call allowlist filter with parameter-level constraints.
+///
+/// Program structure:
+///
+/// ```text
+/// [0]     Load seccomp_data.arch
+/// [1]     If arch == AUDIT_ARCH_X86_64, skip KILL and continue
+/// [2]     KILL_PROCESS
+/// [3]     Load seccomp_data.nr
+/// [4..]   Syscall allowlist chain
+///         - constrained syscall: JEQ -> inline argument block, JF skips the block
+///         - unconstrained syscall: JEQ -> shared ALLOW
+/// [N-2]   KILL_PROCESS (default)
+/// [N-1]   ALLOW
+/// ```
+fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec<SockFilter> {
+    let mut prog = Vec::with_capacity(4 + allowed.len() + constraints.len() * 18 + 2);
+    let mut allow_jump_indexes = Vec::new();
+
+    // 架构校验必须在读取 syscall number 前执行，避免跨架构 syscall 号绕过。
+    prog.push(load_abs(SECCOMP_DATA_ARCH));
+    prog.push(jump_eq(AUDIT_ARCH_X86_64, 1, 0));
+    prog.push(ret(SECCOMP_RET_KILL_PROCESS));
+    prog.push(load_abs(SECCOMP_DATA_NR));
+
+    for &syscall_nr in allowed {
+        if let Some(constraint) = arg_constraint_for_syscall(syscall_nr, constraints) {
+            let block = build_arg_check_block(constraint);
+            assert!(
+                block.len() <= u8::MAX as usize,
+                "BPF 参数约束块过长: syscall={syscall_nr}, len={}",
+                block.len()
+            );
+
+            prog.push(jump_eq(syscall_nr, 0, block.len() as u8));
+            prog.extend(block);
+        } else {
+            let jump_index = prog.len();
+            prog.push(jump_eq(syscall_nr, 0, 0));
+            allow_jump_indexes.push(jump_index);
+        }
+    }
+
+    prog.push(ret(SECCOMP_RET_KILL_PROCESS));
+    let allow_index = prog.len();
+    prog.push(ret(SECCOMP_RET_ALLOW));
+
+    for jump_index in allow_jump_indexes {
+        prog[jump_index].jt = forward_jump_offset(jump_index, allow_index, "ALLOW");
+    }
+
+    assert!(
+        prog.len() <= BPF_MAX_INSTRUCTIONS,
+        "BPF 程序超过 seccomp 指令上限: {} > {}",
+        prog.len(),
+        BPF_MAX_INSTRUCTIONS
+    );
 
     prog
 }
@@ -623,7 +851,8 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     allowed.sort_unstable();
     allowed.dedup();
 
-    let prog = build_bpf_program(&allowed);
+    let constraints = build_arg_constraints(profile, &allowed);
+    let prog = build_bpf_program(&allowed, &constraints);
 
     // 设置 PR_SET_NO_NEW_PRIVS，防止子进程提权绕过 seccomp
     // SAFETY: prctl is called in the child process with constant arguments and no raw pointers.
@@ -666,9 +895,126 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 
 #[cfg(test)]
 mod tests {
-    use super::essential_syscalls;
-    use super::fork_allowed_syscalls;
-    use super::syscall_nr::{RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID, TGKILL};
+    use super::syscall_nr::{
+        CLONE, CLONE3, IOCTL, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID, SOCKET,
+        TGKILL,
+    };
+    use super::{
+        AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ, BPF_JMP, BPF_JSET,
+        BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
+        SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
+        SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
+        SeccompArgConstraint, SockFilter, TCGETS, build_arg_constraints, build_bpf_program,
+        essential_syscalls, fork_allowed_syscalls, network_syscalls,
+    };
+    use mimobox_core::SeccompProfile;
+
+    #[derive(Clone, Copy)]
+    struct FakeSeccompData {
+        nr: u32,
+        arch: u32,
+        args: [[u32; 2]; 6],
+    }
+
+    impl FakeSeccompData {
+        fn new(nr: u32) -> Self {
+            Self {
+                nr,
+                arch: AUDIT_ARCH_X86_64,
+                args: [[0; 2]; 6],
+            }
+        }
+
+        fn with_arch(mut self, arch: u32) -> Self {
+            self.arch = arch;
+            self
+        }
+
+        fn with_arg(mut self, index: usize, value: u64) -> Self {
+            self.args[index][0] = value as u32;
+            self.args[index][1] = (value >> 32) as u32;
+            self
+        }
+    }
+
+    fn load_seccomp_word(data: &FakeSeccompData, offset: u32) -> u32 {
+        match offset {
+            SECCOMP_DATA_NR => data.nr,
+            SECCOMP_DATA_ARCH => data.arch,
+            offset
+                if (SECCOMP_DATA_ARGS_BASE..SECCOMP_DATA_ARGS_BASE + 6 * SECCOMP_DATA_ARG_SIZE)
+                    .contains(&offset) =>
+            {
+                let relative_offset = offset - SECCOMP_DATA_ARGS_BASE;
+                assert_eq!(relative_offset % 4, 0, "BPF 测试只支持 32 位对齐读取");
+
+                let arg_index = (relative_offset / SECCOMP_DATA_ARG_SIZE) as usize;
+                let word_index = ((relative_offset % SECCOMP_DATA_ARG_SIZE) / 4) as usize;
+                data.args[arg_index][word_index]
+            }
+            _ => panic!("测试 BPF 解释器不支持 offset={offset}"),
+        }
+    }
+
+    fn run_bpf(program: &[SockFilter], data: FakeSeccompData) -> u32 {
+        let mut accumulator = 0_u32;
+        let mut pc = 0_usize;
+
+        for _ in 0..program.len() * 2 {
+            let instruction = program
+                .get(pc)
+                .unwrap_or_else(|| panic!("BPF pc 越界: pc={pc}"));
+
+            match instruction.code {
+                code if code == (BPF_LD | BPF_W | BPF_ABS) => {
+                    accumulator = load_seccomp_word(&data, instruction.k);
+                    pc += 1;
+                }
+                code if code == (BPF_JMP | BPF_JEQ | BPF_K) => {
+                    let offset = if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    };
+                    pc += offset as usize + 1;
+                }
+                code if code == (BPF_JMP | BPF_JSET | BPF_K) => {
+                    let offset = if accumulator & instruction.k != 0 {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    };
+                    pc += offset as usize + 1;
+                }
+                code if code == (BPF_ALU | BPF_AND | BPF_K) => {
+                    accumulator &= instruction.k;
+                    pc += 1;
+                }
+                code if code == (BPF_RET | BPF_K) => return instruction.k,
+                code => panic!("测试 BPF 解释器不支持 code={code:#x}"),
+            }
+        }
+
+        panic!("BPF 程序疑似死循环");
+    }
+
+    fn program_for_profile(profile: SeccompProfile) -> Vec<SockFilter> {
+        let mut allowed = match profile {
+            SeccompProfile::Essential => essential_syscalls(),
+            SeccompProfile::Network => network_syscalls(),
+            SeccompProfile::EssentialWithFork => fork_allowed_syscalls(),
+            SeccompProfile::NetworkWithFork => {
+                let mut syscalls = fork_allowed_syscalls();
+                syscalls.extend(network_syscalls());
+                syscalls
+            }
+        };
+        allowed.sort_unstable();
+        allowed.dedup();
+
+        let constraints = build_arg_constraints(profile, &allowed);
+        build_bpf_program(&allowed, &constraints)
+    }
 
     #[test]
     fn test_essential_profile_blocks_process_group_escape_syscalls() {
@@ -714,5 +1060,118 @@ mod tests {
             !syscalls.contains(&RT_TGSIGQUEUEINFO),
             "允许 fork 的 profile 不应允许 rt_tgsigqueueinfo"
         );
+    }
+
+    #[test]
+    fn test_fork_allowed_profile_blocks_unconstrainable_clone3() {
+        let syscalls = fork_allowed_syscalls();
+
+        assert!(
+            !syscalls.contains(&CLONE3),
+            "clone3 的 clone_args 位于用户态指针中，经典 seccomp-bpf 无法安全约束"
+        );
+    }
+
+    #[test]
+    fn test_bpf_program_starts_with_arch_check() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        assert_eq!(program[0].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(program[0].k, SECCOMP_DATA_ARCH);
+        assert_eq!(program[1], super::jump_eq(AUDIT_ARCH_X86_64, 1, 0));
+        assert_eq!(program[2], super::ret(SECCOMP_RET_KILL_PROCESS));
+
+        let wrong_arch = FakeSeccompData::new(READ).with_arch(0);
+        assert_eq!(
+            run_bpf(&program, wrong_arch),
+            SECCOMP_RET_KILL_PROCESS,
+            "arch 不匹配时必须直接 kill"
+        );
+    }
+
+    #[test]
+    fn test_socket_constraint_restricts_domain_and_type() {
+        let program = program_for_profile(SeccompProfile::NetworkWithFork);
+
+        let inet_stream = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_INET as u64)
+            .with_arg(1, (SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK) as u64);
+        assert_eq!(run_bpf(&program, inet_stream), SECCOMP_RET_ALLOW);
+
+        let unix_stream = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_UNIX as u64)
+            .with_arg(1, SOCK_STREAM as u64);
+        assert_eq!(run_bpf(&program, unix_stream), SECCOMP_RET_ALLOW);
+
+        let inet6_stream = FakeSeccompData::new(SOCKET)
+            .with_arg(0, 10)
+            .with_arg(1, SOCK_STREAM as u64);
+        assert_eq!(run_bpf(&program, inet6_stream), SECCOMP_RET_KILL_PROCESS);
+
+        let datagram = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_INET as u64)
+            .with_arg(1, 2);
+        assert_eq!(run_bpf(&program, datagram), SECCOMP_RET_KILL_PROCESS);
+
+        let unknown_type_flag = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_INET as u64)
+            .with_arg(1, (SOCK_STREAM | 0x10) as u64);
+        assert_eq!(
+            run_bpf(&program, unknown_type_flag),
+            SECCOMP_RET_KILL_PROCESS
+        );
+    }
+
+    #[test]
+    fn test_non_network_socket_constraint_allows_only_unix_domain() {
+        let constraints = [ConstrainedSyscall {
+            nr: SOCKET,
+            constraint: SeccompArgConstraint::Socket { allow_inet: false },
+        }];
+        let program = build_bpf_program(&[SOCKET], &constraints);
+
+        let unix_stream = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_UNIX as u64)
+            .with_arg(1, SOCK_STREAM as u64);
+        assert_eq!(run_bpf(&program, unix_stream), SECCOMP_RET_ALLOW);
+
+        let inet_stream = FakeSeccompData::new(SOCKET)
+            .with_arg(0, AF_INET as u64)
+            .with_arg(1, SOCK_STREAM as u64);
+        assert_eq!(run_bpf(&program, inet_stream), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_ioctl_constraint_allows_only_whitelisted_requests() {
+        let program = program_for_profile(SeccompProfile::EssentialWithFork);
+
+        let allowed_request = FakeSeccompData::new(IOCTL).with_arg(1, TCGETS as u64);
+        assert_eq!(run_bpf(&program, allowed_request), SECCOMP_RET_ALLOW);
+
+        let fionbio_request = FakeSeccompData::new(IOCTL).with_arg(1, FIONBIO as u64);
+        assert_eq!(run_bpf(&program, fionbio_request), SECCOMP_RET_ALLOW);
+
+        let tiocsti_request = FakeSeccompData::new(IOCTL).with_arg(1, 0x5412);
+        assert_eq!(run_bpf(&program, tiocsti_request), SECCOMP_RET_KILL_PROCESS);
+
+        let high_bits_set = FakeSeccompData::new(IOCTL).with_arg(1, (1_u64 << 32) | TCGETS as u64);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_clone_constraint_blocks_namespace_flags() {
+        let program = program_for_profile(SeccompProfile::EssentialWithFork);
+
+        let sigchld_only = FakeSeccompData::new(CLONE).with_arg(0, 17);
+        assert_eq!(run_bpf(&program, sigchld_only), SECCOMP_RET_ALLOW);
+
+        let newnet = FakeSeccompData::new(CLONE).with_arg(0, 0x4000_0000);
+        assert_eq!(run_bpf(&program, newnet), SECCOMP_RET_KILL_PROCESS);
+
+        let namespace_mask = FakeSeccompData::new(CLONE).with_arg(0, CLONE_NAMESPACE_MASK as u64);
+        assert_eq!(run_bpf(&program, namespace_mask), SECCOMP_RET_KILL_PROCESS);
+
+        let high_bits_set = FakeSeccompData::new(CLONE).with_arg(0, 1_u64 << 32);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
     }
 }
