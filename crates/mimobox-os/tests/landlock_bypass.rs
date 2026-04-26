@@ -109,9 +109,16 @@ mod landlock_bypass_tests {
         let result = sandbox.execute(&command)?;
 
         // Landlock 检查 symlink 的目标路径（在授权的 /tmp 下），读取应该成功。
-        assert_eq!(result.exit_code, Some(0), "expected successful read via symlink to authorized target");
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "expected successful read via symlink to authorized target"
+        );
         let stdout = String::from_utf8_lossy(&result.stdout);
-        assert!(stdout.contains("public"), "stdout should contain file content, got: {stdout}");
+        assert!(
+            stdout.contains("public"),
+            "stdout should contain file content, got: {stdout}"
+        );
 
         Ok(())
     }
