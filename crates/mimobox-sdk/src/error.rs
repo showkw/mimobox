@@ -100,7 +100,7 @@ impl SdkError {
                 suggestion: Some("increase Config.timeout or per-command timeout".into()),
             },
             mimobox_core::SandboxError::ExecutionFailed(msg) => Self::Sandbox {
-                code: ErrorCode::CommandExit(1),
+                code: ErrorCode::CommandKilled,
                 message: msg,
                 suggestion: None,
             },
@@ -162,5 +162,31 @@ impl SdkError {
 impl From<mimobox_core::SandboxError> for SdkError {
     fn from(err: mimobox_core::SandboxError) -> Self {
         Self::from_sandbox_execute_error(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SdkError;
+    use mimobox_core::{ErrorCode, SandboxError};
+
+    #[test]
+    fn execution_failed_maps_to_command_killed_and_preserves_message() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
+            "process killed by seccomp".to_string(),
+        ));
+
+        match error {
+            SdkError::Sandbox {
+                code,
+                message,
+                suggestion,
+            } => {
+                assert_eq!(code, ErrorCode::CommandKilled);
+                assert_eq!(message, "process killed by seccomp");
+                assert!(suggestion.is_none());
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
     }
 }
