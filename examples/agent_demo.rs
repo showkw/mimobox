@@ -1,3 +1,5 @@
+// 注意：Python SDK 提供了更简洁的 execute_code() API，可一行代码执行多语言代码。
+// 参见 examples/python/multi_language.py 和 examples/python/fork_isolation.py。
 // Agent 集成示例：模拟 AI Agent 通过 mimobox SDK 安全执行用户请求。
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
