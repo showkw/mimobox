@@ -73,6 +73,11 @@ const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
     FIONREAD, TIOCNOTTY,
 ];
 
+// PRCTL 允许的操作（arg0 约束）
+// PR_CAPBSET_READ(23)：libcap/libselinux 检查 capability bounding set，只读操作
+const PR_CAPBSET_READ: u32 = 23;
+const PRCTL_ALLOWED_OPS: &[u32] = &[PR_CAPBSET_READ];
+
 // clone namespace flags 约束
 // 移除 CLONE_NEWCGROUP 位（与 CLONE_CHILD_CLEARTID 共享 bit 25），
 // 避免误杀 bash 等程序创建子进程时的正常 clone 调用。
@@ -543,10 +548,8 @@ fn essential_syscalls() -> Vec<u32> {
 /// Builds the system call allowlist for `allow_fork` mode.
 ///
 /// Adds process-creation system calls on top of Essential for workloads such as shells that fork
-/// child processes. Also allows `ioctl` because shells need terminal ioctls such as `TCGETS`
-/// during startup. Still excludes `setpgid`/`setsid` to prevent escaping the supervisor process
-/// group, `kill`/`tkill` to prevent signaling other processes, `prctl` to prevent modifying
-/// security attributes, and similar calls.
+/// child processes. Still excludes `setpgid`/`setsid` to prevent escaping the supervisor process
+/// group, `kill`/`tkill` to prevent signaling other processes, and similar calls.
 pub fn fork_allowed_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     let mut syscalls = essential_syscalls();
@@ -558,14 +561,9 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
         // clone3 的 flags 位于用户态指针，经典 seccomp-bpf 无法解引用检查；
         // 为避免绕过 clone flags 约束，这里不放行 clone3。
         WAIT4,
-        // shell 运行需要 ioctl（终端 TCGETS/TCSETS 等）
-        IOCTL,
         // Rocky/RHEL 9 的 NSS/systemd-userdb 查找链会在事件循环中使用 timerfd。
         TIMERFD_CREATE,
         TIMERFD_SETTIME,
-        // libcap/libselinux 程序（ls, rm, ps 等）在启动时使用 prctl(PR_CAPBSET_READ)
-        // 检查 capability bounding set，这是只读操作不构成安全风险。
-        PRCTL,
     ]);
     syscalls
 }
@@ -600,6 +598,7 @@ enum SeccompArgConstraint {
     Socket { allow_inet: bool },
     IoctlRequest,
     CloneFlags,
+    PrctlOp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -684,7 +683,7 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(3);
+    let mut constraints = Vec::with_capacity(4);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
@@ -705,6 +704,15 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::IOCTL,
             constraint: SeccompArgConstraint::IoctlRequest,
+        });
+    }
+
+    // prctl(157) 必须约束 arg0 为只读查询操作（如 PR_CAPBSET_READ），
+    // 防止攻击者执行 PR_SET_DUMPABLE 等修改安全属性的操作。
+    if allowed.contains(&syscall_nr::PRCTL) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::PRCTL,
+            constraint: SeccompArgConstraint::PrctlOp,
         });
     }
 
@@ -776,6 +784,25 @@ fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
     block
 }
 
+fn build_prctl_arg_check_block() -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(PRCTL_ALLOWED_OPS.len() + 5);
+
+    // op 是 prctl 的第一个参数（arg0）。只允许 PR_CAPBSET_READ 等只读查询操作。
+    block.push(load_abs(seccomp_arg_hi_offset(0)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(0)));
+
+    for (index, &op) in PRCTL_ALLOWED_OPS.iter().enumerate() {
+        let instructions_to_skip = (PRCTL_ALLOWED_OPS.len() - index) as u8;
+        block.push(jump_eq(op, instructions_to_skip, 0));
+    }
+
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_ALLOW));
+    block
+}
+
 fn build_clone_arg_check_block() -> Vec<SockFilter> {
     vec![
         // flags 是 unsigned long；高 32 位不应携带额外 flag。
@@ -794,6 +821,7 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
         SeccompArgConstraint::Socket { allow_inet } => build_socket_arg_check_block(allow_inet),
         SeccompArgConstraint::IoctlRequest => build_ioctl_arg_check_block(),
         SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
+        SeccompArgConstraint::PrctlOp => build_prctl_arg_check_block(),
     }
 }
 

@@ -60,6 +60,7 @@ pub(in crate::kvm) const SERIAL_STREAM_END_PREFIX: &str = "STREAM:END:";
 pub(in crate::kvm) const SERIAL_STREAM_TIMEOUT_PREFIX: &str = "STREAM:TIMEOUT:";
 pub(in crate::kvm) const MAX_FS_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 const MAX_STREAM_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const MAX_FRAME_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) const SERIAL_BOOT_TIME_PREFIX: &str = "BOOT_TIME:";
 
@@ -415,6 +416,10 @@ pub(in crate::kvm) fn preview_serial_output(serial: &[u8]) -> String {
 pub(in crate::kvm) fn take_serial_frame(
     frame_buffer: &mut Vec<u8>,
 ) -> Result<Option<SerialFrame>, MicrovmError> {
+    if clear_oversized_frame_buffer(frame_buffer) {
+        return Ok(None);
+    }
+
     if frame_buffer.is_empty() {
         Ok(None)
     } else if frame_buffer.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
@@ -439,6 +444,20 @@ pub(in crate::kvm) fn take_serial_frame(
         frame_buffer.drain(..=newline_index);
         Ok(Some(SerialFrame::Line(line)))
     }
+}
+
+fn clear_oversized_frame_buffer(frame_buffer: &mut Vec<u8>) -> bool {
+    if frame_buffer.len() <= MAX_FRAME_BUFFER_SIZE {
+        return false;
+    }
+
+    tracing::warn!(
+        "串口帧缓冲区超过最大限制，清空缓冲区: len={}, max={}",
+        frame_buffer.len(),
+        MAX_FRAME_BUFFER_SIZE
+    );
+    frame_buffer.clear();
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +537,10 @@ fn parse_hex_digit(value: u8) -> Result<u8, MicrovmError> {
 fn try_take_fs_result_frame(
     frame_buffer: &mut Vec<u8>,
 ) -> Result<Option<SerialFrame>, MicrovmError> {
+    if clear_oversized_frame_buffer(frame_buffer) {
+        return Ok(None);
+    }
+
     let bytes = frame_buffer.as_slice();
     if bytes.is_empty() || !bytes.starts_with(SERIAL_FSRESULT_PREFIX.as_bytes()) {
         return Ok(None);
@@ -596,6 +619,10 @@ fn try_take_fs_result_frame(
 }
 
 fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFrame>, MicrovmError> {
+    if clear_oversized_frame_buffer(frame_buffer) {
+        return Ok(None);
+    }
+
     let bytes = frame_buffer.as_slice();
 
     if bytes.starts_with(SERIAL_STREAM_START_PREFIX.as_bytes()) {
@@ -780,6 +807,10 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
 fn try_take_http_request_frame(
     frame_buffer: &mut Vec<u8>,
 ) -> Result<Option<SerialFrame>, MicrovmError> {
+    if clear_oversized_frame_buffer(frame_buffer) {
+        return Ok(None);
+    }
+
     let bytes = frame_buffer.as_slice();
     let prefix_len = SERIAL_HTTP_REQUEST_PREFIX.len();
     let Some((request_id, id_delimiter_index)) = parse_decimal_prefix(bytes, prefix_len)? else {
