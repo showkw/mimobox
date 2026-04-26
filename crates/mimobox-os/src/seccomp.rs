@@ -78,6 +78,21 @@ const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
 const PR_CAPBSET_READ: u32 = 23;
 const PRCTL_ALLOWED_OPS: &[u32] = &[PR_CAPBSET_READ];
 
+// FUTEX 允许的操作（arg0 约束）
+// 仅允许常见的等待/唤醒操作，防止 FUTEX_REQUEUE 等可能导致内核资源耗尽的操作。
+const FUTEX_WAIT: u32 = 0;
+const FUTEX_WAKE: u32 = 1;
+const FUTEX_WAIT_PRIVATE: u32 = 128; // FUTEX_PRIVATE_FLAG | FUTEX_WAIT
+const FUTEX_WAKE_PRIVATE: u32 = 129; // FUTEX_PRIVATE_FLAG | FUTEX_WAKE
+const FUTEX_WAIT_BITSET_PRIVATE: u32 = 137; // FUTEX_PRIVATE_FLAG | FUTEX_WAIT_BITSET
+const FUTEX_ALLOWED_OPS: &[u32] = &[
+    FUTEX_WAIT,
+    FUTEX_WAKE,
+    FUTEX_WAIT_PRIVATE,
+    FUTEX_WAKE_PRIVATE,
+    FUTEX_WAIT_BITSET_PRIVATE,
+];
+
 // clone namespace flags 约束
 // 移除 CLONE_NEWCGROUP 位（与 CLONE_CHILD_CLEARTID 共享 bit 25），
 // 避免误杀 bash 等程序创建子进程时的正常 clone 调用。
@@ -599,6 +614,7 @@ enum SeccompArgConstraint {
     IoctlRequest,
     CloneFlags,
     PrctlOp,
+    FutexOp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -683,7 +699,7 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(4);
+    let mut constraints = Vec::with_capacity(5);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
@@ -713,6 +729,14 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::PRCTL,
             constraint: SeccompArgConstraint::PrctlOp,
+        });
+    }
+
+    // futex(202) 只允许常见等待/唤醒操作，拒绝 REQUEUE/CMP_REQUEUE 等资源放大路径。
+    if allowed.contains(&syscall_nr::FUTEX) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::FUTEX,
+            constraint: SeccompArgConstraint::FutexOp,
         });
     }
 
@@ -803,6 +827,25 @@ fn build_prctl_arg_check_block() -> Vec<SockFilter> {
     block
 }
 
+fn build_futex_arg_check_block() -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(FUTEX_ALLOWED_OPS.len() + 5);
+
+    // op 按 seccomp_data arg0 读取；高 32 位非零视为非法扩展。
+    block.push(load_abs(seccomp_arg_hi_offset(0)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(load_abs(seccomp_arg_lo_offset(0)));
+
+    for (index, &op) in FUTEX_ALLOWED_OPS.iter().enumerate() {
+        let instructions_to_skip = (FUTEX_ALLOWED_OPS.len() - index) as u8;
+        block.push(jump_eq(op, instructions_to_skip, 0));
+    }
+
+    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_ALLOW));
+    block
+}
+
 fn build_clone_arg_check_block() -> Vec<SockFilter> {
     vec![
         // flags 是 unsigned long；高 32 位不应携带额外 flag。
@@ -822,6 +865,7 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
         SeccompArgConstraint::IoctlRequest => build_ioctl_arg_check_block(),
         SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
         SeccompArgConstraint::PrctlOp => build_prctl_arg_check_block(),
+        SeccompArgConstraint::FutexOp => build_futex_arg_check_block(),
     }
 }
 
@@ -969,12 +1013,13 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        CLONE, CLONE3, IOCTL, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID, SOCKET,
-        TGKILL,
+        CLONE, CLONE3, FUTEX, IOCTL, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID, SETSID,
+        SOCKET, TGKILL,
     };
     use super::{
         AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ, BPF_JMP, BPF_JSET,
         BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
+        FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
         SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
         SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
         SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints,
@@ -1234,6 +1279,43 @@ mod tests {
         assert_eq!(run_bpf(&program, tiocsti_request), SECCOMP_RET_KILL_PROCESS);
 
         let high_bits_set = FakeSeccompData::new(IOCTL).with_arg(1, (1_u64 << 32) | TCGETS as u64);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn test_futex_constraint_allows_only_whitelisted_ops() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let futex_wait = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT as u64);
+        assert_eq!(run_bpf(&program, futex_wait), SECCOMP_RET_ALLOW);
+
+        let futex_wake = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAKE as u64);
+        assert_eq!(run_bpf(&program, futex_wake), SECCOMP_RET_ALLOW);
+
+        let futex_wait_private = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT_PRIVATE as u64);
+        assert_eq!(run_bpf(&program, futex_wait_private), SECCOMP_RET_ALLOW);
+
+        let futex_wake_private = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAKE_PRIVATE as u64);
+        assert_eq!(run_bpf(&program, futex_wake_private), SECCOMP_RET_ALLOW);
+
+        let futex_wait_bitset_private =
+            FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT_BITSET_PRIVATE as u64);
+        assert_eq!(
+            run_bpf(&program, futex_wait_bitset_private),
+            SECCOMP_RET_ALLOW
+        );
+
+        let futex_requeue = FakeSeccompData::new(FUTEX).with_arg(0, 3);
+        assert_eq!(run_bpf(&program, futex_requeue), SECCOMP_RET_KILL_PROCESS);
+
+        let futex_cmp_requeue = FakeSeccompData::new(FUTEX).with_arg(0, 4);
+        assert_eq!(
+            run_bpf(&program, futex_cmp_requeue),
+            SECCOMP_RET_KILL_PROCESS
+        );
+
+        let high_bits_set =
+            FakeSeccompData::new(FUTEX).with_arg(0, (1_u64 << 32) | FUTEX_WAIT as u64);
         assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
     }
 
