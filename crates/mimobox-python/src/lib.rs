@@ -431,9 +431,7 @@ impl PySandbox {
                     ));
                 }
                 let quoted = shlex::try_quote(dir).map_err(|_| {
-                    PyValueError::new_err(
-                        "cwd contains characters that cannot be shell-escaped",
-                    )
+                    PyValueError::new_err("cwd contains characters that cannot be shell-escaped")
                 })?;
                 format!("cd {quoted} && {command}")
             }
