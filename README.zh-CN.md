@@ -50,6 +50,13 @@ cargo build --release -p mimobox-cli --features mimobox-cli/wasm
 mimobox run --backend auto --command "/bin/echo hello"
 ```
 
+### MCP Server
+
+```bash
+mimobox-mcp                              # stdio 模式（默认）
+mimobox-mcp --transport http --port 8080 # Streamable HTTP 模式
+```
+
 ### Python 示例
 
 ```python
@@ -58,6 +65,14 @@ from mimobox import Sandbox
 with Sandbox() as sandbox:
     result = sandbox.execute("/bin/echo hello")
     print(result.stdout, end="")
+```
+
+```python
+# File API
+with Sandbox() as sandbox:
+    sandbox.write_file("/tmp/hello.py", "print('hello')")
+    result = sandbox.execute("python3 /tmp/hello.py")
+    entries = sandbox.list_dir("/tmp")
 ```
 
 ### Rust 示例
@@ -122,7 +137,7 @@ mimobox/
 │   ├── mimobox-vm/         # KVM microVM backend, pools, snapshot, fork
 │   ├── mimobox-sdk/        # Unified Rust SDK and smart routing
 │   ├── mimobox-cli/        # CLI entrypoint
-│   ├── mimobox-mcp/        # MCP server over stdio
+│   ├── mimobox-mcp/        # MCP server (stdio + Streamable HTTP)
 │   └── mimobox-python/     # Python SDK via PyO3
 ├── docs/                   # User, API, architecture, MCP, and performance docs
 ├── discuss/                # Design notes, reviews, and market analysis
@@ -139,7 +154,7 @@ mimobox/
 | --- | --- | --- |
 | Completed | Unified SDK + smart routing | `Sandbox::new()` 和 CLI `--backend auto` 已实现 |
 | Completed | OS + Wasm + microVM isolation | Linux KVM、snapshot、restore 和 fork 可验证 |
-| Completed | MCP Server | 面向生命周期、执行、文件、snapshot、fork 和 HTTP 的 10 个 stdio tools |
+| Completed | MCP Server | 面向生命周期、执行、文件、snapshot、fork 和 HTTP proxy 的 10 个 tools，支持 stdio + Streamable HTTP 传输；Seccomp 参数级约束 |
 | Completed | Python SDK | 支持执行、streaming、文件、HTTP、snapshot 和错误的 PyO3 bindings |
 | Planned | Formal vsock data plane | Serial 仍是 bring-up/control path；vsock 是未来 data plane |
 | Planned | Windows backend + GPU/SaaS options | 当前优先级仍是提升 Linux 和 macOS 成熟度 |
