@@ -127,7 +127,7 @@ mod fork_isolation_tests {
         // 被 Seccomp 阻止 (SIGSYS)。显式授权整个 /proc 只读可解决此问题。
         let config_with_proc = {
             let mut c = isolated_config(vec![]);
-            c.fs_readonly = vec!["/proc".into()];
+            c.fs_readonly.push("/proc".into());
             c
         };
 
