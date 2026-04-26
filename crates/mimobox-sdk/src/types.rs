@@ -1,3 +1,5 @@
+#[cfg(all(feature = "vm", target_os = "linux"))]
+use crate::config::Config;
 use crate::error::SdkError;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::map_microvm_error;

@@ -11,6 +11,8 @@ use mimobox_core::{ErrorCode, Sandbox as CoreSandbox};
 use mimobox_vm::GuestFileErrorKind;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+use std::sync::mpsc;
 
 pub(crate) fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
     match inner {
