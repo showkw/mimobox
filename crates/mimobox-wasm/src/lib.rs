@@ -306,6 +306,7 @@ fn build_wasi_ctx(
     for path in &config.fs_readonly {
         if let Some(path_str) = path.to_str() {
             if path.exists() {
+                // 只授予 READ 权限，WASI 的目录创建/删除等写操作会被拒绝。
                 if let Err(e) =
                     builder.preopened_dir(path, path_str, DirPerms::READ, FilePerms::READ)
                 {
@@ -330,8 +331,16 @@ fn build_wasi_ctx(
         }
     }
 
-    // 网络控制：Wasmtime WASI 默认即禁止所有网络，无需额外操作
-    // 即使 deny_network 为 false，当前实现也保持禁止（WASI 网络支持有限）
+    if config.deny_network {
+        log_info!("WASI network denied by SandboxConfig; no sockets are preopened");
+    } else {
+        log_warn!(
+            "SandboxConfig allows network, but WASI backend cannot enable network access; keeping network denied"
+        );
+    }
+
+    // 时钟能力：WasiCtxBuilder 仅暴露 wall_clock/monotonic_clock 替换点，
+    // 没有 WASI Preview 1 clocks 的禁用/白名单 API；执行时限由 fuel、epoch 和 timeout 控制。
 
     builder.build_p1()
 }
