@@ -220,6 +220,9 @@ fn get_cached_module(
 
     // 检查是否已有相同内容的缓存（文件内容相同但元数据不同）
     if let Ok(cached) = std::fs::read(&cache_path) {
+        // SAFETY: 缓存文件由本系统生成，Engine 配置未变。
+        // Module::deserialize 要求输入数据来自相同 Engine 配置的 serialize() 输出。
+        // 我们在缓存写入时确保了这一点，因此反序列化是安全的。
         match unsafe { Module::deserialize(engine, &cached) } {
             Ok(module) => {
                 // 更新映射文件
@@ -335,8 +338,8 @@ impl Sandbox for WasmSandbox {
         })?;
 
         // [IMPORTANT-02 修复] 使用用户专属缓存目录，避免不同用户之间的缓存污染
-        let uid = unsafe { libc::geteuid() };
         // SAFETY: geteuid() 是无副作用的系统调用，始终返回有效的 uid。
+        let uid = unsafe { libc::geteuid() };
         let cache_dir = std::env::temp_dir().join(format!("mimobox-cache-{}", uid));
 
         log_info!(
@@ -587,21 +590,6 @@ fn find_exit_code(error: &wasmtime::Error) -> Option<i32> {
     let root = error.root_cause();
     if let Some(exit) = root.downcast_ref::<I32Exit>() {
         return Some(exit.0);
-    }
-
-    // 遍历 error chain（通过 format 字符串匹配作为最后手段）
-    let err_str = format!("{}", error);
-    if err_str.contains("Exited with i32 exit status") {
-        // 格式："Exited with i32 exit status N"
-        let parts: Vec<&str> = err_str.split_whitespace().collect();
-        for i in 0..parts.len() {
-            if parts[i] == "status"
-                && i + 1 < parts.len()
-                && let Ok(code) = parts[i + 1].parse::<i32>()
-            {
-                return Some(code);
-            }
-        }
     }
 
     None

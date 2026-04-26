@@ -85,7 +85,7 @@ pub struct Sandbox {
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl RestorePool {
-    /// 根据基础配置创建一个固定大小的恢复池。
+    /// Creates a fixed-size restore pool from the base configuration.
     pub fn new(config: RestorePoolConfig) -> Result<Self, SdkError> {
         let sandbox_config = config.base_config.to_sandbox_config();
         let microvm_config = config.base_config.to_microvm_config()?;
@@ -104,7 +104,7 @@ impl RestorePool {
         })
     }
 
-    /// 使用给定快照恢复一个新的沙箱实例。
+    /// Restores a new sandbox instance from the given snapshot.
     pub fn restore(&self, snapshot: &SandboxSnapshot) -> Result<Sandbox, SdkError> {
         let restored = self
             .inner
@@ -116,12 +116,12 @@ impl RestorePool {
         ))
     }
 
-    /// 返回当前恢复池中的空闲实例数量。
+    /// Returns the number of idle instances currently in the restore pool.
     pub fn idle_count(&self) -> usize {
         self.inner.idle_count()
     }
 
-    /// 将恢复池预热到至少 `target` 个空闲实例。
+    /// Warms the restore pool to at least `target` idle instances.
     pub fn warm(&self, target: usize) -> Result<(), SdkError> {
         self.inner.warm(target).map_err(map_restore_pool_error)
     }
@@ -146,9 +146,11 @@ macro_rules! dispatch_execute {
     };
 }
 
-/// VM-only 三变体分派宏（MicroVm / PooledMicroVm / RestoredPooledMicroVm）。
-/// 用于 read_file、write_file、http_request、stream_execute、execute_with_vm_options 等
-/// 仅 VM 后端支持的方法。非 VM 变体统一走 fallback 表达式。
+/// Dispatch macro for the three VM-only variants (`MicroVm`, `PooledMicroVm`,
+/// `RestoredPooledMicroVm`).
+/// Used by VM-only methods such as `read_file`, `write_file`, `http_request`,
+/// `stream_execute`, and `execute_with_vm_options`.
+/// Non-VM variants uniformly use the fallback expression.
 macro_rules! dispatch_vm {
     ($inner:expr, $binding:ident, $expr:expr, $fallback:expr) => {
         match $inner {
@@ -250,9 +252,9 @@ impl Sandbox {
         Ok(sandbox)
     }
 
-    /// 拍摄当前沙箱快照。
+    /// Takes a snapshot of the current sandbox.
     ///
-    /// 该能力当前仅在 `Linux + vm feature + MicroVm` 后端上可用。
+    /// This capability is currently only available on `Linux + vm feature + MicroVm` backends.
     ///
     /// # Examples
     ///
@@ -306,7 +308,7 @@ impl Sandbox {
         }
     }
 
-    /// 从快照恢复新沙箱。
+    /// Restores a new sandbox from a snapshot.
     pub fn from_snapshot(snapshot: &SandboxSnapshot) -> Result<Self, SdkError> {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         {
@@ -329,10 +331,11 @@ impl Sandbox {
         }
     }
 
-    /// 从当前沙箱 fork 一个独立的副本。
+    /// Forks the current sandbox into an independent copy.
     ///
-    /// 仅 microVM 后端支持。fork 出的沙箱与原沙箱共享未修改的内存页（CoW），
-    /// 写入时各自持有私有副本。
+    /// Only the microVM backend supports this. The forked sandbox shares
+    /// unmodified memory pages with the original sandbox (CoW), and each keeps
+    /// private copies after writes.
     #[cfg(all(feature = "vm", target_os = "linux"))]
     pub fn fork(&mut self) -> Result<Self, SdkError> {
         self.ensure_backend_for_snapshot()?;
@@ -356,7 +359,7 @@ impl Sandbox {
         Err(SdkError::unsupported_backend("fork"))
     }
 
-    /// 在沙箱中执行命令。
+    /// Executes a command inside the sandbox.
     ///
     /// # Examples
     ///
@@ -390,9 +393,9 @@ impl Sandbox {
         self.execute(&command)
     }
 
-    /// 列出指定路径下的目录条目。
+    /// Lists directory entries under the specified path.
     ///
-    /// 返回目录内所有条目的名称、类型、大小和符号链接标记。
+    /// Returns each entry's name, type, size, and symlink flag.
     pub fn list_dir(&mut self, path: &str) -> Result<Vec<mimobox_core::DirEntry>, SdkError> {
         self.ensure_backend("/bin/ls")?;
         let inner = self.require_inner()?;
@@ -437,7 +440,7 @@ impl Sandbox {
         }
     }
 
-    /// 创建交互式终端会话。
+    /// Creates an interactive terminal session.
     ///
     /// # Examples
     ///
@@ -468,7 +471,7 @@ impl Sandbox {
         })
     }
 
-    /// 使用完整 `PtyConfig` 创建交互式终端会话。
+    /// Creates an interactive terminal session with a complete `PtyConfig`.
     pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
         if config.command.is_empty() {
             return Err(SdkError::Config(
@@ -518,7 +521,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 在 microVM 后端中执行命令，并为本次调用附加环境变量。
+    /// Executes a command in the microVM backend with additional environment variables for this call.
     pub fn execute_with_env(
         &mut self,
         command: &str,
@@ -535,7 +538,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 在 microVM 后端中执行命令，并覆写本次调用的超时时间。
+    /// Executes a command in the microVM backend and overrides the timeout for this call.
     pub fn execute_with_timeout(
         &mut self,
         command: &str,
@@ -552,7 +555,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 在 microVM 后端中执行命令，并同时覆写环境变量与超时时间。
+    /// Executes a command in the microVM backend and overrides both environment variables and timeout.
     pub fn execute_with_env_and_timeout(
         &mut self,
         command: &str,
@@ -570,7 +573,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 在 microVM 后端中执行命令，并覆写本次调用的工作目录。
+    /// Executes a command in the microVM backend and overrides the working directory for this call.
     pub fn execute_with_cwd(
         &mut self,
         command: &str,
@@ -584,7 +587,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 在 microVM 后端中执行命令，并使用完整的单命令执行选项。
+    /// Executes a command in the microVM backend with full per-command execution options.
     pub fn execute_with_vm_options_full(
         &mut self,
         command: &str,
@@ -593,7 +596,7 @@ impl Sandbox {
         self.execute_with_vm_options_full_inner(command, options)
     }
 
-    /// 以流式事件形式执行命令。
+    /// Executes a command as a stream of events.
     pub fn stream_execute(
         &mut self,
         command: &str,
@@ -619,7 +622,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 从 microVM 沙箱中读取文件内容。
+    /// Reads file contents from the microVM sandbox.
     pub fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SdkError> {
         self.ensure_backend_for_file_ops()?;
         let inner = self.require_inner()?;
@@ -640,7 +643,7 @@ impl Sandbox {
     }
 
     #[cfg(feature = "vm")]
-    /// 向 microVM 沙箱中写入文件内容。
+    /// Writes file contents into the microVM sandbox.
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), SdkError> {
         self.ensure_backend_for_file_ops()?;
         let inner = self.require_inner()?;
@@ -662,7 +665,7 @@ impl Sandbox {
 
     #[cfg(feature = "vm")]
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    /// 通过受控 HTTP 代理发起请求。
+    /// Sends a request through the controlled HTTP proxy.
     pub fn http_request(
         &mut self,
         method: &str,
@@ -707,9 +710,10 @@ impl Sandbox {
         self.active_isolation
     }
 
-    /// 等待当前沙箱后端进入可用状态。
+    /// Waits for the current sandbox backend to become ready.
     ///
-    /// microVM 后端会执行 PING/PONG readiness probe；OS/Wasm 后端初始化后直接视为就绪。
+    /// For microVM backends, runs a PING/PONG readiness probe; OS/Wasm backends
+    /// are considered ready after initialization.
     pub fn wait_ready(&mut self, timeout: std::time::Duration) -> Result<(), SdkError> {
         if timeout.is_zero() {
             return Err(SdkError::Config(
@@ -733,7 +737,7 @@ impl Sandbox {
         self.wait_ready_inner(timeout)
     }
 
-    /// 返回当前 SDK 沙箱是否已经初始化为可用后端。
+    /// Returns whether the current SDK sandbox has been initialized with a usable backend.
     pub fn is_ready(&self) -> bool {
         let Some(inner) = self.inner.as_ref() else {
             return false;
@@ -762,7 +766,7 @@ impl Sandbox {
 
     // ── 私有辅助方法 ──
 
-    /// 获取已初始化的后端实例引用，若不存在则返回统一错误。
+    /// Returns the initialized backend instance, or a unified error if it is missing.
     fn require_inner(&mut self) -> Result<&mut SandboxInner, SdkError> {
         self.inner.as_mut().ok_or_else(|| {
             SdkError::sandbox(

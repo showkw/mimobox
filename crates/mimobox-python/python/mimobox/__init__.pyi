@@ -73,13 +73,14 @@ class Snapshot:
 
     @classmethod
     def from_file(cls, path: str) -> "Snapshot":
-        """从文件化快照创建 Snapshot 实例。
+        """Create a Snapshot instance from a file-backed snapshot.
 
-        直接从磁盘文件路径构造快照引用，无需将整个文件读入内存。
-        适用于之前通过 ``to_bytes()`` 保存到磁盘的大快照文件。
+        Constructs a snapshot reference directly from the on-disk file path
+        without loading the entire file into memory. This is useful for large
+        snapshot files previously saved to disk via ``to_bytes()``.
 
         Args:
-            path: 快照文件的磁盘路径。
+            path: On-disk path to the snapshot file.
 
         Returns:
             A restored ``Snapshot`` instance.
