@@ -130,9 +130,9 @@ pub struct Config {
     pub timeout: Option<Duration>,
     /// Memory limit in MiB. Applied via cgroups v2 or setrlimit.
     pub memory_limit_mb: Option<u64>,
-    /// CPU 时间配额（微秒）。`None` 表示不限制。
+    /// CPU time quota in microseconds. `None` means unlimited.
     pub cpu_quota_us: Option<u64>,
-    /// CPU 周期（微秒）。默认 100000（100ms）。
+    /// CPU period in microseconds. Defaults to 100000 (100ms).
     pub cpu_period_us: u64,
     /// Read-only mount paths inside the sandbox.
     pub fs_readonly: Vec<PathBuf>,

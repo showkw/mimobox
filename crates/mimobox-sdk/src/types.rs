@@ -31,23 +31,24 @@ use std::sync::mpsc;
 /// ```
 #[non_exhaustive]
 pub struct ExecuteResult {
-    /// 标准输出字节流。
+    /// Standard output byte stream.
     pub stdout: Vec<u8>,
-    /// 标准错误字节流。
+    /// Standard error byte stream.
     pub stderr: Vec<u8>,
-    /// 退出码；若进程未正常退出则可能为 `None`。
+    /// Exit code; may be `None` if the process did not exit normally.
     pub exit_code: Option<i32>,
-    /// 是否因超时被终止。
+    /// Whether execution was terminated due to timeout.
     pub timed_out: bool,
-    /// 本次执行的总耗时。
+    /// Total elapsed time for this execution.
     pub elapsed: std::time::Duration,
 }
 
 impl ExecuteResult {
-    /// 构造一个新的执行结果。
+    /// Constructs a new execution result.
     ///
-    /// 由于 `ExecuteResult` 标记为 `#[non_exhaustive]`，外部 crate 无法使用结构体字面量构造。
-    /// 此方法提供了稳定的构造路径。
+    /// Because `ExecuteResult` is marked `#[non_exhaustive]`, external crates
+    /// cannot construct it with a struct literal.
+    /// This method provides a stable construction path.
     pub fn new(
         stdout: Vec<u8>,
         stderr: Vec<u8>,
@@ -89,11 +90,11 @@ impl ExecuteResult {
 /// ```
 #[non_exhaustive]
 pub struct HttpResponse {
-    /// HTTP 状态码。
+    /// HTTP status code.
     pub status: u16,
-    /// 归一化后的响应头集合。
+    /// Normalized response headers.
     pub headers: std::collections::HashMap<String, String>,
-    /// 响应体字节流。
+    /// Response body byte stream.
     pub body: Vec<u8>,
 }
 
@@ -123,35 +124,35 @@ pub struct SandboxSnapshot {
 }
 
 impl SandboxSnapshot {
-    /// 从原始字节恢复快照。
+    /// Restores a snapshot from raw bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SdkError> {
         mimobox_core::SandboxSnapshot::from_bytes(data)
             .map(Self::from_core)
             .map_err(map_snapshot_bytes_error)
     }
 
-    /// 从文件化快照的 `memory.bin` 创建快照。
+    /// Creates a snapshot from a file-backed snapshot's `memory.bin`.
     pub fn from_file(path: PathBuf) -> Result<Self, SdkError> {
         mimobox_core::SandboxSnapshot::from_file(path)
             .map(Self::from_core)
             .map_err(map_snapshot_bytes_error)
     }
 
-    /// 返回文件模式快照对应的 memory 文件路径。
+    /// Returns the memory file path for a file-backed snapshot.
     pub fn memory_file_path(&self) -> Option<&Path> {
         self.inner.memory_file_path()
     }
 
-    /// 返回快照字节切片，避免额外拷贝。
+    /// Returns a snapshot byte slice without an extra copy.
     ///
-    /// 仅内存模式支持该操作；文件模式会返回错误。
+    /// Only in-memory snapshots support this operation; file-backed snapshots return an error.
     pub fn as_bytes(&self) -> Result<&[u8], SdkError> {
         self.inner.as_bytes().map_err(map_snapshot_bytes_error)
     }
 
-    /// 返回快照字节副本。
+    /// Returns a copied snapshot byte buffer.
     ///
-    /// 文件模式下会重建完整的自描述快照字节。
+    /// For file-backed snapshots, rebuilds the complete self-describing snapshot bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SdkError> {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         if let Some(memory_path) = self.inner.memory_file_path() {
@@ -163,9 +164,9 @@ impl SandboxSnapshot {
         self.inner.to_bytes().map_err(map_snapshot_bytes_error)
     }
 
-    /// 消费快照并返回底层字节，避免额外拷贝。
+    /// Consumes the snapshot and returns the underlying bytes without an extra copy.
     ///
-    /// 文件模式下会重建完整的自描述快照字节。
+    /// For file-backed snapshots, rebuilds the complete self-describing snapshot bytes.
     pub fn into_bytes(self) -> Result<Vec<u8>, SdkError> {
         #[cfg(all(feature = "vm", target_os = "linux"))]
         if let Some(memory_path) = self.inner.memory_file_path().map(Path::to_path_buf) {
@@ -177,7 +178,7 @@ impl SandboxSnapshot {
         self.inner.into_bytes().map_err(map_snapshot_bytes_error)
     }
 
-    /// 返回快照大小（字节）。
+    /// Returns the snapshot size in bytes.
     pub fn size(&self) -> usize {
         self.inner.size()
     }
@@ -193,9 +194,9 @@ impl SandboxSnapshot {
 ///
 /// Requires `vm` feature + Linux.
 pub struct RestorePoolConfig {
-    /// 恢复池目标大小。
+    /// Target restore pool size.
     pub pool_size: usize,
-    /// 恢复池使用的基础配置。
+    /// Base configuration used by the restore pool.
     pub base_config: Config,
 }
 
@@ -269,13 +270,13 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
-    /// 一段标准输出数据。
+    /// A chunk of standard output data.
     Stdout(Vec<u8>),
-    /// 一段标准错误数据。
+    /// A chunk of standard error data.
     Stderr(Vec<u8>),
-    /// 进程退出并携带退出码。
+    /// The process exited with an exit code.
     Exit(i32),
-    /// 执行因超时被终止。
+    /// Execution was terminated due to timeout.
     TimedOut,
 }
 
@@ -312,34 +313,34 @@ impl std::fmt::Debug for PtySession {
 }
 
 impl PtySession {
-    /// 从后端 PTY 会话构造 SDK PTY 包装。
+    /// Constructs an SDK PTY wrapper from a backend PTY session.
     pub(crate) fn from_inner(inner: Box<dyn mimobox_core::PtySession>) -> Self {
         Self { inner }
     }
 
-    /// 向 PTY 会话写入输入数据。
+    /// Writes input data to the PTY session.
     pub fn send_input(&mut self, data: &[u8]) -> Result<(), SdkError> {
         self.inner.send_input(data).map_err(map_pty_session_error)
     }
 
-    /// 调整 PTY 终端尺寸。
+    /// Resizes the PTY terminal.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SdkError> {
         self.inner
             .resize(PtySize { cols, rows })
             .map_err(map_pty_session_error)
     }
 
-    /// 返回 PTY 输出事件接收端。
+    /// Returns the PTY output event receiver.
     pub fn output(&self) -> &mpsc::Receiver<PtyEvent> {
         self.inner.output_rx()
     }
 
-    /// 强制结束 PTY 会话。
+    /// Forcefully terminates the PTY session.
     pub fn kill(&mut self) -> Result<(), SdkError> {
         self.inner.kill().map_err(map_pty_session_error)
     }
 
-    /// 等待 PTY 进程退出并返回退出码。
+    /// Waits for the PTY process to exit and returns its exit code.
     pub fn wait(&mut self) -> Result<i32, SdkError> {
         self.inner.wait().map_err(map_pty_session_error)
     }
