@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM ubuntu:22.04 AS builder
 
 LABEL org.opencontainers.image.title="mimobox" \
@@ -14,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/cargo/bin:/usr/local/bin:$PATH \
     VM_ASSETS_DIR=/opt/mimobox-assets \
     ALPINE_VERSION=3.20 \
-    ALPINE_APK_TOOLS_VERSION=2.14.4-r0
+    ALPINE_APK_TOOLS_VERSION=2.14.4-r1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -32,6 +30,7 @@ RUN apt-get update \
         bc \
         perl \
         xz-utils \
+        libelf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # scripts/build-rootfs.sh 在本地构建路径中优先调用 apk 安装 guest 运行时。
