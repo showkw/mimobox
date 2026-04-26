@@ -342,8 +342,113 @@ demo_security_block() {
     record_pass "${demo_name}"
 }
 
+demo_timeout() {
+    local demo_name="4) Timeout"
+
+    if macos_os_backend_skip_reason; then
+        record_skip "${demo_name}" "${MACOS_OS_SKIP_REASON}"
+        return 0
+    fi
+
+    if ! run_cli_json run --backend os --command "/bin/sleep 10" --timeout 1; then
+        record_fail "${demo_name}" "$(command_failure_detail)"
+        return 0
+    fi
+
+    assert_json_equals "${demo_name}" "timed_out" "true" || return 0
+
+    record_pass "${demo_name}"
+}
+
+demo_exit_code() {
+    local demo_name="5) Exit code"
+
+    if macos_os_backend_skip_reason; then
+        record_skip "${demo_name}" "${MACOS_OS_SKIP_REASON}"
+        return 0
+    fi
+
+    if ! run_cli_json run --backend os --command "/bin/sh -c 'exit 42'"; then
+        record_fail "${demo_name}" "$(command_failure_detail)"
+        return 0
+    fi
+
+    assert_json_equals "${demo_name}" "exit_code" "42" || return 0
+
+    record_pass "${demo_name}"
+}
+
+demo_stderr() {
+    local demo_name="6) Stderr separation"
+
+    if macos_os_backend_skip_reason; then
+        record_skip "${demo_name}" "${MACOS_OS_SKIP_REASON}"
+        return 0
+    fi
+
+    if ! run_cli_json run --backend os --command "/bin/sh -c 'echo stdout_msg; echo stderr_msg >&2'"; then
+        record_fail "${demo_name}" "$(command_failure_detail)"
+        return 0
+    fi
+
+    assert_json_equals "${demo_name}" "exit_code" "0" || return 0
+
+    local stderr=""
+    if ! stderr="$(json_get "stderr")"; then
+        record_fail "${demo_name}" "Failed to read JSON field: stderr"
+        return 0
+    fi
+
+    if [[ "${stderr}" != *"stderr_msg"* ]]; then
+        record_fail \
+            "${demo_name}" \
+            "Expected stderr to contain stderr_msg.\nstdout: ${LAST_STDOUT}\nstderr: ${LAST_STDERR}"
+        return 0
+    fi
+
+    local stdout=""
+    if ! stdout="$(json_get "stdout")"; then
+        record_fail "${demo_name}" "Failed to read JSON field: stdout"
+        return 0
+    fi
+
+    if [[ "${stdout}" != *"stdout_msg"* ]]; then
+        record_fail \
+            "${demo_name}" \
+            "Expected stdout to contain stdout_msg.\nstdout: ${LAST_STDOUT}\nstderr: ${LAST_STDERR}"
+        return 0
+    fi
+
+    record_pass "${demo_name}"
+}
+
+demo_sequential() {
+    local demo_name="7) Sequential"
+
+    if macos_os_backend_skip_reason; then
+        record_skip "${demo_name}" "${MACOS_OS_SKIP_REASON}"
+        return 0
+    fi
+
+    if ! run_cli_json run --backend os --command "/bin/echo first"; then
+        record_fail "${demo_name}" "$(command_failure_detail)"
+        return 0
+    fi
+
+    assert_json_equals "${demo_name}" "exit_code" "0" || return 0
+
+    if ! run_cli_json run --backend os --command "/bin/echo second"; then
+        record_fail "${demo_name}" "$(command_failure_detail)"
+        return 0
+    fi
+
+    assert_json_equals "${demo_name}" "exit_code" "0" || return 0
+
+    record_pass "${demo_name}"
+}
+
 demo_summary() {
-    local demo_name="4) Summary"
+    local demo_name="8) Summary"
 
     log "Summary: ${PASSED_COUNT} passed, ${SKIPPED_COUNT} skipped, ${FAILED_COUNT} failed"
     record_pass "${demo_name}"
@@ -361,6 +466,10 @@ main() {
     demo_os_auto_routing
     demo_wasm_sandbox
     demo_security_block
+    demo_timeout
+    demo_exit_code
+    demo_stderr
+    demo_sequential
     demo_summary
 
     log "Final result: ${PASSED_COUNT} passed, ${SKIPPED_COUNT} skipped, ${FAILED_COUNT} failed"
