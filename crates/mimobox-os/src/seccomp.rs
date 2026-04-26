@@ -78,7 +78,7 @@ const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
 const PR_CAPBSET_READ: u32 = 23;
 const PRCTL_ALLOWED_OPS: &[u32] = &[PR_CAPBSET_READ];
 
-// FUTEX 允许的操作（arg0 约束）
+// FUTEX 允许的操作（arg1 约束：futex_op 是第二个参数）
 // 仅允许常见的等待/唤醒操作，防止 FUTEX_REQUEUE 等可能导致内核资源耗尽的操作。
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
@@ -830,11 +830,11 @@ fn build_prctl_arg_check_block() -> Vec<SockFilter> {
 fn build_futex_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(FUTEX_ALLOWED_OPS.len() + 5);
 
-    // op 按 seccomp_data arg0 读取；高 32 位非零视为非法扩展。
-    block.push(load_abs(seccomp_arg_hi_offset(0)));
+    // futex_op 是第二个参数（args[1]），高 32 位非零视为非法扩展。
+    block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_KILL_PROCESS));
-    block.push(load_abs(seccomp_arg_lo_offset(0)));
+    block.push(load_abs(seccomp_arg_lo_offset(1)));
 
     for (index, &op) in FUTEX_ALLOWED_OPS.iter().enumerate() {
         let instructions_to_skip = (FUTEX_ALLOWED_OPS.len() - index) as u8;
@@ -1286,36 +1286,36 @@ mod tests {
     fn test_futex_constraint_allows_only_whitelisted_ops() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        let futex_wait = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT as u64);
+        let futex_wait = FakeSeccompData::new(FUTEX).with_arg(1, FUTEX_WAIT as u64);
         assert_eq!(run_bpf(&program, futex_wait), SECCOMP_RET_ALLOW);
 
-        let futex_wake = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAKE as u64);
+        let futex_wake = FakeSeccompData::new(FUTEX).with_arg(1, FUTEX_WAKE as u64);
         assert_eq!(run_bpf(&program, futex_wake), SECCOMP_RET_ALLOW);
 
-        let futex_wait_private = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT_PRIVATE as u64);
+        let futex_wait_private = FakeSeccompData::new(FUTEX).with_arg(1, FUTEX_WAIT_PRIVATE as u64);
         assert_eq!(run_bpf(&program, futex_wait_private), SECCOMP_RET_ALLOW);
 
-        let futex_wake_private = FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAKE_PRIVATE as u64);
+        let futex_wake_private = FakeSeccompData::new(FUTEX).with_arg(1, FUTEX_WAKE_PRIVATE as u64);
         assert_eq!(run_bpf(&program, futex_wake_private), SECCOMP_RET_ALLOW);
 
         let futex_wait_bitset_private =
-            FakeSeccompData::new(FUTEX).with_arg(0, FUTEX_WAIT_BITSET_PRIVATE as u64);
+            FakeSeccompData::new(FUTEX).with_arg(1, FUTEX_WAIT_BITSET_PRIVATE as u64);
         assert_eq!(
             run_bpf(&program, futex_wait_bitset_private),
             SECCOMP_RET_ALLOW
         );
 
-        let futex_requeue = FakeSeccompData::new(FUTEX).with_arg(0, 3);
+        let futex_requeue = FakeSeccompData::new(FUTEX).with_arg(1, 3);
         assert_eq!(run_bpf(&program, futex_requeue), SECCOMP_RET_KILL_PROCESS);
 
-        let futex_cmp_requeue = FakeSeccompData::new(FUTEX).with_arg(0, 4);
+        let futex_cmp_requeue = FakeSeccompData::new(FUTEX).with_arg(1, 4);
         assert_eq!(
             run_bpf(&program, futex_cmp_requeue),
             SECCOMP_RET_KILL_PROCESS
         );
 
         let high_bits_set =
-            FakeSeccompData::new(FUTEX).with_arg(0, (1_u64 << 32) | FUTEX_WAIT as u64);
+            FakeSeccompData::new(FUTEX).with_arg(1, (1_u64 << 32) | FUTEX_WAIT as u64);
         assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
     }
 
