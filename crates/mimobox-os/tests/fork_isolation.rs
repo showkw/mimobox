@@ -9,8 +9,7 @@ mod fork_isolation_tests {
 
     fn isolated_config(readwrite_paths: Vec<PathBuf>) -> SandboxConfig {
         let mut config = SandboxConfig::default();
-        // 清空用户配置的只读路径，验证每个沙箱实例只获得自己声明的读写目录。
-        config.fs_readonly = vec![];
+        // 保留默认只读路径（/usr, /lib, /bin 等系统目录），仅覆盖读写目录。
         config.fs_readwrite = readwrite_paths;
         config.timeout_secs = Some(10);
         config.seccomp_profile = SeccompProfile::Essential;
