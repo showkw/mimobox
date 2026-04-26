@@ -2161,6 +2161,63 @@ mod tests {
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_list_dir_returns_entries() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        std::fs::write(temp_dir.path().join("entry.txt"), "test").expect("写入测试文件失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+
+        let entries = sandbox
+            .list_dir(&temp_dir.path().to_string_lossy())
+            .expect("list_dir 应成功");
+
+        assert!(
+            entries.iter().any(|entry| entry.name == "entry.txt"),
+            "返回结果应包含测试文件: {entries:?}"
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_list_dir_nonexistent_returns_error() {
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+
+        let result = sandbox.list_dir("/nonexistent/path");
+
+        assert!(result.is_err(), "不存在路径应返回错误");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_list_dir_file_path_returns_error() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("not-a-directory.txt");
+        std::fs::write(&file_path, "test").expect("写入测试文件失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let result = sandbox.list_dir(&file_path.to_string_lossy());
+
+        assert!(result.is_err(), "文件路径应返回错误");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_list_dir_empty_directory_returns_empty() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let entries = sandbox
+            .list_dir(&temp_dir.path().to_string_lossy())
+            .expect("list_dir 空目录应成功");
+
+        assert!(entries.is_empty(), "空目录应返回空 Vec");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     #[test]
     fn create_pty_microvm_is_rejected() {

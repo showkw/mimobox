@@ -31,6 +31,15 @@ async fn call_tool(name: &str, arguments: Value) -> Result<CallToolResult> {
     Ok(result)
 }
 
+async fn call_tool_with_client(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: Value,
+) -> Result<CallToolResult> {
+    let params = CallToolRequestParams::new(name.to_string()).with_arguments(to_object(arguments));
+    Ok(client.peer().call_tool(params).await?)
+}
+
 fn to_object(value: Value) -> JsonObject {
     match value {
         Value::Object(object) => object,
@@ -122,5 +131,83 @@ async fn test_execute_code_ephemeral() -> Result<()> {
         "execute_code should return stdout or a recognizable sandbox result: {text}"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_dir_ephemeral() -> Result<()> {
+    let result = call_tool("list_dir", json!({ "sandbox_id": 999, "path": "/tmp" })).await?;
+    let text = result_text(&result).to_ascii_lowercase();
+
+    assert!(
+        result.is_error == Some(true) || text.contains("not found"),
+        "未创建沙箱时 list_dir 应返回错误或 not found 文案: {text}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_dir_with_sandbox() -> Result<()> {
+    let client = setup_client().await?;
+    let create_result = call_tool_with_client(&client, "create_sandbox", json!({})).await?;
+    let sandbox_id = create_result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("sandbox_id"))
+        .and_then(Value::as_u64)
+        .expect("create_sandbox 应返回 sandbox_id");
+
+    let result = call_tool_with_client(
+        &client,
+        "list_dir",
+        json!({ "sandbox_id": sandbox_id, "path": "/tmp" }),
+    )
+    .await?;
+    let text = result_text(&result);
+
+    assert_eq!(result.is_error, Some(false));
+    assert!(text.contains("entries"), "返回内容缺少 entries: {text}");
+    assert!(
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|content| content.get("entries"))
+            .is_some(),
+        "结构化返回缺少 entries: {text}"
+    );
+
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_dir_nonexistent_path() -> Result<()> {
+    let client = setup_client().await?;
+    let create_result = call_tool_with_client(&client, "create_sandbox", json!({})).await?;
+    let sandbox_id = create_result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("sandbox_id"))
+        .and_then(Value::as_u64)
+        .expect("create_sandbox 应返回 sandbox_id");
+
+    let result = call_tool_with_client(
+        &client,
+        "list_dir",
+        json!({ "sandbox_id": sandbox_id, "path": "/nonexistent/path/abc123" }),
+    )
+    .await?;
+    let text = result_text(&result).to_ascii_lowercase();
+
+    assert!(
+        result.is_error == Some(true)
+            || text.contains("not found")
+            || text.contains("no such file")
+            || text.contains("不存在"),
+        "不存在路径应返回错误: {text}"
+    );
+
+    client.cancel().await?;
     Ok(())
 }

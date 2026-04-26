@@ -144,6 +144,69 @@ mod linux_backend_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_linux_list_dir_returns_entries() -> Result<(), Box<dyn Error>> {
+        let temp_dir = TempDir::new()?;
+        std::fs::write(temp_dir.path().join("entry.txt"), "test")?;
+        let mut sandbox = LinuxSandbox::new(linux_config())?;
+
+        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == "entry.txt")
+            .expect("返回结果应包含测试文件");
+        assert_eq!(entry.name, "entry.txt");
+        assert!(matches!(
+            entry.file_type,
+            mimobox_core::FileType::File
+                | mimobox_core::FileType::Dir
+                | mimobox_core::FileType::Symlink
+                | mimobox_core::FileType::Other
+        ));
+        let _size = entry.size;
+        let _is_symlink = entry.is_symlink;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linux_list_dir_nonexistent_path_returns_error() -> Result<(), Box<dyn Error>> {
+        let mut sandbox = LinuxSandbox::new(linux_config())?;
+
+        let result = sandbox.list_dir("/nonexistent/path/abc123");
+
+        assert!(result.is_err(), "不存在路径应返回错误");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linux_list_dir_file_path_returns_error() -> Result<(), Box<dyn Error>> {
+        let temp_dir = TempDir::new()?;
+        let file_path = temp_dir.path().join("not-a-directory.txt");
+        std::fs::write(&file_path, "test")?;
+        let mut sandbox = LinuxSandbox::new(linux_config())?;
+
+        let result = sandbox.list_dir(&file_path.to_string_lossy());
+
+        assert!(result.is_err(), "文件路径应返回错误");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linux_list_dir_empty_directory_returns_empty() -> Result<(), Box<dyn Error>> {
+        let temp_dir = TempDir::new()?;
+        let mut sandbox = LinuxSandbox::new(linux_config())?;
+
+        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+
+        assert!(entries.is_empty(), "空目录应返回空 Vec");
+
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -286,6 +349,83 @@ mod macos_backend_tests {
 
         assert!(result.exit_code != Some(0));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_macos_list_dir_returns_entries() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
+        let temp_dir = TempDir::new()?;
+        std::fs::write(temp_dir.path().join("entry.txt"), "test")?;
+        let mut sandbox = MacOsSandbox::new(macos_config())?;
+
+        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == "entry.txt")
+            .expect("返回结果应包含测试文件");
+        assert_eq!(entry.name, "entry.txt");
+        assert!(matches!(
+            entry.file_type,
+            mimobox_core::FileType::File
+                | mimobox_core::FileType::Dir
+                | mimobox_core::FileType::Symlink
+                | mimobox_core::FileType::Other
+        ));
+        let _size = entry.size;
+        let _is_symlink = entry.is_symlink;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_macos_list_dir_nonexistent_path_returns_error() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
+        let mut sandbox = MacOsSandbox::new(macos_config())?;
+
+        let result = sandbox.list_dir("/nonexistent/path/abc123");
+
+        assert!(result.is_err(), "不存在路径应返回错误");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_macos_list_dir_file_path_returns_error() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
+        let temp_dir = TempDir::new()?;
+        let file_path = temp_dir.path().join("not-a-directory.txt");
+        std::fs::write(&file_path, "test")?;
+        let mut sandbox = MacOsSandbox::new(macos_config())?;
+
+        let result = sandbox.list_dir(&file_path.to_string_lossy());
+
+        assert!(result.is_err(), "文件路径应返回错误");
+        Ok(())
+    }
+
+    #[test]
+    fn test_macos_list_dir_empty_directory_returns_empty() -> Result<(), Box<dyn Error>> {
+        if should_skip_runtime_tests() {
+            return Ok(());
+        }
+
+        let temp_dir = TempDir::new()?;
+        let mut sandbox = MacOsSandbox::new(macos_config())?;
+
+        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+
+        assert!(entries.is_empty(), "空目录应返回空 Vec");
         Ok(())
     }
 }
