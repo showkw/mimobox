@@ -21,6 +21,10 @@ struct Cli {
     /// HTTP 绑定地址（仅 HTTP 模式，默认仅允许本地访问）
     #[arg(long, default_value = "127.0.0.1")]
     bind_addr: String,
+
+    /// CORS 允许的 origin 列表，逗号分隔，如 'http://localhost:3000,http://localhost:8080'。默认限制为 localhost。
+    #[arg(long)]
+    allowed_origins: Option<String>,
 }
 
 #[tokio::main]
@@ -38,7 +42,7 @@ async fn main() -> AppResult<()> {
 
     match cli.transport.as_str() {
         "stdio" => run_stdio().await,
-        "http" => http::run_http_server(&cli.bind_addr, port).await,
+        "http" => http::run_http_server(&cli.bind_addr, port, cli.allowed_origins).await,
         _ => {
             tracing::error!("不支持的传输模式: {}，请使用 stdio 或 http", cli.transport);
             std::process::exit(1);

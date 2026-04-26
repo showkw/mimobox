@@ -9,7 +9,7 @@ use std::{
 use axum::{
     Router,
     body::Body,
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::Response,
@@ -24,11 +24,17 @@ use tokio::signal::unix::{SignalKind, signal};
 type HttpResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
+type AllowedOrigins = Arc<Vec<String>>;
 
 const MAX_CONCURRENT_SESSIONS: usize = 100;
+const WILDCARD_ORIGIN: &str = "*";
 
 /// 启动 MCP HTTP 服务器。
-pub async fn run_http_server(bind_addr: &str, port: u16) -> HttpResult<()> {
+pub async fn run_http_server(
+    bind_addr: &str,
+    port: u16,
+    allowed_origins: Option<String>,
+) -> HttpResult<()> {
     tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
     if !is_local_bind_addr(bind_addr) {
         tracing::warn!(
@@ -37,11 +43,16 @@ pub async fn run_http_server(bind_addr: &str, port: u16) -> HttpResult<()> {
         );
     }
 
+    let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
     let server_registry = Arc::new(Mutex::new(Vec::new()));
     let service = create_mcp_service(server_registry.clone(), bind_addr);
-    let app = Router::new()
-        .route_service("/mcp", service)
-        .layer(axum::middleware::from_fn(cors_middleware));
+    let app =
+        Router::new()
+            .route_service("/mcp", service)
+            .layer(axum::middleware::from_fn_with_state(
+                allowed_origins,
+                cors_middleware,
+            ));
 
     let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
     let local_addr = listener.local_addr()?;
@@ -116,6 +127,64 @@ fn allowed_hosts(bind_addr: &str) -> Vec<String> {
     hosts
 }
 
+fn parse_allowed_origins(allowed_origins: Option<String>) -> Vec<String> {
+    match allowed_origins {
+        Some(origins) if origins.contains(WILDCARD_ORIGIN) => {
+            tracing::warn!("CORS 配置为完全开放模式(*)，请勿在生产环境使用");
+            vec![WILDCARD_ORIGIN.to_string()]
+        }
+        Some(origins) => {
+            let parsed = origins
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            warn_non_local_origins(&parsed);
+            parsed
+        }
+        None => vec![
+            "http://localhost".to_string(),
+            "http://127.0.0.1".to_string(),
+        ],
+    }
+}
+
+fn warn_non_local_origins(origins: &[String]) {
+    for origin in origins {
+        if !is_local_origin(origin) {
+            tracing::warn!(origin, "CORS 允许非本地 origin，请确认仅用于受信客户端");
+        }
+    }
+}
+
+fn is_local_origin(origin: &str) -> bool {
+    let Some(host_part) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+
+    let host_with_port = match host_part.split('/').next() {
+        Some(host_with_port) => host_with_port,
+        None => host_part,
+    };
+    let host = if let Some(ipv6_part) = host_with_port.strip_prefix('[') {
+        match ipv6_part.split_once(']') {
+            Some((host, _)) => host,
+            None => host_with_port,
+        }
+    } else {
+        match host_with_port.split_once(':') {
+            Some((host, _)) => host,
+            None => host_with_port,
+        }
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 async fn cleanup_registered_servers(server_registry: ServerRegistry) {
     let servers = match server_registry.lock() {
         Ok(mut servers) => std::mem::take(&mut *servers),
@@ -130,28 +199,65 @@ async fn cleanup_registered_servers(server_registry: ServerRegistry) {
     }
 }
 
-async fn cors_middleware(req: Request, next: Next) -> Response {
+async fn cors_middleware(
+    State(allowed_origins): State<AllowedOrigins>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let allowed_origin = allowed_origin_header(req.headers(), allowed_origins.as_slice()).cloned();
+
     if req.method() == Method::OPTIONS {
-        return cors_response();
+        return cors_response(allowed_origin.as_ref());
     }
 
     let mut response = next.run(req).await;
-    apply_cors_headers(response.headers_mut());
+    apply_cors_headers(response.headers_mut(), allowed_origin.as_ref());
     response
 }
 
-fn cors_response() -> Response {
+fn cors_response(allowed_origin: Option<&HeaderValue>) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::OK;
-    apply_cors_headers(response.headers_mut());
+    apply_cors_headers(response.headers_mut(), allowed_origin);
     response
 }
 
-fn apply_cors_headers(headers: &mut HeaderMap) {
-    headers.insert(
-        HeaderName::from_static("access-control-allow-origin"),
-        HeaderValue::from_static("*"),
-    );
+fn allowed_origin_header<'a>(
+    headers: &'a HeaderMap,
+    allowed_origins: &[String],
+) -> Option<&'a HeaderValue> {
+    let origin = headers.get(HeaderName::from_static("origin"))?;
+    if is_origin_allowed(origin, allowed_origins) {
+        Some(origin)
+    } else {
+        None
+    }
+}
+
+fn is_origin_allowed(origin: &HeaderValue, allowed_origins: &[String]) -> bool {
+    if allowed_origins
+        .iter()
+        .any(|allowed_origin| allowed_origin == WILDCARD_ORIGIN)
+    {
+        return true;
+    }
+
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+
+    allowed_origins
+        .iter()
+        .any(|allowed_origin| allowed_origin == origin)
+}
+
+fn apply_cors_headers(headers: &mut HeaderMap, allowed_origin: Option<&HeaderValue>) {
+    if let Some(origin) = allowed_origin {
+        headers.insert(
+            HeaderName::from_static("access-control-allow-origin"),
+            origin.clone(),
+        );
+    }
     headers.insert(
         HeaderName::from_static("access-control-allow-methods"),
         HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
