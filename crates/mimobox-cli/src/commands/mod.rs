@@ -21,12 +21,16 @@ use std::time::Duration;
 
 use clap::{ArgAction, Args, ValueEnum};
 use mimobox_core::{SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use mimobox_sdk::Sandbox as SdkSandbox;
 use mimobox_sdk::{
     Config as SdkConfig, ExecuteResult as SdkExecuteResult, IsolationLevel as SdkIsolationLevel,
     NetworkPolicy as SdkNetworkPolicy,
 };
 use serde::Serialize;
 use thiserror::Error;
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use tracing::warn;
 
 use crate::{DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECS};
 
