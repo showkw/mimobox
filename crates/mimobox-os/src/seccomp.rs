@@ -37,8 +37,10 @@ const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
 // Seccomp 返回值
-// IMPORTANT-01 修复：使用 KILL_PROCESS 替代 KILL_THREAD，确保整个进程树被终止
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
+// TRAP 模式：向进程发送 SIGSYS 信号，允许注册信号处理器记录审计日志。
+// 对标 Firecracker/gVisor 的 TRAP 模式，提升可审计性和调试友好度。
+// 与 KILL_PROCESS 的区别：TRAP 允许进程在终止前执行信号处理器记录被阻止的 syscall 信息。
+const SECCOMP_RET_TRAP: u32 = 0x00030000;
 const SECCOMP_RET_ALLOW: u32 = 0x7FFF0000;
 
 // seccomp_data 偏移量
@@ -791,30 +793,30 @@ fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
     // domain 是 int 参数。低 32 位必须命中白名单，高 32 位必须为 0。
     block.push(load_abs(seccomp_arg_hi_offset(0)));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(0)));
 
     if allow_inet {
         block.push(jump_eq(AF_UNIX, 2, 0));
         block.push(jump_eq(AF_INET, 1, 0));
-        block.push(ret(SECCOMP_RET_KILL_PROCESS));
+        block.push(ret(SECCOMP_RET_TRAP));
     } else {
         block.push(jump_eq(AF_UNIX, 1, 0));
-        block.push(ret(SECCOMP_RET_KILL_PROCESS));
+        block.push(ret(SECCOMP_RET_TRAP));
     }
 
     // type 必须是 SOCK_STREAM 加上 CLOEXEC/NONBLOCK 的任意组合。
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(1)));
     block.push(alu_and(!SOCK_ALLOWED_TYPE_MASK));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(1)));
     block.push(alu_and(SOCK_STREAM));
     block.push(jump_eq(SOCK_STREAM, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(ret(SECCOMP_RET_ALLOW));
 
     block
@@ -826,7 +828,7 @@ fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
     // request 是 ioctl 的第二个参数。只接受 x86_64 终端相关 request code。
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(1)));
 
     for (index, &request) in IOCTL_ALLOWED_REQUESTS.iter().enumerate() {
@@ -834,7 +836,7 @@ fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
         block.push(jump_eq(request, instructions_to_skip, 0));
     }
 
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(ret(SECCOMP_RET_ALLOW));
     block
 }
@@ -845,7 +847,7 @@ fn build_prctl_arg_check_block() -> Vec<SockFilter> {
     // op 是 prctl 的第一个参数（arg0）。只允许 PR_CAPBSET_READ 等只读查询操作。
     block.push(load_abs(seccomp_arg_hi_offset(0)));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(0)));
 
     for (index, &op) in PRCTL_ALLOWED_OPS.iter().enumerate() {
@@ -853,7 +855,7 @@ fn build_prctl_arg_check_block() -> Vec<SockFilter> {
         block.push(jump_eq(op, instructions_to_skip, 0));
     }
 
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(ret(SECCOMP_RET_ALLOW));
     block
 }
@@ -864,7 +866,7 @@ fn build_futex_arg_check_block() -> Vec<SockFilter> {
     // futex_op 是第二个参数（args[1]），高 32 位非零视为非法扩展。
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(load_abs(seccomp_arg_lo_offset(1)));
 
     for (index, &op) in FUTEX_ALLOWED_OPS.iter().enumerate() {
@@ -872,7 +874,7 @@ fn build_futex_arg_check_block() -> Vec<SockFilter> {
         block.push(jump_eq(op, instructions_to_skip, 0));
     }
 
-    block.push(ret(SECCOMP_RET_KILL_PROCESS));
+    block.push(ret(SECCOMP_RET_TRAP));
     block.push(ret(SECCOMP_RET_ALLOW));
     block
 }
@@ -882,10 +884,10 @@ fn build_clone_arg_check_block() -> Vec<SockFilter> {
         // flags 是 unsigned long；高 32 位不应携带额外 flag。
         load_abs(seccomp_arg_hi_offset(0)),
         jump_eq(0, 1, 0),
-        ret(SECCOMP_RET_KILL_PROCESS),
+        ret(SECCOMP_RET_TRAP),
         load_abs(seccomp_arg_lo_offset(0)),
         jump_set(CLONE_NAMESPACE_MASK, 0, 1),
-        ret(SECCOMP_RET_KILL_PROCESS),
+        ret(SECCOMP_RET_TRAP),
         ret(SECCOMP_RET_ALLOW),
     ]
 }
@@ -895,14 +897,14 @@ fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
         // flags 是 int 参数；高 32 位不应携带额外 flag。
         load_abs(seccomp_arg_hi_offset(3)),
         jump_eq(0, 1, 0),
-        ret(SECCOMP_RET_KILL_PROCESS),
+        ret(SECCOMP_RET_TRAP),
         // 加载 flags 低 32 位。
         load_abs(seccomp_arg_lo_offset(3)),
         // 必须包含 MAP_PRIVATE 或 MAP_SHARED，否则拒绝 mmap。
         alu_and(MAP_PRIVATE | MAP_SHARED),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_ALLOW),
-        ret(SECCOMP_RET_KILL_PROCESS),
+        ret(SECCOMP_RET_TRAP),
     ]
 }
 
@@ -923,13 +925,13 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
 ///
 /// ```text
 /// [0]     Load seccomp_data.arch
-/// [1]     If arch == AUDIT_ARCH_X86_64, skip KILL and continue
-/// [2]     KILL_PROCESS
+/// [1]     If arch == AUDIT_ARCH_X86_64, skip TRAP and continue
+/// [2]     TRAP
 /// [3]     Load seccomp_data.nr
 /// [4..]   Syscall allowlist chain
 ///         - constrained syscall: JEQ -> inline argument block, JF skips the block
 ///         - unconstrained syscall: JEQ -> shared ALLOW
-/// [N-2]   KILL_PROCESS (default)
+/// [N-2]   TRAP (default)
 /// [N-1]   ALLOW
 /// ```
 fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec<SockFilter> {
@@ -939,7 +941,7 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
     // 架构校验必须在读取 syscall number 前执行，避免跨架构 syscall 号绕过。
     prog.push(load_abs(SECCOMP_DATA_ARCH));
     prog.push(jump_eq(AUDIT_ARCH_X86_64, 1, 0));
-    prog.push(ret(SECCOMP_RET_KILL_PROCESS));
+    prog.push(ret(SECCOMP_RET_TRAP));
     prog.push(load_abs(SECCOMP_DATA_NR));
 
     for &syscall_nr in allowed {
@@ -960,7 +962,7 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
         }
     }
 
-    prog.push(ret(SECCOMP_RET_KILL_PROCESS));
+    prog.push(ret(SECCOMP_RET_TRAP));
     let allow_index = prog.len();
     prog.push(ret(SECCOMP_RET_ALLOW));
 
@@ -1070,7 +1072,7 @@ mod tests {
         FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
         MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, SECCOMP_DATA_ARCH,
         SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR, SECCOMP_RET_ALLOW,
-        SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM, SeccompArgConstraint,
+        SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM, SeccompArgConstraint,
         SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints, build_bpf_program,
         essential_syscalls, fork_allowed_syscalls, network_syscalls,
     };
@@ -1246,13 +1248,13 @@ mod tests {
         assert_eq!(program[0].code, BPF_LD | BPF_W | BPF_ABS);
         assert_eq!(program[0].k, SECCOMP_DATA_ARCH);
         assert_eq!(program[1], super::jump_eq(AUDIT_ARCH_X86_64, 1, 0));
-        assert_eq!(program[2], super::ret(SECCOMP_RET_KILL_PROCESS));
+        assert_eq!(program[2], super::ret(SECCOMP_RET_TRAP));
 
         let wrong_arch = FakeSeccompData::new(READ).with_arch(0);
         assert_eq!(
             run_bpf(&program, wrong_arch),
-            SECCOMP_RET_KILL_PROCESS,
-            "arch 不匹配时必须直接 kill"
+            SECCOMP_RET_TRAP,
+            "arch 不匹配时必须触发 SIGSYS"
         );
     }
 
@@ -1273,20 +1275,17 @@ mod tests {
         let inet6_stream = FakeSeccompData::new(SOCKET)
             .with_arg(0, 10)
             .with_arg(1, SOCK_STREAM as u64);
-        assert_eq!(run_bpf(&program, inet6_stream), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, inet6_stream), SECCOMP_RET_TRAP);
 
         let datagram = FakeSeccompData::new(SOCKET)
             .with_arg(0, AF_INET as u64)
             .with_arg(1, 2);
-        assert_eq!(run_bpf(&program, datagram), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, datagram), SECCOMP_RET_TRAP);
 
         let unknown_type_flag = FakeSeccompData::new(SOCKET)
             .with_arg(0, AF_INET as u64)
             .with_arg(1, (SOCK_STREAM | 0x10) as u64);
-        assert_eq!(
-            run_bpf(&program, unknown_type_flag),
-            SECCOMP_RET_KILL_PROCESS
-        );
+        assert_eq!(run_bpf(&program, unknown_type_flag), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1305,7 +1304,7 @@ mod tests {
         let inet_stream = FakeSeccompData::new(SOCKET)
             .with_arg(0, AF_INET as u64)
             .with_arg(1, SOCK_STREAM as u64);
-        assert_eq!(run_bpf(&program, inet_stream), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, inet_stream), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1325,10 +1324,10 @@ mod tests {
         assert_eq!(run_bpf(&program, tiocspgrp_request), SECCOMP_RET_ALLOW);
 
         let tiocsti_request = FakeSeccompData::new(IOCTL).with_arg(1, 0x5412);
-        assert_eq!(run_bpf(&program, tiocsti_request), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, tiocsti_request), SECCOMP_RET_TRAP);
 
         let high_bits_set = FakeSeccompData::new(IOCTL).with_arg(1, (1_u64 << 32) | TCGETS as u64);
-        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1355,17 +1354,14 @@ mod tests {
         );
 
         let futex_requeue = FakeSeccompData::new(FUTEX).with_arg(1, 3);
-        assert_eq!(run_bpf(&program, futex_requeue), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, futex_requeue), SECCOMP_RET_TRAP);
 
         let futex_cmp_requeue = FakeSeccompData::new(FUTEX).with_arg(1, 4);
-        assert_eq!(
-            run_bpf(&program, futex_cmp_requeue),
-            SECCOMP_RET_KILL_PROCESS
-        );
+        assert_eq!(run_bpf(&program, futex_cmp_requeue), SECCOMP_RET_TRAP);
 
         let high_bits_set =
             FakeSeccompData::new(FUTEX).with_arg(1, (1_u64 << 32) | FUTEX_WAIT as u64);
-        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1376,13 +1372,13 @@ mod tests {
         assert_eq!(run_bpf(&program, sigchld_only), SECCOMP_RET_ALLOW);
 
         let newnet = FakeSeccompData::new(CLONE).with_arg(0, 0x4000_0000);
-        assert_eq!(run_bpf(&program, newnet), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, newnet), SECCOMP_RET_TRAP);
 
         let namespace_mask = FakeSeccompData::new(CLONE).with_arg(0, CLONE_NAMESPACE_MASK as u64);
-        assert_eq!(run_bpf(&program, namespace_mask), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, namespace_mask), SECCOMP_RET_TRAP);
 
         let high_bits_set = FakeSeccompData::new(CLONE).with_arg(0, 1_u64 << 32);
-        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1409,17 +1405,17 @@ mod tests {
     fn test_mmap_constraint_blocks_no_private_nor_shared() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // flags=0（无 MAP_PRIVATE 也无 MAP_SHARED）-> KILL
+        // flags=0（无 MAP_PRIVATE 也无 MAP_SHARED）-> TRAP
         let no_flags = FakeSeccompData::new(MMAP).with_arg(3, 0);
-        assert_eq!(run_bpf(&program, no_flags), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, no_flags), SECCOMP_RET_TRAP);
     }
 
     #[test]
     fn test_mmap_constraint_blocks_high_bits() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // 高 32 位非零 -> KILL
+        // 高 32 位非零 -> TRAP
         let high_bits = FakeSeccompData::new(MMAP).with_arg(3, (1_u64 << 32) | MAP_PRIVATE as u64);
-        assert_eq!(run_bpf(&program, high_bits), SECCOMP_RET_KILL_PROCESS);
+        assert_eq!(run_bpf(&program, high_bits), SECCOMP_RET_TRAP);
     }
 }
