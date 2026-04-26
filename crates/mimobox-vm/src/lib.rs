@@ -23,6 +23,7 @@
 //! executed by the host-side proxy rather than by giving the guest direct network
 //! access.
 
+mod guest_file_ops;
 mod http_proxy;
 /// Thread-safe microVM prewarm pool types.
 pub mod pool;

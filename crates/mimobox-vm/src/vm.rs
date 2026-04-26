@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SandboxSnapshot};
+use mimobox_core::{
+    DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult, SandboxSnapshot,
+};
 use tracing::debug;
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse};
@@ -788,6 +790,41 @@ impl MicrovmSandbox {
         self.with_ready_state("write_file", |backend| backend.write_file(path, data))
     }
 
+    /// Lists directory entries from the guest filesystem.
+    pub fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, MicrovmError> {
+        self.with_ready_state("list_dir", |backend| {
+            crate::guest_file_ops::list_dir(path, |cmd| backend.run_command(cmd))
+        })
+    }
+
+    /// Returns whether a guest path exists.
+    pub fn file_exists(&mut self, path: &str) -> Result<bool, MicrovmError> {
+        self.with_ready_state("file_exists", |backend| {
+            crate::guest_file_ops::file_exists(path, |cmd| backend.run_command(cmd))
+        })
+    }
+
+    /// Removes a guest file.
+    pub fn remove_file(&mut self, path: &str) -> Result<(), MicrovmError> {
+        self.with_ready_state("remove_file", |backend| {
+            crate::guest_file_ops::remove_file(path, |cmd| backend.run_command(cmd))
+        })
+    }
+
+    /// Renames or moves a guest file.
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), MicrovmError> {
+        self.with_ready_state("rename", |backend| {
+            crate::guest_file_ops::rename(from, to, |cmd| backend.run_command(cmd))
+        })
+    }
+
+    /// Returns guest file metadata.
+    pub fn stat(&mut self, path: &str) -> Result<FileStat, MicrovmError> {
+        self.with_ready_state("stat", |backend| {
+            crate::guest_file_ops::stat(path, |cmd| backend.run_command(cmd))
+        })
+    }
+
     /// Waits until the microVM is responsive.
     ///
     /// Readiness is verified with the guest command loop `PING`/`PONG` protocol. A
@@ -939,6 +976,26 @@ impl Sandbox for MicrovmSandbox {
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         MicrovmSandbox::write_file(self, path, data).map_err(SandboxError::from)
+    }
+
+    fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
+        MicrovmSandbox::list_dir(self, path).map_err(SandboxError::from)
+    }
+
+    fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError> {
+        MicrovmSandbox::file_exists(self, path).map_err(SandboxError::from)
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), SandboxError> {
+        MicrovmSandbox::remove_file(self, path).map_err(SandboxError::from)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError> {
+        MicrovmSandbox::rename(self, from, to).map_err(SandboxError::from)
+    }
+
+    fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError> {
+        MicrovmSandbox::stat(self, path).map_err(SandboxError::from)
     }
 
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError> {
