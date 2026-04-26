@@ -50,6 +50,13 @@ cargo build --release -p mimobox-cli --features mimobox-cli/wasm
 mimobox run --backend auto --command "/bin/echo hello"
 ```
 
+### MCP Server
+
+```bash
+mimobox-mcp                              # stdio mode (default)
+mimobox-mcp --transport http --port 8080 # Streamable HTTP mode
+```
+
 ### Python
 
 ```python
@@ -58,6 +65,14 @@ from mimobox import Sandbox
 with Sandbox() as sandbox:
     result = sandbox.execute("/bin/echo hello")
     print(result.stdout, end="")
+```
+
+```python
+# File API
+with Sandbox() as sandbox:
+    sandbox.write_file("/tmp/hello.py", "print('hello')")
+    result = sandbox.execute("python3 /tmp/hello.py")
+    entries = sandbox.list_dir("/tmp")
 ```
 
 ### Rust
@@ -122,7 +137,7 @@ mimobox/
 │   ├── mimobox-vm/         # KVM microVM backend, pools, snapshot, fork
 │   ├── mimobox-sdk/        # Unified Rust SDK and smart routing
 │   ├── mimobox-cli/        # CLI entrypoint
-│   ├── mimobox-mcp/        # MCP server over stdio
+│   ├── mimobox-mcp/        # MCP server (stdio + Streamable HTTP)
 │   └── mimobox-python/     # Python SDK via PyO3
 ├── docs/                   # User, API, architecture, MCP, and performance docs
 ├── discuss/                # Design notes, reviews, and market analysis
@@ -139,7 +154,7 @@ mimobox/
 | --- | --- | --- |
 | Completed | Unified SDK + smart routing | `Sandbox::new()` and CLI `--backend auto` are implemented |
 | Completed | OS + Wasm + microVM isolation | Linux KVM, snapshot, restore, and fork are verifiable |
-| Completed | MCP Server | 10 stdio tools for lifecycle, execution, files, snapshots, fork, and HTTP |
+| Completed | MCP Server | 10 tools over stdio + Streamable HTTP for lifecycle, execution, files, snapshots, fork, and HTTP proxy; parameter-level Seccomp constraints |
 | Completed | Python SDK | PyO3 bindings with execution, streaming, files, HTTP, snapshot, and errors |
 | Planned | Formal vsock data plane | Serial remains the bring-up/control path; vsock is the future data plane |
 | Planned | Windows backend + GPU/SaaS options | Current priority remains Linux and macOS maturity |
