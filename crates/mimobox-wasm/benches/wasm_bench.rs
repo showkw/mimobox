@@ -61,8 +61,8 @@ fn build_noop_module() -> Result<BenchModule, Box<dyn Error>> {
 }
 
 fn wasm_cache_dir() -> PathBuf {
-    let uid = unsafe { libc::geteuid() };
     // SAFETY: geteuid() 是无副作用系统调用，返回当前进程有效 uid。
+    let uid = unsafe { libc::geteuid() };
     std::env::temp_dir().join(format!("mimobox-cache-{}", uid))
 }
 
