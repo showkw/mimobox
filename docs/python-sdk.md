@@ -25,9 +25,11 @@ mimobox_sdk::Sandbox
 The Python SDK supports:
 
 - Basic command execution.
+- Multi-language code execution with `execute_code()`.
 - Command-level environment variable injection and timeouts.
 - Streaming output.
 - microVM file reads and writes.
+- Directory listing with `list_dir()`.
 - microVM snapshots, restoration, and CoW fork.
 - Host-side HTTP proxy.
 - Python exception hierarchy and standard exception mapping.
@@ -71,8 +73,10 @@ Parameters:
 Public methods:
 
 ```python
-execute(command, env=None, timeout=None) -> ExecuteResult
+execute(command, env=None, timeout=None, cwd=None) -> ExecuteResult
+execute_code(language, code, *, env=None, timeout=None, cwd=None) -> ExecuteResult
 stream_execute(command) -> StreamIterator
+list_dir(path) -> list[DirEntry]
 read_file(path) -> bytes
 write_file(path, data: bytes)
 snapshot() -> Snapshot
@@ -80,6 +84,7 @@ fork() -> Sandbox
 http_request(method, url, headers=None, body=None) -> HttpResponse
 wait_ready(timeout_secs=None)
 is_ready() -> bool
+close()
 ```
 
 Class method:
@@ -87,6 +92,57 @@ Class method:
 ```python
 Sandbox.from_snapshot(snapshot) -> Sandbox
 ```
+
+#### execute(command, env=None, timeout=None, cwd=None)
+
+Executes a shell command inside the sandbox.
+
+Parameters:
+
+- `command: str`: Shell command to execute.
+- `env: dict | None`: Optional environment variables to set for the command.
+- `timeout: float | None`: Optional timeout in seconds. Must be > 0 and finite.
+- `cwd: str | None`: Optional working directory for the command. When set, the command runs as `cd <cwd> && <command>`.
+
+Example:
+
+```python
+with Sandbox() as sb:
+    result = sb.execute("ls -la", cwd="/workspace")
+    print(result.stdout)
+```
+
+#### execute_code(language, code, *, env=None, timeout=None, cwd=None)
+
+Executes source code in the specified language inside the sandbox. This is a convenience method that wraps the code in the appropriate interpreter invocation.
+
+Supported languages: `"bash"`, `"sh"`, `"shell"`, `"python"`, `"python3"`, `"py"`, `"javascript"`, `"js"`, `"node"`, `"nodejs"`.
+
+Parameters:
+
+- `language: str`: Programming language name.
+- `code: str`: Source code to execute.
+- `env: dict | None`: Optional environment variables to set for the command.
+- `timeout: float | None`: Optional timeout in seconds. Must be > 0 and finite.
+- `cwd: str | None`: Optional working directory for the command.
+
+Example:
+
+```python
+with Sandbox() as sb:
+    result = sb.execute_code("python", "print(42)")
+    print(result.stdout, end="")
+
+    result = sb.execute_code("bash", "echo hello", timeout=5.0)
+    print(result.stdout, end="")
+
+    result = sb.execute_code("node", "console.log('hi')", cwd="/app")
+    print(result.stdout, end="")
+```
+
+Raises:
+
+- `ValueError`: If the language is not supported.
 
 Context manager:
 
@@ -109,7 +165,18 @@ Attributes:
 - `timed_out: bool`: Whether the execution timed out.
 - `elapsed: float | None`: Execution duration in seconds; `None` when unknown.
 
-### 3.3 `HttpResponse`
+### 3.3 `DirEntry`
+
+A single directory entry returned by `Sandbox.list_dir()`.
+
+Attributes:
+
+- `name: str`: File or directory name.
+- `file_type: str`: Type string: `"file"`, `"dir"`, `"symlink"`, or `"other"`.
+- `size: int`: File size in bytes.
+- `is_symlink: bool`: Whether this entry is a symbolic link.
+
+### 3.4 `HttpResponse`
 
 HTTP proxy response.
 
@@ -119,7 +186,7 @@ Attributes:
 - `headers: dict`: Response headers.
 - `body: bytes`: Raw response body bytes.
 
-### 3.4 `Snapshot`
+### 3.5 `Snapshot`
 
 microVM sandbox snapshot.
 
@@ -127,17 +194,19 @@ Methods:
 
 ```python
 Snapshot.from_bytes(data: bytes) -> Snapshot
+Snapshot.from_file(path: str) -> Snapshot
 to_bytes() -> bytes
 size() -> int
 ```
 
 Notes:
 
-- `from_bytes` is a classmethod.
+- `from_bytes` is a classmethod that reconstructs a snapshot from its serialized byte representation.
+- `from_file` is a classmethod that loads a snapshot from a file on disk, without reading the entire file into memory. Suitable for large snapshot files previously saved via `to_bytes()`.
 - `to_bytes()` serializes the snapshot into bytes.
 - `size()` returns the snapshot size.
 
-### 3.5 `StreamEvent`
+### 3.6 `StreamEvent`
 
 Streaming execution event.
 
@@ -150,7 +219,7 @@ Attributes:
 
 Each event usually carries only one kind of information: stdout, stderr, exit code, or timeout.
 
-### 3.6 `StreamIterator`
+### 3.7 `StreamIterator`
 
 `StreamIterator` is the iterator returned by `Sandbox.stream_execute()`.
 
@@ -167,6 +236,41 @@ for event in sb.stream_execute("/bin/sh -c 'echo hello; echo err >&2'"):
     if event.stdout is not None:
         print(event.stdout.decode(), end="")
 ```
+
+### 3.8 `list_dir()`
+
+```python
+list_dir(path) -> list[DirEntry]
+```
+
+Lists directory entries inside the sandbox.
+
+Parameters:
+
+- `path: str`: Absolute path inside the sandbox filesystem.
+
+Returns a list of `DirEntry` objects.
+
+Example:
+
+```python
+with Sandbox(isolation="microvm") as sb:
+    entries = sb.list_dir("/tmp")
+    for entry in entries:
+        print(f"{entry.name} ({entry.file_type}) - {entry.size} bytes")
+```
+
+Raises:
+
+- `SandboxError`: If the directory cannot be read.
+
+### 3.9 `close()`
+
+```python
+close()
+```
+
+Explicitly releases sandbox resources. Safe to call multiple times; subsequent calls are no-ops. Also called automatically by the context manager exit.
 
 ## 4. Exception Hierarchy
 
@@ -328,3 +432,56 @@ with Sandbox(isolation="microvm") as parent:
 ```
 
 Note: `fork()` returns an independent sandbox. The example explicitly releases `child` by calling the context manager's exit method; in real code, it is recommended to wrap the forked object in your own resource management logic.
+
+
+### 6.8 Multi-Language Code Execution
+
+```python
+from mimobox import Sandbox
+
+with Sandbox(isolation="microvm") as sb:
+    # Python
+    result = sb.execute_code("python", "import sys; print(sys.version)")
+    print(result.stdout, end="")
+
+    # Bash
+    result = sb.execute_code("bash", "uname -a", timeout=5.0)
+    print(result.stdout, end="")
+
+    # JavaScript (requires Node.js in the sandbox)
+    result = sb.execute_code("node", "console.log('hello from node')", cwd="/app")
+    print(result.stdout, end="")
+```
+
+### 6.9 Directory Listing
+
+```python
+from mimobox import Sandbox
+
+with Sandbox(isolation="microvm") as sb:
+    sb.write_file("/tmp/test.txt", b"hello")
+
+    entries = sb.list_dir("/tmp")
+    for entry in entries:
+        symlink_info = " -> symlink" if entry.is_symlink else ""
+        print(f"{entry.name} ({entry.file_type}) - {entry.size} bytes{symlink_info}")
+```
+
+### 6.10 Snapshot from File
+
+```python
+from mimobox import Sandbox, Snapshot
+
+# Save snapshot to disk
+with Sandbox(isolation="microvm") as sb:
+    sb.write_file("/tmp/state.txt", b"saved to disk")
+    snapshot = sb.snapshot()
+    with open("/tmp/snapshot.bin", "wb") as f:
+        f.write(snapshot.to_bytes())
+
+# Restore from file
+snapshot = Snapshot.from_file("/tmp/snapshot.bin")
+with Sandbox.from_snapshot(snapshot) as restored:
+    data = restored.read_file("/tmp/state.txt")
+    print(data.decode("utf-8"), end="")
+```
