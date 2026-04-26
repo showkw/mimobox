@@ -82,8 +82,13 @@ mod landlock_bypass_tests {
         Ok(())
     }
 
+    /// 验证 Landlock 正确追踪 symlink 目标路径。
+    ///
+    /// 当 symlink 位于未授权目录（/var/tmp）但目标文件位于已授权的只读目录（/tmp）时，
+    /// Landlock 检查的是目标路径而非链接本身路径，因此读取应当成功。
+    /// 这不是绕过，而是 Landlock 正确的安全语义。
     #[test]
-    fn test_symlink_from_unauthorized_to_authorized() -> Result<(), Box<dyn Error>> {
+    fn test_symlink_to_authorized_target_allows_read() -> Result<(), Box<dyn Error>> {
         let authorized_dir = TempDir::new_in("/tmp")?;
         let public_file = authorized_dir.path().join("public.txt");
         fs::write(&public_file, "public\n")?;
@@ -103,7 +108,10 @@ mod landlock_bypass_tests {
         ];
         let result = sandbox.execute(&command)?;
 
-        assert_denied(&result);
+        // Landlock 检查 symlink 的目标路径（在授权的 /tmp 下），读取应该成功。
+        assert_eq!(result.exit_code, Some(0), "expected successful read via symlink to authorized target");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("public"), "stdout should contain file content, got: {stdout}");
 
         Ok(())
     }
