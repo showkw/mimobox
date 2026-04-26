@@ -468,6 +468,9 @@ fn essential_syscalls() -> Vec<u32> {
         GETPID,
         GETPPID,
         GETTID,
+        // libcap/libselinux 程序在启动时使用 prctl(PR_CAPBSET_READ)
+        // 检查 capability bounding set，只读操作不构成安全风险。
+        PRCTL,
         ARCH_PRCTL,
         SET_TID_ADDRESS,
         SET_ROBUST_LIST,
