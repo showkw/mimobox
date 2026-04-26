@@ -482,6 +482,9 @@ fn essential_syscalls() -> Vec<u32> {
         RT_SIGRETURN,
         SIGALTSTACK,
         // 文件系统（不含 symlink/chmod）
+        // 终端 I/O：参数约束系统限制仅允许终端相关 request（TCGETS/TCSETS 等），
+        // 不允许任意设备 ioctl。ls/ps 等程序通过 isatty() → ioctl(TCGETS) 检查终端。
+        IOCTL,
         FCNTL,
         FSYNC,
         FTRUNCATE,
