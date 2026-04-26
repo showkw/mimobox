@@ -66,6 +66,20 @@ fn command_log_summary(cmd: &[String]) -> String {
     format!("program={name}, argc={}", cmd.len())
 }
 
+const NAMESPACE_FALLBACK_MARKER: &str = "unshare(full_flags) failed";
+
+fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
+    let stderr = String::from_utf8_lossy(stderr_buf);
+    if stderr
+        .lines()
+        .any(|line| line.contains(NAMESPACE_FALLBACK_MARKER))
+    {
+        tracing::warn!(
+            "命名空间降级: unshare(full_flags) 失败，已回退到不含 user namespace 的隔离模式"
+        );
+    }
+}
+
 unsafe fn reset_child_environment() -> Result<(), ()> {
     // SECURITY: clearenv() 必须成功，失败时不能继续沿用父进程环境，
     // 否则 LD_PRELOAD/BASH_ENV 等注入变量可能带入沙箱子进程。
@@ -242,23 +256,6 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
 
         let result = (|| -> Result<(), landlock::RulesetError> {
             let mut ruleset = Ruleset::default().handle_access(all_access)?.create()?;
-
-            let default_ro: Vec<&str> = [
-                "/bin",
-                "/usr",
-                "/lib",
-                "/lib64",
-                "/etc",
-                "/proc/self",
-                "/dev/urandom",
-                "/tmp",
-            ]
-            .into_iter()
-            .filter(|path| std::path::Path::new(path).exists())
-            .collect();
-            if !default_ro.is_empty() {
-                ruleset = ruleset.add_rules(path_beneath_rules(&default_ro, read_access))?;
-            }
 
             let user_ro: Vec<&str> = config
                 .fs_readonly
@@ -643,6 +640,7 @@ impl Sandbox for LinuxSandbox {
 
                 match wait_result {
                     WaitStatus::Exited(_, code) => {
+                        log_namespace_fallback_from_stderr(&stderr_buf);
                         tracing::info!(
                             "子进程退出, code={}, elapsed={:.2}ms",
                             code,
@@ -657,6 +655,7 @@ impl Sandbox for LinuxSandbox {
                         })
                     }
                     WaitStatus::Signaled(_, sig, _) => {
+                        log_namespace_fallback_from_stderr(&stderr_buf);
                         let code = -(sig as i32);
                         if timed_out {
                             tracing::warn!(
@@ -678,13 +677,16 @@ impl Sandbox for LinuxSandbox {
                             timed_out,
                         })
                     }
-                    _ => Ok(SandboxResult {
-                        stdout: stdout_buf,
-                        stderr: stderr_buf,
-                        exit_code: None,
-                        elapsed,
-                        timed_out,
-                    }),
+                    _ => {
+                        log_namespace_fallback_from_stderr(&stderr_buf);
+                        Ok(SandboxResult {
+                            stdout: stdout_buf,
+                            stderr: stderr_buf,
+                            exit_code: None,
+                            elapsed,
+                            timed_out,
+                        })
+                    }
                 }
             }
             ForkResult::Child => {
