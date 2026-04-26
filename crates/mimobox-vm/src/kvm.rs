@@ -30,7 +30,7 @@ use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
 use crate::snapshot::MicrovmSnapshot;
-use crate::vm::{GuestCommandResult, MicrovmConfig, MicrovmError, StreamEvent};
+use crate::vm::{GuestCommandResult, GuestFileErrorKind, MicrovmConfig, MicrovmError, StreamEvent};
 use crate::vm::{GuestExecOptions, LifecycleError};
 
 mod boot;
@@ -2535,14 +2535,16 @@ pub(crate) fn restore_runtime_state(
 }
 
 fn fs_result_to_error(status: u8, path: &str) -> MicrovmError {
-    match status {
-        1 => MicrovmError::Backend(format!("guest file path error: {path}")),
-        2 => MicrovmError::Backend(format!("guest file I/O error: {path}")),
-        3 => MicrovmError::Backend(format!("guest file permission error: {path}")),
-        4 => MicrovmError::Backend(format!("guest file out of space: {path}")),
-        other => MicrovmError::Backend(format!(
-            "guest returned unknown file status code {other}: {path}"
-        )),
+    let kind = match status {
+        1 => GuestFileErrorKind::NotFound,
+        2 => GuestFileErrorKind::Io,
+        3 => GuestFileErrorKind::PermissionDenied,
+        4 => GuestFileErrorKind::OutOfSpace,
+        other => GuestFileErrorKind::Unknown(other),
+    };
+    MicrovmError::GuestFile {
+        kind,
+        path: path.to_string(),
     }
 }
 
