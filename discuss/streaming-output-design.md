@@ -3,7 +3,6 @@ title: 串口流式输出协议设计
 date: 2026-04-23
 status: reviewed
 scope: P0-a
-reviewers: [Codex gpt-5.4, Claude 总指挥]
 ---
 
 # 串口流式输出协议设计
@@ -26,7 +25,7 @@ guest → host:  EXIT:<code>\n
 - Modal：Python generator yield 模式
 - Daytona：PTY + REST streaming
 
-## 2. 协议设计（综合 Codex + 总指挥方案）
+## 2. 协议设计（综合方案）
 
 ### 2.1 帧类型
 

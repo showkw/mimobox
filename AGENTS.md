@@ -28,7 +28,7 @@
 基准测试、性能回归检测。
 
 - 使用 criterion.rs 编写基准测试
-- 在 Linux 服务器（hermes）上执行
+- 在 Linux 服务器上执行
 - 通过 scripts/bench.sh 入口
 - 对比各阶段性能目标验证达标情况
 
@@ -46,7 +46,7 @@
 
 环境配置、CI/CD、远程服务器管理。
 
-- 通过 SSH 管理 hermes 服务器（工作目录已迁移至 /data/fast/coding/mimobox-poc）
+- 远程 Linux 服务器管理（环境配置、脚本维护）
 - 维护 scripts/ 目录的脚本
 - 确保 .env 文件正确配置
 - 确保 scripts/ 脚本可执行且路径正确

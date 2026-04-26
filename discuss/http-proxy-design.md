@@ -3,7 +3,6 @@ title: 串口 HTTP 代理协议设计
 date: 2026-04-23
 status: reviewed
 scope: P0-b
-reviewers: [Codex gpt-5.4, Claude 总指挥]
 ---
 
 # 串口 HTTP 代理协议设计

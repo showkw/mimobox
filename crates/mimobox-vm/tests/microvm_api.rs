@@ -57,7 +57,7 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
     }
 
     // Linux + KVM：构造显式无效配置（vcpu_count=0），确保 validate() 拒绝
-    // 不使用 default()，因为 hermes 开发机上 default() 会解析到真实 vm 资产路径，
+    // 不使用 default()，因为 某些开发环境下 default() 会解析到真实 vm 资产路径，
     // 导致 validate() 通过后在 KvmBackend::create_vm() 阶段因权限失败，错误消息不匹配断言
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     {

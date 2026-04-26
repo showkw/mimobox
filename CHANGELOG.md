@@ -92,5 +92,5 @@
 - 完成 clippy 零 warning、fmt 统一、rustdoc 警告清理、文档链接修复与 Rust 工具链锁定。
 - 完成 SDK 分派逻辑去重，提取宏减少重复代码，并清理 Linux 安全策略重复实现。
 - 完成发布管线就绪化：依赖统一、社区文件、crate metadata、license、CHANGELOG、install.sh、release.yml 与自动发布脚本。
-- 完成 Linux 服务器 hermes 路径迁移、KVM 构建测试工具链、VM 资产路径、CI 缓存与性能验证环境整理。
+- 完成 Linux 服务器路径迁移、KVM 构建测试工具链、VM 资产路径、CI 缓存与性能验证环境整理。
 - 完成多轮产品打磨：API freeze、Python SDK 完善、MCP 工具扩展、文档刷新、示例画廊、错误英文化与公开发布准备。
