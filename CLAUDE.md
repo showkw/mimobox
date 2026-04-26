@@ -67,14 +67,8 @@ mimobox/
 9. **网络默认拒绝**：所有沙箱默认禁止网络访问
 10. **内存限制**：所有沙箱必须设置内存上限
 
-## 开发环境
-
-- macOS：当前设备（代码编辑、文档）
-- Linux 服务器：hermes（SSH 连接，沙箱开发和测试）
-  - 连接：`ssh hermes`
-  - 工作目录：~/mimobox-poc（符号链接 → /data/fast/coding/mimobox-poc）
-  - VM 测试资产：~/mimobox-codex-assets（符号链接 → /data/fast/coding/mimobox-codex-assets）
-  - sudo 密码见 .env 文件
+- macOS：代码编辑、文档
+- Linux 服务器：用于沙箱开发和测试（需要 SSH 访问、KVM 支持、cgroups v2）
   - 所有沙箱测试必须在 Linux 服务器上执行
 
 ## 性能目标

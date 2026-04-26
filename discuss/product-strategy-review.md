@@ -2,7 +2,6 @@
 title: mimobox 产品战略评审：三层隔离架构决策
 date: 2026-04-21
 status: final
-participants: 总指挥（Claude）、技术方案评审官、产品与业务分析师
 ---
 
 # mimobox 产品战略评审：三层隔离架构决策

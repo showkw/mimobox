@@ -1,6 +1,6 @@
 # mimobox Architecture Design
 
-This document describes the architecture layers, backend implementation mechanisms, SDK intelligent routing, MCP Server, Python bindings, and security boundaries of the current `/Users/showkw/dev/mimobox` repository. It only records capabilities that actually exist in the current source code, and does not present long-term plans from research documents as current status.
+This document describes the architecture layers, backend implementation mechanisms, SDK intelligent routing, MCP Server, Python bindings, and security boundaries of the current repository. It only records capabilities that actually exist in the current source code, and does not present long-term plans from research documents as current status.
 
 ## Version History
 
@@ -40,7 +40,7 @@ This document describes the architecture layers, backend implementation mechanis
 The current Cargo workspace contains 8 crates:
 
 ```text
-/Users/showkw/dev/mimobox
+.
 |
 |-- crates/mimobox-core
 |    |-- Sandbox trait
@@ -425,17 +425,17 @@ macOS:
 
 If this is your first time working with `mimobox`, read the source in the following order:
 
-1. `/Users/showkw/dev/mimobox/crates/mimobox-core/src/sandbox.rs`
-2. `/Users/showkw/dev/mimobox/crates/mimobox-core/src/error.rs`
-3. `/Users/showkw/dev/mimobox/crates/mimobox-sdk/src/config.rs`
-4. `/Users/showkw/dev/mimobox/crates/mimobox-sdk/src/router.rs`
-5. `/Users/showkw/dev/mimobox/crates/mimobox-sdk/src/lib.rs`
-6. `/Users/showkw/dev/mimobox/crates/mimobox-os/src/linux.rs`
-7. `/Users/showkw/dev/mimobox/crates/mimobox-os/src/pool.rs`
-8. `/Users/showkw/dev/mimobox/crates/mimobox-wasm/src/lib.rs`
-9. `/Users/showkw/dev/mimobox/crates/mimobox-vm/src/lib.rs`
-10. `/Users/showkw/dev/mimobox/crates/mimobox-cli/src/main.rs`
-11. `/Users/showkw/dev/mimobox/crates/mimobox-mcp/src/main.rs`
-12. `/Users/showkw/dev/mimobox/crates/mimobox-python/src/lib.rs`
+1. `crates/mimobox-core/src/sandbox.rs`
+2. `crates/mimobox-core/src/error.rs`
+3. `crates/mimobox-sdk/src/config.rs`
+4. `crates/mimobox-sdk/src/router.rs`
+5. `crates/mimobox-sdk/src/lib.rs`
+6. `crates/mimobox-os/src/linux.rs`
+7. `crates/mimobox-os/src/pool.rs`
+8. `crates/mimobox-wasm/src/lib.rs`
+9. `crates/mimobox-vm/src/lib.rs`
+10. `crates/mimobox-cli/src/main.rs`
+11. `crates/mimobox-mcp/src/main.rs`
+12. `crates/mimobox-python/src/lib.rs`
 
 This path corresponds to the actual dependency relationship: "common contract -> SDK decisions -> backend implementations -> upper-layer entry points."

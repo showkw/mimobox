@@ -7,3 +7,17 @@ target/
 .idea/
 *.iml
 __pycache__/
+# Claude Code agent 工作文件
+.claude/
+
+# VM assets (large binary files)
+vm-assets/
+
+# IDE and editor configs
+.vscode/
+*.code-workspace
+
+# Temporary / scratch files
+*.tmp
+*.bak
+*.orig

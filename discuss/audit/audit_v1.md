@@ -4,14 +4,14 @@
 
 1. microVM 冷启动 <250ms，表里却写 P50: 252ms 且标 ✅。这在逻辑上直接自相矛盾，除非团队另有未公开的判定口径，否则应判为未达标。
 2. Phase 3 P99: 0.38us 的统计口径不稳定，且不是业务可用延迟。
-   当前 2026-04-22 在 hermes 复跑时，同一 benchmark 的 criterion 聚合样本折算 p99 约 0.272us，但 bench 自己 stderr 打出的 sampled_p99 是 2.47us。这说明它混用了不同统计对象，而且测的是 pool.acquire() + drop()，不是“沙箱已执行完首个请
+   当前 2026-04-22 在 Linux 服务器上复跑时，同一 benchmark 的 criterion 聚合样本折算 p99 约 0.272us，但 bench 自己 stderr 打出的 sampled_p99 是 2.47us。这说明它混用了不同统计对象，而且测的是 pool.acquire() + drop()，不是“沙箱已执行完首个请
    求”。
 3. 官方 bench 复现路径不完整。
    scripts/bench.sh 只执行 cargo bench -p <crate>，不会带 --features kvm。而 kvm_bench.rs 在未启用 kvm feature 时 main() 是空实现，所以 ./scripts/bench.sh mimobox-vm kvm_bench 会“成功结束”，但并没有真正跑 microVM benchmark。
 4. snapshot restore 测的是内存中的快照恢复，不是文件/磁盘快照恢复。
    bench_snapshot_restore 先在进程内生成 (Vec<u8>, Vec<u8>)，再直接 restore_state(memory.as_slice(), vcpu_state.as_slice())。这不是典型生产环境里“从落盘 snapshot 加载恢复”的成本。
 5. 多个对外数字缺少可追溯原始证据，且与当前复跑不一致。
-   例如 README/CLAUDE 中的 OS 冷启动 3.51ms，当前 2026-04-22 在 hermes 复跑得到的是约 8.35ms；OS 热获取 0.38us P99 当前复跑的 sampled_p99 是 2.47us。仓库当前也没有可绑定这些数字的 Git commit，hermes 上甚至还是未提交仓库。
+   例如 README/CLAUDE 中的 OS 冷启动 3.51ms，当前 2026-04-22 在 Linux 服务器上复跑得到的是约 8.35ms；OS 热获取 0.38us P99 当前复跑的 sampled_p99 是 2.47us。仓库当前也没有可绑定这些数字的 Git commit，测试仓库甚至还是未提交仓库。
 
 需索取的原始材料清单
 
@@ -22,12 +22,12 @@
 | 原始测试日志 | 仅有我 2026-04-22 的复跑输出；历史宣称值原始日志缺失 | 无法确认历史宣称值真实性 |
 | 样本数量 N | OS/microVM 当前 criterion 样本可得；Wasm 缺失 | Wasm 与历史宣称值 N 不明 |
 | P50 / P95 / P99 / max | 当前 OS/microVM 可由 sample.json 重算；公开表只给 P50 或单个 P99 | 对外表明显著隐藏尾延迟 |
-| 测试机器配置 | 已取得 hermes 的 CPU/内存/磁盘/内核/虚拟化信息 | 当前复跑环境可描述，但历史宣称值未绑定机器快照 |
+| 测试机器配置 | 已取得 Linux 测试服务器的 CPU/内存/磁盘/内核/虚拟化信息 | 当前复跑环境可描述，但历史宣称值未绑定机器快照 |
 | 构建模式 / Rust 版本 | 当前为 cargo bench，toolchain 1.95.0 | 当前复跑可确认；历史宣称值缺乏绑定 |
 | sandbox 实际负载内容 | 代码可确认多为 /bin/true、/bin/echo hello | 明显偏空负载 / 轻负载 |
 | snapshot 体积 / 恢复流程 / page cache | 代码可确认是整块 guest memory dump，且 bench 用内存中的 snapshot | 恢复路径偏理想化，不是文件恢复 |
 | warm pool 大小 / 预热策略 | 代码可确认 OS 池大小 64，microVM 池 min=1,max=4 | 资源成本未量化，RSS / CPU 缺证据 |
-| Git commit / branch hash | 关键缺失，hermes 上为未提交仓库 | 重大可追溯性缺陷 |
+| Git commit / branch hash | 关键缺失，测试仓库为未提交仓库 | 重大可追溯性缺陷 |
 
 证据基线
 
@@ -104,11 +104,11 @@ B. 逐项审计表
 当前我实际完成的复核
 
 - 时间：2026-04-22
-- 机器：hermes
+- 机器：Linux 服务器
 - CPU：Intel Xeon E5-2686 v4 @ 2.30GHz，72 CPU
-- 内存：93GiB
+- 内存：64GB+
 - 磁盘：NVMe + HDD 混合
-- 内核：5.14.0-611.5.1.el9_7.x86_64
+- 内核：Linux 5.x+
 - 虚拟化：systemd-detect-virt = none
 - Rust：rustc 1.95.0，cargo 1.95.0
 - 构建：cargo bench 的 bench profile，优化开启
