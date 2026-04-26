@@ -1,5 +1,12 @@
 [English](README.md)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="logo.svg">
+    <img alt="mimobox logo" src="logo.svg" width="120">
+  </picture>
+</p>
+
 # mimobox
 
 [![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
