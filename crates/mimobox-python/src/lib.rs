@@ -424,7 +424,19 @@ impl PySandbox {
     ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
         let effective_command = match cwd {
-            Some(dir) => format!("cd {} && {}", dir, command),
+            Some(dir) => {
+                if dir.contains("..") {
+                    return Err(PyValueError::new_err(
+                        "cwd must not contain '..' path traversal",
+                    ));
+                }
+                let quoted = shlex::try_quote(dir).map_err(|_| {
+                    PyValueError::new_err(
+                        "cwd contains characters that cannot be shell-escaped",
+                    )
+                })?;
+                format!("cd {quoted} && {command}")
+            }
             None => command.to_string(),
         };
         let result = match (env, timeout) {
