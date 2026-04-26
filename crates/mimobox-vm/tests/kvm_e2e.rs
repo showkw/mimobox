@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use mimobox_core::{Sandbox, SandboxConfig};
 use mimobox_vm::{
-    HttpProxyError, HttpRequest, KvmBackend, KvmExitReason, MicrovmConfig, MicrovmError,
-    MicrovmSandbox, StreamEvent, microvm_config_from_vm_assets, resolve_vm_assets_dir,
+    GuestFileErrorKind, HttpProxyError, HttpRequest, KvmBackend, KvmExitReason, MicrovmConfig,
+    MicrovmError, MicrovmSandbox, StreamEvent, microvm_config_from_vm_assets,
+    resolve_vm_assets_dir,
 };
 
 const HTTP_PROXY_ALLOWED_HOST: &str = "api.github.com";
@@ -400,8 +401,14 @@ fn test_kvm_vm_read_nonexistent_file() {
         .expect_err("读取不存在文件必须失败");
 
     assert!(
-        matches!(error, MicrovmError::Backend(ref message) if message.contains("path error")),
-        "不存在文件应映射为路径错误: {error}"
+        matches!(
+            error,
+            MicrovmError::GuestFile {
+                kind: GuestFileErrorKind::NotFound,
+                ..
+            }
+        ),
+        "不存在文件应映射为 NotFound 错误: {error}"
     );
 
     backend.shutdown().expect("关闭 VM 必须成功");

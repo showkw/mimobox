@@ -201,6 +201,26 @@ pub enum LifecycleError {
     Other(String),
 }
 
+/// Guest-side file operation error categories.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GuestFileErrorKind {
+    /// 目标路径不存在或无法解析。
+    #[error("path not found")]
+    NotFound,
+    /// 标准 I/O 错误（读写失败等）。
+    #[error("I/O error")]
+    Io,
+    /// 权限不足。
+    #[error("permission denied")]
+    PermissionDenied,
+    /// 磁盘空间不足。
+    #[error("out of space")]
+    OutOfSpace,
+    /// 未知的 guest 文件状态码。
+    #[error("unknown status code {0}")]
+    Unknown(u8),
+}
+
 /// microVM-level error.
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
@@ -219,6 +239,15 @@ pub enum MicrovmError {
     /// KVM or guest protocol error.
     #[error("KVM backend error: {0}")]
     Backend(String),
+
+    /// Guest-side file operation error.
+    #[error("guest file error: {path}: {kind}")]
+    GuestFile {
+        /// 错误类型语义分类。
+        kind: GuestFileErrorKind,
+        /// 出错的文件路径。
+        path: String,
+    },
 
     /// Controlled HTTP proxy error.
     #[error(transparent)]
@@ -242,6 +271,9 @@ impl From<MicrovmError> for SandboxError {
             | MicrovmError::HttpProxy(crate::http_proxy::HttpProxyError::Internal(message))
             | MicrovmError::SnapshotFormat(message) => SandboxError::ExecutionFailed(message),
             MicrovmError::Lifecycle(error) => SandboxError::ExecutionFailed(error.to_string()),
+            error @ MicrovmError::GuestFile { .. } => {
+                SandboxError::ExecutionFailed(error.to_string())
+            }
             MicrovmError::HttpProxy(error) => SandboxError::ExecutionFailed(error.to_string()),
             MicrovmError::Io(error) => SandboxError::Io(error),
         }
