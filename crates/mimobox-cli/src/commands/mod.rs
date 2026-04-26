@@ -1,13 +1,20 @@
 pub mod bench;
+pub mod cat;
+pub mod code;
 pub mod completions;
+pub mod ls;
 pub mod mcp_init;
 pub mod run;
 pub mod shell;
 pub mod snapshot;
 pub mod version;
+pub mod write;
 
 pub(crate) use bench::handle_bench;
+pub(crate) use cat::handle_cat;
+pub(crate) use code::handle_code;
 pub(crate) use completions::{CompletionsArgs, handle_completions};
+pub(crate) use ls::handle_ls;
 pub(crate) use mcp_init::handle_mcp_init;
 pub(crate) use run::handle_run;
 #[cfg(test)]
@@ -15,22 +22,20 @@ pub(crate) use run::handle_run_via_sdk;
 pub(crate) use shell::handle_shell;
 pub(crate) use snapshot::{handle_restore, handle_snapshot};
 pub(crate) use version::handle_version;
+pub(crate) use write::handle_write;
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use clap::{ArgAction, Args, ValueEnum};
 use mimobox_core::{SandboxConfig, SandboxError, SandboxResult, SeccompProfile};
-#[cfg(all(target_os = "linux", feature = "kvm"))]
-use mimobox_sdk::Sandbox as SdkSandbox;
 use mimobox_sdk::{
-    Config as SdkConfig, ExecuteResult as SdkExecuteResult, IsolationLevel as SdkIsolationLevel,
-    NetworkPolicy as SdkNetworkPolicy,
+    Config as SdkConfig, DirEntry, ExecuteResult as SdkExecuteResult,
+    IsolationLevel as SdkIsolationLevel, NetworkPolicy as SdkNetworkPolicy, Sandbox as SdkSandbox,
 };
 use serde::Serialize;
 use thiserror::Error;
-#[cfg(all(target_os = "linux", feature = "kvm"))]
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECS};
 
@@ -130,6 +135,66 @@ pub(crate) struct ShellArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct CodeArgs {
+    /// Select backend
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub(crate) backend: Backend,
+
+    /// Programming language to execute
+    #[arg(short = 'l', long)]
+    pub(crate) language: String,
+
+    /// Code snippet to execute
+    #[arg(short = 'c', long)]
+    pub(crate) code: String,
+
+    /// Timeout in seconds; pass 0 for no timeout
+    #[arg(short = 't', long)]
+    pub(crate) timeout: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LsArgs {
+    /// Directory path inside the sandbox
+    #[arg(value_name = "path")]
+    pub(crate) path: String,
+
+    /// Select backend
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub(crate) backend: Backend,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CatArgs {
+    /// File path inside the sandbox
+    #[arg(value_name = "path")]
+    pub(crate) path: String,
+
+    /// Select backend
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub(crate) backend: Backend,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WriteArgs {
+    /// File path inside the sandbox
+    #[arg(value_name = "path")]
+    pub(crate) path: String,
+
+    /// Inline content to write
+    #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+    pub(crate) content: Option<String>,
+
+    /// Local file path whose bytes should be written
+    #[arg(long, value_name = "path", conflicts_with = "content")]
+    pub(crate) file: Option<String>,
+
+    /// Select backend
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub(crate) backend: Backend,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct SnapshotArgs {
     /// Snapshot output file path
     #[arg(long, value_name = "path")]
@@ -222,6 +287,10 @@ pub(crate) struct ErrorEnvelope {
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandResponse {
     Run(RunResponse),
+    Code(CodeResponse),
+    Ls(LsResponse),
+    Cat(CatResponse),
+    Write(WriteResponse),
     Snapshot(SnapshotResponse),
     Restore(RestoreResponse),
     Bench(BenchResponse),
@@ -243,6 +312,35 @@ pub(crate) struct RunResponse {
     pub(crate) timeout_secs: Option<u64>,
     pub(crate) deny_network: bool,
     pub(crate) allow_fork: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CodeResponse {
+    pub(crate) language: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) timed_out: bool,
+    pub(crate) elapsed_ms: f64,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LsResponse {
+    pub(crate) path: String,
+    pub(crate) entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CatResponse {
+    pub(crate) path: String,
+    pub(crate) size_bytes: usize,
+    pub(crate) content_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WriteResponse {
+    pub(crate) path: String,
+    pub(crate) bytes_written: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -415,6 +513,21 @@ pub(crate) fn build_sdk_config(
     }
 }
 
+pub(crate) fn build_cli_sdk_config(backend: Backend, timeout: Option<u64>) -> SdkConfig {
+    let mut config = build_sdk_config(None, timeout, false, false);
+    config.isolation = backend_to_sdk_isolation(backend);
+    config
+}
+
+pub(crate) fn backend_to_sdk_isolation(backend: Backend) -> SdkIsolationLevel {
+    match backend {
+        Backend::Auto => SdkIsolationLevel::Auto,
+        Backend::Os => SdkIsolationLevel::Os,
+        Backend::Wasm => SdkIsolationLevel::Wasm,
+        Backend::Kvm => SdkIsolationLevel::MicroVm,
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 pub(crate) fn build_snapshot_sdk_config(
     args: &SnapshotArgs,
@@ -497,14 +610,50 @@ pub(crate) fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
     error.into()
 }
 
-#[cfg(all(target_os = "linux", feature = "kvm"))]
+pub(crate) fn finish_sdk_operation<T>(
+    sandbox: SdkSandbox,
+    result: Result<T, mimobox_sdk::SdkError>,
+    failure_context: &str,
+) -> Result<T, CliError> {
+    match result {
+        Ok(value) => {
+            destroy_sdk_sandbox_after_success(sandbox)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let cli_error = map_sdk_error(error);
+            error!(
+                code = cli_error.code(),
+                message = %cli_error,
+                context = failure_context,
+                "SDK operation failed"
+            );
+            destroy_sdk_sandbox_quietly(sandbox, failure_context);
+            Err(cli_error)
+        }
+    }
+}
+
+pub(crate) fn destroy_sdk_sandbox_after_success(sandbox: SdkSandbox) -> Result<(), CliError> {
+    sandbox.destroy().map_err(|error| {
+        let cli_error = map_sdk_error(error);
+        error!(
+            code = cli_error.code(),
+            message = %cli_error,
+            "failed to destroy sandbox after successful SDK operation"
+        );
+        cli_error
+    })
+}
+
 pub(crate) fn destroy_sdk_sandbox_quietly(sandbox: SdkSandbox, context: &str) {
     if let Err(error) = sandbox.destroy() {
         let cli_error = map_sdk_error(error);
         warn!(
             code = cli_error.code(),
             message = %cli_error,
-            "{context}"
+            context,
+            "failed to destroy sandbox"
         );
     }
 }
@@ -528,10 +677,14 @@ pub(crate) fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option
 pub(crate) fn success_exit_code(response: &CommandResponse) -> Option<i32> {
     match response {
         CommandResponse::Run(run) => run.exit_code.filter(|code| *code != 0),
+        CommandResponse::Code(code) => code.exit_code.filter(|exit_code| *exit_code != 0),
         CommandResponse::Restore(restore) => restore.exit_code.filter(|code| *code != 0),
-        CommandResponse::Snapshot(_) | CommandResponse::Bench(_) | CommandResponse::Version(_) => {
-            None
-        }
+        CommandResponse::Ls(_)
+        | CommandResponse::Cat(_)
+        | CommandResponse::Write(_)
+        | CommandResponse::Snapshot(_)
+        | CommandResponse::Bench(_)
+        | CommandResponse::Version(_) => None,
     }
 }
 
