@@ -2,7 +2,11 @@ target/
 .git/
 logs/
 .env
+*.swp
+*~
 .DS_Store
 .idea/
-vm-assets/
+*.iml
 __pycache__/
+vm-assets/
+node_modules/

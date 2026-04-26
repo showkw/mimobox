@@ -4,6 +4,11 @@ set -euo pipefail
 export VM_ASSETS_DIR="${VM_ASSETS_DIR:-/opt/mimobox-assets}"
 
 printf 'mimobox Docker 一键试用环境\n'
+if mimobox version >/dev/null 2>&1; then
+    mimobox version
+else
+    mimobox --version || true
+fi
 printf 'VM assets: %s\n' "${VM_ASSETS_DIR}"
 
 if [[ ! -e /dev/kvm ]]; then
@@ -16,15 +21,8 @@ if [[ $# -eq 0 ]]; then
     set -- shell --backend auto
 fi
 
-case "$1" in
-    mimobox)
-        shift
-        exec mimobox "$@"
-        ;;
-    run|shell|snapshot|restore|bench|doctor|setup|mcp-init|completions|version)
-        exec mimobox "$@"
-        ;;
-    *)
-        exec "$@"
-        ;;
-esac
+if [[ "$1" == "mimobox" ]]; then
+    shift
+fi
+
+exec mimobox "$@"

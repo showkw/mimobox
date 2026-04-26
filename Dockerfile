@@ -2,6 +2,12 @@
 
 FROM ubuntu:22.04 AS builder
 
+LABEL org.opencontainers.image.title="mimobox" \
+      org.opencontainers.image.description="mimobox Docker 一键试用镜像 builder" \
+      org.opencontainers.image.source="https://github.com/showkw/mimobox" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
@@ -52,33 +58,41 @@ RUN curl -fsSL https://sh.rustup.rs \
     && rustc --version \
     && cargo --version
 
-WORKDIR /workspace
+WORKDIR /usr/src/mimobox
 COPY . .
 
-RUN cargo build --release -p mimobox-cli --features mimobox-cli/full,mimobox-sdk/vm,mimobox-sdk/wasm
+RUN cargo build --release --features mimobox-cli/full,mimobox-sdk/vm,mimobox-sdk/wasm \
+    && install -m 0755 target/release/mimobox-cli target/release/mimobox
 
 RUN mkdir -p "${VM_ASSETS_DIR}" \
-    && OUTPUT="${VM_ASSETS_DIR}/rootfs.cpio.gz" scripts/build-rootfs.sh \
     && OUTPUT="${VM_ASSETS_DIR}/vmlinux" scripts/build-kernel.sh \
-    && test -x target/release/mimobox-cli \
+    && OUTPUT="${VM_ASSETS_DIR}/rootfs.cpio.gz" scripts/build-rootfs.sh \
+    && test -x target/release/mimobox \
     && test -s "${VM_ASSETS_DIR}/rootfs.cpio.gz" \
     && test -s "${VM_ASSETS_DIR}/vmlinux"
 
 FROM ubuntu:22.04 AS runtime
+
+LABEL org.opencontainers.image.title="mimobox" \
+      org.opencontainers.image.description="mimobox Docker 一键试用镜像，内置 guest kernel、rootfs、Python3 与 Node.js 运行时" \
+      org.opencontainers.image.source="https://github.com/showkw/mimobox" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     VM_ASSETS_DIR=/opt/mimobox-assets
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
+    && mkdir -p /usr/local/bin/scripts \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /workspace/target/release/mimobox-cli /usr/local/bin/mimobox
+COPY --from=builder /usr/src/mimobox/target/release/mimobox /usr/local/bin/mimobox
 COPY --from=builder /opt/mimobox-assets/ /opt/mimobox-assets/
-COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY scripts/docker-entrypoint.sh /usr/local/bin/scripts/docker-entrypoint.sh
 
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+RUN chmod 0755 /usr/local/bin/scripts/docker-entrypoint.sh \
     && chmod 0755 /usr/local/bin/mimobox
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/scripts/docker-entrypoint.sh"]
 CMD ["shell", "--backend", "auto"]

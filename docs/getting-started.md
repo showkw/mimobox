@@ -25,22 +25,30 @@ This builds the default workspace members. By default, it focuses on the OS back
 
 ### 2.3 Docker One-Command Trial
 
-如果只想快速试用 mimobox，可以直接构建 Docker 镜像。镜像会在 builder 阶段编译 `mimobox` CLI，并把 microVM 所需的 `vmlinux` 与 `rootfs.cpio.gz` 打包到 `/opt/mimobox-assets`。
+如果只想快速试用 mimobox，可以直接构建 Docker 镜像。镜像会在 builder 阶段编译 `mimobox` CLI，并把 microVM 所需的 `vmlinux` 与 `rootfs.cpio.gz` 打包到 `/opt/mimobox-assets`。镜像内的 guest rootfs 已包含 Python3 与 Node.js 运行时。
+
+前置要求：Docker Engine 20.10+。
 
 ```bash
-docker build -t mimobox:local .
+docker build -t mimobox/sandbox .
 ```
 
 启动交互式 shell：
 
 ```bash
-docker run --rm -it --device /dev/kvm mimobox:local
+docker run -it --rm --device /dev/kvm mimobox/sandbox
 ```
 
 执行单条命令：
 
 ```bash
-docker run --rm -it --device /dev/kvm mimobox:local run --backend auto --command '/bin/echo hello'
+docker run -it --rm --device /dev/kvm mimobox/sandbox run --backend auto --command '/bin/echo hello'
+```
+
+如果当前环境没有 KVM，可以明确使用 OS 后端降级运行：
+
+```bash
+docker run -it --rm mimobox/sandbox shell --backend os
 ```
 
 KVM 说明：
@@ -55,7 +63,7 @@ KVM 说明：
 services:
   mimobox:
     build: .
-    image: mimobox:local
+    image: mimobox/sandbox
     stdin_open: true
     tty: true
     devices:
