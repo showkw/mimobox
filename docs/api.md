@@ -22,12 +22,16 @@ mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 ## Table of Contents
 
 - [Sandbox](#sandbox)
+- [Sandbox::execute_code](#sandboxexecute_code)
+- [Sandbox::list_dir](#sandboxlist_dir)
+- [Sandbox::execute_with_cwd](#sandboxexecute_with_cwd)
 - [Config](#config)
 - [ConfigBuilder](#configbuilder)
 - [IsolationLevel](#isolationlevel)
 - [TrustLevel](#trustlevel)
 - [NetworkPolicy](#networkpolicy)
 - [ExecuteResult](#executeresult)
+- [FileType / DirEntry](#filetype--direntry)
 - [StreamEvent](#streamevent)
 - [SandboxSnapshot](#sandboxsnapshot)
 - [RestorePool](#restorepool)
@@ -36,6 +40,7 @@ mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 - [HttpResponse](#httpresponse)
 - [SdkError](#sdkerror)
 - [ErrorCode](#errorcode)
+- [CLI](#cli)
 
 ---
 
@@ -168,6 +173,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### `Sandbox::execute_code`
+
+```rust
+pub fn execute_code(&mut self, language: &str, code: &str) -> Result<ExecuteResult, SdkError>
+```
+
+Executes inline code by mapping a language name to the corresponding interpreter command. This is a convenience API over [`execute`](#sandboxexecute) for common scripting languages.
+
+| Language | Command mapping |
+|----------|-----------------|
+| `bash` | `bash -c <code>` |
+| `sh`, `shell` | `sh -c <code>` |
+| `python`, `python3`, `py` | `python3 -c <code>` |
+| `javascript`, `js`, `node`, `nodejs` | `node -e <code>` |
+
+**Errors**: Returns `SdkError::Config` if the language is unsupported. Backend and timeout errors are the same as [`execute`](#sandboxexecute).
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sandbox = Sandbox::new()?;
+    let result = sandbox.execute_code("python", "print('hello from python')")?;
+    assert_eq!(result.exit_code, Some(0));
+    println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
 ### `Sandbox::execute_with_env`
 
 *(requires `vm` feature)*
@@ -232,6 +267,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(5),
     )?;
     assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "hello");
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+### `Sandbox::execute_with_cwd`
+
+*(requires `vm` feature)*
+
+```rust
+#[cfg(feature = "vm")]
+pub fn execute_with_cwd(&mut self, command: &str, cwd: &str) -> Result<ExecuteResult, SdkError>
+```
+
+Executes a command with a working directory override inside the microVM guest. The `cwd` path must exist in the guest filesystem before the command starts.
+
+```rust
+use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .isolation(IsolationLevel::MicroVm)
+        .build();
+    let mut sandbox = Sandbox::with_config(config)?;
+    sandbox.execute("/bin/mkdir -p /workspace")?;
+    sandbox.write_file("/workspace/input.txt", b"hello")?;
+    let result = sandbox.execute_with_cwd("/bin/cat input.txt", "/workspace")?;
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "hello");
     sandbox.destroy()?;
     Ok(())
 }
@@ -363,6 +426,31 @@ pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SdkError>
 ```
 
 Writes a file into the sandbox guest filesystem.
+
+### `Sandbox::list_dir`
+
+```rust
+pub fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SdkError>
+```
+
+Lists directory entries inside the sandbox filesystem. Supported by OS-level and microVM backends.
+
+**Errors**: Returns `FileNotFound` if the path does not exist, `FilePermissionDenied` if access is denied.
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sandbox = Sandbox::new()?;
+    sandbox.write_file("/tmp/example.txt", b"hello")?;
+    let entries = sandbox.list_dir("/tmp")?;
+    for entry in entries {
+        println!("{} {:?} {:?}", entry.name, entry.file_type, entry.size);
+    }
+    sandbox.destroy()?;
+    Ok(())
+}
+```
 
 ### `Sandbox::http_request`
 
@@ -557,6 +645,8 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 | `network` | `NetworkPolicy` | `DenyAll` | Network access policy |
 | `timeout` | `Option<Duration>` | `Some(30s)` | Command execution timeout |
 | `memory_limit_mb` | `Option<u64>` | `Some(512)` | Memory limit in MiB |
+| `cpu_quota_us` | `Option<u64>` | `None` | CPU quota in microseconds per period. `None` means unlimited |
+| `cpu_period_us` | `u64` | `100000` | CPU quota period in microseconds (100ms) |
 | `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths |
 | `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write mount paths |
 | `allowed_http_domains` | `Vec<String>` | `[]` | HTTP proxy domain whitelist |
@@ -604,6 +694,8 @@ Fluent builder for constructing `Config` instances.
 | `network(policy)` | `NetworkPolicy` | Set network access policy |
 | `timeout(duration)` | `Duration` | Set command execution timeout |
 | `memory_limit_mb(mb)` | `u64` | Set memory limit in MiB |
+| `cpu_quota(quota_us)` | `u64` | Set CPU quota in microseconds per period |
+| `cpu_period(period_us)` | `u64` | Set CPU quota period in microseconds |
 | `fs_readonly(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-only mount paths |
 | `fs_readwrite(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-write mount paths |
 | `allow_fork(allow)` | `bool` | Allow child process creation |
@@ -740,6 +832,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## FileType / DirEntry
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileType {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub file_type: FileType,
+    pub size: Option<u64>,
+    pub is_symlink: bool,
+}
+```
+
+`FileType` classifies filesystem entries returned by [`Sandbox::list_dir`](#sandboxlist_dir). `DirEntry` contains the stable metadata exposed by SDK directory listing operations.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `String` | Entry name relative to the listed directory |
+| `file_type` | `FileType` | Entry kind: `File`, `Dir`, `Symlink`, or `Other` |
+| `size` | `Option<u64>` | File size in bytes when available |
+| `is_symlink` | `bool` | `true` if the entry is a symbolic link |
 
 ---
 
@@ -1129,6 +1250,8 @@ pub struct SandboxConfig {
     pub fs_readwrite: Vec<PathBuf>,
     pub deny_network: bool,
     pub memory_limit_mb: Option<u64>,
+    pub cpu_quota_us: Option<u64>,
+    pub cpu_period_us: u64,
     pub timeout_secs: Option<u64>,
     pub seccomp_profile: SeccompProfile,
     pub allow_fork: bool,
@@ -1157,3 +1280,36 @@ pub enum SandboxError {
 ```
 
 Low-level backend errors. The SDK maps these to `SdkError` with structured `ErrorCode` values.
+
+---
+
+## CLI
+
+### `mimobox completions`
+
+```text
+mimobox completions <shell>
+```
+
+Generates shell completion scripts for the `mimobox` CLI.
+
+| Shell | Command |
+|-------|---------|
+| `bash` | `mimobox completions bash` |
+| `zsh` | `mimobox completions zsh` |
+| `fish` | `mimobox completions fish` |
+| `powershell` | `mimobox completions powershell` |
+
+```sh
+# bash
+mimobox completions bash > /etc/bash_completion.d/mimobox
+
+# zsh
+mimobox completions zsh > "${fpath[1]}/_mimobox"
+
+# fish
+mimobox completions fish > ~/.config/fish/completions/mimobox.fish
+
+# powershell
+mimobox completions powershell > mimobox.ps1
+```
