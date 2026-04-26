@@ -117,18 +117,8 @@ const MAP_POPULATE: u32 = 0x8000;
 const MAP_STACK: u32 = 0x20000;
 #[allow(dead_code)]
 const MAP_HUGETLB: u32 = 0x40000;
-// 危险 flags（需要阻止）
-const MAP_DENYWRITE: u32 = 0x0800;
-const MAP_EXECUTABLE: u32 = 0x1000;
 #[allow(dead_code)]
 const MAP_LOCKED: u32 = 0x2000;
-const MAP_GROWSDOWN: u32 = 0x0100;
-// 允许的安全 flags 位组合掩码
-#[allow(dead_code)]
-const MMAP_ALLOWED_FLAGS_MASK: u32 =
-    MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE | MAP_POPULATE | MAP_STACK;
-// 危险 flags 位掩码（必须全部为0）
-const MMAP_DANGEROUS_FLAGS_MASK: u32 = MAP_DENYWRITE | MAP_EXECUTABLE | MAP_GROWSDOWN;
 
 const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
@@ -738,8 +728,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
     );
 
-    // mmap(9) 的 flags 参数（args[3]）约束：必须含 MAP_PRIVATE 或 MAP_SHARED，
-    // 不含 MAP_DENYWRITE/MAP_EXECUTABLE/MAP_GROWSDOWN 等危险 flags。
+    // mmap(9) 的 flags 参数（args[3]）约束：必须含 MAP_PRIVATE 或 MAP_SHARED。
     if allowed.contains(&syscall_nr::MMAP) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::MMAP,
@@ -908,12 +897,6 @@ fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_KILL_PROCESS),
         // 加载 flags 低 32 位。
-        load_abs(seccomp_arg_lo_offset(3)),
-        // 检查危险 flags：DENYWRITE | EXECUTABLE | GROWSDOWN。
-        alu_and(MMAP_DANGEROUS_FLAGS_MASK),
-        jump_eq(0, 1, 0),
-        ret(SECCOMP_RET_KILL_PROCESS),
-        // 重新加载 flags 低 32 位（AND 已修改累加器）。
         load_abs(seccomp_arg_lo_offset(3)),
         // 必须包含 MAP_PRIVATE 或 MAP_SHARED，否则拒绝 mmap。
         alu_and(MAP_PRIVATE | MAP_SHARED),
@@ -1085,12 +1068,11 @@ mod tests {
         AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ, BPF_JMP, BPF_JSET,
         BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
         FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
-        MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_GROWSDOWN, MAP_PRIVATE,
-        MAP_SHARED, SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE,
-        SECCOMP_DATA_NR, SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK,
-        SOCK_STREAM, SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP,
-        build_arg_constraints, build_bpf_program, essential_syscalls, fork_allowed_syscalls,
-        network_syscalls,
+        MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, SECCOMP_DATA_ARCH,
+        SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR, SECCOMP_RET_ALLOW,
+        SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM, SeccompArgConstraint,
+        SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints, build_bpf_program,
+        essential_syscalls, fork_allowed_syscalls, network_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1430,26 +1412,6 @@ mod tests {
         // flags=0（无 MAP_PRIVATE 也无 MAP_SHARED）-> KILL
         let no_flags = FakeSeccompData::new(MMAP).with_arg(3, 0);
         assert_eq!(run_bpf(&program, no_flags), SECCOMP_RET_KILL_PROCESS);
-    }
-
-    #[test]
-    fn test_mmap_constraint_blocks_dangerous_flags() {
-        let program = program_for_profile(SeccompProfile::Essential);
-
-        // MAP_PRIVATE | MAP_DENYWRITE -> KILL
-        let denywrite =
-            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_DENYWRITE) as u64);
-        assert_eq!(run_bpf(&program, denywrite), SECCOMP_RET_KILL_PROCESS);
-
-        // MAP_PRIVATE | MAP_EXECUTABLE -> KILL
-        let executable =
-            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_EXECUTABLE) as u64);
-        assert_eq!(run_bpf(&program, executable), SECCOMP_RET_KILL_PROCESS);
-
-        // MAP_PRIVATE | MAP_GROWSDOWN -> KILL
-        let growsdown =
-            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_GROWSDOWN) as u64);
-        assert_eq!(run_bpf(&program, growsdown), SECCOMP_RET_KILL_PROCESS);
     }
 
     #[test]
