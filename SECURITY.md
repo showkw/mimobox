@@ -112,7 +112,7 @@ HTTPS-only external destinations.
 
 If you discover a security vulnerability in mimobox, report it responsibly.
 
-- **Email**: send details to security@mimobox.dev.
+- **Email**: send details to security@mimobox.io.
 - **GitHub**: use the GitHub Security Advisory feature at
   https://github.com/showkw/mimobox/security/advisories/new.
 

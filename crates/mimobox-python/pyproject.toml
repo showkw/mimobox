@@ -33,9 +33,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/showkw/mimobox"
+Homepage = "https://mimobox.io"
 Repository = "https://github.com/showkw/mimobox"
-Documentation = "https://github.com/showkw/mimobox#readme"
+Documentation = "https://mimobox.io"
 
 [tool.maturin]
 bindings = "pyo3"
