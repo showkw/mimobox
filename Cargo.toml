@@ -59,9 +59,11 @@ vm-memory = { version = "0.16", features = ["backend-mmap"] }
 vmm-sys-util = "0.12.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 portable-pty = "0.9"
-rmcp = { version = "1.5", features = ["client", "server", "schemars", "transport-async-rw", "transport-io"] }
+rmcp = { version = "1.5", features = ["client", "server", "schemars", "transport-async-rw", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
