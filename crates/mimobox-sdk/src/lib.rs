@@ -887,6 +887,19 @@ impl Sandbox {
         dispatch_execute!(inner, s, s.execute_for_sdk(&args))
     }
 
+    /// Execute code in the given language inside the sandbox.
+    ///
+    /// # Supported languages
+    ///
+    /// - "bash" -> bash -c <code>
+    /// - "sh" / "shell" -> sh -c <code>
+    /// - "python" / "python3" / "py" -> python3 -c <code>
+    /// - "javascript" / "js" / "node" / "nodejs" -> node -e <code>
+    pub fn execute_code(&mut self, language: &str, code: &str) -> Result<ExecuteResult, SdkError> {
+        let command = build_code_command(language, code)?;
+        self.execute(&command)
+    }
+
     /// 列出指定路径下的目录条目。
     ///
     /// 返回目录内所有条目的名称、类型、大小和符号链接标记。
@@ -1611,6 +1624,27 @@ fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
     })
 }
 
+fn build_code_command(language: &str, code: &str) -> Result<String, SdkError> {
+    let quoted = shlex::try_quote(code).map_err(|_| {
+        SdkError::Config("code contains characters that cannot be shell-escaped".to_string())
+    })?;
+
+    match language {
+        "bash" => Ok(format!("bash -c {quoted}")),
+        "sh" | "shell" => Ok(format!("sh -c {quoted}")),
+        "python" | "python3" | "py" => Ok(format!("python3 -c {quoted}")),
+        "javascript" | "js" | "node" | "nodejs" => Ok(format!("node -e {quoted}")),
+        _ => Err(SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            format!("unsupported language: {language}"),
+            Some(
+                "Supported: bash, sh, shell, python, python3, py, javascript, js, node, nodejs"
+                    .to_string(),
+            ),
+        )),
+    }
+}
+
 fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
@@ -1966,6 +2000,72 @@ mod tests {
         let result = parse_for_test("'unterminated");
 
         assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[test]
+    fn build_code_command_maps_languages_correctly() {
+        assert!(
+            build_code_command("bash", "echo 1")
+                .unwrap()
+                .starts_with("bash -c ")
+        );
+        assert!(
+            build_code_command("sh", "echo 1")
+                .unwrap()
+                .starts_with("sh -c ")
+        );
+        assert!(
+            build_code_command("shell", "echo 1")
+                .unwrap()
+                .starts_with("sh -c ")
+        );
+        assert!(
+            build_code_command("python", "print(1)")
+                .unwrap()
+                .starts_with("python3 -c ")
+        );
+        assert!(
+            build_code_command("python3", "print(1)")
+                .unwrap()
+                .starts_with("python3 -c ")
+        );
+        assert!(
+            build_code_command("py", "print(1)")
+                .unwrap()
+                .starts_with("python3 -c ")
+        );
+        assert!(
+            build_code_command("node", "console.log(1)")
+                .unwrap()
+                .starts_with("node -e ")
+        );
+        assert!(
+            build_code_command("js", "console.log(1)")
+                .unwrap()
+                .starts_with("node -e ")
+        );
+        assert!(
+            build_code_command("javascript", "console.log(1)")
+                .unwrap()
+                .starts_with("node -e ")
+        );
+        assert!(
+            build_code_command("nodejs", "console.log(1)")
+                .unwrap()
+                .starts_with("node -e ")
+        );
+    }
+
+    #[test]
+    fn build_code_command_rejects_unknown_language() {
+        let err = build_code_command("ruby", "puts 1").unwrap_err();
+        assert!(matches!(
+            err,
+            SdkError::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                ..
+            }
+        ));
     }
 
     #[test]
