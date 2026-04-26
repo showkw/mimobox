@@ -17,6 +17,16 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::sync::mpsc;
 
+mod tracing {
+    macro_rules! tracing_warn {
+        ($message:literal, code = ?$code:expr) => {
+            eprintln!("{} code={:?}", $message, $code);
+        };
+    }
+
+    pub(crate) use tracing_warn as warn;
+}
+
 create_exception!(mimobox, SandboxError, pyo3::exceptions::PyException);
 create_exception!(mimobox, SandboxProcessError, SandboxError);
 create_exception!(mimobox, SandboxHttpError, SandboxError);
@@ -750,7 +760,11 @@ fn map_sdk_error(error: SdkError) -> PyErr {
     match error {
         SdkError::Config(message) => PyValueError::new_err(message),
         SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
-        SdkError::Io(err) => PyRuntimeError::new_err(err.to_string()),
+        SdkError::Io(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(err.to_string()),
+            std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(err.to_string()),
+            _ => PyRuntimeError::new_err(err.to_string()),
+        },
         SdkError::Sandbox {
             code,
             message,
@@ -767,6 +781,8 @@ fn map_sdk_error(error: SdkError) -> PyErr {
                 }
                 ErrorCode::FileNotFound => PyFileNotFoundError::new_err(detail),
                 ErrorCode::FilePermissionDenied => PyPermissionError::new_err(detail),
+                ErrorCode::FileTooLarge => SandboxError::new_err(detail),
+                ErrorCode::NotDirectory => SandboxError::new_err(detail),
                 ErrorCode::HttpConnectFail | ErrorCode::HttpTlsFail => {
                     PyConnectionError::new_err(detail)
                 }
@@ -781,9 +797,10 @@ fn map_sdk_error(error: SdkError) -> PyErr {
                 ErrorCode::SandboxNotReady
                 | ErrorCode::SandboxDestroyed
                 | ErrorCode::SandboxCreateFailed => SandboxLifecycleError::new_err(detail),
-                ErrorCode::NotDirectory => PyValueError::new_err(detail),
-                ErrorCode::FileTooLarge => SandboxError::new_err(detail),
-                _ => SandboxError::new_err(detail),
+                _ => {
+                    tracing::warn!("未识别的 ErrorCode 变体，降级为 SandboxError", code = ?code);
+                    SandboxError::new_err(detail)
+                }
             }
         }
         error => PyRuntimeError::new_err(error.to_string()),

@@ -375,22 +375,49 @@ class Sandbox:
 
 
 class SandboxError(Exception):
-    """Base exception for all mimobox sandbox errors."""
+    """Base exception for all mimobox sandbox errors.
+
+    All sandbox-related exceptions inherit from this class. Catch this to handle
+    any sandbox error uniformly. Specific subclasses provide finer-grained handling:
+
+    - SandboxProcessError: command exits non-zero or is killed
+    - SandboxHttpError: HTTP proxy request denied or failed
+    - SandboxLifecycleError: sandbox create/destroy/restore failures
+
+    Certain error codes also map to standard Python built-in exceptions:
+
+    - TimeoutError: command or HTTP timeout (ErrorCode::CommandTimeout, HttpTimeout)
+    - FileNotFoundError: file not found (ErrorCode::FileNotFound, IO NotFound)
+    - PermissionError: access denied (ErrorCode::FilePermissionDenied, IO PermissionDenied)
+    - ValueError: invalid configuration (ErrorCode::InvalidConfig)
+    - NotImplementedError: unsupported platform (ErrorCode::UnsupportedPlatform)
+    - ConnectionError: HTTP connection/TLS failure (ErrorCode::HttpConnectFail, HttpTlsFail)
+    """
     ...
 
 
 class SandboxProcessError(SandboxError):
-    """Raised when a sandbox command exits non-zero or is killed."""
+    """Raised when a sandbox command exits non-zero or is forcibly killed.
+
+    Maps from ErrorCode::CommandExit(code) and ErrorCode::CommandKilled.
+    """
     ...
 
 
 class SandboxHttpError(SandboxError):
-    """Raised when an HTTP proxy request fails or is denied."""
+    """Raised when an HTTP proxy request fails or the target host is denied.
+
+    Maps from ErrorCode::HttpDeniedHost, HttpBodyTooLarge, and HttpInvalidUrl.
+    HTTP connection/TLS failures map to the built-in ConnectionError instead.
+    """
     ...
 
 
 class SandboxLifecycleError(SandboxError):
-    """Raised for sandbox lifecycle issues (create/destroy/restore failures)."""
+    """Raised for sandbox lifecycle issues.
+
+    Maps from ErrorCode::SandboxNotReady, SandboxDestroyed, and SandboxCreateFailed.
+    """
     ...
 
 
