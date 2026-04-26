@@ -11,7 +11,7 @@ mod landlock_enforcement_tests {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
         config.allow_fork = true;
-        config.fs_readonly = Vec::new();
+        // 保留默认只读路径（/usr, /lib, /bin 等），确保 /bin/sh 可执行。
         config.fs_readwrite = Vec::new();
         config
     }
@@ -40,7 +40,7 @@ mod landlock_enforcement_tests {
         std::fs::write(&test_file, "original")?;
 
         let mut config = linux_config();
-        config.fs_readonly = vec![readonly_dir.path().canonicalize()?];
+        config.fs_readonly.push(readonly_dir.path().canonicalize()?);
 
         let mut sandbox = LinuxSandbox::new(config)?;
         let command = vec![
@@ -133,7 +133,7 @@ mod landlock_enforcement_tests {
         std::fs::write(&test_file, "readable\n")?;
 
         let mut config = linux_config();
-        config.fs_readonly = vec![readonly_dir.path().canonicalize()?];
+        config.fs_readonly.push(readonly_dir.path().canonicalize()?);
 
         let mut sandbox = LinuxSandbox::new(config)?;
         let command = vec![
