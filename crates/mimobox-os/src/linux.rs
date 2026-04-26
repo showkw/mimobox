@@ -655,6 +655,7 @@ impl Sandbox for LinuxSandbox {
                 if !timed_out {
                     // SAFETY: fd 有效且未被其他代码接管，from_raw_fd 获取所有权
                     let mut stdout_file = unsafe { std::fs::File::from_raw_fd(stdout_read_fd) };
+                    // SAFETY: stderr_read_fd 有效且未被其他代码接管，from_raw_fd 获取所有权
                     let mut stderr_file = unsafe { std::fs::File::from_raw_fd(stderr_read_fd) };
                     if let Err(e) = stdout_file.read_to_end(&mut stdout_buf) {
                         tracing::warn!("读取 stdout 失败: {e}");
@@ -872,6 +873,10 @@ impl Sandbox for LinuxSandbox {
     }
 }
 
+/// # Safety
+///
+/// 仅在 fork 后的子进程中调用，用于清除环境变量并设置 PTY 所需的子进程环境。
+/// 在 fork 后、exec 前调用是安全的，因为此时子进程为单线程状态，环境变量修改不会影响其他线程。
 unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> Result<(), ()> {
     // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
     if unsafe { libc::clearenv() } != 0 {
