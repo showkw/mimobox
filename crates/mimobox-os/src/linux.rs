@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use nix::sched::CloneFlags;
-use nix::sys::signal::Signal;
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
@@ -121,6 +121,29 @@ unsafe fn write_msg(fd: RawFd, msg: &[u8]) {
     // SAFETY: 仅在 fork 后子进程单线程环境中调用，fd 有效。
     unsafe {
         libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+    }
+}
+
+/// SIGSYS 信号处理器：记录被 seccomp 过滤器阻止的 syscall。
+///
+/// 使用 TRAP 模式时，seccomp 过滤器匹配到未授权的 syscall 会发送 SIGSYS 信号。
+/// 此处理器将阻止信息写入 stderr 供调试，然后以 159 (128+SIGSYS) 退出码终止进程。
+///
+/// # Safety
+///
+/// 此函数只能使用 async-signal-safe 函数（write, _exit 等）。
+/// 禁止使用 malloc、printf、Rust 标准库等非 signal-safe 函数。
+#[cfg(target_os = "linux")]
+extern "C" fn sigsys_handler(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    _ctx: *mut libc::c_void,
+) {
+    // SAFETY: 仅使用 async-signal-safe 函数（write, _exit）。
+    unsafe {
+        let msg = b"[mimobox] syscall blocked by seccomp filter\n";
+        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+        libc::_exit(159); // 128 + SIGSYS(31) = 159
     }
 }
 
@@ -350,6 +373,18 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
             }
         }
     }
+
+    // 4.5 注册 SIGSYS handler（在应用 seccomp 之前）
+    // TRAP 模式下，被阻止的 syscall 会触发 SIGSYS 信号。
+    // 注册 handler 以便记录审计信息，对标 Firecracker/gVisor 的 TRAP 模式。
+    // 必须在 apply_seccomp 之前注册，否则第一条被阻止的 syscall 无法被 handler 捕获。
+    let sigsys_action = SigAction::new(
+        SigHandler::SigAction(sigsys_handler),
+        SaFlags::SA_SIGINFO,
+        SigSet::empty(),
+    );
+    // SAFETY: sigaction 注册信号处理器，参数合法。SIGSYS 不会影响正常的信号处理流程。
+    let _ = unsafe { nix::sys::signal::sigaction(Signal::SIGSYS, &sigsys_action) };
 
     // 5. 应用 Seccomp-bpf 过滤（在 exec 之前最后应用）
     // 致命 #3 修复：Seccomp 在所有安全策略配置完成后、exec 之前立即应用
