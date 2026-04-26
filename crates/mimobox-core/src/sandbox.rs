@@ -130,6 +130,45 @@ impl DirEntry {
     }
 }
 
+/// 文件元信息，stat 方法返回的类型。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileStat {
+    /// 文件路径。
+    pub path: String,
+    /// 是否为目录。
+    pub is_dir: bool,
+    /// 是否为普通文件。
+    pub is_file: bool,
+    /// 文件大小（字节）。
+    pub size: u64,
+    /// 文件权限模式（Unix mode）。
+    pub mode: u32,
+    /// 最后修改时间（毫秒时间戳），可能不可用。
+    pub modified_ms: Option<u64>,
+}
+
+impl FileStat {
+    /// 创建文件元信息。
+    pub fn new(
+        path: String,
+        is_dir: bool,
+        is_file: bool,
+        size: u64,
+        mode: u32,
+        modified_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            path,
+            is_dir,
+            is_file,
+            size,
+            mode,
+            modified_ms,
+        }
+    }
+}
+
 /// Sandbox configuration shared across all backends.
 ///
 /// This struct describes the minimum capability set used by all sandbox
@@ -588,6 +627,41 @@ pub trait Sandbox {
         let _ = path;
         Err(SandboxError::ExecutionFailed(
             "list_dir not supported by current backend".into(),
+        ))
+    }
+
+    /// 检查指定路径的文件是否存在。
+    fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError> {
+        let _ = path;
+        Err(SandboxError::UnsupportedOperation(
+            "file_exists not supported by current backend".to_string(),
+        ))
+    }
+
+    /// 删除指定路径的文件或空目录。
+    ///
+    /// 注意：不支持递归删除（安全考虑）。
+    fn remove_file(&mut self, path: &str) -> Result<(), SandboxError> {
+        let _ = path;
+        Err(SandboxError::UnsupportedOperation(
+            "remove_file not supported by current backend".to_string(),
+        ))
+    }
+
+    /// 重命名/移动文件。
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError> {
+        let _ = from;
+        let _ = to;
+        Err(SandboxError::UnsupportedOperation(
+            "rename not supported by current backend".to_string(),
+        ))
+    }
+
+    /// 返回文件的元信息。
+    fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError> {
+        let _ = path;
+        Err(SandboxError::UnsupportedOperation(
+            "stat not supported by current backend".to_string(),
         ))
     }
 

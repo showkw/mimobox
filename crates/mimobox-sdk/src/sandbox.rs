@@ -20,7 +20,7 @@ use crate::vm_helpers::{
 };
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
-use mimobox_core::{ErrorCode, PtyConfig, PtySize, Sandbox as CoreSandbox};
+use mimobox_core::{ErrorCode, FileStat, PtyConfig, PtySize, Sandbox as CoreSandbox};
 #[cfg(feature = "vm")]
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
@@ -433,6 +433,184 @@ impl Sandbox {
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
                 mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+        }
+    }
+
+    /// 检查指定路径的文件是否存在。
+    pub fn file_exists(&mut self, path: &str) -> Result<bool, SdkError> {
+        self.ensure_backend("/bin/test")?;
+        let inner = self.require_inner()?;
+
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => {
+                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => {
+                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => {
+                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
+                Err(SdkError::sandbox(
+                    mimobox_core::ErrorCode::UnsupportedPlatform,
+                    "file_exists is not yet supported for pooled VM backends",
+                    None,
+                ))
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => {
+                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+        }
+    }
+
+    /// 删除指定路径的文件或空目录。
+    pub fn remove_file(&mut self, path: &str) -> Result<(), SdkError> {
+        self.ensure_backend("/bin/test")?;
+        let inner = self.require_inner()?;
+
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => {
+                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => {
+                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => {
+                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
+                Err(SdkError::sandbox(
+                    mimobox_core::ErrorCode::UnsupportedPlatform,
+                    "remove_file is not yet supported for pooled VM backends",
+                    None,
+                ))
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => {
+                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+        }
+    }
+
+    /// 重命名/移动文件。
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), SdkError> {
+        self.ensure_backend("/bin/test")?;
+        let inner = self.require_inner()?;
+
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => {
+                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => {
+                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => {
+                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
+                Err(SdkError::sandbox(
+                    mimobox_core::ErrorCode::UnsupportedPlatform,
+                    "rename is not yet supported for pooled VM backends",
+                    None,
+                ))
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => {
+                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+        }
+    }
+
+    /// 返回文件元信息。
+    pub fn stat(&mut self, path: &str) -> Result<FileStat, SdkError> {
+        self.ensure_backend("/bin/test")?;
+        let inner = self.require_inner()?;
+
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
+                mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                other => SdkError::from_sandbox_execute_error(other),
+            }),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => {
+                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => {
+                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
+                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+                    other => SdkError::from_sandbox_execute_error(other),
+                })
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
+                Err(SdkError::sandbox(
+                    mimobox_core::ErrorCode::UnsupportedPlatform,
+                    "stat is not yet supported for pooled VM backends",
+                    None,
+                ))
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => {
+                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -1329,6 +1507,107 @@ mod tests {
             .expect("list_dir 空目录应成功");
 
         assert!(entries.is_empty(), "空目录应返回空 Vec");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_file_exists_returns_expected_result() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("exists.txt");
+        std::fs::write(&file_path, "test").expect("写入测试文件失败");
+        let missing_path = temp_dir.path().join("missing.txt");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        assert!(
+            sandbox
+                .file_exists(&file_path.to_string_lossy())
+                .expect("file_exists 应成功"),
+            "已存在文件应返回 true"
+        );
+        assert!(
+            !sandbox
+                .file_exists(&missing_path.to_string_lossy())
+                .expect("file_exists 应成功"),
+            "不存在文件应返回 false"
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_remove_file_removes_file() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("remove.txt");
+        std::fs::write(&file_path, "test").expect("写入测试文件失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        sandbox
+            .remove_file(&file_path.to_string_lossy())
+            .expect("remove_file 应成功");
+
+        assert!(
+            !file_path.exists(),
+            "remove_file 后测试文件不应继续存在: {}",
+            file_path.display()
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_rename_moves_file() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let source_path = temp_dir.path().join("source.txt");
+        let target_path = temp_dir.path().join("target.txt");
+        std::fs::write(&source_path, "test").expect("写入测试文件失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        sandbox
+            .rename(
+                &source_path.to_string_lossy(),
+                &target_path.to_string_lossy(),
+            )
+            .expect("rename 应成功");
+
+        assert!(!source_path.exists(), "源文件应不存在");
+        assert!(target_path.exists(), "目标文件应存在");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_stat_returns_file_metadata() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("stat.txt");
+        std::fs::write(&file_path, "stat").expect("写入测试文件失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let stat = sandbox
+            .stat(&file_path.to_string_lossy())
+            .expect("stat 应成功");
+
+        assert_eq!(stat.path, file_path.to_string_lossy().as_ref());
+        assert!(stat.is_file, "stat 应标记为普通文件");
+        assert!(!stat.is_dir, "stat 不应标记为目录");
+        assert!(stat.size > 0, "stat 应返回文件大小");
+        assert!(stat.modified_ms.is_some(), "stat 应返回修改时间");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_file_api_rejects_path_traversal() {
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        assert!(
+            sandbox.file_exists("/../etc/passwd").is_err(),
+            "路径遍历应被拒绝"
+        );
+        assert!(
+            sandbox.remove_file("/tmp/../etc/passwd").is_err(),
+            "路径遍历应被拒绝"
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 

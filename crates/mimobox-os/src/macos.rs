@@ -24,7 +24,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use mimobox_core::{DirEntry, FileType, Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{
+    DirEntry, FileStat, FileType, Sandbox, SandboxConfig, SandboxError, SandboxResult,
+};
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
@@ -150,6 +152,21 @@ fn wait_child_with_timeout(
             ))
         }
     }
+}
+
+/// 验证路径参数：非空且不包含路径遍历。
+fn validate_path(path: &str) -> Result<(), SandboxError> {
+    if path.is_empty() {
+        return Err(SandboxError::ExecutionFailed(
+            "path must not be empty".to_string(),
+        ));
+    }
+    if path.contains("..") {
+        return Err(SandboxError::ExecutionFailed(
+            "path must not contain '..' path traversal".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl MacOsSandbox {
@@ -428,6 +445,54 @@ impl Sandbox for MacOsSandbox {
         ))
     }
 
+    fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError> {
+        validate_path(path)?;
+        Ok(std::path::Path::new(path).exists())
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), SandboxError> {
+        validate_path(path)?;
+        let p = std::path::Path::new(path);
+        if p.is_dir() {
+            std::fs::remove_dir(p)?;
+        } else {
+            std::fs::remove_file(p)?;
+        }
+        Ok(())
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError> {
+        validate_path(from)?;
+        validate_path(to)?;
+        std::fs::rename(from, to)?;
+        Ok(())
+    }
+
+    fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError> {
+        validate_path(path)?;
+        let metadata = std::fs::metadata(path)?;
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let mode: u32 = 0;
+        Ok(FileStat::new(
+            path.to_string(),
+            metadata.is_dir(),
+            metadata.is_file(),
+            metadata.len(),
+            mode,
+            modified_ms,
+        ))
+    }
+
     fn list_dir(
         &mut self,
         path: &str,
@@ -519,6 +584,124 @@ mod tests {
                 );
             })
             .as_deref()
+    }
+
+    #[test]
+    fn test_file_exists() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "/bin/echo test > /tmp/mimobox_exists_test".to_string(),
+        ];
+        sb.execute(&cmd).expect("创建测试文件失败");
+
+        assert!(
+            sb.file_exists("/tmp/mimobox_exists_test")
+                .expect("file_exists 失败")
+        );
+        assert!(
+            !sb.file_exists("/tmp/mimobox_not_exists_12345")
+                .expect("file_exists 失败")
+        );
+
+        let _ = sb.execute(&vec![
+            "/bin/rm".to_string(),
+            "-f".to_string(),
+            "/tmp/mimobox_exists_test".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_remove_file() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "/bin/echo test > /tmp/mimobox_remove_test".to_string(),
+        ];
+        sb.execute(&cmd).expect("创建测试文件失败");
+
+        sb.remove_file("/tmp/mimobox_remove_test")
+            .expect("remove_file 失败");
+        assert!(
+            !sb.file_exists("/tmp/mimobox_remove_test")
+                .expect("file_exists 失败")
+        );
+    }
+
+    #[test]
+    fn test_rename() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "/bin/echo test > /tmp/mimobox_rename_src".to_string(),
+        ];
+        sb.execute(&cmd).expect("创建测试文件失败");
+
+        sb.rename("/tmp/mimobox_rename_src", "/tmp/mimobox_rename_dst")
+            .expect("rename 失败");
+        assert!(
+            sb.file_exists("/tmp/mimobox_rename_dst")
+                .expect("file_exists 失败")
+        );
+        assert!(
+            !sb.file_exists("/tmp/mimobox_rename_src")
+                .expect("file_exists 失败")
+        );
+
+        let _ = sb.execute(&vec![
+            "/bin/rm".to_string(),
+            "-f".to_string(),
+            "/tmp/mimobox_rename_dst".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_stat() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "/bin/echo stat_test > /tmp/mimobox_stat_test".to_string(),
+        ];
+        sb.execute(&cmd).expect("创建测试文件失败");
+
+        let info = sb.stat("/tmp/mimobox_stat_test").expect("stat 失败");
+        assert!(info.is_file);
+        assert!(!info.is_dir);
+        assert!(info.size > 0);
+        assert!(info.modified_ms.is_some());
+
+        let _ = sb.execute(&vec![
+            "/bin/rm".to_string(),
+            "-f".to_string(),
+            "/tmp/mimobox_stat_test".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_path_validation_rejects_traversal() {
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        assert!(sb.file_exists("/../etc/passwd").is_err());
+        assert!(sb.remove_file("/tmp/../etc/passwd").is_err());
     }
 
     #[test]

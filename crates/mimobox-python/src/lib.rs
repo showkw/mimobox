@@ -5,8 +5,8 @@
 //! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
-    Config, DirEntry, ErrorCode, ExecuteResult, FileType, IsolationLevel, Sandbox as RustSandbox,
-    SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
+    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
+    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -159,6 +159,37 @@ impl From<DirEntry> for PyDirEntry {
             .to_string(),
             size: value.size,
             is_symlink: value.is_symlink,
+        }
+    }
+}
+
+/// 文件元信息，由 Sandbox.stat() 返回。
+#[pyclass(name = "FileStat")]
+#[derive(Debug, Clone)]
+struct PyFileStat {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    is_dir: bool,
+    #[pyo3(get)]
+    is_file: bool,
+    #[pyo3(get)]
+    size: u64,
+    #[pyo3(get)]
+    mode: u32,
+    #[pyo3(get)]
+    modified_ms: Option<u64>,
+}
+
+impl From<FileStat> for PyFileStat {
+    fn from(value: FileStat) -> Self {
+        Self {
+            path: value.path,
+            is_dir: value.is_dir,
+            is_file: value.is_file,
+            size: value.size,
+            mode: value.mode,
+            modified_ms: value.modified_ms,
         }
     }
 }
@@ -548,6 +579,33 @@ impl PySandbox {
         Ok(entries.into_iter().map(PyDirEntry::from).collect())
     }
 
+    /// 检查指定路径的文件是否存在。
+    fn file_exists(&mut self, path: &str) -> PyResult<bool> {
+        let sandbox = self.inner_mut()?;
+        sandbox.file_exists(path).map_err(map_sdk_error)
+    }
+
+    /// 删除指定路径的文件或空目录。
+    fn remove_file(&mut self, path: &str) -> PyResult<()> {
+        let sandbox = self.inner_mut()?;
+        sandbox.remove_file(path).map_err(map_sdk_error)
+    }
+
+    /// 重命名/移动文件。
+    fn rename(&mut self, from: &str, to: &str) -> PyResult<()> {
+        let sandbox = self.inner_mut()?;
+        sandbox.rename(from, to).map_err(map_sdk_error)
+    }
+
+    /// 返回文件元信息。
+    fn stat(&mut self, path: &str) -> PyResult<PyFileStat> {
+        let sandbox = self.inner_mut()?;
+        sandbox
+            .stat(path)
+            .map(PyFileStat::from)
+            .map_err(map_sdk_error)
+    }
+
     /// Read a file from inside the sandbox.
     ///
     /// # Arguments
@@ -825,6 +883,7 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyExecuteResult>()?;
     module.add_class::<PyHttpResponse>()?;
     module.add_class::<PyDirEntry>()?;
+    module.add_class::<PyFileStat>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
     module.add("SandboxError", py.get_type::<SandboxError>())?;

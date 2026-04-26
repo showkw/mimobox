@@ -49,7 +49,7 @@ mod vm_helpers;
 
 pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLevel};
 pub use error::SdkError;
-pub use mimobox_core::{DirEntry, ErrorCode, FileType, PtyConfig, PtyEvent, PtySize};
+pub use mimobox_core::{DirEntry, ErrorCode, FileStat, FileType, PtyConfig, PtyEvent, PtySize};
 pub use sandbox::Sandbox;
 pub use types::{ExecuteResult, HttpResponse, PtySession, SandboxSnapshot, StreamEvent};
 #[cfg(all(feature = "vm", target_os = "linux"))]
