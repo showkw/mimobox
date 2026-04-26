@@ -416,20 +416,11 @@ impl Sandbox {
                 })
             }
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => {
-                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::MicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
-                Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "list_dir is not yet supported for pooled VM backends",
-                    None,
-                ))
-            }
+            SandboxInner::PooledMicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
                 mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
@@ -461,19 +452,12 @@ impl Sandbox {
                 })
             }
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => {
-                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::MicroVm(s) => s.file_exists(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
-                Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "file_exists is not yet supported for pooled VM backends",
-                    None,
-                ))
+            SandboxInner::PooledMicroVm(s) => s.file_exists(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => {
+                s.file_exists(path).map_err(map_microvm_error)
             }
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
@@ -506,19 +490,12 @@ impl Sandbox {
                 })
             }
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => {
-                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::MicroVm(s) => s.remove_file(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
-                Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "remove_file is not yet supported for pooled VM backends",
-                    None,
-                ))
+            SandboxInner::PooledMicroVm(s) => s.remove_file(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => {
+                s.remove_file(path).map_err(map_microvm_error)
             }
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
@@ -551,20 +528,11 @@ impl Sandbox {
                 })
             }
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => {
-                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::MicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
-                Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "rename is not yet supported for pooled VM backends",
-                    None,
-                ))
-            }
+            SandboxInner::PooledMicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
                 mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
@@ -594,20 +562,11 @@ impl Sandbox {
                 })
             }
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => {
-                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::MicroVm(s) => s.stat(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) | SandboxInner::RestoredPooledMicroVm(_) => {
-                Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "stat is not yet supported for pooled VM backends",
-                    None,
-                ))
-            }
+            SandboxInner::PooledMicroVm(s) => s.stat(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => s.stat(path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
                 mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
@@ -1679,7 +1638,7 @@ mod tests {
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
     #[test]
-    fn list_dir_returns_unsupported_for_pooled_vm_backends() {
+    fn file_ops_work_for_pooled_vm_backends() {
         let Ok(microvm_config) = mimobox_vm::microvm_config_from_vm_assets(256) else {
             return;
         };
@@ -1690,19 +1649,56 @@ mod tests {
             .rootfs_path(microvm_config.rootfs_path.clone())
             .build();
         let mut sandbox = Sandbox::with_config(config).expect("创建 pooled VM 沙箱失败");
+        let source_path = "/sandbox/sdk-file-api.txt";
+        let target_path = "/sandbox/sdk-file-api-renamed.txt";
 
         sandbox
-            .execute("/bin/echo init")
-            .expect("初始化 VM 后端失败");
+            .write_file(source_path, b"pooled")
+            .expect("pooled VM 写文件必须成功");
+        assert!(
+            sandbox
+                .file_exists(source_path)
+                .expect("pooled VM file_exists 必须成功"),
+            "写入后的文件必须存在"
+        );
 
-        match sandbox.list_dir("/tmp") {
-            Err(SdkError::Sandbox {
-                code: ErrorCode::UnsupportedPlatform,
-                ..
-            }) => {}
-            Ok(_) => {}
-            Err(other) => panic!("list_dir 返回了意外的错误: {other}"),
-        }
+        let stat = sandbox.stat(source_path).expect("pooled VM stat 必须成功");
+        assert!(stat.is_file, "stat 应标记为普通文件: {stat:?}");
+        assert_eq!(stat.size, 6);
+
+        let entries = sandbox
+            .list_dir("/sandbox/")
+            .expect("pooled VM list_dir 必须成功");
+        assert!(
+            entries.iter().any(|entry| entry.name == "sdk-file-api.txt"),
+            "list_dir 应包含写入文件: {entries:?}"
+        );
+
+        sandbox
+            .rename(source_path, target_path)
+            .expect("pooled VM rename 必须成功");
+        assert!(
+            !sandbox
+                .file_exists(source_path)
+                .expect("rename 后检查源路径必须成功"),
+            "rename 后源路径不应存在"
+        );
+        assert!(
+            sandbox
+                .file_exists(target_path)
+                .expect("rename 后检查目标路径必须成功"),
+            "rename 后目标路径应存在"
+        );
+
+        sandbox
+            .remove_file(target_path)
+            .expect("pooled VM remove_file 必须成功");
+        assert!(
+            !sandbox
+                .file_exists(target_path)
+                .expect("remove_file 后检查路径必须成功"),
+            "remove_file 后目标路径不应存在"
+        );
 
         sandbox.destroy().expect("销毁沙箱失败");
     }

@@ -14,7 +14,7 @@ use crate::{
     GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
     StreamEvent,
 };
-use mimobox_core::{SandboxConfig, SandboxSnapshot};
+use mimobox_core::{DirEntry, FileStat, SandboxConfig, SandboxSnapshot};
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
@@ -569,6 +569,31 @@ impl PooledVm {
                 "VM has been released".into(),
             ))),
         }
+    }
+
+    /// Lists directory entries from the borrowed guest filesystem.
+    pub fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, MicrovmError> {
+        crate::guest_file_ops::list_dir(path, |cmd| self.execute(cmd))
+    }
+
+    /// Returns whether a guest path exists.
+    pub fn file_exists(&mut self, path: &str) -> Result<bool, MicrovmError> {
+        crate::guest_file_ops::file_exists(path, |cmd| self.execute(cmd))
+    }
+
+    /// Removes a file from the borrowed guest filesystem.
+    pub fn remove_file(&mut self, path: &str) -> Result<(), MicrovmError> {
+        crate::guest_file_ops::remove_file(path, |cmd| self.execute(cmd))
+    }
+
+    /// Renames or moves a file inside the borrowed guest filesystem.
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), MicrovmError> {
+        crate::guest_file_ops::rename(from, to, |cmd| self.execute(cmd))
+    }
+
+    /// Returns guest file metadata.
+    pub fn stat(&mut self, path: &str) -> Result<FileStat, MicrovmError> {
+        crate::guest_file_ops::stat(path, |cmd| self.execute(cmd))
     }
 
     /// Runs one guest `PING`/`PONG` readiness probe and returns the round-trip duration.
