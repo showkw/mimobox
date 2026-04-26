@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use nix::sched::CloneFlags;
-use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal};
+use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
@@ -124,28 +124,24 @@ unsafe fn write_msg(fd: RawFd, msg: &[u8]) {
     }
 }
 
-/// SIGSYS 信号处理器：记录被 seccomp 过滤器阻止的 syscall。
+/// SIGSYS handler 说明（已移除）
 ///
-/// 使用 TRAP 模式时，seccomp 过滤器匹配到未授权的 syscall 会发送 SIGSYS 信号。
-/// 此处理器将阻止信息写入 stderr 供调试，然后以 159 (128+SIGSYS) 退出码终止进程。
+/// seccomp 使用 TRAP 模式（SECCOMP_RET_TRAP）时，被阻止的 syscall 会触发 SIGSYS 信号。
+/// 曾在此处注册 sigsys_handler 以记录审计信息，但该 handler 在沙箱实际运行中不会生效：
 ///
-/// # Safety
+/// - handler 在 child process 中注册（exec 之前）
+/// - execve() 系统调用总是将所有信号处理器重置为 SIG_DFL（POSIX 规定）
+/// - 只有 SIG_IGN 和 SIG_DFL 可以跨 exec 保留，自定义 handler 一定会被丢弃
+/// - 因此 exec 后的进程（如 /bin/sh）不会有我们的 SIGSYS handler
 ///
-/// 此函数只能使用 async-signal-safe 函数（write, _exit 等）。
-/// 禁止使用 malloc、printf、Rust 标准库等非 signal-safe 函数。
-#[cfg(target_os = "linux")]
-extern "C" fn sigsys_handler(
-    _sig: libc::c_int,
-    _info: *mut libc::siginfo_t,
-    _ctx: *mut libc::c_void,
-) {
-    // SAFETY: 仅使用 async-signal-safe 函数（write, _exit）。
-    unsafe {
-        let msg = b"[mimobox] syscall blocked by seccomp filter\n";
-        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
-        libc::_exit(159); // 128 + SIGSYS(31) = 159
-    }
-}
+/// TRAP 模式的实际价值：
+/// - 进程以 SIGSYS 终止，退出码为 159 (128+SIGSYS=31)
+/// - 内核审计日志（auditd）可记录 SIGSYS 信号及触发 syscall 信息
+/// - 父进程通过 waitpid 检测到 WaitStatus::Signaled(SIGSYS)，可识别为 seccomp 违规
+///
+/// 如需自定义审计日志（如记录被阻止的 syscall 号、参数等），需要使用：
+/// - seccomp-unotify (SECCOMP_RET_USER_NOTIF)：内核将违规通知转发到用户空间
+/// - ptrace + PTRACE_O_TRACESECCOMP：通过 ptrace 拦截 seccomp 事件
 
 /// Writes a formatted error message in the child process.
 ///
@@ -374,17 +370,10 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
         }
     }
 
-    // 4.5 注册 SIGSYS handler（在应用 seccomp 之前）
-    // TRAP 模式下，被阻止的 syscall 会触发 SIGSYS 信号。
-    // 注册 handler 以便记录审计信息，对标 Firecracker/gVisor 的 TRAP 模式。
-    // 必须在 apply_seccomp 之前注册，否则第一条被阻止的 syscall 无法被 handler 捕获。
-    let sigsys_action = SigAction::new(
-        SigHandler::SigAction(sigsys_handler),
-        SaFlags::SA_SIGINFO,
-        SigSet::empty(),
-    );
-    // SAFETY: sigaction 注册信号处理器，参数合法。SIGSYS 不会影响正常的信号处理流程。
-    let _ = unsafe { nix::sys::signal::sigaction(Signal::SIGSYS, &sigsys_action) };
+    // 4.5 SIGSYS handler（已移除）
+    // 不在此处注册 SIGSYS handler，因为 execve() 会将所有自定义信号处理器重置为 SIG_DFL。
+    // TRAP 模式的价值在于：进程以 SIGSYS 终止（exit_code=159），内核审计可记录。
+    // 详见上方 "SIGSYS handler 说明（已移除）" 注释。
 
     // 5. 应用 Seccomp-bpf 过滤（在 exec 之前最后应用）
     // 致命 #3 修复：Seccomp 在所有安全策略配置完成后、exec 之前立即应用
