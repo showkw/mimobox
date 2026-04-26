@@ -1,3 +1,8 @@
+//! Shared PTY helpers for OS-level sandbox backends.
+//!
+//! This module allocates native pseudo terminals and adapts them to the
+//! `mimobox-core` [`PtySession`] trait used by Linux and macOS backends.
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -9,13 +14,22 @@ use std::time::Duration;
 use mimobox_core::{PtyConfig, PtyEvent, PtySession, PtySize as CorePtySize, SandboxError};
 use portable_pty::{MasterPty, NativePtySystem, PtySystem};
 
+/// Allocated native pseudo terminal resources.
+///
+/// The platform backend owns this value until the sandbox child process is
+/// spawned, then passes it to [`build_session`] to create a managed PTY session.
 pub(crate) struct AllocatedPty {
+    /// Master PTY handle used for resizing and lifecycle ownership.
     pub(crate) master: Box<dyn MasterPty + Send>,
+    /// Reader cloned from the master PTY for output forwarding.
     pub(crate) reader: Box<dyn Read + Send>,
+    /// Writer connected to the master PTY for input forwarding.
     pub(crate) writer: Box<dyn Write + Send>,
+    /// Filesystem path of the slave PTY device opened by the child process.
     pub(crate) slave_path: PathBuf,
 }
 
+/// Allocates a native pseudo terminal with the requested terminal size.
 pub(crate) fn allocate_pty(size: CorePtySize) -> Result<AllocatedPty, SandboxError> {
     let pty_system = NativePtySystem::default();
     let pair = pty_system
@@ -42,6 +56,10 @@ pub(crate) fn allocate_pty(size: CorePtySize) -> Result<AllocatedPty, SandboxErr
     })
 }
 
+/// Builds a boxed PTY session around an allocated PTY and child process.
+///
+/// The returned session owns the PTY master side and starts background threads
+/// for output forwarding, child exit observation, and optional timeout cleanup.
 pub(crate) fn build_session(
     allocated: AllocatedPty,
     child_pid: libc::pid_t,
@@ -50,6 +68,11 @@ pub(crate) fn build_session(
     Box::new(OsPtySession::new(allocated, child_pid, timeout))
 }
 
+/// Builds the sanitized child environment used for PTY-backed commands.
+///
+/// The result starts from a minimal allowlist and then overlays variables from
+/// [`PtyConfig::env`]. The `PWD` value follows [`PtyConfig::cwd`] when present
+/// and defaults to `/tmp` otherwise.
 pub(crate) fn build_child_env(config: &PtyConfig) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (

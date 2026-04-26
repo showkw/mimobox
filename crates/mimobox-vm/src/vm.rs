@@ -19,19 +19,23 @@ use crate::vm_assets::resolve_vm_assets_dir;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::kvm::{KvmBackend, restore_runtime_state};
 
-/// microVM-specific configuration.
+/// Configuration for a single microVM instance.
+///
+/// The configuration describes the guest CPU and memory shape plus the host-side
+/// assets required to boot the guest kernel and root filesystem. It is validated
+/// before any backend is created.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MicrovmConfig {
-    /// Number of vCPUs.
+    /// Number of virtual CPUs exposed to the guest.
     pub vcpu_count: u8,
-    /// Guest memory size in MiB.
+    /// Guest memory size in mebibytes.
     pub memory_mb: u32,
-    /// Optional CPU time quota in microseconds.
+    /// Optional CPU time quota in microseconds for backends that support CPU throttling.
     #[serde(default)]
     pub cpu_quota_us: Option<u64>,
-    /// Guest kernel image path.
+    /// Path to the guest kernel image on the host.
     pub kernel_path: PathBuf,
-    /// Guest rootfs path.
+    /// Path to the gzip-compressed guest rootfs image on the host.
     pub rootfs_path: PathBuf,
 }
 
@@ -54,7 +58,10 @@ impl Default for MicrovmConfig {
 }
 
 impl MicrovmConfig {
-    /// Returns the guest memory size in bytes.
+    /// Returns the configured guest memory size in bytes.
+    ///
+    /// The conversion checks for arithmetic overflow and for platforms where the
+    /// requested memory size cannot fit into `usize`.
     pub fn memory_bytes(&self) -> Result<usize, MicrovmError> {
         let bytes = u64::from(self.memory_mb)
             .checked_mul(1024 * 1024)
@@ -68,7 +75,10 @@ impl MicrovmConfig {
         })
     }
 
-    /// Validates the base microVM configuration.
+    /// Validates the base microVM configuration before backend creation.
+    ///
+    /// Validation rejects zero vCPU count, memory below the minimum supported guest
+    /// size, empty asset paths, and missing kernel or rootfs files.
     pub fn validate(&self) -> Result<(), MicrovmError> {
         if self.vcpu_count == 0 {
             return Err(MicrovmError::InvalidConfig(
@@ -112,7 +122,7 @@ impl MicrovmConfig {
     }
 }
 
-/// microVM lifecycle state.
+/// Lifecycle state of a [`MicrovmSandbox`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrovmState {
     /// Instance has been created but is not yet executable.
@@ -125,31 +135,31 @@ pub enum MicrovmState {
     Destroyed,
 }
 
-/// Guest command execution result.
+/// Result of a guest command execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestCommandResult {
-    /// Standard output bytes.
+    /// Bytes written by the guest process to standard output.
     pub stdout: Vec<u8>,
-    /// Standard error bytes.
+    /// Bytes written by the guest process to standard error.
     pub stderr: Vec<u8>,
-    /// Exit code, or `None` if the process did not exit normally.
+    /// Exit code reported by the guest process, or `None` when no normal exit code is available.
     pub exit_code: Option<i32>,
-    /// Whether execution was terminated by a timeout.
+    /// Whether execution was terminated because the effective timeout expired.
     pub timed_out: bool,
 }
 
-/// Guest command-level execution options.
+/// Per-command execution options passed to the guest command protocol.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestExecOptions {
-    /// Environment variables that only apply to this command.
+    /// Environment variables that apply only to this command.
     pub env: HashMap<String, String>,
-    /// Timeout that only applies to this command.
+    /// Timeout override that applies only to this command.
     pub timeout: Option<Duration>,
-    /// Working directory that only applies to this command.
+    /// Working directory override that applies only to this command.
     pub cwd: Option<String>,
 }
 
-/// Guest streaming execution event.
+/// Event emitted by streaming guest command execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     /// A chunk of standard output data.
@@ -162,66 +172,81 @@ pub enum StreamEvent {
     TimedOut,
 }
 
-/// microVM-level error.
-/// microVM 生命周期错误的具体语义分类。
+/// Structured lifecycle error for microVM and pooled VM handles.
 ///
-/// 用于替代原来的字符串匹配模式，提供编译期穷尽检查。
+/// This error separates state-machine failures from backend failures so callers can
+/// distinguish invalid handle usage from guest or KVM execution problems.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LifecycleError {
-    /// 当前状态不允许请求的操作。
+    /// The current lifecycle state does not permit the requested operation.
     #[error("{message}")]
     InvalidState {
-        /// 操作要求的生命周期状态。
+        /// Lifecycle state required by the operation.
         expected: String,
-        /// 当前实际生命周期状态描述。
+        /// Description of the current lifecycle state.
         current: String,
-        /// 对外展示的原始错误消息。
+        /// Stable user-facing error message.
         message: String,
     },
-    /// 沙箱已被销毁，无法复用。
+    /// The sandbox has been destroyed and cannot be reused.
     #[error("{0}")]
-    Destroyed(String),
-    /// VM 实例已归还池中，无法再使用。
+    Destroyed(
+        /// Destroyed-state failure message.
+        String,
+    ),
+    /// The VM handle was released back to its pool and cannot be used again.
     #[error("{0}")]
-    Released(String),
-    /// 仅 Ready 状态允许快照。
+    Released(
+        /// Released-handle failure message.
+        String,
+    ),
+    /// Snapshotting was requested while the VM was not ready.
     #[error("snapshot only allowed in Ready state")]
     NotReady,
-    /// 仅 Ready 状态允许 fork。
+    /// Forking was requested while the VM was not ready.
     #[error("fork only allowed in Ready state")]
     NotReadyForFork,
-    /// vsock 命令通道未连接。
+    /// The vsock command channel is required but not connected.
     #[error("vsock command channel is not connected")]
     VsockNotConnected,
-    /// vsock 命令通道不可用。
+    /// The vsock command channel is not available for the requested operation.
     #[error("vsock command channel unavailable")]
     VsockUnavailable,
-    /// 其他生命周期错误。
+    /// Any lifecycle error that does not fit a more specific category.
     #[error("{0}")]
-    Other(String),
+    Other(
+        /// Additional lifecycle failure detail.
+        String,
+    ),
 }
 
 /// Guest-side file operation error categories.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GuestFileErrorKind {
-    /// 目标路径不存在或无法解析。
+    /// The guest path does not exist or cannot be resolved.
     #[error("path not found")]
     NotFound,
-    /// 标准 I/O 错误（读写失败等）。
+    /// The guest reported a generic I/O failure.
     #[error("I/O error")]
     Io,
-    /// 权限不足。
+    /// The guest denied the requested file operation.
     #[error("permission denied")]
     PermissionDenied,
-    /// 磁盘空间不足。
+    /// The guest filesystem did not have enough free space.
     #[error("out of space")]
     OutOfSpace,
-    /// 未知的 guest 文件状态码。
+    /// The guest returned an unknown file-operation status code.
     #[error("unknown status code {0}")]
-    Unknown(u8),
+    Unknown(
+        /// Raw status code returned by the guest.
+        u8,
+    ),
 }
 
-/// microVM-level error.
+/// Top-level error type returned by the microVM crate.
+///
+/// Errors are intentionally grouped by configuration, lifecycle, backend, guest
+/// file protocol, HTTP proxy, snapshot, and host I/O boundaries.
 #[derive(Debug, thiserror::Error)]
 pub enum MicrovmError {
     /// KVM microVMs are not supported on the current platform or build configuration.
@@ -230,36 +255,56 @@ pub enum MicrovmError {
 
     /// microVM configuration is invalid.
     #[error("invalid microVM config: {0}")]
-    InvalidConfig(String),
+    InvalidConfig(
+        /// Configuration validation failure detail.
+        String,
+    ),
 
     /// Current lifecycle state does not allow the requested operation.
     #[error("microVM lifecycle error: {0}")]
-    Lifecycle(LifecycleError),
+    Lifecycle(
+        /// Source lifecycle-state error.
+        LifecycleError,
+    ),
 
     /// KVM or guest protocol error.
     #[error("KVM backend error: {0}")]
-    Backend(String),
+    Backend(
+        /// Backend failure detail.
+        String,
+    ),
 
     /// Guest-side file operation error.
     #[error("guest file error: {path}: {kind}")]
     GuestFile {
-        /// 错误类型语义分类。
+        /// Semantic category reported by the guest file protocol.
         kind: GuestFileErrorKind,
-        /// 出错的文件路径。
+        /// Guest path associated with the failed operation.
         path: String,
     },
 
     /// Controlled HTTP proxy error.
     #[error(transparent)]
-    HttpProxy(#[from] HttpProxyError),
+    HttpProxy(
+        /// Source HTTP proxy error.
+        #[from]
+        HttpProxyError,
+    ),
 
     /// Snapshot format is invalid or incompatible.
     #[error("invalid snapshot format: {0}")]
-    SnapshotFormat(String),
+    SnapshotFormat(
+        /// Snapshot decoding or compatibility failure detail.
+        String,
+    ),
 
     /// Standard library I/O error.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(
+        /// Source host I/O error.
+        #[from]
+        std::io::Error,
+    ),
 }
 
 impl From<MicrovmError> for SandboxError {
@@ -476,7 +521,11 @@ impl BackendHandle {
     }
 }
 
-/// microVM sandbox implementation.
+/// Public microVM sandbox implementation.
+///
+/// A `MicrovmSandbox` owns one backend instance and exposes guest command
+/// execution, file transfer, readiness probing, HTTP proxying, snapshotting, and
+/// fork/restore operations through a lifecycle-checked API.
 pub struct MicrovmSandbox {
     base_config: SandboxConfig,
     microvm_config: MicrovmConfig,
@@ -494,12 +543,18 @@ impl std::fmt::Debug for MicrovmSandbox {
 }
 
 impl MicrovmSandbox {
-    /// Creates a microVM with the default `SandboxConfig`.
+    /// Creates a microVM with the default [`SandboxConfig`].
+    ///
+    /// This is a convenience wrapper around [`Self::new_with_base`].
     pub fn new(config: MicrovmConfig) -> Result<Self, MicrovmError> {
         Self::new_with_base(SandboxConfig::default(), config)
     }
 
-    /// Creates a microVM with explicit `SandboxConfig` and `MicrovmConfig` values.
+    /// Creates a microVM with explicit sandbox and microVM configuration.
+    ///
+    /// The method validates the microVM asset paths and returns
+    /// [`MicrovmError::UnsupportedPlatform`] when the current build does not include
+    /// a supported KVM backend.
     pub fn new_with_base(
         base_config: SandboxConfig,
         microvm_config: MicrovmConfig,
@@ -524,7 +579,11 @@ impl MicrovmSandbox {
         })
     }
 
-    /// Exports a snapshot of the current microVM.
+    /// Exports a file-backed snapshot of the current microVM.
+    ///
+    /// Snapshotting is only allowed while the sandbox is in [`MicrovmState::Ready`].
+    /// The returned [`SandboxSnapshot`] stores guest memory in a snapshot directory
+    /// and associated runtime state in sidecar metadata.
     pub fn snapshot(&mut self) -> Result<SandboxSnapshot, MicrovmError> {
         if self.state != MicrovmState::Ready {
             return Err(MicrovmError::Lifecycle(LifecycleError::NotReady));
@@ -540,7 +599,10 @@ impl MicrovmSandbox {
         .persist_to_files()
     }
 
-    /// Restores a microVM from a snapshot.
+    /// Restores a microVM from a [`SandboxSnapshot`].
+    ///
+    /// File-backed snapshots use the optimized file restore path when available.
+    /// Inline snapshots are decoded from their self-describing byte representation.
     pub fn restore(snapshot: &SandboxSnapshot) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_restore").entered();
         if let Some(memory_path) = snapshot.memory_file_path() {
@@ -552,6 +614,8 @@ impl MicrovmSandbox {
     }
 
     /// Restores a microVM from self-describing snapshot bytes.
+    ///
+    /// The byte format is produced by [`MicrovmSnapshot::snapshot`].
     pub fn restore_from_bytes(data: &[u8]) -> Result<Self, MicrovmError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         Self::from_snapshot(snapshot)
@@ -655,7 +719,10 @@ impl MicrovmSandbox {
         }
     }
 
-    /// Attempts to fork the microVM or returns an unsupported-backend error.
+    /// Attempts to fork the microVM on unsupported builds.
+    ///
+    /// This method preserves the public API on non-KVM builds and always returns an
+    /// unsupported-backend error.
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
         let _span = tracing::info_span!("vm_fork").entered();
@@ -664,6 +731,7 @@ impl MicrovmSandbox {
         ))
     }
 
+    /// Reconstructs a sandbox from a decoded [`MicrovmSnapshot`].
     pub(crate) fn from_snapshot(snapshot: MicrovmSnapshot) -> Result<Self, MicrovmError> {
         let (sandbox_config, microvm_config, memory, vcpu_state) = snapshot.into_parts();
         let backend =
@@ -701,17 +769,26 @@ impl MicrovmSandbox {
         result
     }
 
-    /// Reads file contents from the guest.
+    /// Reads file contents from the guest filesystem.
+    ///
+    /// The path is interpreted by the guest agent. The call requires a ready guest
+    /// and returns [`MicrovmError::GuestFile`] for guest-side file failures.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         self.with_ready_state("read_file", |backend| backend.read_file(path))
     }
 
-    /// Writes file contents into the guest.
+    /// Writes file contents into the guest filesystem.
+    ///
+    /// Existing files are handled by the guest agent according to its filesystem
+    /// semantics. The call requires a ready guest.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         self.with_ready_state("write_file", |backend| backend.write_file(path, data))
     }
 
-    /// Waits until the microVM is responsive and verifies the command loop with PING/PONG.
+    /// Waits until the microVM is responsive.
+    ///
+    /// Readiness is verified with the guest command loop `PING`/`PONG` protocol. A
+    /// zero timeout is rejected as invalid configuration.
     pub fn wait_ready(&mut self, timeout: Duration) -> Result<(), MicrovmError> {
         if timeout.is_zero() {
             return Err(MicrovmError::InvalidConfig(
@@ -729,17 +806,19 @@ impl MicrovmSandbox {
         })
     }
 
-    /// Returns whether the microVM is in the Ready state.
+    /// Returns whether the microVM is in the ready state and the guest is responsive.
     pub fn is_ready(&self) -> bool {
         self.state == MicrovmState::Ready && self.backend.is_ready()
     }
 
-    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
+    /// Runs one guest `PING`/`PONG` readiness probe.
+    ///
+    /// The returned duration measures the host-observed round trip.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         self.with_ready_state("ping", BackendHandle::ping)
     }
 
-    /// Executes a command as a stream of events.
+    /// Executes a command and returns a receiver for streaming output events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -747,7 +826,9 @@ impl MicrovmSandbox {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// Executes a command as a stream of events with command-level options.
+    /// Executes a command as a stream of output events with command-level options.
+    ///
+    /// An empty command vector is rejected before the guest protocol is invoked.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -765,6 +846,8 @@ impl MicrovmSandbox {
     }
 
     /// Executes a command with command-level environment variables.
+    ///
+    /// The provided environment map is scoped to this single command.
     pub fn execute_with_env(
         &mut self,
         cmd: &[String],
@@ -781,6 +864,8 @@ impl MicrovmSandbox {
     }
 
     /// Executes a command with a command-level timeout override.
+    ///
+    /// The timeout overrides the base sandbox timeout for this command only.
     pub fn execute_with_timeout(
         &mut self,
         cmd: &[String],
@@ -797,6 +882,9 @@ impl MicrovmSandbox {
     }
 
     /// Executes a command with the full set of command-level options.
+    ///
+    /// Command execution is serialized by the sandbox lifecycle state. The sandbox
+    /// returns to ready after the command unless the backend marks it destroyed.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -814,6 +902,9 @@ impl MicrovmSandbox {
     }
 
     /// Sends a request through the host-controlled HTTP proxy.
+    ///
+    /// The request is validated against the base sandbox network policy before the
+    /// host performs the outbound HTTPS request.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         self.with_ready_state("http_request", |backend| backend.http_request(request))
     }

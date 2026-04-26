@@ -29,7 +29,12 @@ fn default_health_check_command() -> Vec<String> {
     vec!["/usr/bin/true".to_string()]
 }
 
-/// Warm pool configuration.
+/// Configuration for a [`SandboxPool`].
+///
+/// The pool keeps up to [`PoolConfig::max_size`] idle sandboxes and can
+/// pre-create [`PoolConfig::min_size`] instances during construction. Idle
+/// entries older than [`PoolConfig::max_idle_duration`] are evicted during
+/// maintenance operations such as [`SandboxPool::warm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolConfig {
     /// Minimum number of idle sandboxes pre-warmed during initialization.
@@ -53,7 +58,10 @@ impl Default for PoolConfig {
     }
 }
 
-/// Warm pool statistics snapshot.
+/// Point-in-time statistics for a [`SandboxPool`].
+///
+/// Counters are cumulative for the lifetime of the pool. Size fields describe
+/// the state observed when [`SandboxPool::stats`] took the snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PoolStats {
     /// Number of times `acquire()` hits the idle pool.
@@ -68,7 +76,7 @@ pub struct PoolStats {
     pub in_use_count: usize,
 }
 
-/// Warm pool error.
+/// Error returned by warm pool operations.
 #[derive(Debug, Error)]
 pub enum PoolError {
     /// The pool configuration is invalid.
@@ -86,7 +94,11 @@ pub enum PoolError {
 
     /// Underlying sandbox error.
     #[error(transparent)]
-    Sandbox(#[from] SandboxError),
+    Sandbox(
+        /// Error returned by the platform sandbox implementation.
+        #[from]
+        SandboxError,
+    ),
 }
 
 struct IdleSandbox {
@@ -302,10 +314,11 @@ impl PoolInner {
     }
 }
 
-/// Thread-safe sandbox warm pool.
+/// Thread-safe warm pool for OS-level sandboxes.
 ///
 /// `SandboxPool` can be cloned and shared across multiple threads. The hot path holds the mutex
-/// only while acquiring an idle sandbox.
+/// only while acquiring an idle sandbox. Checked-out sandboxes are returned to
+/// the pool automatically when their [`PooledSandbox`] handle is dropped.
 #[derive(Clone)]
 pub struct SandboxPool {
     inner: Arc<PoolInner>,
@@ -313,6 +326,9 @@ pub struct SandboxPool {
 
 impl SandboxPool {
     /// Creates a new warm pool and automatically warms it to `min_size`.
+    ///
+    /// Returns [`PoolError::InvalidConfig`] when `max_size` is zero or when
+    /// `min_size` is greater than `max_size`.
     pub fn new(config: SandboxConfig, pool_config: PoolConfig) -> Result<Self, PoolError> {
         if pool_config.max_size == 0 || pool_config.min_size > pool_config.max_size {
             return Err(PoolError::InvalidConfig {
@@ -337,24 +353,28 @@ impl SandboxPool {
         Ok(pool)
     }
 
-    /// Returns the pool configuration.
+    /// Returns the immutable pool configuration used by this pool.
     pub fn pool_config(&self) -> PoolConfig {
         self.inner.pool_config
     }
 
-    /// Returns a statistics snapshot.
+    /// Returns a statistics snapshot for the current pool state.
     pub fn stats(&self) -> Result<PoolStats, PoolError> {
         Ok(self.inner.lock_state()?.snapshot())
     }
 
-    /// Returns the current number of idle sandboxes.
+    /// Returns the current number of idle sandboxes retained by the pool.
     pub fn idle_len(&self) -> Result<usize, PoolError> {
         Ok(self.inner.lock_state()?.idle.len())
     }
 
     /// Warms the pool to the specified number of idle sandboxes.
     ///
-    /// Returns the number of sandboxes actually created by this call.
+    /// The requested target is capped at [`PoolConfig::max_size`]. Expired idle
+    /// entries are evicted before new sandboxes are created.
+    ///
+    /// Returns the number of sandboxes actually inserted into the idle pool by
+    /// this call.
     pub fn warm(&self, target_idle_size: usize) -> Result<usize, PoolError> {
         let target_idle_size = target_idle_size.min(self.inner.pool_config.max_size);
         let expired = self.inner.take_expired_idle()?;
@@ -401,9 +421,11 @@ impl SandboxPool {
         Ok(inserted)
     }
 
-    /// Acquires a pre-warmed sandbox.
+    /// Acquires a sandbox from the pool.
     ///
-    /// Reuses an idle object on pool hit; creates a new sandbox on demand when the pool is empty.
+    /// Reuses an idle object on pool hit and creates a new platform sandbox on
+    /// demand when the pool is empty. The returned [`PooledSandbox`] recycles
+    /// itself back into the pool on drop.
     pub fn acquire(&self) -> Result<PooledSandbox, PoolError> {
         let reused = {
             let mut state = self.inner.lock_state()?;
@@ -436,7 +458,7 @@ impl SandboxPool {
     }
 }
 
-/// Handle for a sandbox checked out from the pool.
+/// Handle for a sandbox checked out from a [`SandboxPool`].
 ///
 /// Recycles the sandbox according to pool configuration on drop; by default, only memory cleanup
 /// runs and no health check is performed.
@@ -446,7 +468,11 @@ pub struct PooledSandbox {
 }
 
 impl PooledSandbox {
-    /// Executes a command in the sandbox.
+    /// Executes a command in the checked-out sandbox.
+    ///
+    /// The command vector must follow the same contract as
+    /// [`mimobox_core::Sandbox::execute`]: the first element is the executable
+    /// path and the remaining elements are arguments.
     pub fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         match self.sandbox.as_mut() {
             Some(sandbox) => sandbox.execute(cmd),
@@ -477,6 +503,10 @@ fn percentile_us(samples: &[f64], percentile: f64) -> f64 {
 }
 
 /// Runs a simple pool benchmark comparing cold-start and hot-acquire latency.
+///
+/// `pool_size` controls how many idle sandboxes are pre-warmed. `iterations`
+/// controls how many cold and hot samples are collected before printing p50 and
+/// p99 latency summaries.
 pub fn run_pool_benchmark(
     pool_size: usize,
     iterations: usize,

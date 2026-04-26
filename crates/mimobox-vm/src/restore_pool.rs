@@ -24,6 +24,7 @@ use crate::{
     MicrovmSnapshot, StreamEvent,
 };
 
+/// Pre-created KVM VM shell that has memory and vCPUs registered but no restored guest state.
 pub(crate) struct EmptyVmSlot {
     kvm: Kvm,
     vm_fd: VmFd,
@@ -34,6 +35,7 @@ pub(crate) struct EmptyVmSlot {
 }
 
 impl EmptyVmSlot {
+    /// Creates an empty VM slot ready to accept snapshot memory and runtime state.
     pub(crate) fn new(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -82,6 +84,7 @@ impl EmptyVmSlot {
         })
     }
 
+    /// Converts this empty slot into a restored backend using in-memory snapshot data.
     pub(crate) fn into_restored_backend(
         self,
         memory: &[u8],
@@ -115,6 +118,7 @@ impl EmptyVmSlot {
         Ok(backend)
     }
 
+    /// Converts this empty slot into a restored backend using a file-backed memory snapshot.
     #[cfg(feature = "zerocopy-fork")]
     pub(crate) fn into_restored_backend_from_file(
         self,
@@ -150,16 +154,16 @@ impl EmptyVmSlot {
     }
 }
 
-/// Snapshot restore pool configuration.
+/// Configuration for the snapshot restore pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestorePoolConfig {
-    /// Minimum number of empty VM shells to prewarm during initialization.
+    /// Minimum number of empty VM shells to prewarm and keep available.
     pub min_size: usize,
     /// Maximum number of empty VM shells retained by the restore pool.
     pub max_size: usize,
 }
 
-/// Snapshot restore pool error.
+/// Error returned by [`RestorePool`] operations.
 #[derive(Debug, Error)]
 pub enum RestorePoolError {
     /// Restore pool configuration is invalid.
@@ -177,7 +181,11 @@ pub enum RestorePoolError {
 
     /// Underlying microVM error.
     #[error(transparent)]
-    Microvm(#[from] MicrovmError),
+    Microvm(
+        /// Source microVM error.
+        #[from]
+        MicrovmError,
+    ),
 }
 
 #[derive(Default)]
@@ -306,7 +314,11 @@ impl Drop for RestorePoolInner {
     }
 }
 
-/// microVM restore pool based on snapshot restoration.
+/// Pool of empty VM shells optimized for snapshot restoration.
+///
+/// Unlike [`crate::pool::VmPool`], this pool does not keep fully booted guests.
+/// Instead, it keeps KVM VM shells with memory and vCPU structures allocated so
+/// snapshot state can be restored with less setup latency.
 #[derive(Clone)]
 pub struct RestorePool {
     inner: Arc<RestorePoolInner>,
@@ -314,6 +326,9 @@ pub struct RestorePool {
 
 impl RestorePool {
     /// Creates a pool of empty VM shells for snapshot restore.
+    ///
+    /// The pool validates capacity limits and microVM assets, then warms the
+    /// configured minimum number of empty slots.
     pub fn new(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -344,7 +359,10 @@ impl RestorePool {
         Ok(pool)
     }
 
-    /// Restores a microVM from memory pages and vCPU state.
+    /// Restores a microVM from guest memory pages and serialized vCPU state.
+    ///
+    /// A pre-created slot is used when available; otherwise the pool creates one on
+    /// demand and rolls back accounting if restoration fails.
     pub fn restore(
         &self,
         memory: &[u8],
@@ -382,14 +400,17 @@ impl RestorePool {
         })
     }
 
-    /// Restores a microVM from full snapshot bytes.
+    /// Restores a microVM from full self-describing snapshot bytes.
     pub fn restore_from_bytes(&self, data: &[u8]) -> Result<PooledRestoreVm, RestorePoolError> {
         let snapshot = MicrovmSnapshot::restore(data)?;
         let (_, _, memory, vcpu_state) = snapshot.into_parts();
         self.restore(memory.as_slice(), vcpu_state.as_slice())
     }
 
-    /// Restores a microVM from a `SandboxSnapshot`.
+    /// Restores a microVM from a [`SandboxSnapshot`].
+    ///
+    /// File-backed snapshots use the optimized file path when the build supports it;
+    /// otherwise the snapshot is loaded into memory before restoration.
     pub fn restore_snapshot(
         &self,
         snapshot: &SandboxSnapshot,
@@ -452,6 +473,9 @@ impl RestorePool {
     }
 
     /// Returns the current number of idle slots in the restore pool.
+    ///
+    /// If the internal lock is poisoned, this method logs the condition and returns
+    /// `0` rather than panicking.
     pub fn idle_count(&self) -> usize {
         match self.inner.state.lock() {
             Ok(state) => state.idle.len(),
@@ -463,24 +487,32 @@ impl RestorePool {
     }
 
     /// Warms the restore pool to at least `target` empty VM shells.
+    ///
+    /// The effective target is capped by [`RestorePoolConfig::max_size`].
     pub fn warm(&self, target: usize) -> Result<(), RestorePoolError> {
         self.inner.warm(target)
     }
 }
 
-/// Restored microVM handle borrowed from a `RestorePool`.
+/// Restored microVM handle borrowed from a [`RestorePool`].
+///
+/// Dropping the handle shuts down the restored VM and allows the pool to replenish
+/// an empty slot if needed.
 pub struct PooledRestoreVm {
     backend: Option<KvmBackend>,
     pool: Arc<RestorePoolInner>,
 }
 
 impl PooledRestoreVm {
-    /// Executes a command and waits for completion.
+    /// Executes a guest command and waits for completion.
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// Executes a command with command-level options.
+    /// Executes a guest command with command-level options.
+    ///
+    /// Returns [`LifecycleError::Released`] through [`MicrovmError::Lifecycle`] when
+    /// the restored handle has already been released.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -494,7 +526,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// Executes a command as a stream of events.
+    /// Executes a guest command and returns a receiver for streaming output events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -502,7 +534,7 @@ impl PooledRestoreVm {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// Executes a command as a stream of events with command-level options.
+    /// Executes a guest command as streaming output events with command-level options.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -516,7 +548,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// Reads file contents from the guest.
+    /// Reads file contents from the restored guest filesystem.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.read_file(path),
@@ -526,7 +558,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// Writes file contents into the guest.
+    /// Writes file contents into the restored guest filesystem.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.write_file(path, data),
@@ -536,7 +568,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
+    /// Runs one guest `PING`/`PONG` readiness probe and returns the round-trip duration.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.ping(),
@@ -546,7 +578,7 @@ impl PooledRestoreVm {
         }
     }
 
-    /// Sends a request through the host-controlled HTTP proxy.
+    /// Sends a request through the host-controlled HTTP proxy for the restored VM.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => backend.http_request(request),

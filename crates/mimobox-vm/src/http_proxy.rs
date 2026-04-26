@@ -20,11 +20,15 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 /// Raw JSON payload accepted by the guest-to-host HTTP proxy protocol.
+///
+/// Guests use this shape when sending serialized HTTP requests over the command
+/// protocol. The payload is decoded and normalized into [`HttpRequest`] before any
+/// host network access is attempted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpProxyRequestPayload {
-    /// Request method, such as `GET` or `POST`.
+    /// HTTP method supplied by the guest, such as `GET` or `POST`.
     pub method: String,
-    /// Target HTTPS URL.
+    /// Target HTTPS URL supplied by the guest.
     pub url: String,
     /// Request headers supplied by the guest.
     #[serde(default)]
@@ -43,37 +47,40 @@ pub struct HttpProxyRequestPayload {
 /// Validated and normalized HTTP proxy request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
-    /// Request method, such as `GET` or `POST`.
+    /// HTTP method to send on the host side, such as `GET` or `POST`.
     pub method: String,
-    /// Target HTTPS URL.
+    /// Target HTTPS URL after guest payload normalization.
     pub url: String,
-    /// Request headers.
+    /// Request headers to forward to the target server.
     pub headers: HashMap<String, String>,
-    /// Optional request body.
+    /// Optional raw request body bytes.
     pub body: Option<Vec<u8>>,
     /// Request timeout in milliseconds.
     pub timeout_ms: u64,
-    /// Maximum response body size allowed.
+    /// Maximum response body size allowed before the proxy aborts the read.
     pub max_response_bytes: usize,
 }
 
-/// HTTP proxy response.
+/// HTTP response returned by the host-controlled proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
-    /// HTTP status code.
+    /// Numeric HTTP status code returned by the target server.
     pub status: u16,
-    /// Response headers.
+    /// Response headers returned by the target server.
     pub headers: HashMap<String, String>,
-    /// Response body bytes.
+    /// Response body bytes, capped by the originating request limit.
     pub body: Vec<u8>,
 }
 
-/// microVM HTTP proxy error.
+/// Error returned by the host-controlled HTTP proxy.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpProxyError {
     /// Target host is not in the allowlist.
     #[error("domain not in whitelist: {0}")]
-    DeniedHost(String),
+    DeniedHost(
+        /// Hostname rejected by the configured allowlist.
+        String,
+    ),
     /// Request exceeded its timeout.
     #[error("HTTP request timed out")]
     Timeout,
@@ -82,23 +89,38 @@ pub enum HttpProxyError {
     BodyTooLarge,
     /// Failed to connect to the target server.
     #[error("HTTP connection failed: {0}")]
-    ConnectFail(String),
+    ConnectFail(
+        /// Connection failure detail from the HTTP client or DNS resolver.
+        String,
+    ),
     /// TLS handshake failed.
     #[error("TLS handshake failed: {0}")]
-    TlsFail(String),
+    TlsFail(
+        /// TLS failure detail from the HTTP client.
+        String,
+    ),
     /// Request URL is invalid.
     #[error("invalid URL: {0}")]
-    InvalidUrl(String),
+    InvalidUrl(
+        /// URL parsing or validation failure detail.
+        String,
+    ),
     /// DNS resolved to a private or reserved address.
     #[error("DNS resolution hit private address: {0}")]
-    DnsRebind(String),
+    DnsRebind(
+        /// DNS rebinding guard failure detail.
+        String,
+    ),
     /// Proxy execution failed internally.
     #[error("HTTP proxy internal error: {0}")]
-    Internal(String),
+    Internal(
+        /// Internal proxy failure detail.
+        String,
+    ),
 }
 
 impl HttpProxyError {
-    /// Returns the stable error code string.
+    /// Returns the stable protocol error code for this proxy failure.
     pub fn code(&self) -> &'static str {
         match self {
             Self::DeniedHost(_) => "DENIED_HOST",
@@ -145,6 +167,9 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
 
 impl HttpRequest {
     /// Constructs a new HTTP proxy request and applies default limits.
+    ///
+    /// The request body is rejected when it exceeds the maximum guest-to-host body
+    /// size accepted by the proxy protocol.
     pub fn new(
         method: impl Into<String>,
         url: impl Into<String>,
@@ -170,7 +195,9 @@ impl HttpRequest {
         })
     }
 
-    /// Parses an HTTP proxy request from a JSON payload.
+    /// Parses an HTTP proxy request from a guest JSON payload.
+    ///
+    /// Missing timeout and response-size fields are replaced with crate defaults.
     pub fn from_json(json: &str) -> Result<Self, HttpProxyError> {
         let payload = serde_json::from_str::<HttpProxyRequestPayload>(json).map_err(|err| {
             HttpProxyError::InvalidUrl(format!("invalid HTTP request JSON: {err}"))
@@ -180,6 +207,10 @@ impl HttpRequest {
 }
 
 /// Executes an HTTP request through the host-controlled proxy.
+///
+/// Only HTTPS URLs are accepted. Hostnames must match the sandbox allowlist, direct
+/// IP literals are rejected, and DNS results must not resolve to loopback, private,
+/// link-local, or unspecified addresses.
 pub fn execute_http_request(
     config: &SandboxConfig,
     request: &HttpRequest,
@@ -232,7 +263,11 @@ pub fn execute_http_request(
     })
 }
 
-/// Returns whether the given host matches the HTTP host allowlist.
+/// Returns whether a hostname matches the sandbox HTTP allowlist.
+///
+/// The matcher accepts exact host rules and wildcard rules of the form
+/// `*.example.com`. Wildcards match subdomains only and do not match the bare
+/// suffix itself.
 pub fn is_allowed_http_host(config: &SandboxConfig, host: &str) -> bool {
     let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
     if normalized_host.is_empty() {
