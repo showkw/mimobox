@@ -48,6 +48,14 @@ pub(crate) struct Cli {
 enum CliCommand {
     /// Execute a command in the specified backend sandbox
     Run(RunArgs),
+    /// Execute a code snippet in the specified backend sandbox
+    Code(CodeArgs),
+    /// List directory entries inside a sandbox
+    Ls(LsArgs),
+    /// Read a file from a microVM-backed sandbox
+    Cat(CatArgs),
+    /// Write a file into a microVM-backed sandbox
+    Write(WriteArgs),
     /// Start an interactive terminal session
     Shell(ShellArgs),
     /// Create a microVM snapshot file
@@ -113,7 +121,19 @@ fn run_with_panic_guard() -> ExitCode {
 }
 
 fn run() -> Result<Option<i32>, CliError> {
-    let cli = Cli::try_parse().map_err(|error| CliError::Args(error.to_string()))?;
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.print()?;
+            return Ok(None);
+        }
+        Err(error) => return Err(CliError::Args(error.to_string())),
+    };
     let is_human_readable_command = matches!(
         cli.command,
         CliCommand::Doctor
@@ -129,6 +149,10 @@ fn run() -> Result<Option<i32>, CliError> {
 
     let response = match cli.command {
         CliCommand::Run(args) => CommandResponse::Run(handle_run(args)?),
+        CliCommand::Code(args) => CommandResponse::Code(handle_code(args)?),
+        CliCommand::Ls(args) => CommandResponse::Ls(handle_ls(args)?),
+        CliCommand::Cat(args) => CommandResponse::Cat(handle_cat(args)?),
+        CliCommand::Write(args) => CommandResponse::Write(handle_write(args)?),
         CliCommand::Shell(args) => {
             let exit_code = handle_shell(args)?;
             info!(exit_code, "shell subcommand completed");
@@ -247,6 +271,101 @@ mod tests {
             }
             _ => panic!("expected run subcommand"),
         }
+    }
+
+    #[test]
+    fn code_subcommand_parses_expected_flags() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "code",
+            "--backend",
+            "os",
+            "--language",
+            "python",
+            "--code",
+            "print('hello')",
+            "--timeout",
+            "3",
+        ])
+        .expect("code subcommand should parse successfully");
+
+        match cli.command {
+            CliCommand::Code(args) => {
+                assert_eq!(args.backend, Backend::Os);
+                assert_eq!(args.language, "python");
+                assert_eq!(args.code, "print('hello')");
+                assert_eq!(args.timeout, Some(3));
+            }
+            _ => panic!("expected code subcommand"),
+        }
+    }
+
+    #[test]
+    fn file_operation_subcommands_parse_expected_defaults() {
+        let ls = Cli::try_parse_from(["mimobox", "ls", "/tmp"])
+            .expect("ls subcommand should parse successfully");
+        match ls.command {
+            CliCommand::Ls(args) => {
+                assert_eq!(args.path, "/tmp");
+                assert_eq!(args.backend, Backend::Auto);
+            }
+            _ => panic!("expected ls subcommand"),
+        }
+
+        let cat = Cli::try_parse_from(["mimobox", "cat", "/tmp/a.txt"])
+            .expect("cat subcommand should parse successfully");
+        match cat.command {
+            CliCommand::Cat(args) => {
+                assert_eq!(args.path, "/tmp/a.txt");
+                assert_eq!(args.backend, Backend::Auto);
+            }
+            _ => panic!("expected cat subcommand"),
+        }
+
+        let write = Cli::try_parse_from([
+            "mimobox",
+            "write",
+            "/tmp/a.txt",
+            "--content",
+            "hello",
+            "--backend",
+            "kvm",
+        ])
+        .expect("write subcommand should parse successfully");
+        match write.command {
+            CliCommand::Write(args) => {
+                assert_eq!(args.path, "/tmp/a.txt");
+                assert_eq!(args.content.as_deref(), Some("hello"));
+                assert_eq!(args.file, None);
+                assert_eq!(args.backend, Backend::Kvm);
+            }
+            _ => panic!("expected write subcommand"),
+        }
+    }
+
+    #[test]
+    fn write_subcommand_requires_single_input_source() {
+        let missing_input = Cli::try_parse_from(["mimobox", "write", "/tmp/a.txt"])
+            .expect_err("write subcommand should require --content or --file");
+        assert_eq!(
+            missing_input.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflicting_input = Cli::try_parse_from([
+            "mimobox",
+            "write",
+            "/tmp/a.txt",
+            "--content",
+            "hello",
+            "--file",
+            "/tmp/source.txt",
+        ])
+        .expect_err("write subcommand should reject both input sources");
+        assert_eq!(
+            conflicting_input.kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
     }
 
     #[test]
@@ -777,6 +896,20 @@ mod tests {
         });
 
         assert_eq!(success_exit_code(&response), Some(7));
+    }
+
+    #[test]
+    fn success_exit_code_propagates_non_zero_code_exit_code() {
+        let response = CommandResponse::Code(CodeResponse {
+            language: "python".to_string(),
+            exit_code: Some(11),
+            timed_out: false,
+            elapsed_ms: 1.0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        assert_eq!(success_exit_code(&response), Some(11));
     }
 
     #[test]
