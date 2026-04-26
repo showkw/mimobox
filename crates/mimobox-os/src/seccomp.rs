@@ -74,7 +74,10 @@ const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
 ];
 
 // clone namespace flags 约束
-const CLONE_NAMESPACE_MASK: u32 = 0x4E02_0000;
+// 移除 CLONE_NEWCGROUP 位（与 CLONE_CHILD_CLEARTID 共享 bit 25），
+// 避免误杀 bash 等程序创建子进程时的正常 clone 调用。
+// 包含：CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET
+const CLONE_NAMESPACE_MASK: u32 = 0x4C02_0000;
 const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
 // prctl 常量
@@ -197,10 +200,14 @@ mod syscall_nr {
     pub const GETCWD: u32 = 79;
     /// syscall number for chdir(2).
     pub const CHDIR: u32 = 80;
+    /// syscall number for fchdir(2).
+    pub const FCHDIR: u32 = 81;
     /// syscall number for rename(2).
     pub const RENAME: u32 = 82;
     /// syscall number for mkdir(2).
     pub const MKDIR: u32 = 83;
+    /// syscall number for rmdir(2).
+    pub const RMDIR: u32 = 84;
     /// syscall number for unlink(2).
     pub const UNLINK: u32 = 87;
     /// syscall number for symlink(2).
@@ -421,6 +428,7 @@ fn essential_syscalls() -> Vec<u32> {
         GETDENTS64,
         GETCWD,
         CHDIR,
+        FCHDIR,
         DUP,
         DUP2,
         DUP3,
@@ -456,6 +464,7 @@ fn essential_syscalls() -> Vec<u32> {
         FTRUNCATE,
         FUTIMENSAT,
         MKDIR,
+        RMDIR,
         MKDIRAT,
         UNLINK,
         UNLINKAT,
@@ -524,6 +533,9 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
         // Rocky/RHEL 9 的 NSS/systemd-userdb 查找链会在事件循环中使用 timerfd。
         TIMERFD_CREATE,
         TIMERFD_SETTIME,
+        // libcap/libselinux 程序（ls, rm, ps 等）在启动时使用 prctl(PR_CAPBSET_READ)
+        // 检查 capability bounding set，这是只读操作不构成安全风险。
+        PRCTL,
     ]);
     syscalls
 }

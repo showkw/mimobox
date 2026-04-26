@@ -10,7 +10,7 @@ pub(crate) fn handle_ls(args: LsArgs) -> Result<LsResponse, CliError> {
         "preparing to execute ls subcommand"
     );
 
-    let config = build_cli_sdk_config(args.backend, None);
+    let config = build_cli_sdk_config(args.backend, None, false);
     let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
     let result = sandbox.list_dir(&args.path);
     let mut entries =
