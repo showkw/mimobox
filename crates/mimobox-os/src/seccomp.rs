@@ -258,6 +258,18 @@ mod syscall_nr {
     pub const PAUSE: u32 = 34;
     /// syscall number for arch_prctl(2).
     pub const ARCH_PRCTL: u32 = 158;
+    /// syscall number for getxattr(2).
+    pub const GETXATTR: u32 = 191;
+    /// syscall number for lgetxattr(2).
+    pub const LGETXATTR: u32 = 192;
+    /// syscall number for fgetxattr(2).
+    pub const FGETXATTR: u32 = 193;
+    /// syscall number for listxattr(2).
+    pub const LISTXATTR: u32 = 195;
+    /// syscall number for llistxattr(2).
+    pub const LLISTXATTR: u32 = 196;
+    /// syscall number for flistxattr(2).
+    pub const FLISTXATTR: u32 = 197;
     /// syscall number for set_tid_address(2).
     pub const SET_TID_ADDRESS: u32 = 218;
     /// syscall number for exit_group(2).
@@ -417,6 +429,14 @@ fn essential_syscalls() -> Vec<u32> {
         FSTATAT,
         NEWFSTATAT,
         STATX,
+        // SELinux 环境下 ls/stat/rm 等程序需要读取 xattr（如 security.selinux）。
+        // 这些 syscall 只读扩展属性，不修改文件系统状态。
+        GETXATTR,
+        LGETXATTR,
+        FGETXATTR,
+        LISTXATTR,
+        LLISTXATTR,
+        FLISTXATTR,
         ACCESS,
         FACCESSAT,
         // glibc 2.33+ 在 access(2) 路径上会优先尝试 faccessat2。
