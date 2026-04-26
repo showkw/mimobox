@@ -530,6 +530,10 @@ fn essential_syscalls() -> Vec<u32> {
         SPLICE,
         TEE,
         FADVISE64,
+        // 现代 Linux 发行版（Rocky/RHEL 9）的 NSS 会使用 unix socket 连接
+        // systemd-userdbd 进行用户/组名解析。参数约束系统自动限制为仅 AF_UNIX。
+        SOCKET,
+        CONNECT,
     ]
 }
 
