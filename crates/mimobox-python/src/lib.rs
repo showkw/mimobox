@@ -375,6 +375,173 @@ impl From<StreamEvent> for PyStreamEvent {
     }
 }
 
+/// 文件系统子模块（sandbox.fs）。
+///
+/// 聚合文件操作 API，通过代理模式调用 PySandbox 的已有方法。
+#[pyclass(name = "FileSystem")]
+struct PyFileSystem {
+    sandbox: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyFileSystem {
+    /// 读取文件内容。
+    fn read(&self, py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
+        let result = self.sandbox.call_method1(py, "read_file", (path,))?;
+        result.extract(py)
+    }
+
+    /// 写入文件。
+    fn write(&self, py: Python<'_>, path: &str, data: Vec<u8>) -> PyResult<()> {
+        self.sandbox.call_method1(py, "write_file", (path, data))?;
+        Ok(())
+    }
+
+    /// 列出目录内容。
+    fn list(&self, py: Python<'_>, path: &str) -> PyResult<Vec<PyDirEntry>> {
+        let result = self.sandbox.call_method1(py, "list_dir", (path,))?;
+        result.extract(py)
+    }
+
+    /// 检查文件是否存在。
+    fn exists(&self, py: Python<'_>, path: &str) -> PyResult<bool> {
+        let result = self.sandbox.call_method1(py, "file_exists", (path,))?;
+        result.extract(py)
+    }
+
+    /// 删除文件。
+    fn remove(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.sandbox.call_method1(py, "remove_file", (path,))?;
+        Ok(())
+    }
+
+    /// 重命名或移动文件。
+    fn rename(&self, py: Python<'_>, from: &str, to: &str) -> PyResult<()> {
+        self.sandbox.call_method1(py, "rename", (from, to))?;
+        Ok(())
+    }
+
+    /// 返回文件元信息。
+    fn stat(&self, py: Python<'_>, path: &str) -> PyResult<PyFileStat> {
+        let result = self.sandbox.call_method1(py, "stat", (path,))?;
+        result.extract(py)
+    }
+}
+
+/// 进程子模块（sandbox.process）。
+///
+/// 聚合命令执行 API，通过代理模式调用 PySandbox 的已有方法。
+#[pyclass(name = "Process")]
+struct PyProcess {
+    sandbox: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyProcess {
+    /// 执行 shell 命令。
+    #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
+    fn run(
+        &self,
+        py: Python<'_>,
+        command: &str,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+        cwd: Option<&str>,
+    ) -> PyResult<PyExecuteResult> {
+        let result = self
+            .sandbox
+            .call_method1(py, "execute", (command, env, timeout, cwd))?;
+        result.extract(py)
+    }
+
+    /// 执行代码片段。
+    #[pyo3(signature = (language, code, *, env=None, timeout=None, cwd=None))]
+    fn run_code(
+        &self,
+        py: Python<'_>,
+        language: &str,
+        code: &str,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+        cwd: Option<&str>,
+    ) -> PyResult<PyExecuteResult> {
+        let kwargs = PyDict::new(py);
+        if let Some(env) = env {
+            kwargs.set_item("env", env)?;
+        }
+        if let Some(timeout) = timeout {
+            kwargs.set_item("timeout", timeout)?;
+        }
+        if let Some(cwd) = cwd {
+            kwargs.set_item("cwd", cwd)?;
+        }
+
+        let result =
+            self.sandbox
+                .call_method(py, "execute_code", (language, code), Some(&kwargs))?;
+        result.extract(py)
+    }
+
+    /// 流式执行命令。
+    fn stream(&self, py: Python<'_>, command: &str) -> PyResult<Py<PyAny>> {
+        self.sandbox.call_method1(py, "stream_execute", (command,))
+    }
+}
+
+/// 快照子模块（sandbox.snapshot）。
+///
+/// 聚合快照操作 API，通过代理模式调用 PySandbox 的已有方法。
+#[pyclass(name = "SnapshotOps")]
+struct PySnapshotOps {
+    sandbox: Py<PyAny>,
+}
+
+#[pymethods]
+impl PySnapshotOps {
+    /// 兼容旧 API：允许 sandbox.snapshot() 继续捕获快照。
+    fn __call__(&self, py: Python<'_>) -> PyResult<PySnapshot> {
+        self.capture(py)
+    }
+
+    /// 捕获当前沙箱状态的快照。
+    fn capture(&self, py: Python<'_>) -> PyResult<PySnapshot> {
+        let result = self.sandbox.call_method0(py, "_capture_snapshot")?;
+        result.extract(py)
+    }
+
+    /// 基于当前实例派生一个独立沙箱。
+    fn fork(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.sandbox.call_method0(py, "fork")
+    }
+}
+
+/// 网络子模块（sandbox.network）。
+///
+/// 聚合 HTTP 请求 API，通过代理模式调用 PySandbox 的已有方法。
+#[pyclass(name = "Network")]
+struct PyNetwork {
+    sandbox: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyNetwork {
+    /// 发起 HTTPS 请求（通过 host 代理）。
+    #[pyo3(signature = (method, url, headers=None, body=None))]
+    fn request(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        url: &str,
+        headers: Option<std::collections::HashMap<String, String>>,
+        body: Option<Vec<u8>>,
+    ) -> PyResult<PyHttpResponse> {
+        let result = self
+            .sandbox
+            .call_method1(py, "http_request", (method, url, headers, body))?;
+        result.extract(py)
+    }
+}
+
 /// Python iterator over `StreamEvent` objects from a streaming execution.
 ///
 /// Created by `Sandbox.stream_execute()`. Yields `StreamEvent` objects
@@ -435,6 +602,39 @@ impl PySandbox {
         Ok(Self {
             inner: Some(sandbox),
         })
+    }
+
+    /// 返回文件系统子模块。
+    #[getter]
+    fn fs(slf: PyRef<'_, Self>) -> PyFileSystem {
+        PyFileSystem {
+            sandbox: Py::<PySandbox>::from(slf).into_any(),
+        }
+    }
+
+    /// 返回进程子模块。
+    #[getter]
+    fn process(slf: PyRef<'_, Self>) -> PyProcess {
+        PyProcess {
+            sandbox: Py::<PySandbox>::from(slf).into_any(),
+        }
+    }
+
+    /// 返回快照子模块。
+    #[getter]
+    #[pyo3(name = "snapshot")]
+    fn snapshot_ops(slf: PyRef<'_, Self>) -> PySnapshotOps {
+        PySnapshotOps {
+            sandbox: Py::<PySandbox>::from(slf).into_any(),
+        }
+    }
+
+    /// 返回网络子模块。
+    #[getter]
+    fn network(slf: PyRef<'_, Self>) -> PyNetwork {
+        PyNetwork {
+            sandbox: Py::<PySandbox>::from(slf).into_any(),
+        }
     }
 
     /// Execute a shell-style command inside the sandbox.
@@ -650,7 +850,8 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If snapshotting fails.
-    fn snapshot(&mut self) -> PyResult<PySnapshot> {
+    #[pyo3(name = "_capture_snapshot")]
+    fn capture_snapshot(&mut self) -> PyResult<PySnapshot> {
         let sandbox = self.inner_mut()?;
         let snapshot = sandbox.snapshot().map_err(map_sdk_error)?;
         Ok(PySnapshot { inner: snapshot })
@@ -886,6 +1087,10 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFileStat>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
+    module.add_class::<PyFileSystem>()?;
+    module.add_class::<PyProcess>()?;
+    module.add_class::<PySnapshotOps>()?;
+    module.add_class::<PyNetwork>()?;
     module.add("SandboxError", py.get_type::<SandboxError>())?;
     module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
     module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
