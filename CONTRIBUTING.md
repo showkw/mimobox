@@ -1,3 +1,5 @@
+[English](CONTRIBUTING.en.md) | **中文**
+
 # 贡献指南
 
 ## 感谢
