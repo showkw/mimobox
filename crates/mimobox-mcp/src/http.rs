@@ -25,22 +25,31 @@ type HttpResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
 
+const MAX_CONCURRENT_SESSIONS: usize = 100;
+
 /// 启动 MCP HTTP 服务器。
-pub async fn run_http_server(port: u16) -> HttpResult<()> {
+pub async fn run_http_server(bind_addr: &str, port: u16) -> HttpResult<()> {
     tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
+    if !is_local_bind_addr(bind_addr) {
+        tracing::warn!(
+            bind_addr,
+            "MCP HTTP 绑定地址不是本地回环地址，可能暴露到不受信网络"
+        );
+    }
 
     let server_registry = Arc::new(Mutex::new(Vec::new()));
-    let service = create_mcp_service(server_registry.clone());
+    let service = create_mcp_service(server_registry.clone(), bind_addr);
     let app = Router::new()
         .route_service("/mcp", service)
         .layer(axum::middleware::from_fn(cors_middleware));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
+    let local_addr = listener.local_addr()?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    tracing::info!("MCP HTTP server listening on 0.0.0.0:{port}");
-    tracing::info!("MCP endpoint: http://0.0.0.0:{port}/mcp");
+    tracing::info!("MCP HTTP server listening on {local_addr}");
+    tracing::info!("MCP endpoint: http://{local_addr}/mcp");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -59,11 +68,11 @@ pub async fn run_http_server(port: u16) -> HttpResult<()> {
     Ok(())
 }
 
-fn create_mcp_service(server_registry: ServerRegistry) -> McpHttpService {
+fn create_mcp_service(server_registry: ServerRegistry, bind_addr: &str) -> McpHttpService {
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(true)
-        .with_allowed_hosts(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
+        .with_allowed_hosts(allowed_hosts(bind_addr));
 
     StreamableHttpService::new(
         move || {
@@ -80,8 +89,31 @@ fn register_server(server_registry: &ServerRegistry, server: MimoboxServer) -> i
     let mut servers = server_registry
         .lock()
         .map_err(|_| io::Error::other("MCP HTTP server registry lock poisoned"))?;
+    if servers.len() >= MAX_CONCURRENT_SESSIONS {
+        tracing::warn!(
+            max_sessions = MAX_CONCURRENT_SESSIONS,
+            "MCP HTTP session registry 已达到上限，移除最早的 server handle"
+        );
+        drop(servers.remove(0));
+    }
     servers.push(server);
     Ok(())
+}
+
+fn is_local_bind_addr(bind_addr: &str) -> bool {
+    matches!(bind_addr, "127.0.0.1" | "::1")
+}
+
+fn allowed_hosts(bind_addr: &str) -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if !hosts.iter().any(|host| host == bind_addr) {
+        hosts.push(bind_addr.to_string());
+    }
+    hosts
 }
 
 async fn cleanup_registered_servers(server_registry: ServerRegistry) {
