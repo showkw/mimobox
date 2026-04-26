@@ -45,148 +45,288 @@ const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_SET_SECCOMP: i32 = 22;
 const SECCOMP_MODE_FILTER: i32 = 2;
 
-// x86_64 系统调用号（保留全部定义供参考，未使用的允许 dead_code）
-#[allow(dead_code, missing_docs)]
+/// Linux x86_64 system call number constants referenced by seccomp profiles.
+#[allow(dead_code)]
 mod syscall_nr {
+    /// syscall number for read(2).
     pub const READ: u32 = 0;
+    /// syscall number for write(2).
     pub const WRITE: u32 = 1;
+    /// syscall number for open(2).
     pub const OPEN: u32 = 2;
+    /// syscall number for close(2).
     pub const CLOSE: u32 = 3;
+    /// syscall number for stat(2).
     pub const STAT: u32 = 4;
+    /// syscall number for fstat(2).
     pub const FSTAT: u32 = 5;
+    /// syscall number for lstat(2).
     pub const LSTAT: u32 = 6;
+    /// syscall number for poll(2).
     pub const POLL: u32 = 7;
+    /// syscall number for mmap(2).
     pub const MMAP: u32 = 9;
+    /// syscall number for mprotect(2).
     pub const MPROTECT: u32 = 10;
+    /// syscall number for munmap(2).
     pub const MUNMAP: u32 = 11;
+    /// syscall number for brk(2).
     pub const BRK: u32 = 12;
+    /// syscall number for rt_sigaction(2).
     pub const RT_SIGACTION: u32 = 13;
+    /// syscall number for rt_sigprocmask(2).
     pub const RT_SIGPROCMASK: u32 = 14;
+    /// syscall number for rt_sigreturn(2).
     pub const RT_SIGRETURN: u32 = 15;
+    /// syscall number for ioctl(2).
     pub const IOCTL: u32 = 16;
+    /// syscall number for pread64(2).
     pub const PREAD64: u32 = 17;
+    /// syscall number for pwrite64(2).
     pub const PWRITE64: u32 = 18;
+    /// syscall number for readv(2).
     pub const READV: u32 = 19;
+    /// syscall number for writev(2).
     pub const WRITEV: u32 = 20;
+    /// syscall number for access(2).
     pub const ACCESS: u32 = 21;
+    /// syscall number for pipe(2).
     pub const PIPE: u32 = 22;
+    /// syscall number for select(2).
     pub const SELECT: u32 = 23;
+    /// syscall number for sched_yield(2).
     pub const SCHED_YIELD: u32 = 24;
+    /// syscall number for mremap(2).
     pub const MREMAP: u32 = 25;
+    /// syscall number for nanosleep(2).
     pub const NANOSLEEP: u32 = 35;
+    /// syscall number for alarm(2).
     pub const ALARM: u32 = 37;
+    /// syscall number for getpid(2).
     pub const GETPID: u32 = 39;
+    /// syscall number for sendfile(2).
     pub const SENDFILE: u32 = 40;
+    /// syscall number for socket(2).
     pub const SOCKET: u32 = 41;
+    /// syscall number for connect(2).
     pub const CONNECT: u32 = 42;
+    /// syscall number for accept(2).
     pub const ACCEPT: u32 = 43;
+    /// syscall number for sendto(2).
     pub const SENDTO: u32 = 44;
+    /// syscall number for recvfrom(2).
     pub const RECVFROM: u32 = 45;
+    /// syscall number for sendmsg(2).
     pub const SENDMSG: u32 = 46;
+    /// syscall number for recvmsg(2).
     pub const RECVMSG: u32 = 47;
+    /// syscall number for shutdown(2).
     pub const SHUTDOWN: u32 = 48;
+    /// syscall number for bind(2).
     pub const BIND: u32 = 49;
+    /// syscall number for listen(2).
     pub const LISTEN: u32 = 50;
+    /// syscall number for getsockname(2).
     pub const GETSOCKNAME: u32 = 51;
+    /// syscall number for getpeername(2).
     pub const GETPEERNAME: u32 = 52;
+    /// syscall number for setsockopt(2).
     pub const SETSOCKOPT: u32 = 54;
+    /// syscall number for getsockopt(2).
     pub const GETSOCKOPT: u32 = 55;
+    /// syscall number for clone(2).
     pub const CLONE: u32 = 56;
+    /// syscall number for fork(2).
     pub const FORK: u32 = 57;
+    /// syscall number for vfork(2).
     pub const VFORK: u32 = 58;
+    /// syscall number for execve(2).
     pub const EXECVE: u32 = 59;
+    /// syscall number for exit(2).
     pub const EXIT: u32 = 60;
+    /// syscall number for wait4(2).
     pub const WAIT4: u32 = 61;
+    /// syscall number for uname(2).
     pub const UNAME: u32 = 63;
+    /// syscall number for fcntl(2).
     pub const FCNTL: u32 = 72;
+    /// syscall number for fsync(2).
     pub const FSYNC: u32 = 74;
+    /// syscall number for ftruncate(2).
     pub const FTRUNCATE: u32 = 77;
+    /// syscall number for getdents(2).
     pub const GETDENTS: u32 = 78;
+    /// syscall number for getcwd(2).
     pub const GETCWD: u32 = 79;
+    /// syscall number for chdir(2).
     pub const CHDIR: u32 = 80;
+    /// syscall number for rename(2).
     pub const RENAME: u32 = 82;
+    /// syscall number for mkdir(2).
     pub const MKDIR: u32 = 83;
+    /// syscall number for unlink(2).
     pub const UNLINK: u32 = 87;
+    /// syscall number for symlink(2).
     pub const SYMLINK: u32 = 88;
+    /// syscall number for readlink(2).
     pub const READLINK: u32 = 89;
+    /// syscall number for chmod(2).
     pub const CHMOD: u32 = 90;
+    /// syscall number for getuid(2).
     pub const GETUID: u32 = 102;
+    /// syscall number for syslog(2).
     pub const SYSLOG: u32 = 103;
+    /// syscall number for getgid(2).
     pub const GETGID: u32 = 104;
+    /// syscall number for setuid(2).
     pub const SETUID: u32 = 105;
+    /// syscall number for setgid(2).
     pub const SETGID: u32 = 106;
+    /// syscall number for geteuid(2).
     pub const GETEUID: u32 = 107;
+    /// syscall number for getegid(2).
     pub const GETEGID: u32 = 108;
+    /// syscall number for setpgid(2).
     pub const SETPGID: u32 = 109;
+    /// syscall number for getppid(2).
     pub const GETPPID: u32 = 110;
+    /// syscall number for getpgrp(2).
     pub const GETPGRP: u32 = 111;
+    /// syscall number for setsid(2).
     pub const SETSID: u32 = 112;
+    /// syscall number for getgroups(2).
     pub const GETGROUPS: u32 = 115;
+    /// syscall number for setgroups(2).
     pub const SETGROUPS: u32 = 116;
+    /// syscall number for sigaltstack(2).
     pub const SIGALTSTACK: u32 = 131;
+    /// syscall number for rt_sigqueueinfo(2).
     pub const RT_SIGQUEUEINFO: u32 = 129;
+    /// syscall number for rt_tgsigqueueinfo(2).
     pub const RT_TGSIGQUEUEINFO: u32 = 240;
+    /// syscall number for madvise(2).
     pub const MADVISE: u32 = 28;
+    /// syscall number for dup(2).
     pub const DUP: u32 = 32;
+    /// syscall number for dup2(2).
     pub const DUP2: u32 = 33;
+    /// syscall number for pause(2).
     pub const PAUSE: u32 = 34;
+    /// syscall number for arch_prctl(2).
     pub const ARCH_PRCTL: u32 = 158;
+    /// syscall number for set_tid_address(2).
     pub const SET_TID_ADDRESS: u32 = 218;
+    /// syscall number for exit_group(2).
     pub const EXIT_GROUP: u32 = 231;
+    /// syscall number for set_robust_list(2).
     pub const SET_ROBUST_LIST: u32 = 273;
+    /// syscall number for get_robust_list(2).
     pub const GET_ROBUST_LIST: u32 = 274;
+    /// syscall number for prlimit64(2).
     pub const PRLIMIT64: u32 = 302;
+    /// syscall number for getrandom(2).
     pub const GETRANDOM: u32 = 318;
+    /// syscall number for statfs(2).
     pub const STATFS: u32 = 137;
+    /// syscall number for prctl(2).
     pub const PRCTL: u32 = 157;
+    /// syscall number for getdents64(2).
     pub const GETDENTS64: u32 = 217;
+    /// syscall number for rseq(2).
     pub const RSEQ: u32 = 334;
+    /// syscall number for preadv(2).
     pub const PREADV: u32 = 296;
+    /// syscall number for pwritev(2).
     pub const PWRITEV: u32 = 297;
+    /// syscall number for futex(2).
     pub const FUTEX: u32 = 202;
+    /// syscall number for clock_gettime(2).
     pub const CLOCK_GETTIME: u32 = 228;
+    /// syscall number for clock_getres(2).
     pub const CLOCK_GETRES: u32 = 229;
+    /// syscall number for clock_nanosleep(2).
     pub const CLOCK_NANOSLEEP: u32 = 230;
+    /// syscall number for tgkill(2).
     pub const TGKILL: u32 = 234;
+    /// syscall number for tee(2).
     pub const TEE: u32 = 276;
+    /// syscall number for splice(2).
     pub const SPLICE: u32 = 275;
+    /// syscall number for epoll_create(2).
     pub const EPOLL_CREATE: u32 = 213;
+    /// syscall number for epoll_wait(2).
     pub const EPOLL_WAIT: u32 = 232;
+    /// syscall number for epoll_ctl(2).
     pub const EPOLL_CTL: u32 = 233;
+    /// syscall number for epoll_create1(2).
     pub const EPOLL_CREATE1: u32 = 291;
+    /// syscall number for epoll_pwait(2).
     pub const EPOLL_PWAIT: u32 = 281;
+    /// syscall number for timerfd_create(2).
     pub const TIMERFD_CREATE: u32 = 283;
+    /// syscall number for timerfd_settime(2).
     pub const TIMERFD_SETTIME: u32 = 286;
+    /// syscall number for openat(2).
     pub const OPENAT: u32 = 257;
+    /// syscall number for mkdirat(2).
     pub const MKDIRAT: u32 = 258;
+    /// syscall number for unlinkat(2).
     pub const UNLINKAT: u32 = 263;
+    /// syscall number for readlinkat(2).
     pub const READLINKAT: u32 = 267;
+    /// syscall number for fstatat(2).
     pub const FSTATAT: u32 = 262;
+    /// syscall number for faccessat(2).
     pub const FACCESSAT: u32 = 269;
+    /// syscall number for newfstatat(2).
     pub const NEWFSTATAT: u32 = 262;
+    /// syscall number for fchmodat(2).
     pub const FCHMODAT: u32 = 268;
+    /// syscall number for linkat(2).
     pub const LINKAT: u32 = 265;
+    /// syscall number for symlinkat(2).
     pub const SYMLINKAT: u32 = 266;
+    /// syscall number for renameat(2).
     pub const RENAMEAT: u32 = 264;
+    /// syscall number for futimensat(2).
     pub const FUTIMENSAT: u32 = 280;
+    /// syscall number for ppoll(2).
     pub const PPOLL: u32 = 271;
+    /// syscall number for lseek(2).
     pub const LSEEK: u32 = 8;
+    /// syscall number for sigprocmask(2).
     pub const SIGPROCMASK: u32 = 14;
+    /// syscall number for sigpending(2).
     pub const SIGPENDING: u32 = 73;
+    /// syscall number for kill(2).
     pub const KILL: u32 = 62;
+    /// syscall number for tkill(2).
     pub const TKILL: u32 = 200;
+    /// syscall number for sigtimedwait(2).
     pub const SIGTIMEDWAIT: u32 = 128;
+    /// syscall number for sigwaitinfo(2).
     pub const SIGWAITINFO: u32 = 130;
+    /// syscall number for pipe2(2).
     pub const PIPE2: u32 = 293;
+    /// syscall number for dup3(2).
     pub const DUP3: u32 = 292;
+    /// syscall number for gettid(2).
     pub const GETTID: u32 = 186;
+    /// syscall number for getrlimit(2).
     pub const GETRLIMIT: u32 = 97;
+    /// syscall number for umask(2).
     pub const UMASK: u32 = 95;
+    /// syscall number for statx(2).
     pub const STATX: u32 = 332;
+    /// syscall number for fadvise64(2).
     pub const FADVISE64: u32 = 221;
+    /// syscall number for clone3(2).
     pub const CLONE3: u32 = 435;
+    /// syscall number for close_range(2).
     pub const CLOSE_RANGE: u32 = 436;
+    /// syscall number for openat2(2).
     pub const OPENAT2: u32 = 437;
+    /// syscall number for faccessat2(2).
     pub const FACCESSAT2: u32 = 439;
 }
 
@@ -486,6 +626,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     let prog = build_bpf_program(&allowed);
 
     // 设置 PR_SET_NO_NEW_PRIVS，防止子进程提权绕过 seccomp
+    // SAFETY: prctl is called in the child process with constant arguments and no raw pointers.
     let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret < 0 {
         return Err(SandboxError::SeccompFailed(
@@ -501,6 +642,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
         filter: prog.as_ptr(),
     };
 
+    // SAFETY: prctl copies the sock_fprog descriptor; fprog points to a valid BPF program.
     let ret = unsafe {
         libc::prctl(
             PR_SET_SECCOMP,
@@ -512,6 +654,7 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
     };
 
     if ret < 0 {
+        // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(SandboxError::SeccompFailed(format!(
             "prctl(PR_SET_SECCOMP) 失败: errno={errno}"

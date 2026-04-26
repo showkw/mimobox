@@ -19,16 +19,16 @@ use mimobox_core::{SandboxConfig, SandboxSnapshot};
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::{KvmBackend, KvmExitReason};
 
-/// microVM prewarm pool configuration.
+/// Configuration for a fully booted microVM prewarm pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmPoolConfig {
-    /// Minimum number of idle VMs to prewarm during initialization.
+    /// Minimum number of idle VMs to prewarm and keep available.
     pub min_size: usize,
-    /// Maximum number of VMs retained in the idle queue.
+    /// Maximum number of idle VMs retained by the pool.
     pub max_size: usize,
-    /// Maximum duration an idle VM may be retained.
+    /// Maximum duration an idle VM may be retained before eviction.
     pub max_idle_duration: Duration,
-    /// Runs a health check after this many releases; `None` disables it.
+    /// Release interval used for health checks; `None` disables release-time checks.
     pub health_check_interval: Option<u32>,
 }
 
@@ -43,22 +43,22 @@ impl Default for VmPoolConfig {
     }
 }
 
-/// Runtime statistics for the microVM prewarm pool.
+/// Runtime statistics for a [`VmPool`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VmPoolStats {
-    /// Number of direct hits from the idle pool.
+    /// Number of acquisitions satisfied by an already idle VM.
     pub hit_count: u64,
-    /// Number of idle pool misses that created a new VM.
+    /// Number of acquisitions that had to create a new VM.
     pub miss_count: u64,
-    /// Number of VMs evicted because of timeout, health check failure, or capacity pressure.
+    /// Number of VMs evicted because of timeout, failed health checks, or capacity pressure.
     pub evict_count: u64,
-    /// Current number of idle VMs.
+    /// Current number of idle VMs retained by the pool.
     pub idle_count: usize,
-    /// Current number of borrowed VMs.
+    /// Current number of VM handles checked out from the pool.
     pub in_use_count: usize,
 }
 
-/// microVM prewarm pool error.
+/// Error returned by [`VmPool`] operations.
 #[derive(Debug, Error)]
 pub enum PoolError {
     /// Pool capacity configuration is invalid.
@@ -76,7 +76,11 @@ pub enum PoolError {
 
     /// Underlying microVM error.
     #[error(transparent)]
-    Microvm(#[from] MicrovmError),
+    Microvm(
+        /// Source microVM error.
+        #[from]
+        MicrovmError,
+    ),
 }
 
 struct IdleVm {
@@ -306,19 +310,26 @@ impl VmPoolInner {
     }
 }
 
+/// Thread-safe pool of fully booted microVMs.
+///
+/// `VmPool` amortizes VM creation and boot cost by keeping ready guests in an idle
+/// queue. A borrowed [`PooledVm`] returns to the pool automatically when dropped if
+/// the backend is still reusable.
 #[derive(Clone)]
-/// Thread-safe microVM prewarm pool.
 pub struct VmPool {
     inner: Arc<VmPoolInner>,
 }
 
 impl VmPool {
-    /// Creates a microVM prewarm pool with the default `SandboxConfig`.
+    /// Creates a microVM prewarm pool with the default [`SandboxConfig`].
     pub fn new(config: MicrovmConfig, pool_config: VmPoolConfig) -> Result<Self, PoolError> {
         Self::new_with_base(SandboxConfig::default(), config, pool_config)
     }
 
     /// Creates a microVM prewarm pool with an explicit base sandbox configuration.
+    ///
+    /// The pool validates capacity limits, platform support, and microVM assets
+    /// before warming the configured minimum number of guests.
     pub fn new_with_base(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -352,6 +363,9 @@ impl VmPool {
     }
 
     /// Acquires an executable microVM instance from the pool.
+    ///
+    /// Expired idle VMs are evicted first. If no reusable idle VM is available, a new
+    /// backend is created and counted as a miss.
     pub fn acquire(&self) -> Result<PooledVm, PoolError> {
         let _span = tracing::info_span!("pool_acquire").entered();
         #[cfg(feature = "boot-profile")]
@@ -417,6 +431,9 @@ impl VmPool {
     }
 
     /// Warms the idle pool to at least `count` VMs.
+    ///
+    /// The effective target is capped by [`VmPoolConfig::max_size`]. The return value
+    /// is the number of new VMs inserted into the idle queue.
     pub fn warm(&self, count: usize) -> Result<usize, PoolError> {
         let expired = self.inner.take_expired_idle()?;
         for entry in expired {
@@ -467,20 +484,26 @@ impl VmPool {
     }
 }
 
-/// microVM handle borrowed from a `VmPool`.
+/// microVM handle borrowed from a [`VmPool`].
+///
+/// The handle is single-use with respect to ownership: once dropped, its backend is
+/// either recycled into the pool or destroyed, and the handle cannot be used again.
 pub struct PooledVm {
     backend: Option<Backend>,
     pool: Arc<VmPoolInner>,
 }
 
 impl PooledVm {
-    /// Executes a command and waits for completion.
+    /// Executes a guest command and waits for completion.
     pub fn execute(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         let _span = tracing::info_span!("pool_execute").entered();
         self.execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// Executes a command with command-level options.
+    /// Executes a guest command with command-level options.
+    ///
+    /// Returns [`LifecycleError::Released`] through [`MicrovmError::Lifecycle`] when
+    /// the pooled handle has already been returned to the pool.
     pub fn execute_with_options(
         &mut self,
         cmd: &[String],
@@ -504,7 +527,7 @@ impl PooledVm {
         result
     }
 
-    /// Executes a command as a stream of events.
+    /// Executes a guest command and returns a receiver for streaming output events.
     pub fn stream_execute(
         &mut self,
         cmd: &[String],
@@ -513,7 +536,7 @@ impl PooledVm {
         self.stream_execute_with_options(cmd, GuestExecOptions::default())
     }
 
-    /// Executes a command as a stream of events with command-level options.
+    /// Executes a guest command as streaming output events with command-level options.
     pub fn stream_execute_with_options(
         &mut self,
         cmd: &[String],
@@ -528,7 +551,7 @@ impl PooledVm {
         }
     }
 
-    /// Reads file contents from the guest.
+    /// Reads file contents from the borrowed guest filesystem.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => read_file_backend(backend, path),
@@ -538,7 +561,7 @@ impl PooledVm {
         }
     }
 
-    /// Writes file contents into the guest.
+    /// Writes file contents into the borrowed guest filesystem.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => write_file_backend(backend, path, data),
@@ -548,7 +571,7 @@ impl PooledVm {
         }
     }
 
-    /// Runs one PING/PONG readiness probe and returns the round-trip duration.
+    /// Runs one guest `PING`/`PONG` readiness probe and returns the round-trip duration.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => ping_backend(backend),
@@ -558,7 +581,7 @@ impl PooledVm {
         }
     }
 
-    /// Sends a request through the host-controlled HTTP proxy.
+    /// Sends a request through the host-controlled HTTP proxy for the borrowed VM.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         match self.backend.as_mut() {
             Some(backend) => http_request_backend(backend, request),
@@ -568,7 +591,7 @@ impl PooledVm {
         }
     }
 
-    /// Exports a file-backed snapshot of the current VM.
+    /// Exports a file-backed snapshot of the current borrowed VM.
     pub fn snapshot(&self) -> Result<SandboxSnapshot, MicrovmError> {
         match self.backend.as_ref() {
             #[cfg(all(target_os = "linux", feature = "kvm"))]

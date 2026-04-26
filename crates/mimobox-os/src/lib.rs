@@ -1,17 +1,21 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
-//! mimobox-os: OS-level sandbox backends.
+//! OS-level sandbox backends for mimobox.
 //!
-//! Provides process-level sandbox implementations for Linux, macOS, and Windows (skeleton).
+//! This crate provides process-level sandbox implementations that conform to the
+//! `mimobox-core` [`Sandbox`](mimobox_core::Sandbox) trait. It is responsible for
+//! turning a [`SandboxConfig`](mimobox_core::SandboxConfig) into platform-native
+//! isolation mechanisms while preserving the shared SDK result and error model.
 //!
-//! The Linux backend (`LinuxSandbox`) is currently the only complete implementation and uses
-//! the following kernel mechanisms:
-//! - **Landlock** — filesystem access control (deny by default, allowlist-based access)
-//! - **Seccomp-bpf** — system call filtering (allowlist mode by default)
-//! - **Namespaces** — PID / Network / Mount / IPC isolation (including user namespace fallback)
-//! - **setrlimit** — memory limits (`RLIMIT_AS`)
+//! The Linux backend (`LinuxSandbox`) uses the following kernel mechanisms:
+//! - **Landlock** for filesystem access control.
+//! - **Seccomp-bpf** for allowlist-based system call filtering.
+//! - **Namespaces** for PID, network, mount, and IPC isolation.
+//! - **setrlimit** for memory limits.
 //!
-//! Also provides the warm pool [`SandboxPool`] for microsecond-level sandbox acquisition.
+//! The macOS backend (`MacOsSandbox`) uses Seatbelt through `sandbox-exec`
+//! where available. The crate also exposes [`SandboxPool`] for low-latency reuse
+//! of pre-warmed OS sandboxes on supported platforms.
 //!
 //! # Platform Support
 //!
@@ -20,6 +24,12 @@
 //! | Linux | Complete implementation |
 //! | macOS | Complete implementation (Seatbelt / sandbox-exec) |
 //! | Windows | Planned (AppContainer) |
+//!
+//! # Safety Model
+//!
+//! Platform backends apply sandbox policy in child processes before command
+//! execution. Linux applies seccomp as the final step before `exec`, after
+//! resource limits, filesystem restrictions, and namespace setup are in place.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -36,15 +46,18 @@ mod macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
 
-// 公开导出各平台后端
+/// Linux OS-level sandbox backend using Landlock, seccomp-bpf, namespaces, and resource limits.
 #[cfg(target_os = "linux")]
 pub use linux::LinuxSandbox;
 
+/// Warm pool types for reusing pre-initialized OS sandboxes.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool, run_pool_benchmark};
 
+/// Applies a Linux seccomp-bpf system call filter for the selected profile.
 #[cfg(target_os = "linux")]
 pub use seccomp::apply_seccomp;
 
+/// macOS OS-level sandbox backend using Seatbelt through `sandbox-exec`.
 #[cfg(target_os = "macos")]
 pub use macos::MacOsSandbox;

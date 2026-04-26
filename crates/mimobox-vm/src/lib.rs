@@ -1,17 +1,30 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
-//! mimobox-vm: microVM sandbox backend.
+//! microVM sandbox backend for mimobox.
 //!
-//! This crate provides the foundation for the microVM backend:
-//! - [`MicrovmConfig`]: microVM-specific configuration.
-//! - [`MicrovmSandbox`]: the public entry point implementing [`mimobox_core::Sandbox`].
-//! - [`MicrovmSnapshot`]: the self-describing snapshot format
-//!   (magic + version + config + memory + vCPU state).
-//! - `KvmBackend` on Linux with the `kvm` feature: the basic KVM lifecycle implementation.
+//! This crate provides the microVM isolation layer used by the higher-level mimobox
+//! sandbox APIs. It exposes configuration, lifecycle management, guest command
+//! execution, file transfer, controlled HTTP proxying, snapshot serialization, and
+//! optional pooling helpers.
+//!
+//! The main entry point is [`MicrovmSandbox`], which implements
+//! [`mimobox_core::Sandbox`]. Linux builds with the `kvm` feature use `KvmBackend`
+//! for the underlying VM lifecycle. Other platforms keep the public API available
+//! but return [`MicrovmError::UnsupportedPlatform`] for KVM-only operations.
+//!
+//! Snapshot support is split into [`MicrovmSnapshot`] for self-describing in-memory
+//! snapshots and file-backed [`mimobox_core::SandboxSnapshot`] values for fast
+//! restore paths. [`VmPool`] prewarms fully booted VMs, while `RestorePool` keeps
+//! empty VM shells ready for snapshot restoration on supported KVM builds.
+//!
+//! HTTP access from guests is intentionally host-mediated. [`HttpRequest`] values
+//! are validated against `SandboxConfig::allowed_http_domains` and
+//! executed by the host-side proxy rather than by giving the guest direct network
+//! access.
 
 mod http_proxy;
-/// microVM prewarm pool types.
+/// Thread-safe microVM prewarm pool types.
 pub mod pool;
 mod snapshot;
 mod vm;

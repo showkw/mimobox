@@ -31,6 +31,7 @@ fn create_pipe_cloexec() -> Result<(RawFd, RawFd), SandboxError> {
     // SAFETY: pipe2 系统调用，fds 是有效的输出缓冲区
     let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     if ret < 0 {
+        // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(SandboxError::PipeError(format!(
             "pipe2(O_CLOEXEC) 失败: errno={errno}"
@@ -68,6 +69,7 @@ fn command_log_summary(cmd: &[String]) -> String {
 unsafe fn reset_child_environment() -> Result<(), ()> {
     // SECURITY: clearenv() 必须成功，失败时不能继续沿用父进程环境，
     // 否则 LD_PRELOAD/BASH_ENV 等注入变量可能带入沙箱子进程。
+    // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
     if unsafe { libc::clearenv() } != 0 {
         return Err(());
     }
@@ -75,6 +77,7 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
     for (name, value) in child_env_pairs() {
         // SECURITY: 每个 setenv 都必须成功，否则“最小环境”是不完整的，
         // 子进程会在不满足安全假设的状态下继续执行。
+        // SAFETY: name and value are static NUL-terminated C strings; overwrite flag is valid.
         if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
             return Err(());
         }
@@ -84,6 +87,11 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
 }
 
 /// Linux OS-level sandbox backend.
+///
+/// `LinuxSandbox` executes commands in a child process and applies OS isolation
+/// before `exec`. It combines resource limits, Landlock filesystem rules,
+/// Linux namespaces, and seccomp-bpf filtering according to
+/// [`SandboxConfig`].
 pub struct LinuxSandbox {
     config: SandboxConfig,
 }
@@ -126,6 +134,7 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
     // SAFETY: rlim 是栈上有效结构体，RLIMIT_AS 是合法 resource 参数
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
     if ret < 0 {
+        // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(format!(
             "setrlimit(RLIMIT_AS, {limit_mb}MB) 失败: errno={errno}"
@@ -190,6 +199,7 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
     if let Some(limit_mb) = config.memory_limit_mb
         && let Err(e) = set_memory_limit(limit_mb)
     {
+        // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
         unsafe {
             write_error(2, &format!("memory limit setting failed: {e}"));
             libc::_exit(124);
@@ -209,6 +219,7 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
         // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法。
         let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
         if ret != 0 {
+            // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
             let errno = unsafe { *libc::__errno_location() };
             tracing::warn!(
                 "setrlimit(RLIMIT_NPROC, 256) 失败: errno={}，fork bomb 防护未生效",
@@ -271,6 +282,7 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
 
         if let Err(e) = result {
             // 致命 #4 修复：Landlock 失败必须终止，否则无文件系统隔离
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, &format!("Landlock enforcement failed (fatal): {e}"));
                 libc::_exit(122);
@@ -290,12 +302,14 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
 
     if let Err(e) = ns_result {
         let msg = format!("unshare(full_flags) failed: {e}, retrying without user ns");
+        // SAFETY: This is the forked child; write_error writes directly to stderr without unwinding.
         unsafe {
             write_error(2, &msg);
         }
 
         if let Err(e2) = nix::sched::unshare(ns_flags) {
             // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, &format!("unshare(ns_flags) also failed (fatal): {e2}"));
                 libc::_exit(121);
@@ -307,15 +321,20 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
     // 致命 #6 修复：简化逻辑 — 仅在首次 unshare 成功时需要 reexec
     // （CLONE_NEWPID 已包含在 full_flags 中，无需二次尝试）
     if ns_result.is_ok() {
+        // SAFETY: This child intentionally forks once after CLONE_NEWPID so the namespace takes effect.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
                 // 中间进程：等待孙进程退出后转发退出码
                 loop {
                     match waitpid(child, None) {
-                        Ok(WaitStatus::Exited(_, code)) => unsafe { libc::_exit(code) },
-                        Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
-                            libc::_exit(128 + sig as i32)
-                        },
+                        Ok(WaitStatus::Exited(_, code)) => {
+                            // SAFETY: Intermediate child exits immediately with the grandchild code.
+                            unsafe { libc::_exit(code) }
+                        }
+                        Ok(WaitStatus::Signaled(_, sig, _)) => {
+                            // SAFETY: Intermediate child exits immediately with the encoded signal status.
+                            unsafe { libc::_exit(128 + sig as i32) }
+                        }
                         _ => continue,
                     }
                 }
@@ -323,10 +342,13 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
             Ok(ForkResult::Child) => {
                 // 孙进程：继续应用 seccomp 并执行命令
             }
-            Err(e) => unsafe {
-                write_error(2, &format!("internal fork failed: {e}"));
-                libc::_exit(123);
-            },
+            Err(e) => {
+                // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                unsafe {
+                    write_error(2, &format!("internal fork failed: {e}"));
+                    libc::_exit(123);
+                }
+            }
         }
     }
 
@@ -338,6 +360,7 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
         (_, other) => other,
     };
     if let Err(e) = seccomp::apply_seccomp(effective_profile) {
+        // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
         unsafe {
             write_error(2, &format!("Seccomp error: {e}"));
             libc::_exit(126);
@@ -346,22 +369,29 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
 
     // 6. execvp
     // 重要 #12 修复：使用 unwrap_or_else + _exit 替代 unwrap
-    let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| unsafe {
-        write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
-        libc::_exit(127);
+    let c_cmd = CString::new(cmd[0].as_str()).unwrap_or_else(|_| {
+        // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+        unsafe {
+            write_error(2, &format!("command contains embedded NUL: {}", cmd[0]));
+            libc::_exit(127);
+        }
     });
     let c_args: Vec<CString> = cmd
         .iter()
         .map(|s| {
-            CString::new(s.as_str()).unwrap_or_else(|_| unsafe {
-                write_error(2, &format!("argument contains embedded NUL: {s}"));
-                libc::_exit(127);
+            CString::new(s.as_str()).unwrap_or_else(|_| {
+                // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                unsafe {
+                    write_error(2, &format!("argument contains embedded NUL: {s}"));
+                    libc::_exit(127);
+                }
             })
         })
         .collect();
 
     let _ = execvp(&c_cmd, &c_args);
 
+    // SAFETY: execvp returned, so this child must report the failure and terminate immediately.
     unsafe {
         write_error(2, &format!("execvp failed: {}", cmd[0]));
         libc::_exit(125);
@@ -402,6 +432,7 @@ impl LinuxSandbox {
         // IMPORTANT-04 修复：清理环境变量，防止预热池复用时信息泄漏
         // SAFETY: 仅在 fork 后子进程中重置环境，不影响父进程。
         if unsafe { reset_child_environment() }.is_err() {
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, "environment variable initialization failed");
                 libc::_exit(119);
@@ -413,11 +444,13 @@ impl LinuxSandbox {
         // SAFETY: open 系统调用打开 /dev/null，路径为合法 C 字符串
         let dev_null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
         if dev_null < 0 {
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, "failed to open /dev/null");
                 libc::_exit(120);
             }
         }
+        // SAFETY: All file descriptors are valid in the child; dup2 redirects stdio before exec.
         unsafe {
             libc::dup2(dev_null, 0);
             libc::close(dev_null);
@@ -436,7 +469,9 @@ impl LinuxSandbox {
         pty_config: &mimobox_core::PtyConfig,
         slave_path: &Path,
     ) -> ! {
+        // SAFETY: Only the forked child environment is reset before exec.
         if unsafe { reset_child_environment_for_pty(pty_config) }.is_err() {
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, "PTY environment variable initialization failed");
                 libc::_exit(119);
@@ -444,6 +479,7 @@ impl LinuxSandbox {
         }
 
         if let Err(error) = attach_pty_stdio(slave_path) {
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, &format!("failed to attach PTY slave: {error}"));
                 libc::_exit(120);
@@ -453,6 +489,7 @@ impl LinuxSandbox {
         if let Some(cwd) = pty_config.cwd.as_deref()
             && let Err(error) = change_child_cwd(cwd)
         {
+            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, &format!("failed to change working directory: {error}"));
                 libc::_exit(124);
@@ -513,6 +550,7 @@ impl Sandbox for LinuxSandbox {
         let mut child_config = self.config.clone();
         child_config.seccomp_profile = effective_profile;
 
+        // SAFETY: The parent immediately manages both branches and the child only runs fork-safe setup.
         match unsafe { fork() }.map_err(|e| SandboxError::Syscall(e.to_string()))? {
             ForkResult::Parent { child } => {
                 // 重要 #7 修复：父进程关闭写端（O_CLOEXEC 已在 pipe2 时设置）
@@ -680,6 +718,7 @@ impl Sandbox for LinuxSandbox {
             other => other,
         };
 
+        // SAFETY: The parent manages the child process while the child only performs fork-safe PTY setup.
         match unsafe { fork() }.map_err(|error| SandboxError::Syscall(error.to_string()))? {
             ForkResult::Parent { child } => {
                 Ok(build_session(allocated, child.as_raw(), config.timeout))
@@ -722,6 +761,7 @@ impl Sandbox for LinuxSandbox {
 }
 
 unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> Result<(), ()> {
+    // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
     if unsafe { libc::clearenv() } != 0 {
         return Err(());
     }
@@ -729,6 +769,7 @@ unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> R
     for (name, value) in build_child_env(config) {
         let name = CString::new(name).map_err(|_| ())?;
         let value = CString::new(value).map_err(|_| ())?;
+        // SAFETY: name and value are valid NUL-terminated C strings created above.
         if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
             return Err(());
         }

@@ -119,6 +119,7 @@ fn wait_child_with_timeout(
             tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
             // SECURITY: sandbox-exec 允许 process-fork，超时必须回收整个进程组，
             // 否则其派生进程会在 supervisor 返回后继续存活。
+            // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
             let status = rx.recv().map_err(|_| {
                 SandboxError::ExecutionFailed(
@@ -274,6 +275,7 @@ impl Sandbox for MacOsSandbox {
         let mut args = vec!["-p".to_string(), policy, "--".to_string()];
         args.extend(cmd.iter().cloned());
 
+        // SAFETY: pre_exec installs only async-signal-safe process group setup before exec.
         let mut child = unsafe {
             Command::new("sandbox-exec")
                 .args(&args)
@@ -390,6 +392,7 @@ impl Sandbox for MacOsSandbox {
             command.current_dir(cwd);
         }
 
+        // SAFETY: pre_exec installs only async-signal-safe session and PTY control setup before exec.
         let child = unsafe {
             command.pre_exec(|| {
                 // SAFETY: pre_exec 中仅调用 async-signal-safe 的 setsid/ioctl，

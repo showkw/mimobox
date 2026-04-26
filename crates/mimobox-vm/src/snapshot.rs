@@ -13,20 +13,30 @@ use crate::vm::{MicrovmConfig, MicrovmError};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
 const SNAPSHOT_VERSION: u16 = 2;
+/// Version of the sidecar `state.json` file used by file-backed snapshots.
 pub(crate) const FILE_SNAPSHOT_VERSION: u16 = 1;
 const SNAPSHOT_MEMORY_FILE_NAME: &str = "memory.bin";
 const SNAPSHOT_STATE_FILE_NAME: &str = "state.json";
 static SNAPSHOT_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Sidecar metadata stored next to a file-backed guest memory snapshot.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SnapshotStateFile {
+    /// File snapshot metadata format version.
     pub(crate) version: u16,
+    /// Sandbox policy captured when the snapshot was created.
     pub(crate) sandbox_config: SandboxConfig,
+    /// microVM configuration captured when the snapshot was created.
     pub(crate) microvm_config: MicrovmConfig,
+    /// Base64-encoded vCPU and device runtime state.
     pub(crate) vcpu_state_base64: String,
 }
 
 /// Self-describing microVM snapshot.
+///
+/// A snapshot captures the base sandbox policy, microVM configuration, complete
+/// guest memory image, and serialized vCPU/device runtime state required to
+/// restore an equivalent guest.
 #[derive(Clone)]
 pub struct MicrovmSnapshot {
     pub(crate) sandbox_config: SandboxConfig,
@@ -36,7 +46,7 @@ pub struct MicrovmSnapshot {
 }
 
 impl MicrovmSnapshot {
-    /// Creates a snapshot object.
+    /// Creates an in-memory snapshot object from already captured state parts.
     pub fn new(
         sandbox_config: SandboxConfig,
         microvm_config: MicrovmConfig,
@@ -51,7 +61,10 @@ impl MicrovmSnapshot {
         }
     }
 
-    /// Serializes into `magic + version + config + memory + vcpu state`.
+    /// Serializes this snapshot into the stable in-memory byte format.
+    ///
+    /// The format is `magic + version + sandbox config + microVM config + guest
+    /// memory + vCPU state`, with all variable-length sections length-prefixed.
     pub fn snapshot(&self) -> Result<Vec<u8>, MicrovmError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&SNAPSHOT_MAGIC);
@@ -63,7 +76,10 @@ impl MicrovmSnapshot {
         Ok(bytes)
     }
 
-    /// Restores a snapshot object from a byte stream.
+    /// Restores a snapshot object from the self-describing byte format.
+    ///
+    /// The decoder validates the magic bytes, version, and end-of-input boundary
+    /// before returning the reconstructed snapshot.
     pub fn restore(data: &[u8]) -> Result<Self, MicrovmError> {
         let mut cursor = SnapshotCursor::new(data);
         let magic = cursor.read_exact(SNAPSHOT_MAGIC.len())?;
@@ -99,7 +115,7 @@ impl MicrovmSnapshot {
         })
     }
 
-    /// Persists the snapshot to `~/.mimobox/snapshots/<id>/memory.bin + state.json`.
+    /// Persists the snapshot to `~/.mimobox/snapshots/<id>/memory.bin` and `state.json`.
     pub(crate) fn persist_to_files(&self) -> Result<SandboxSnapshot, MicrovmError> {
         let snapshot_dir = create_snapshot_dir()?;
         let memory_path = snapshot_dir.join(SNAPSHOT_MEMORY_FILE_NAME);
@@ -129,7 +145,10 @@ impl MicrovmSnapshot {
         write_result
     }
 
-    /// Restores a full snapshot object from a file-backed snapshot `memory.bin`.
+    /// Restores a full snapshot object from a file-backed `memory.bin` snapshot.
+    ///
+    /// The method reads sibling `state.json` metadata and then loads the guest
+    /// memory file into memory.
     pub fn from_memory_file(memory_path: &Path) -> Result<Self, MicrovmError> {
         let (sandbox_config, microvm_config, vcpu_state) =
             load_state_from_memory_file(memory_path)?;
@@ -143,6 +162,7 @@ impl MicrovmSnapshot {
         })
     }
 
+    /// Splits the snapshot into the state parts required by restore paths.
     pub(crate) fn into_parts(self) -> (SandboxConfig, MicrovmConfig, Vec<u8>, Vec<u8>) {
         (
             self.sandbox_config,
@@ -172,6 +192,7 @@ fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
     Ok(home_dir.join(".mimobox").join("snapshots"))
 }
 
+/// Creates a unique directory under the per-user microVM snapshot root.
 pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
     let root_dir = snapshot_root_dir()?;
     fs::create_dir_all(&root_dir)?;

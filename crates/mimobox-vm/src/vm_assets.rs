@@ -7,8 +7,9 @@ const DEFAULT_VM_ASSETS_SUBDIR: &str = ".mimobox/assets";
 
 /// Resolves the microVM assets directory.
 ///
-/// An explicit override takes precedence. If no override is provided, this falls back to
-/// `HOME/.mimobox/assets`.
+/// An explicit override takes precedence. If no override is provided, this falls
+/// back to `HOME/.mimobox/assets`. The function is parameterized for tests and for
+/// callers that have already read environment variables.
 pub fn resolve_vm_assets_dir(
     vm_assets_override: Option<PathBuf>,
     home_dir: Option<PathBuf>,
@@ -25,7 +26,10 @@ pub fn resolve_vm_assets_dir(
     Ok(home_dir.join(DEFAULT_VM_ASSETS_SUBDIR))
 }
 
-/// Resolves the default microVM assets directory from environment variables.
+/// Resolves the default microVM assets directory from process environment variables.
+///
+/// `VM_ASSETS_DIR` overrides the default location. Without that override, `HOME`
+/// must be present so the default `HOME/.mimobox/assets` path can be derived.
 pub fn vm_assets_dir() -> Result<PathBuf, MicrovmError> {
     resolve_vm_assets_dir(
         env::var_os("VM_ASSETS_DIR").map(PathBuf::from),
@@ -33,7 +37,10 @@ pub fn vm_assets_dir() -> Result<PathBuf, MicrovmError> {
     )
 }
 
-/// Builds a `MicrovmConfig` from an assets directory.
+/// Builds a [`MicrovmConfig`] from an assets directory.
+///
+/// The directory must contain `vmlinux` and `rootfs.cpio.gz`. The returned config
+/// uses one vCPU, the provided memory size, and no CPU quota.
 pub fn microvm_config_from_assets_dir(
     assets_dir: PathBuf,
     memory_mb: u32,
@@ -64,7 +71,9 @@ pub fn microvm_config_from_assets_dir(
     })
 }
 
-/// Builds a `MicrovmConfig` from the default assets directory.
+/// Builds a [`MicrovmConfig`] from the default assets directory.
+///
+/// This combines [`vm_assets_dir`] and [`microvm_config_from_assets_dir`].
 pub fn microvm_config_from_vm_assets(memory_mb: u32) -> Result<MicrovmConfig, MicrovmError> {
     let assets_dir = vm_assets_dir()?;
     microvm_config_from_assets_dir(assets_dir, memory_mb)

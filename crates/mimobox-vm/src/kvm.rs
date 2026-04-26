@@ -52,6 +52,7 @@ use self::boot::{
     ZERO_PAGE_EXT_CMD_LINE_PTR, ZERO_PAGE_EXT_RAMDISK_IMAGE, ZERO_PAGE_EXT_RAMDISK_SIZE,
     ZERO_PAGE_LEN, ZERO_PAGE_SENTINEL,
 };
+/// x86_64 KVM boot-time identity-map and TSS addresses.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use self::boot::{KVM_IDENTITY_MAP_ADDR, KVM_TSS_ADDR};
 #[cfg(target_arch = "x86_64")]
@@ -75,6 +76,7 @@ use self::devices::{
 };
 #[cfg(test)]
 use self::devices::{SerialFrame, parse_serial_line, take_serial_frame};
+/// Snapshot restore profiling data shared with restore-pool paths.
 pub(crate) use self::profile::RestoreProfile;
 #[cfg(all(any(debug_assertions, feature = "boot-profile"), test))]
 use self::profile::parse_guest_boot_time_line;
@@ -83,7 +85,9 @@ use self::profile::{BootProfile, log_boot_profile, log_guest_boot_profile_extens
 use self::profile::{CreateVmProfile, RuntimeRestoreProfile, VcpuSetupProfile};
 use self::state::*;
 
+/// Guest physical address used for the x86 Linux zero page.
 pub(crate) const ZERO_PAGE_ADDR: u64 = 0x7_000;
+/// Guest physical address used for the kernel command line buffer.
 pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 #[cfg(test)]
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
@@ -175,7 +179,7 @@ impl AssetCache {
     }
 }
 
-/// Command channel type.
+/// Guest command transport selected by the KVM backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmTransport {
     /// Serial port command transport.
@@ -184,7 +188,7 @@ pub enum KvmTransport {
     Vsock,
 }
 
-/// KVM backend lifecycle state.
+/// Lifecycle state of a [`KvmBackend`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmLifecycle {
     /// Backend has been constructed but the guest is not ready.
@@ -197,7 +201,7 @@ pub enum KvmLifecycle {
     Destroyed,
 }
 
-/// Exit reason after the `KVM_RUN` loop is handled.
+/// Coarse exit reason returned after a `KVM_RUN` loop step is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvmExitReason {
     /// The vCPU exited due to port I/O.
@@ -210,9 +214,12 @@ pub enum KvmExitReason {
     InternalError,
 }
 
+/// Metadata recorded after loading the guest kernel image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedKernel {
+    /// Kernel entry point extracted from the ELF header.
     pub(crate) entry_point: u64,
+    /// Highest guest physical address touched by loaded kernel segments.
     pub(crate) high_watermark: u64,
 }
 
@@ -291,7 +298,12 @@ impl Drop for VcpuRunWatchdog {
     }
 }
 
-/// Basic Linux KVM backend implementation.
+/// Linux KVM backend implementation for mimobox microVMs.
+///
+/// `KvmBackend` owns the KVM file descriptors, guest memory mapping, emulated
+/// devices, serial/vsock command channels, and guest lifecycle state for one VM.
+/// It is a low-level backend; most callers should use [`crate::MicrovmSandbox`],
+/// [`crate::VmPool`], or `RestorePool` instead.
 pub struct KvmBackend {
     base_config: SandboxConfig,
     config: MicrovmConfig,
@@ -340,7 +352,10 @@ impl KvmBackend {
         cmdline
     }
 
-    /// Executes `KVM_CREATE_VM`, allocates guest memory, and creates vCPUs.
+    /// Creates a cold-start KVM VM and loads the configured guest assets.
+    ///
+    /// The returned backend is ready to boot but the guest command loop is not
+    /// considered responsive until [`Self::boot`] completes successfully.
     pub fn create_vm(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -350,6 +365,9 @@ impl KvmBackend {
     }
 
     /// Creates an empty VM shell intended for snapshot restoration.
+    ///
+    /// This path allocates KVM structures and guest memory but skips kernel and
+    /// rootfs loading because restored memory will replace the initial contents.
     pub fn create_vm_for_restore(
         base_config: SandboxConfig,
         config: MicrovmConfig,
@@ -357,8 +375,10 @@ impl KvmBackend {
         Self::create_vm_with_mode(base_config, config, BackendCreateMode::SnapshotRestore)
     }
 
-    /// Builds a backend from raw components of an externally pre-created slot without
-    /// repeating the VM creation flow.
+    /// Builds a backend from raw components of an externally pre-created slot.
+    ///
+    /// Restore pools use this to avoid repeating KVM creation work when converting
+    /// an empty slot into a restored backend.
     pub(crate) fn from_slot_components(
         kvm: Kvm,
         vm_fd: VmFd,
@@ -402,10 +422,12 @@ impl KvmBackend {
         }
     }
 
+    /// Marks the backend lifecycle as ready after a successful restore path.
     pub(crate) fn set_lifecycle_ready(&mut self) {
         self.lifecycle = KvmLifecycle::Ready;
     }
 
+    /// Stores restore profiling data until the first resumed `KVM_RUN` records its duration.
     pub(crate) fn set_pending_restore_profile(&mut self, profile: RestoreProfile) {
         self.pending_restore_profile = Some(profile);
     }
@@ -654,21 +676,22 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// Returns accumulated serial output.
+    /// Returns accumulated serial output observed from the guest.
     pub fn serial_output(&self) -> &[u8] {
         &self.serial_buffer
     }
 
-    /// Returns whether the guest has reached the READY state.
+    /// Returns whether the guest has reached the command-loop READY state.
     pub fn is_guest_ready(&self) -> bool {
         self.lifecycle == KvmLifecycle::Ready && self.guest_ready
     }
 
-    /// Probes through serial `PING\n`/`PONG\n` to check whether the guest command loop is responsive.
+    /// Probes the guest command loop with the serial `PING\n`/`PONG\n` protocol.
     pub fn ping(&mut self) -> Result<Duration, MicrovmError> {
         self.ping_with_timeout(Duration::from_secs(READINESS_PROBE_TIMEOUT_SECS))
     }
 
+    /// Probes the guest command loop using an explicit timeout.
     pub(crate) fn ping_with_timeout(
         &mut self,
         timeout: Duration,
@@ -763,6 +786,7 @@ impl KvmBackend {
         );
     }
 
+    /// Takes pending restore profile data or seeds it from cold-start profile data.
     pub(crate) fn take_or_seed_restore_profile(&mut self) -> RestoreProfile {
         if let Some(profile) = self.pending_restore_profile.take() {
             return profile;
@@ -780,6 +804,7 @@ impl KvmBackend {
         profile
     }
 
+    /// Emits restore timing information before the first resumed `KVM_RUN` is measured.
     pub(crate) fn emit_restore_profile_without_resume(&self, profile: &RestoreProfile) {
         info!(
             total_without_resume = ?profile.total_without_resume(),
@@ -829,7 +854,7 @@ impl KvmBackend {
         );
     }
 
-    /// Initializes vCPU boot registers and enters the real `KVM_RUN` loop.
+    /// Initializes vCPU boot registers and runs the guest until the command loop is ready.
     pub fn boot(&mut self) -> Result<KvmExitReason, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
@@ -1094,12 +1119,18 @@ impl KvmBackend {
         self.write_guest_bytes(ROOTFS_METADATA_ADDR, metadata.as_bytes())
     }
 
-    /// Prefers vsock when guest-vsock is explicitly enabled; otherwise defaults to the serial protocol.
+    /// Runs a guest command and waits for completion.
+    ///
+    /// The backend prefers vsock only when `guest-vsock` is enabled and a compatible
+    /// command channel is connected; otherwise it uses the serial command protocol.
     pub fn run_command(&mut self, cmd: &[String]) -> Result<GuestCommandResult, MicrovmError> {
         self.run_command_with_options(cmd, &GuestExecOptions::default())
     }
 
-    /// Allows per-command environment and timeout overrides.
+    /// Runs a guest command with per-command execution options.
+    ///
+    /// Environment variables, timeout, and working directory overrides are encoded
+    /// into the guest command protocol. An empty command vector is rejected.
     pub fn run_command_with_options(
         &mut self,
         cmd: &[String],
@@ -1164,8 +1195,10 @@ impl KvmBackend {
         result
     }
 
-    /// Phase B streaming execution always uses the serial protocol to avoid semantic
-    /// conflicts with the current vsock command channel.
+    /// Runs a guest command and returns a receiver for streaming output events.
+    ///
+    /// Streaming execution uses the serial protocol to avoid semantic conflicts with
+    /// the current vsock command channel.
     pub fn run_command_streaming(
         &mut self,
         cmd: &[String],
@@ -1174,6 +1207,9 @@ impl KvmBackend {
     }
 
     /// Runs a command and streams guest output using explicit execution options.
+    ///
+    /// The returned receiver emits stdout, stderr, exit, and timeout events in the
+    /// order reported by the guest protocol.
     pub fn run_command_streaming_with_options(
         &mut self,
         cmd: &[String],
@@ -1218,6 +1254,9 @@ impl KvmBackend {
     }
 
     /// Reads a file from the guest filesystem.
+    ///
+    /// This uses the guest file protocol over serial and therefore requires the
+    /// guest command loop to be ready.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
@@ -1254,6 +1293,9 @@ impl KvmBackend {
     }
 
     /// Writes a file into the guest filesystem.
+    ///
+    /// This uses the guest file protocol over serial and returns structured
+    /// guest-file errors for common guest-side failures.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
@@ -1290,6 +1332,9 @@ impl KvmBackend {
     }
 
     /// Executes an allowlisted host-side HTTP request for the guest.
+    ///
+    /// The guest does not receive direct network access; the host validates and
+    /// performs the outbound request through the controlled proxy.
     pub fn http_request(&mut self, request: HttpRequest) -> Result<HttpResponse, MicrovmError> {
         if self.lifecycle != KvmLifecycle::Ready {
             return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
@@ -1477,13 +1522,14 @@ impl KvmBackend {
         self.run_until_fs_result()
     }
 
-    /// Exports the memory and vCPU state required for a snapshot.
+    /// Exports guest memory and vCPU/device state required for a snapshot.
     pub fn snapshot_state(&self) -> Result<(Vec<u8>, Vec<u8>), MicrovmError> {
         let memory = self.dump_guest_memory()?;
         let vcpu_state = encode_runtime_state(self)?;
         Ok((memory, vcpu_state))
     }
 
+    /// Serializes the current backend state into an in-memory microVM snapshot.
     #[allow(dead_code)] // 公开快照 API 供外部调用方使用，当前 crate 内尚未直接调用。
     pub(crate) fn snapshot_bytes(&self) -> Result<Vec<u8>, MicrovmError> {
         let (memory, vcpu_state) = self.snapshot_state()?;
@@ -1496,6 +1542,7 @@ impl KvmBackend {
         .snapshot()
     }
 
+    /// Persists the current backend state as a file-backed sandbox snapshot.
     pub(crate) fn snapshot_to_file(&self) -> Result<mimobox_core::SandboxSnapshot, MicrovmError> {
         let (memory, vcpu_state) = self.snapshot_state()?;
         MicrovmSnapshot::new(
@@ -1507,7 +1554,9 @@ impl KvmBackend {
         .persist_to_files()
     }
 
-    /// Restores guest memory and vCPU state from a snapshot.
+    /// Restores guest memory and vCPU/device state from a snapshot.
+    ///
+    /// The backend is marked ready after memory and runtime state are restored.
     pub fn restore_state(&mut self, memory: &[u8], vcpu_state: &[u8]) -> Result<(), MicrovmError> {
         let _span = tracing::info_span!("vm_restore").entered();
         let mut restore_profile = self.take_or_seed_restore_profile();
@@ -1527,7 +1576,10 @@ impl KvmBackend {
         Ok(())
     }
 
-    /// Shuts down the VM and releases lifecycle state.
+    /// Shuts down the VM from the backend perspective and releases lifecycle state.
+    ///
+    /// This clears host-side command buffers and marks the backend destroyed. KVM file
+    /// descriptors are then released naturally when the backend is dropped.
     pub fn shutdown(&mut self) -> Result<(), MicrovmError> {
         self.last_command_payload.clear();
         self.serial_device = SerialDevice::default();
@@ -2310,6 +2362,9 @@ impl KvmBackend {
         Ok(())
     }
 
+    /// Restores guest memory from an in-memory byte slice.
+    ///
+    /// The slice length must exactly match the configured guest memory size.
     pub(crate) fn restore_guest_memory(&self, memory: &[u8]) -> Result<(), MicrovmError> {
         let expected_len = self.config.memory_bytes()?;
         if memory.len() != expected_len {
@@ -2517,6 +2572,10 @@ impl KvmBackend {
     }
 }
 
+/// Restores serialized KVM runtime state into an existing backend.
+///
+/// The function dispatches by runtime-state magic version and returns timing data
+/// used by restore profiling.
 pub(crate) fn restore_runtime_state(
     backend: &mut KvmBackend,
     state: &[u8],
