@@ -1731,6 +1731,7 @@ dependencies = [
  "mimobox-sdk",
  "pyo3",
  "pyo3-build-config",
+ "shlex",
 ]
 
 [[package]]

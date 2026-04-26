@@ -446,6 +446,38 @@ impl PySandbox {
         Ok(result.into())
     }
 
+    /// Execute code in the given language inside the sandbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `language` - Programming language: "bash", "sh", "shell", "python", "python3", "py",
+    ///   "javascript", "js", "node", "nodejs".
+    /// * `code` - Source code to execute.
+    /// * `env` - Optional environment variables to set for the command.
+    /// * `timeout` - Optional timeout in seconds (float). Must be > 0 and finite.
+    /// * `cwd` - Optional working directory for this command.
+    ///
+    /// # Returns
+    ///
+    /// An `ExecuteResult` with stdout, stderr, exit_code, and timed_out.
+    ///
+    /// # Raises
+    ///
+    /// * `SandboxError` - If the sandbox is destroyed or execution fails.
+    /// * `ValueError` - If the language is not supported.
+    #[pyo3(signature = (language, code, *, env=None, timeout=None, cwd=None))]
+    fn execute_code(
+        &mut self,
+        language: &str,
+        code: &str,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+        cwd: Option<&str>,
+    ) -> PyResult<PyExecuteResult> {
+        let command = build_python_code_command(language, code)?;
+        self.execute(&command, env, timeout, cwd)
+    }
+
     /// Execute a command and return a streaming iterator of events.
     ///
     /// # Arguments
@@ -674,6 +706,22 @@ fn build_python_config(
     }
 
     Ok(builder.build())
+}
+
+fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {
+    let quoted = shlex::try_quote(code).map_err(|_| {
+        PyValueError::new_err("code contains characters that cannot be shell-escaped")
+    })?;
+
+    match language {
+        "bash" => Ok(format!("bash -c {quoted}")),
+        "sh" | "shell" => Ok(format!("sh -c {quoted}")),
+        "python" | "python3" | "py" => Ok(format!("python3 -c {quoted}")),
+        "javascript" | "js" | "node" | "nodejs" => Ok(format!("node -e {quoted}")),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported language: {language}. Supported: bash, sh, shell, python, python3, py, javascript, js, node, nodejs"
+        ))),
+    }
 }
 
 fn parse_python_isolation(value: &str) -> Result<IsolationLevel, String> {
