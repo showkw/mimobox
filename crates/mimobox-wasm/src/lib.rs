@@ -97,7 +97,7 @@ fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
 fn truncate_output(data: Vec<u8>, label: &str) -> Vec<u8> {
     if data.len() > MAX_OUTPUT_SIZE {
         log_warn!(
-            "{} 输出超出限制 ({} > {} bytes)，已截断",
+            "{} output exceeded limit ({} > {} bytes), truncated",
             label,
             data.len(),
             MAX_OUTPUT_SIZE
@@ -151,7 +151,10 @@ fn compile_module_from_bytes(
     // SECURITY: 调用方在读取字节后立刻使用同一份不可变切片编译，
     // 避免“先读取算哈希、再按路径重新打开编译”的 TOCTOU 竞态。
     Module::from_binary(engine, bytes).map_err(|e| {
-        SandboxError::ExecutionFailed(format!("加载 Wasm 模块失败 ({:?}): {}", wasm_path, e))
+        SandboxError::ExecutionFailed(format!(
+            "Failed to load Wasm module ({:?}): {}",
+            wasm_path, e
+        ))
     })
 }
 
@@ -174,8 +177,9 @@ fn get_cached_module(
         Some(fp) => fp,
         None => {
             // 无法获取元数据时也只读取一次文件，避免在读取与编译之间被路径替换。
-            let file_data = std::fs::read(wasm_path)
-                .map_err(|e| SandboxError::ExecutionFailed(format!("读取 Wasm 文件失败: {}", e)))?;
+            let file_data = std::fs::read(wasm_path).map_err(|e| {
+                SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e))
+            })?;
             return compile_module_from_bytes(engine, wasm_path, &file_data);
         }
     };
@@ -194,12 +198,12 @@ fn get_cached_module(
                 // 我们在缓存写入时确保了这一点，因此反序列化是安全的。
                 match unsafe { Module::deserialize(engine, &cached) } {
                     Ok(module) => {
-                        log_info!("从缓存加载模块: {:?}", wasm_path);
+                        log_info!("Loaded module from cache: {:?}", wasm_path);
                         return Ok(module);
                     }
                     Err(e) => {
                         // 反序列化失败：缓存可能损坏或 Engine 配置变更，静默降级重新编译
-                        log_warn!("缓存反序列化失败，将重新编译: {}", e);
+                        log_warn!("Cache deserialization failed, recompiling: {}", e);
                         let _ = std::fs::remove_file(&cache_path);
                         let _ = std::fs::remove_file(&map_file);
                     }
@@ -214,7 +218,7 @@ fn get_cached_module(
 
     // 缓存未命中：需要计算文件内容的 SHA256
     let file_data = std::fs::read(wasm_path)
-        .map_err(|e| SandboxError::ExecutionFailed(format!("读取 Wasm 文件失败: {}", e)))?;
+        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
     let hash = content_hash(&file_data);
     let cache_path = cache_dir.join(format!("{}.cwasm", hash));
 
@@ -227,11 +231,11 @@ fn get_cached_module(
             Ok(module) => {
                 // 更新映射文件
                 let _ = std::fs::write(&map_file, &hash);
-                log_info!("从缓存加载模块（内容匹配）: {:?}", wasm_path);
+                log_info!("Loaded module from cache (content match): {:?}", wasm_path);
                 return Ok(module);
             }
             Err(e) => {
-                log_warn!("缓存反序列化失败，将重新编译: {}", e);
+                log_warn!("Cache deserialization failed, recompiling: {}", e);
                 let _ = std::fs::remove_file(&cache_path);
             }
         }
@@ -246,7 +250,7 @@ fn get_cached_module(
         if std::fs::write(&tmp_path, &serialized).is_ok() {
             // rename 在同一文件系统上是原子的
             if let Err(e) = std::fs::rename(&tmp_path, &cache_path) {
-                log_warn!("重命名缓存文件失败: {}", e);
+                log_warn!("Failed to rename cache file: {}", e);
                 let _ = std::fs::remove_file(&tmp_path);
             }
         }
@@ -254,7 +258,7 @@ fn get_cached_module(
         let _ = std::fs::write(&map_file, &hash);
     }
 
-    log_info!("编译并缓存模块: {:?}", wasm_path);
+    log_info!("Compiled and cached module: {:?}", wasm_path);
     Ok(module)
 }
 
@@ -303,10 +307,10 @@ fn build_wasi_ctx(
                 if let Err(e) =
                     builder.preopened_dir(path, path_str, DirPerms::READ, FilePerms::READ)
                 {
-                    log_warn!("开放只读目录失败 {:?}: {}", path, e);
+                    log_warn!("Failed to preopen read-only dir {:?}: {}", path, e);
                 }
             } else {
-                log_warn!("只读路径不存在: {:?}", path);
+                log_warn!("Read-only path does not exist: {:?}", path);
             }
         }
     }
@@ -316,10 +320,10 @@ fn build_wasi_ctx(
                 if let Err(e) =
                     builder.preopened_dir(path, path_str, DirPerms::all(), FilePerms::all())
                 {
-                    log_warn!("开放读写目录失败 {:?}: {}", path, e);
+                    log_warn!("Failed to preopen read-write dir {:?}: {}", path, e);
                 }
             } else {
-                log_warn!("读写路径不存在: {:?}", path);
+                log_warn!("Read-write path does not exist: {:?}", path);
             }
         }
     }
@@ -334,7 +338,7 @@ impl Sandbox for WasmSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
         let engine_config = create_engine_config();
         let engine = Engine::new(&engine_config).map_err(|e| {
-            SandboxError::ExecutionFailed(format!("Wasmtime Engine 创建失败: {}", e))
+            SandboxError::ExecutionFailed(format!("Failed to create Wasmtime Engine: {}", e))
         })?;
 
         // [IMPORTANT-02 修复] 使用用户专属缓存目录，避免不同用户之间的缓存污染
@@ -343,7 +347,7 @@ impl Sandbox for WasmSandbox {
         let cache_dir = std::env::temp_dir().join(format!("mimobox-cache-{}", uid));
 
         log_info!(
-            "创建 Wasm 沙箱后端, memory_limit={:?}MB, timeout={:?}s, cache_dir={:?}",
+            "Created Wasm sandbox backend, memory_limit={:?}MB, timeout={:?}s, cache_dir={:?}",
             config.memory_limit_mb,
             config.timeout_secs,
             cache_dir,
@@ -360,13 +364,13 @@ impl Sandbox for WasmSandbox {
         let start = Instant::now();
 
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed("命令为空".into()));
+            return Err(SandboxError::ExecutionFailed("Command is empty".into()));
         }
 
         let wasm_path = Path::new(&cmd[0]);
         if !wasm_path.exists() {
             return Err(SandboxError::ExecutionFailed(format!(
-                "Wasm 文件不存在: {:?}",
+                "Wasm file does not exist: {:?}",
                 wasm_path
             )));
         }
@@ -376,7 +380,7 @@ impl Sandbox for WasmSandbox {
             && meta.len() > MAX_WASM_FILE_SIZE
         {
             return Err(SandboxError::ExecutionFailed(format!(
-                "Wasm 文件过大: {} bytes (上限 {} bytes)",
+                "Wasm file too large: {} bytes (limit {} bytes)",
                 meta.len(),
                 MAX_WASM_FILE_SIZE
             )));
@@ -401,7 +405,7 @@ impl Sandbox for WasmSandbox {
         // 注意：Linker 的类型参数必须与 Store data type 一致
         let mut linker: Linker<StoreData> = Linker::new(&self.engine);
         p1::add_to_linker_sync(&mut linker, |data| &mut data.wasi).map_err(|e| {
-            SandboxError::ExecutionFailed(format!("注册 WASI Preview 1 失败: {}", e))
+            SandboxError::ExecutionFailed(format!("Failed to register WASI Preview 1: {}", e))
         })?;
 
         // 5. [FATAL-01 修复] 创建带资源限制的 Store
@@ -433,7 +437,7 @@ impl Sandbox for WasmSandbox {
         let fuel_limit = fuel_from_timeout(self.config.timeout_secs);
         store
             .set_fuel(fuel_limit)
-            .map_err(|e| SandboxError::ExecutionFailed(format!("设置 Fuel 失败: {}", e)))?;
+            .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to set fuel: {}", e)))?;
 
         // 7. [IMPORTANT-01 补充] 设置 epoch deadline 实现墙钟超时
         // epoch_interruption 可中断包括 WASI I/O 阻塞在内的执行，
@@ -470,9 +474,9 @@ impl Sandbox for WasmSandbox {
         });
 
         // 8. 实例化模块
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| SandboxError::ExecutionFailed(format!("Wasm 模块实例化失败: {}", e)))?;
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| {
+            SandboxError::ExecutionFailed(format!("Failed to instantiate Wasm module: {}", e))
+        })?;
 
         // 9. 调用 _start 函数（WASI Command 模式）
         // WASI Command 通过 _start 进入，正常退出时调用 proc_exit(code)，
@@ -487,7 +491,9 @@ impl Sandbox for WasmSandbox {
                         if let Some(exit) = find_exit_code(&e) {
                             Some(exit)
                         } else if is_fuel_exhausted(&store) || is_epoch_interrupt(&e) {
-                            log_warn!("执行超时（fuel 耗尽或 epoch deadline 超出）");
+                            log_warn!(
+                                "Execution timed out (fuel exhausted or epoch deadline exceeded)"
+                            );
                             // 通知 epoch ticker 线程退出
                             running.store(false, Ordering::Relaxed);
                             let elapsed = start.elapsed();
@@ -503,7 +509,7 @@ impl Sandbox for WasmSandbox {
                                 timed_out: true,
                             });
                         } else {
-                            log_warn!("Wasm 执行错误: {}", e);
+                            log_warn!("Wasm execution error: {}", e);
                             Some(1)
                         }
                     }
@@ -518,14 +524,14 @@ impl Sandbox for WasmSandbox {
                             if let Some(exit) = find_exit_code(&e) {
                                 Some(exit)
                             } else {
-                                log_warn!("main 函数执行失败: {}", e);
+                                log_warn!("main function execution failed: {}", e);
                                 Some(1)
                             }
                         }
                     },
                     Err(_) => {
                         return Err(SandboxError::ExecutionFailed(
-                            "Wasm 模块没有 _start 或 main 导出函数".into(),
+                            "Wasm module has no _start or main export function".into(),
                         ));
                     }
                 }
@@ -542,7 +548,7 @@ impl Sandbox for WasmSandbox {
         let stderr = truncate_output(stderr_reader.contents().to_vec(), "stderr");
 
         log_info!(
-            "Wasm 执行完成, exit_code={:?}, elapsed={:.2}ms",
+            "Wasm execution completed, exit_code={:?}, elapsed={:.2}ms",
             exit_code,
             elapsed.as_secs_f64() * 1000.0
         );
@@ -557,7 +563,7 @@ impl Sandbox for WasmSandbox {
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
-        log_info!("销毁 Wasm 沙箱后端");
+        log_info!("Destroying Wasm sandbox backend");
         Ok(())
     }
 }
@@ -600,7 +606,7 @@ pub fn run_wasm_benchmark(
     wasm_path: &str,
     iterations: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== mimobox Wasm 沙箱性能基准测试 ===\n");
+    println!("=== mimobox Wasm Sandbox Benchmark ===\n");
 
     let mut config = SandboxConfig::default();
     config.deny_network = true;
@@ -613,35 +619,35 @@ pub fn run_wasm_benchmark(
     config.allowed_http_domains = vec![];
 
     if !Path::new(wasm_path).exists() {
-        return Err(format!("Wasm 文件不存在: {}", wasm_path).into());
+        return Err(format!("Wasm file does not exist: {}", wasm_path).into());
     }
 
     let cmd = vec![wasm_path.to_string()];
 
     // Phase 1: Engine 创建开销（一次性）
-    println!("测试 Engine 创建开销...");
+    println!("Testing Engine creation overhead...");
     let engine_start = Instant::now();
     let mut sb = WasmSandbox::new(config.clone())?;
     let engine_elapsed = engine_start.elapsed();
     println!(
-        "  Engine 创建: {:.2}ms",
+        "  Engine creation: {:.2}ms",
         engine_elapsed.as_secs_f64() * 1000.0
     );
 
     // Phase 2: 模块编译开销（首次）
-    println!("\n测试模块首次编译...");
+    println!("\nTesting first module compilation...");
     let compile_start = Instant::now();
     let result = sb.execute(&cmd)?;
     let compile_elapsed = compile_start.elapsed();
     println!(
-        "  首次执行（含编译）: {:.2}ms, exit_code={:?}",
+        "  First execution (with compilation): {:.2}ms, exit_code={:?}",
         compile_elapsed.as_secs_f64() * 1000.0,
         result.exit_code
     );
 
     // Phase 3: 冷启动测试（每次 new + execute）
     println!(
-        "\n冷启动测试 ({} 次迭代, 每次含 new + execute)...",
+        "\nCold start test ({} iterations, each with new + execute)...",
         iterations
     );
     let mut cold_times = Vec::with_capacity(iterations);
@@ -653,12 +659,15 @@ pub fn run_wasm_benchmark(
         cold_times.push(elapsed.as_micros() as f64 / 1000.0);
 
         if result.exit_code != Some(0) {
-            eprintln!("迭代 {} 失败: 退出码 {:?}", i, result.exit_code);
+            eprintln!("Iteration {} failed: exit code {:?}", i, result.exit_code);
         }
     }
 
     // Phase 4: 热路径测试（复用 Engine，仅 execute）
-    println!("\n热路径测试 ({} 次迭代, 复用 Engine)...", iterations);
+    println!(
+        "\nHot path test ({} iterations, reusing Engine)...",
+        iterations
+    );
     let mut hot_times = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
@@ -667,7 +676,7 @@ pub fn run_wasm_benchmark(
         hot_times.push(elapsed.as_micros() as f64 / 1000.0);
 
         if result.exit_code != Some(0) {
-            eprintln!("热路径执行失败: {:?}", result.exit_code);
+            eprintln!("Hot path execution failed: {:?}", result.exit_code);
         }
     }
 
@@ -678,7 +687,7 @@ pub fn run_wasm_benchmark(
     fn print_stats(label: &str, times: &[f64]) {
         let n = times.len();
         if n == 0 {
-            println!("{}  无数据", label);
+            println!("{}  no data", label);
             return;
         }
         let p50 = times[n / 2];
@@ -686,7 +695,7 @@ pub fn run_wasm_benchmark(
         let p99_idx = ((n as f64 * 0.99) as usize).min(n - 1);
         let avg: f64 = times.iter().sum::<f64>() / n as f64;
 
-        println!("\n{}延迟:", label);
+        println!("\n{} latency:", label);
         println!("  Min:  {:.2}ms", times[0]);
         println!("  P50:  {:.2}ms", p50);
         println!("  P95:  {:.2}ms", times[p95_idx]);
@@ -695,25 +704,25 @@ pub fn run_wasm_benchmark(
         println!("  Max:  {:.2}ms", times[n - 1]);
     }
 
-    print_stats("冷启动", &cold_times);
-    print_stats("热路径", &hot_times);
+    print_stats("Cold start ", &cold_times);
+    print_stats("Hot path ", &hot_times);
 
     // 目标检查
     let cold_p50 = cold_times[cold_times.len() / 2];
     let hot_p50 = hot_times[hot_times.len() / 2];
-    println!("\n目标检查:");
+    println!("\nTarget check:");
     println!(
-        "  冷启动 P50: {:.2}ms {}",
+        "  Cold start P50: {:.2}ms {}",
         cold_p50,
         if cold_p50 < 5.0 { "[PASS]" } else { "[FAIL]" }
     );
     println!(
-        "  热路径 P50: {:.2}ms {}",
+        "  Hot path P50: {:.2}ms {}",
         hot_p50,
         if hot_p50 < 1.0 { "[PASS]" } else { "[FAIL]" }
     );
 
-    println!("\n=== 测试完成 ===");
+    println!("\n=== Test completed ===");
     Ok(())
 }
 
@@ -739,34 +748,38 @@ mod tests {
     #[test]
     fn test_wasm_sandbox_create() {
         let sb = WasmSandbox::new(test_config());
-        assert!(sb.is_ok(), "创建 Wasm 沙箱失败: {:?}", sb.err());
+        assert!(sb.is_ok(), "Failed to create Wasm sandbox: {:?}", sb.err());
     }
 
     #[test]
     fn test_wasm_sandbox_empty_command() {
-        let mut sb = WasmSandbox::new(test_config()).expect("创建失败");
+        let mut sb = WasmSandbox::new(test_config()).expect("Failed to create");
         let result = sb.execute(&[]);
-        assert!(result.is_err(), "空命令应返回错误");
+        assert!(result.is_err(), "Empty command should return error");
     }
 
     #[test]
     fn test_wasm_sandbox_nonexistent_file() {
-        let mut sb = WasmSandbox::new(test_config()).expect("创建失败");
+        let mut sb = WasmSandbox::new(test_config()).expect("Failed to create");
         let result = sb.execute(&["/nonexistent/file.wasm".to_string()]);
-        assert!(result.is_err(), "不存在的文件应返回错误");
+        assert!(result.is_err(), "Nonexistent file should return error");
     }
 
     #[test]
     fn test_wasm_sandbox_destroy() {
-        let sb = WasmSandbox::new(test_config()).expect("创建失败");
+        let sb = WasmSandbox::new(test_config()).expect("Failed to create");
         let result = sb.destroy();
-        assert!(result.is_ok(), "销毁沙箱失败: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to destroy sandbox: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_compile_module_from_bytes_is_not_affected_by_path_swap() {
         let engine = Engine::default();
-        let temp_dir = tempfile::tempdir().expect("创建临时目录失败");
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let wasm_path = temp_dir.path().join("swap.wasm");
         let module_a = wat::parse_str(
             r#"
@@ -775,7 +788,7 @@ mod tests {
                     i32.const 1))
             "#,
         )
-        .expect("编译 module A WAT 失败");
+        .expect("Failed to compile module A WAT");
         let module_b = wat::parse_str(
             r#"
                 (module
@@ -783,19 +796,20 @@ mod tests {
                     i32.const 2))
             "#,
         )
-        .expect("编译 module B WAT 失败");
+        .expect("Failed to compile module B WAT");
 
-        std::fs::write(&wasm_path, &module_a).expect("写入初始模块失败");
+        std::fs::write(&wasm_path, &module_a).expect("Failed to write initial module");
         let module = compile_module_from_bytes(&engine, &wasm_path, &module_a)
-            .expect("应使用已读取字节编译");
-        std::fs::write(&wasm_path, &module_b).expect("覆盖模块失败");
+            .expect("Should compile from read bytes");
+        std::fs::write(&wasm_path, &module_b).expect("Failed to overwrite module");
 
         let mut store = Store::new(&engine, ());
-        let instance = Instance::new(&mut store, &module, &[]).expect("实例化已读取字节的模块失败");
+        let instance = Instance::new(&mut store, &module, &[])
+            .expect("Failed to instantiate module from read bytes");
         let main = instance
             .get_typed_func::<(), i32>(&mut store, "main")
-            .expect("获取 main 导出失败");
+            .expect("Failed to get main export");
 
-        assert_eq!(main.call(&mut store, ()).expect("调用 main 失败"), 1);
+        assert_eq!(main.call(&mut store, ()).expect("Failed to call main"), 1);
     }
 }
