@@ -1072,8 +1072,15 @@ mod tests {
     fn test_pty_basic_echo() {
         // 使用最小化沙箱配置，避免 Landlock/Seccomp 限制 PTY 行为
         let mut config = test_config();
-        config.fs_readonly = vec![];
-        config.fs_readwrite = vec![];
+        config.fs_readonly = vec![
+            "/usr".into(),
+            "/lib".into(),
+            "/lib64".into(),
+            "/bin".into(),
+            "/sbin".into(),
+        ];
+        config.fs_readwrite = vec!["/tmp".into()];
+        config.allow_fork = true;
         config.memory_limit_mb = None;
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
         let mut session = sb
