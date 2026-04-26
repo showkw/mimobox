@@ -30,6 +30,7 @@ const BPF_W: u16 = 0x00;
 const BPF_ABS: u16 = 0x20;
 const BPF_JMP: u16 = 0x05;
 const BPF_JEQ: u16 = 0x10;
+const BPF_JGT: u16 = 0x20;
 const BPF_JSET: u16 = 0x40;
 const BPF_ALU: u16 = 0x04;
 const BPF_AND: u16 = 0x50;
@@ -57,6 +58,11 @@ const SOCK_STREAM: u32 = 1;
 const SOCK_CLOEXEC: u32 = 0x80000;
 const SOCK_NONBLOCK: u32 = 0x800;
 const SOCK_ALLOWED_TYPE_MASK: u32 = SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK;
+
+// bind addrlen 约束：sizeof(struct sockaddr_storage) = 128
+const BIND_MAX_ADDRLEN: u32 = 128;
+// listen backlog 约束：SOMAXCONN
+const LISTEN_MAX_BACKLOG: u32 = 128;
 
 // ioctl request 白名单（x86_64）
 const TCGETS: u32 = 0x5401;
@@ -635,6 +641,8 @@ fn network_syscalls() -> Vec<u32> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SeccompArgConstraint {
     Socket { allow_inet: bool },
+    BindAddrlen,
+    ListenBacklog,
     IoctlRequest,
     CloneFlags,
     PrctlOp,
@@ -668,6 +676,15 @@ fn load_abs(offset: u32) -> SockFilter {
 fn jump_eq(k: u32, jt: u8, jf: u8) -> SockFilter {
     SockFilter {
         code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt,
+        jf,
+        k,
+    }
+}
+
+fn jump_gt(k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter {
+        code: BPF_JMP | BPF_JGT | BPF_K,
         jt,
         jf,
         k,
@@ -724,7 +741,7 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(6);
+    let mut constraints = Vec::with_capacity(8);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
@@ -745,6 +762,20 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
             constraint: SeccompArgConstraint::Socket {
                 allow_inet: is_network_profile,
             },
+        });
+    }
+
+    if is_network_profile && allowed.contains(&syscall_nr::BIND) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::BIND,
+            constraint: SeccompArgConstraint::BindAddrlen,
+        });
+    }
+
+    if is_network_profile && allowed.contains(&syscall_nr::LISTEN) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::LISTEN,
+            constraint: SeccompArgConstraint::ListenBacklog,
         });
     }
 
@@ -820,6 +851,46 @@ fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
     block.push(ret(SECCOMP_RET_ALLOW));
 
     block
+}
+
+/// bind 系统调用的参数约束块。
+///
+/// bind(sockfd, const struct sockaddr *addr, socklen_t addrlen)
+/// - args[0] = sockfd：文件描述符，无法在 seccomp 层验证有效性
+/// - args[1] = addr：指向 sockaddr 结构的指针，**BPF 无法解引用指针**，
+///   因此无法检查 sa_family、端口号、IP 地址等字段
+/// - args[2] = addrlen：地址结构长度，可约束上限
+///
+/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
+///
+/// 安全限制：由于 BPF 无法解引用 addr 指针，无法阻止 sandbox 内进程
+/// 绑定特权端口（<1024）或绑定 0.0.0.0 等通配地址。端口劫持防护
+/// 依赖 Landlock 网络规则或 host 侧网络命名空间隔离。
+fn build_bind_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        load_abs(seccomp_arg_hi_offset(2)),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_TRAP),
+        // 经典 BPF 无法解引用 addr 指针，只能约束 addrlen 这类标量参数。
+        load_abs(seccomp_arg_lo_offset(2)),
+        jump_gt(BIND_MAX_ADDRLEN, 0, 1),
+        ret(SECCOMP_RET_TRAP),
+        ret(SECCOMP_RET_ALLOW),
+    ]
+}
+
+fn build_listen_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // backlog 是 int 参数；高 32 位非零视为非法扩展。
+        load_abs(seccomp_arg_hi_offset(1)),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_TRAP),
+        load_abs(seccomp_arg_lo_offset(1)),
+        jump_gt(LISTEN_MAX_BACKLOG, 0, 1),
+        ret(SECCOMP_RET_TRAP),
+        ret(SECCOMP_RET_ALLOW),
+    ]
 }
 
 fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
@@ -911,6 +982,8 @@ fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
 fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
     match constraint {
         SeccompArgConstraint::Socket { allow_inet } => build_socket_arg_check_block(allow_inet),
+        SeccompArgConstraint::BindAddrlen => build_bind_arg_check_block(),
+        SeccompArgConstraint::ListenBacklog => build_listen_arg_check_block(),
         SeccompArgConstraint::IoctlRequest => build_ioctl_arg_check_block(),
         SeccompArgConstraint::CloneFlags => build_clone_arg_check_block(),
         SeccompArgConstraint::PrctlOp => build_prctl_arg_check_block(),
@@ -1063,18 +1136,19 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        CLONE, CLONE3, FUTEX, IOCTL, MMAP, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SETPGID,
-        SETSID, SOCKET, TGKILL,
+        BIND, CLONE, CLONE3, FUTEX, IOCTL, LISTEN, MMAP, READ, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO,
+        SETPGID, SETSID, SOCKET, TGKILL,
     };
     use super::{
-        AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ, BPF_JMP, BPF_JSET,
-        BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
-        FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
-        MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, SECCOMP_DATA_ARCH,
-        SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR, SECCOMP_RET_ALLOW,
-        SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM, SeccompArgConstraint,
-        SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints, build_bpf_program,
-        essential_syscalls, fork_allowed_syscalls, network_syscalls,
+        AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BIND_MAX_ADDRLEN, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ,
+        BPF_JGT, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK,
+        ConstrainedSyscall, FIONBIO, FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE,
+        FUTEX_WAKE, FUTEX_WAKE_PRIVATE, LISTEN_MAX_BACKLOG, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE,
+        MAP_SHARED, SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE,
+        SECCOMP_DATA_NR, SECCOMP_RET_ALLOW, SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK,
+        SOCK_STREAM, SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP,
+        build_arg_constraints, build_bpf_program, essential_syscalls, fork_allowed_syscalls,
+        network_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1141,6 +1215,14 @@ mod tests {
                 }
                 code if code == (BPF_JMP | BPF_JEQ | BPF_K) => {
                     let offset = if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    };
+                    pc += offset as usize + 1;
+                }
+                code if code == (BPF_JMP | BPF_JGT | BPF_K) => {
+                    let offset = if accumulator > instruction.k {
                         instruction.jt
                     } else {
                         instruction.jf
@@ -1305,6 +1387,72 @@ mod tests {
             .with_arg(0, AF_INET as u64)
             .with_arg(1, SOCK_STREAM as u64);
         assert_eq!(run_bpf(&program, inet_stream), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_bind_constraint_allows_reasonable_addrlen() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let sockaddr_in = FakeSeccompData::new(BIND).with_arg(2, 16);
+        assert_eq!(run_bpf(&program, sockaddr_in), SECCOMP_RET_ALLOW);
+
+        let sockaddr_storage = FakeSeccompData::new(BIND).with_arg(2, BIND_MAX_ADDRLEN as u64);
+        assert_eq!(run_bpf(&program, sockaddr_storage), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_bind_constraint_blocks_oversized_addrlen() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let oversized_addrlen = FakeSeccompData::new(BIND).with_arg(2, BIND_MAX_ADDRLEN as u64 + 1);
+        assert_eq!(run_bpf(&program, oversized_addrlen), SECCOMP_RET_TRAP);
+
+        let addrlen_256 = FakeSeccompData::new(BIND).with_arg(2, 256);
+        assert_eq!(run_bpf(&program, addrlen_256), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_bind_constraint_blocks_high_bits() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let high_bits_set = FakeSeccompData::new(BIND).with_arg(2, 1_u64 << 32);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_listen_constraint_allows_reasonable_backlog() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let max_backlog = FakeSeccompData::new(LISTEN).with_arg(1, LISTEN_MAX_BACKLOG as u64);
+        assert_eq!(run_bpf(&program, max_backlog), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_listen_constraint_allows_small_backlog() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let small_backlog = FakeSeccompData::new(LISTEN).with_arg(1, 5);
+        assert_eq!(run_bpf(&program, small_backlog), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_listen_constraint_blocks_oversized_backlog() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let oversized_backlog =
+            FakeSeccompData::new(LISTEN).with_arg(1, LISTEN_MAX_BACKLOG as u64 + 1);
+        assert_eq!(run_bpf(&program, oversized_backlog), SECCOMP_RET_TRAP);
+
+        let backlog_256 = FakeSeccompData::new(LISTEN).with_arg(1, 256);
+        assert_eq!(run_bpf(&program, backlog_256), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_listen_constraint_blocks_high_bits() {
+        let program = program_for_profile(SeccompProfile::Network);
+
+        let high_bits_set = FakeSeccompData::new(LISTEN).with_arg(1, 1_u64 << 32);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
     }
 
     #[test]
