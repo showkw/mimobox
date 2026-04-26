@@ -59,6 +59,7 @@ pub(in crate::kvm) const SERIAL_STREAM_STDERR_PREFIX: &str = "STREAM:STDERR:";
 pub(in crate::kvm) const SERIAL_STREAM_END_PREFIX: &str = "STREAM:END:";
 pub(in crate::kvm) const SERIAL_STREAM_TIMEOUT_PREFIX: &str = "STREAM:TIMEOUT:";
 pub(in crate::kvm) const MAX_FS_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
+const MAX_STREAM_FRAME_SIZE: usize = 16 * 1024 * 1024;
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 pub(in crate::kvm) const SERIAL_BOOT_TIME_PREFIX: &str = "BOOT_TIME:";
 
@@ -555,6 +556,11 @@ fn try_take_fs_result_frame(
     else {
         return Ok(None);
     };
+    if data_len > MAX_FS_TRANSFER_BYTES {
+        return Err(MicrovmError::Backend(format!(
+            "guest FSRESULT data_len exceeds limit: data_len={data_len}, max={MAX_FS_TRANSFER_BYTES}"
+        )));
+    }
     match bytes.get(data_len_delim_index) {
         Some(b':') => {}
         Some(other) => {
@@ -724,6 +730,11 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
     else {
         return Ok(None);
     };
+    if data_len > MAX_STREAM_FRAME_SIZE {
+        return Err(MicrovmError::Backend(format!(
+            "guest STREAM data_len exceeds limit: data_len={data_len}, max={MAX_STREAM_FRAME_SIZE}"
+        )));
+    }
     match bytes.get(data_len_delimiter_index) {
         Some(b':') => {}
         Some(other) => {
@@ -796,6 +807,11 @@ fn try_take_http_request_frame(
     else {
         return Ok(None);
     };
+    if json_len > MAX_STREAM_FRAME_SIZE {
+        return Err(MicrovmError::Backend(format!(
+            "guest HTTP:REQUEST json_len exceeds limit: json_len={json_len}, max={MAX_STREAM_FRAME_SIZE}"
+        )));
+    }
     match bytes.get(json_len_delimiter_index) {
         Some(b':') => {}
         Some(other) => {

@@ -7,7 +7,7 @@ pub(crate) fn handle_write(args: WriteArgs) -> Result<WriteResponse, CliError> {
     #[cfg(not(feature = "kvm"))]
     {
         let _ = args;
-        return Err(CliError::KvmFeatureDisabled);
+        Err(CliError::KvmFeatureDisabled)
     }
 
     #[cfg(feature = "kvm")]
