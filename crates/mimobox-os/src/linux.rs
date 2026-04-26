@@ -94,6 +94,8 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
 /// [`SandboxConfig`].
 pub struct LinuxSandbox {
     config: SandboxConfig,
+    #[cfg(target_os = "linux")]
+    last_cgroup_path: Option<PathBuf>,
 }
 
 /// Writes to a file descriptor in the child process without depending on Rust `std`, making it safe after `fork`.
@@ -399,6 +401,13 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
 }
 
 impl LinuxSandbox {
+    #[cfg(target_os = "linux")]
+    fn cleanup_last_cgroup(&mut self) {
+        if let Some(path) = self.last_cgroup_path.take() {
+            cleanup_cgroup(&path);
+        }
+    }
+
     /// Runs the child-process main flow by applying security policies before executing the command.
     ///
     /// Execution order (security policies are applied as early as possible to minimize race windows):
@@ -508,7 +517,11 @@ impl Sandbox for LinuxSandbox {
             config.allow_fork,
             config.timeout_secs
         );
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            #[cfg(target_os = "linux")]
+            last_cgroup_path: None,
+        })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
@@ -517,6 +530,9 @@ impl Sandbox for LinuxSandbox {
                 "command must not be empty".into(),
             ));
         }
+
+        #[cfg(target_os = "linux")]
+        self.cleanup_last_cgroup();
 
         // SECURITY: 只记录可执行文件基名和参数个数，避免把 argv 中的 token/路径写入日志。
         tracing::info!("执行命令: {}", command_log_summary(cmd));
@@ -567,7 +583,10 @@ impl Sandbox for LinuxSandbox {
                         child.as_raw(),
                         &self.config,
                     ) {
-                        Ok(path) => Some(path),
+                        Ok(path) => {
+                            self.last_cgroup_path = Some(path.clone());
+                            Some(path)
+                        }
                         Err(error) => {
                             kill_process_group(child.as_raw(), Signal::SIGKILL);
                             let _ = waitpid(child, None);
@@ -618,8 +637,8 @@ impl Sandbox for LinuxSandbox {
                 let elapsed = start.elapsed();
 
                 #[cfg(target_os = "linux")]
-                if let Some(path) = cgroup_path.as_deref() {
-                    cleanup_cgroup(path);
+                if cgroup_path.is_some() {
+                    self.cleanup_last_cgroup();
                 }
 
                 match wait_result {
@@ -755,7 +774,10 @@ impl Sandbox for LinuxSandbox {
         Ok(entries)
     }
 
-    fn destroy(self) -> Result<(), SandboxError> {
+    fn destroy(mut self) -> Result<(), SandboxError> {
+        #[cfg(target_os = "linux")]
+        self.cleanup_last_cgroup();
+
         Ok(())
     }
 }

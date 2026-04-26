@@ -13,7 +13,9 @@ use crate::snapshot::MicrovmSnapshot;
 use crate::snapshot::load_state_from_memory_file;
 
 #[cfg(all(target_os = "linux", feature = "kvm", not(feature = "zerocopy-fork")))]
-use crate::snapshot::{FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir};
+use crate::snapshot::{
+    FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir, memory_sha256_hex,
+};
 use crate::vm_assets::resolve_vm_assets_dir;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -705,6 +707,7 @@ impl MicrovmSandbox {
                     microvm_config: self.microvm_config.clone(),
                     vcpu_state_base64: base64::engine::general_purpose::STANDARD
                         .encode(&vcpu_state),
+                    memory_hash: Some(memory_sha256_hex(&memory)),
                 };
                 let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
                     MicrovmError::SnapshotFormat(format!("failed to serialize state.json: {error}"))

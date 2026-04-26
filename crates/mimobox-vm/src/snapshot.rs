@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::vm::{MicrovmConfig, MicrovmError};
 
@@ -30,6 +31,9 @@ pub(crate) struct SnapshotStateFile {
     pub(crate) microvm_config: MicrovmConfig,
     /// Base64-encoded vCPU and device runtime state.
     pub(crate) vcpu_state_base64: String,
+    /// `memory.bin` 的 SHA-256 摘要，使用小写十六进制编码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_hash: Option<String>,
 }
 
 /// Self-describing microVM snapshot.
@@ -129,6 +133,7 @@ impl MicrovmSnapshot {
                 sandbox_config: self.sandbox_config.clone(),
                 microvm_config: self.microvm_config.clone(),
                 vcpu_state_base64: BASE64_STANDARD.encode(&self.vcpu_state),
+                memory_hash: Some(memory_sha256_hex(&self.memory)),
             };
             let state_bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
                 MicrovmError::SnapshotFormat(format!("failed to serialize state.json: {error}"))
@@ -150,15 +155,15 @@ impl MicrovmSnapshot {
     /// The method reads sibling `state.json` metadata and then loads the guest
     /// memory file into memory.
     pub fn from_memory_file(memory_path: &Path) -> Result<Self, MicrovmError> {
-        let (sandbox_config, microvm_config, vcpu_state) =
-            load_state_from_memory_file(memory_path)?;
+        let state = load_snapshot_state_from_memory_file(memory_path)?;
         let memory = fs::read(memory_path)?;
+        verify_memory_hash_bytes(memory_path, &memory, state.memory_hash.as_deref())?;
 
         Ok(Self {
-            sandbox_config,
-            microvm_config,
+            sandbox_config: state.sandbox_config,
+            microvm_config: state.microvm_config,
             memory,
-            vcpu_state,
+            vcpu_state: state.vcpu_state,
         })
     }
 
@@ -181,6 +186,78 @@ fn map_snapshot_error(error: SandboxError) -> MicrovmError {
         }
         other => MicrovmError::SnapshotFormat(other.to_string()),
     }
+}
+
+pub(crate) fn memory_sha256_hex(memory: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(memory);
+    digest_to_hex(hasher.finalize())
+}
+
+fn memory_file_sha256_hex(memory_path: &Path) -> Result<String, MicrovmError> {
+    let mut file = fs::File::open(memory_path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read_len = file.read(&mut buffer)?;
+        if read_len == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read_len]);
+    }
+
+    Ok(digest_to_hex(hasher.finalize()))
+}
+
+fn digest_to_hex(digest: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = digest.as_ref();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from(HEX[(byte >> 4) as usize]));
+        hex.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    hex
+}
+
+fn verify_memory_hash(
+    memory_path: &Path,
+    actual_hash: &str,
+    expected_hash: Option<&str>,
+) -> Result<(), MicrovmError> {
+    let Some(expected_hash) = expected_hash else {
+        tracing::warn!(
+            "文件快照缺少 memory_hash，跳过 memory.bin 完整性校验: {}",
+            memory_path.display()
+        );
+        return Ok(());
+    };
+
+    if actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Ok(());
+    }
+
+    Err(MicrovmError::SnapshotFormat(format!(
+        "memory.bin hash mismatch ({}): expected {expected_hash}, actual {actual_hash}",
+        memory_path.display()
+    )))
+}
+
+fn verify_memory_hash_bytes(
+    memory_path: &Path,
+    memory: &[u8],
+    expected_hash: Option<&str>,
+) -> Result<(), MicrovmError> {
+    verify_memory_hash(memory_path, &memory_sha256_hex(memory), expected_hash)
+}
+
+fn verify_memory_hash_file(
+    memory_path: &Path,
+    expected_hash: Option<&str>,
+) -> Result<(), MicrovmError> {
+    let actual_hash = memory_file_sha256_hex(memory_path)?;
+    verify_memory_hash(memory_path, &actual_hash, expected_hash)
 }
 
 fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
@@ -231,11 +308,26 @@ fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
     Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
 }
 
-/// Reads the configuration and vCPU state from a file-backed snapshot without loading
-/// the guest memory file.
+struct LoadedSnapshotState {
+    sandbox_config: SandboxConfig,
+    microvm_config: MicrovmConfig,
+    vcpu_state: Vec<u8>,
+    memory_hash: Option<String>,
+}
+
+/// 读取文件快照元数据并校验 `memory.bin` 完整性，但不在内存中保留 guest memory。
 pub(crate) fn load_state_from_memory_file(
     memory_path: &Path,
 ) -> Result<(SandboxConfig, MicrovmConfig, Vec<u8>), MicrovmError> {
+    let state = load_snapshot_state_from_memory_file(memory_path)?;
+    verify_memory_hash_file(memory_path, state.memory_hash.as_deref())?;
+
+    Ok((state.sandbox_config, state.microvm_config, state.vcpu_state))
+}
+
+fn load_snapshot_state_from_memory_file(
+    memory_path: &Path,
+) -> Result<LoadedSnapshotState, MicrovmError> {
     let state_path = state_file_path(memory_path)?;
     let state_bytes = fs::read(&state_path)?;
     let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
@@ -258,7 +350,12 @@ pub(crate) fn load_state_from_memory_file(
             MicrovmError::SnapshotFormat(format!("failed to decode vCPU state: {error}"))
         })?;
 
-    Ok((state.sandbox_config, state.microvm_config, vcpu_state))
+    Ok(LoadedSnapshotState {
+        sandbox_config: state.sandbox_config,
+        microvm_config: state.microvm_config,
+        vcpu_state,
+        memory_hash: state.memory_hash,
+    })
 }
 
 fn encode_sandbox_config(out: &mut Vec<u8>, config: &SandboxConfig) -> Result<(), MicrovmError> {

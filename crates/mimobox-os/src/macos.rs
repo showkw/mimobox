@@ -40,8 +40,15 @@ const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".azure",
     ".kube",
     ".docker",
+    ".netrc",
+    ".gitconfig",
+    ".npmrc",
+    ".pypirc",
+    ".cargo/credentials",
     ".config/gcloud",
     ".config/gh",
+    ".config/solana",
+    ".config/starknet",
 ];
 
 /// macOS Seatbelt sandbox backend.
