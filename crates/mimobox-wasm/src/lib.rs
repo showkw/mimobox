@@ -116,6 +116,8 @@ pub struct WasmSandbox {
     engine: Arc<Engine>,
     config: SandboxConfig,
     cache_dir: PathBuf,
+    epoch_running: Arc<AtomicBool>,
+    epoch_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Calculates the SHA256 hash of file content.
@@ -337,9 +339,25 @@ fn build_wasi_ctx(
 impl Sandbox for WasmSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
         let engine_config = create_engine_config();
-        let engine = Engine::new(&engine_config).map_err(|e| {
+        let engine = Arc::new(Engine::new(&engine_config).map_err(|e| {
             SandboxError::ExecutionFailed(format!("Failed to create Wasmtime Engine: {}", e))
-        })?;
+        })?);
+
+        let epoch_running = Arc::new(AtomicBool::new(true));
+        let epoch_thread_engine = engine.clone();
+        let epoch_thread_running = epoch_running.clone();
+        let epoch_thread = std::thread::Builder::new()
+            .name("mimobox-wasm-epoch-ticker".to_string())
+            .spawn(move || {
+                let tick_interval = std::time::Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
+                while epoch_thread_running.load(Ordering::Relaxed) {
+                    std::thread::sleep(tick_interval);
+                    epoch_thread_engine.increment_epoch();
+                }
+            })
+            .map_err(|e| {
+                SandboxError::ExecutionFailed(format!("Failed to start Wasm epoch ticker: {}", e))
+            })?;
 
         // [IMPORTANT-02 修复] 使用用户专属缓存目录，避免不同用户之间的缓存污染
         // SAFETY: geteuid() 是无副作用的系统调用，始终返回有效的 uid。
@@ -354,9 +372,11 @@ impl Sandbox for WasmSandbox {
         );
 
         Ok(Self {
-            engine: Arc::new(engine),
+            engine,
             config,
             cache_dir,
+            epoch_running,
+            epoch_thread: Some(epoch_thread),
         })
     }
 
@@ -450,29 +470,6 @@ impl Sandbox for WasmSandbox {
             .unwrap_or(3000); // 默认 30s
         store.set_epoch_deadline(epoch_deadline_ticks);
 
-        // 启动 epoch ticker 后台线程
-        // 使用 Arc<AtomicBool> 控制线程退出。
-        // 注意：不使用 join() 等待线程退出，因为线程循环中每 10ms 检查一次 flag，
-        // join() 会导致 execute 额外等待最多 10ms，严重影响热路径性能。
-        // 线程会在 running=false 后自然退出（下次循环检查时）。
-        let engine_ref = self.engine.clone();
-        let max_epoch_duration = std::time::Duration::from_millis(
-            epoch_deadline_ticks.saturating_mul(EPOCH_TICK_INTERVAL_MS),
-        );
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
-        let _epoch_thread = std::thread::spawn(move || {
-            let tick_interval = std::time::Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
-            let epoch_start = std::time::Instant::now();
-            while running_clone.load(Ordering::Relaxed) {
-                std::thread::sleep(tick_interval);
-                if epoch_start.elapsed() > max_epoch_duration {
-                    break;
-                }
-                engine_ref.increment_epoch();
-            }
-        });
-
         // 8. 实例化模块
         let instance = linker.instantiate(&mut store, &module).map_err(|e| {
             SandboxError::ExecutionFailed(format!("Failed to instantiate Wasm module: {}", e))
@@ -494,8 +491,6 @@ impl Sandbox for WasmSandbox {
                             log_warn!(
                                 "Execution timed out (fuel exhausted or epoch deadline exceeded)"
                             );
-                            // 通知 epoch ticker 线程退出
-                            running.store(false, Ordering::Relaxed);
                             let elapsed = start.elapsed();
                             let stdout =
                                 truncate_output(stdout_reader.contents().to_vec(), "stdout");
@@ -510,7 +505,7 @@ impl Sandbox for WasmSandbox {
                             });
                         } else {
                             log_warn!("Wasm execution error: {}", e);
-                            Some(1)
+                            None
                         }
                     }
                 }
@@ -525,7 +520,7 @@ impl Sandbox for WasmSandbox {
                                 Some(exit)
                             } else {
                                 log_warn!("main function execution failed: {}", e);
-                                Some(1)
+                                None
                             }
                         }
                     },
@@ -540,10 +535,7 @@ impl Sandbox for WasmSandbox {
 
         let elapsed = start.elapsed();
 
-        // 10. 通知 epoch ticker 线程退出（不 join，避免阻塞）
-        running.store(false, Ordering::Relaxed);
-
-        // 11. 从 clone 的 MemoryOutputPipe 中读取捕获的输出（带截断保护）
+        // 10. 从 clone 的 MemoryOutputPipe 中读取捕获的输出（带截断保护）
         let stdout = truncate_output(stdout_reader.contents().to_vec(), "stdout");
         let stderr = truncate_output(stderr_reader.contents().to_vec(), "stderr");
 
@@ -565,6 +557,17 @@ impl Sandbox for WasmSandbox {
     fn destroy(self) -> Result<(), SandboxError> {
         log_info!("Destroying Wasm sandbox backend");
         Ok(())
+    }
+}
+
+impl Drop for WasmSandbox {
+    fn drop(&mut self) {
+        self.epoch_running.store(false, Ordering::Relaxed);
+        if let Some(epoch_thread) = self.epoch_thread.take()
+            && let Err(e) = epoch_thread.join()
+        {
+            log_warn!("Wasm epoch ticker thread join failed: {:?}", e);
+        }
     }
 }
 
