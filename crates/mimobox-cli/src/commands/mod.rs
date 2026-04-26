@@ -513,8 +513,8 @@ pub(crate) fn build_sdk_config(
     }
 }
 
-pub(crate) fn build_cli_sdk_config(backend: Backend, timeout: Option<u64>) -> SdkConfig {
-    let mut config = build_sdk_config(None, timeout, false, false);
+pub(crate) fn build_cli_sdk_config(backend: Backend, timeout: Option<u64>, allow_fork: bool) -> SdkConfig {
+    let mut config = build_sdk_config(None, timeout, false, allow_fork);
     config.isolation = backend_to_sdk_isolation(backend);
     config
 }

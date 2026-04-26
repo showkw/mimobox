@@ -29,7 +29,7 @@ pub(crate) fn handle_write(args: WriteArgs) -> Result<WriteResponse, CliError> {
             "preparing to execute write subcommand"
         );
 
-        let config = build_cli_sdk_config(backend, None);
+        let config = build_cli_sdk_config(backend, None, false);
         let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
         let result = sandbox.write_file(&path, &data);
         finish_sdk_operation(sandbox, result, "cleaning up sandbox after write failure")?;

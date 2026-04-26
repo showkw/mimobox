@@ -20,7 +20,7 @@ pub(crate) fn handle_cat(args: CatArgs) -> Result<CatResponse, CliError> {
             "preparing to execute cat subcommand"
         );
 
-        let config = build_cli_sdk_config(args.backend, None);
+        let config = build_cli_sdk_config(args.backend, None, false);
         let mut sandbox = SdkSandbox::with_config(config).map_err(map_sdk_error)?;
         let result = sandbox.read_file(&args.path);
         let content =
