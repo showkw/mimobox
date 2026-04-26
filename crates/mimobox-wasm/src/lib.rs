@@ -512,6 +512,9 @@ impl Sandbox for WasmSandbox {
                                 elapsed,
                                 timed_out: true,
                             });
+                        } else if is_memory_trap(&e) {
+                            log_info!("Wasm memory limit exceeded, mapping to exit code 1");
+                            Some(1)
                         } else {
                             log_warn!("Wasm execution error: {}", e);
                             None
@@ -527,6 +530,9 @@ impl Sandbox for WasmSandbox {
                         Err(e) => {
                             if let Some(exit) = find_exit_code(&e) {
                                 Some(exit)
+                            } else if is_memory_trap(&e) {
+                                log_info!("Wasm memory limit exceeded, mapping to exit code 1");
+                                Some(1)
                             } else {
                                 log_warn!("main function execution failed: {}", e);
                                 None
@@ -592,6 +598,21 @@ fn is_epoch_interrupt(error: &wasmtime::Error) -> bool {
     } else {
         false
     }
+}
+
+/// Checks whether an error is caused by Wasm memory access or growth limits.
+fn is_memory_trap(error: &wasmtime::Error) -> bool {
+    if let Some(trap) = error.downcast_ref::<Trap>()
+        && matches!(trap, Trap::MemoryOutOfBounds)
+    {
+        return true;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("memory")
+        && (message.contains("out of bounds")
+            || message.contains("grow")
+            || message.contains("growth"))
 }
 
 /// Finds a WASI `I32Exit` exit code in the wasmtime error chain.

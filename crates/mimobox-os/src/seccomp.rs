@@ -61,13 +61,16 @@ const TCGETS: u32 = 0x5401;
 const TCSETS: u32 = 0x5402;
 const TCSETSW: u32 = 0x5403;
 const TCSETSF: u32 = 0x5404;
+const TIOCGPGRP: u32 = 0x540F;
+const TIOCSPGRP: u32 = 0x5410;
 const TIOCGWINSZ: u32 = 0x5413;
 const TIOCSWINSZ: u32 = 0x5414;
 const FIONBIO: u32 = 0x5421;
 const FIONREAD: u32 = 0x541B;
 const TIOCNOTTY: u32 = 0x5422;
 const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
-    TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ, TIOCSWINSZ, FIONBIO, FIONREAD, TIOCNOTTY,
+    TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ, FIONBIO,
+    FIONREAD, TIOCNOTTY,
 ];
 
 // clone namespace flags 约束
@@ -904,8 +907,8 @@ mod tests {
         BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK, ConstrainedSyscall, FIONBIO,
         SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
         SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
-        SeccompArgConstraint, SockFilter, TCGETS, build_arg_constraints, build_bpf_program,
-        essential_syscalls, fork_allowed_syscalls, network_syscalls,
+        SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints,
+        build_bpf_program, essential_syscalls, fork_allowed_syscalls, network_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1150,6 +1153,12 @@ mod tests {
 
         let fionbio_request = FakeSeccompData::new(IOCTL).with_arg(1, FIONBIO as u64);
         assert_eq!(run_bpf(&program, fionbio_request), SECCOMP_RET_ALLOW);
+
+        let tiocgpgrp_request = FakeSeccompData::new(IOCTL).with_arg(1, TIOCGPGRP as u64);
+        assert_eq!(run_bpf(&program, tiocgpgrp_request), SECCOMP_RET_ALLOW);
+
+        let tiocspgrp_request = FakeSeccompData::new(IOCTL).with_arg(1, TIOCSPGRP as u64);
+        assert_eq!(run_bpf(&program, tiocspgrp_request), SECCOMP_RET_ALLOW);
 
         let tiocsti_request = FakeSeccompData::new(IOCTL).with_arg(1, 0x5412);
         assert_eq!(run_bpf(&program, tiocsti_request), SECCOMP_RET_KILL_PROCESS);
