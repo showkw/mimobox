@@ -1,14 +1,48 @@
+use clap::Parser;
 use mimobox_mcp::MimoboxServer;
 use rmcp::ServiceExt;
 use tokio::signal::unix::{SignalKind, signal};
 
+mod http;
+
+type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Parser)]
+#[command(name = "mimobox-mcp", about = "mimobox MCP Server")]
+struct Cli {
+    /// 传输模式：stdio（默认）或 http
+    #[arg(long, default_value = "stdio")]
+    transport: String,
+
+    /// HTTP 监听端口（仅 HTTP 模式）
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> AppResult<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
         .init();
 
+    let cli = Cli::parse();
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(cli.port);
+
+    match cli.transport.as_str() {
+        "stdio" => run_stdio().await,
+        "http" => http::run_http_server(port).await,
+        _ => {
+            tracing::error!("不支持的传输模式: {}，请使用 stdio 或 http", cli.transport);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_stdio() -> AppResult<()> {
     tracing::info!("mimobox MCP stdio server starting");
 
     let server = MimoboxServer::new();
