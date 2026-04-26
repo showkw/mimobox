@@ -22,6 +22,7 @@ shlex.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
 reqwest = { workspace = true, features = ["blocking", "json"] }
 serde_json.workspace = true
+tempfile = "3"
 
 [features]
 default = ["os"]
