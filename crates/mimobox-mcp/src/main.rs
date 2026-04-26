@@ -17,6 +17,10 @@ struct Cli {
     /// HTTP 监听端口（仅 HTTP 模式）
     #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// HTTP 绑定地址（仅 HTTP 模式，默认仅允许本地访问）
+    #[arg(long, default_value = "127.0.0.1")]
+    bind_addr: String,
 }
 
 #[tokio::main]
@@ -34,7 +38,7 @@ async fn main() -> AppResult<()> {
 
     match cli.transport.as_str() {
         "stdio" => run_stdio().await,
-        "http" => http::run_http_server(port).await,
+        "http" => http::run_http_server(&cli.bind_addr, port).await,
         _ => {
             tracing::error!("不支持的传输模式: {}，请使用 stdio 或 http", cli.transport);
             std::process::exit(1);

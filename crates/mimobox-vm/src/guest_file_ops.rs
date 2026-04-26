@@ -150,6 +150,11 @@ fn validate_guest_path(path: &str) -> Result<(), MicrovmError> {
             "guest file path must not contain NUL bytes".to_string(),
         ));
     }
+    if path.contains('\n') || path.contains('\r') {
+        return Err(MicrovmError::InvalidConfig(
+            "guest file path must not contain newline or carriage return characters".to_string(),
+        ));
+    }
     if !path.starts_with(GUEST_SANDBOX_PREFIX) {
         return Err(MicrovmError::InvalidConfig(format!(
             "guest file path must start with {GUEST_SANDBOX_PREFIX}: {path}"
@@ -317,6 +322,14 @@ mod tests {
         assert!(validate_guest_path("/tmp/file").is_err());
         assert!(validate_guest_path("/sandbox/../etc/passwd").is_err());
         assert!(validate_guest_path("/sandbox/file").is_ok());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_newlines() {
+        assert!(validate_guest_path("/sandbox/file\nname").is_err());
+        assert!(validate_guest_path("/sandbox/file\rname").is_err());
+        assert!(validate_guest_path("/sandbox/file\r\nname").is_err());
+        assert!(validate_guest_path("/sandbox/normal-file").is_ok());
     }
 
     #[test]
