@@ -18,7 +18,7 @@ use crate::vm_helpers::{
 };
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
-use mimobox_core::{ErrorCode, FileStat, PtyConfig, PtySize, Sandbox as CoreSandbox};
+use mimobox_core::{ErrorCode, FileStat, PtyConfig, PtySize, Sandbox as CoreSandbox, SandboxError};
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
@@ -269,77 +269,42 @@ fn map_core_file_error(error: mimobox_core::SandboxError) -> SdkError {
     }
 }
 
-#[cfg(feature = "wasm")]
-fn read_file_via_core(sandbox: &mut impl CoreSandbox, path: &str) -> Result<Vec<u8>, SdkError> {
-    mimobox_core::Sandbox::read_file(sandbox, path).map_err(map_core_file_error)
+fn read_file_via_core(sandbox: &mut impl CoreSandbox, path: &str) -> Result<Vec<u8>, SandboxError> {
+    mimobox_core::Sandbox::read_file(sandbox, path)
 }
 
-fn read_file_via_core_or_host(
-    sandbox: &mut impl CoreSandbox,
-    path: &str,
-) -> Result<Vec<u8>, SdkError> {
-    match mimobox_core::Sandbox::read_file(sandbox, path) {
-        Ok(data) => Ok(data),
-        Err(mimobox_core::SandboxError::ExecutionFailed(message))
-            if message == "file reading not supported by current backend" =>
-        {
-            read_host_file(path)
-        }
-        Err(error) => Err(map_core_file_error(error)),
-    }
-}
-
-#[cfg(feature = "wasm")]
 fn write_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
     data: &[u8],
-) -> Result<(), SdkError> {
-    mimobox_core::Sandbox::write_file(sandbox, path, data).map_err(map_core_file_error)
+) -> Result<(), SandboxError> {
+    mimobox_core::Sandbox::write_file(sandbox, path, data)
 }
 
-fn write_file_via_core_or_host(
-    sandbox: &mut impl CoreSandbox,
-    path: &str,
-    data: &[u8],
-) -> Result<(), SdkError> {
-    match mimobox_core::Sandbox::write_file(sandbox, path, data) {
-        Ok(()) => Ok(()),
-        Err(mimobox_core::SandboxError::ExecutionFailed(message))
-            if message == "file writing not supported by current backend" =>
-        {
-            write_host_file(path, data)
+fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> SdkError {
+    SdkError::sandbox(
+        ErrorCode::UnsupportedPlatform,
+        format!(
+            "OS backend does not support {operation}: file operations bypass sandbox isolation"
+        ),
+        Some(suggestion.to_string()),
+    )
+}
+
+fn map_os_core_file_error(
+    operation: &str,
+    unsupported_message: &str,
+    error: SandboxError,
+) -> SdkError {
+    match error {
+        SandboxError::ExecutionFailed(message) if message == unsupported_message => {
+            os_file_operation_unsupported(
+                operation,
+                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+            )
         }
-        Err(error) => Err(map_core_file_error(error)),
+        other => map_core_file_error(other),
     }
-}
-
-fn read_host_file(path: &str) -> Result<Vec<u8>, SdkError> {
-    validate_host_file_path(path)?;
-    std::fs::read(path).map_err(SdkError::Io)
-}
-
-fn write_host_file(path: &str, data: &[u8]) -> Result<(), SdkError> {
-    validate_host_file_path(path)?;
-    std::fs::write(path, data).map_err(SdkError::Io)
-}
-
-fn validate_host_file_path(path: &str) -> Result<(), SdkError> {
-    if path.is_empty() {
-        return Err(SdkError::sandbox(
-            ErrorCode::InvalidConfig,
-            "path must not be empty",
-            Some("Provide a valid absolute or relative file path.".to_string()),
-        ));
-    }
-    if path.contains("..") {
-        return Err(SdkError::sandbox(
-            ErrorCode::InvalidConfig,
-            "path must not contain '..' path traversal",
-            Some("Use absolute paths without '..' components.".to_string()),
-        ));
-    }
-    Ok(())
 }
 
 impl Sandbox {
@@ -573,34 +538,30 @@ impl Sandbox {
     /// Lists directory entries under the specified path.
     ///
     /// Returns each entry's name, type, size, and symlink flag.
-    pub fn list_dir(&mut self, path: &str) -> Result<Vec<mimobox_core::DirEntry>, SdkError> {
+    pub fn list_dir(&mut self, _path: &str) -> Result<Vec<mimobox_core::DirEntry>, SdkError> {
         self.ensure_backend("/bin/ls")?;
         let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => {
-                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "list_dir",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => {
-                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "list_dir",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
+            SandboxInner::MicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
+            SandboxInner::PooledMicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.list_dir(path).map_err(map_microvm_error),
+            SandboxInner::RestoredPooledMicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::list_dir(s, path).map_err(|err| match err {
+                mimobox_core::Sandbox::list_dir(s, _path).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -609,36 +570,32 @@ impl Sandbox {
     }
 
     /// 检查指定路径的文件是否存在。
-    pub fn file_exists(&mut self, path: &str) -> Result<bool, SdkError> {
+    pub fn file_exists(&mut self, _path: &str) -> Result<bool, SdkError> {
         self.ensure_backend("/bin/test")?;
         let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => {
-                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "file_exists",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => {
-                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "file_exists",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.file_exists(path).map_err(map_microvm_error),
+            SandboxInner::MicroVm(s) => s.file_exists(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.file_exists(path).map_err(map_microvm_error),
+            SandboxInner::PooledMicroVm(s) => s.file_exists(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::RestoredPooledMicroVm(s) => {
-                s.file_exists(path).map_err(map_microvm_error)
+                s.file_exists(_path).map_err(map_microvm_error)
             }
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::file_exists(s, path).map_err(|err| match err {
+                mimobox_core::Sandbox::file_exists(s, _path).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -647,36 +604,32 @@ impl Sandbox {
     }
 
     /// 删除指定路径的文件或空目录。
-    pub fn remove_file(&mut self, path: &str) -> Result<(), SdkError> {
+    pub fn remove_file(&mut self, _path: &str) -> Result<(), SdkError> {
         self.ensure_backend("/bin/test")?;
         let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => {
-                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "remove_file",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => {
-                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "remove_file",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.remove_file(path).map_err(map_microvm_error),
+            SandboxInner::MicroVm(s) => s.remove_file(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.remove_file(path).map_err(map_microvm_error),
+            SandboxInner::PooledMicroVm(s) => s.remove_file(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::RestoredPooledMicroVm(s) => {
-                s.remove_file(path).map_err(map_microvm_error)
+                s.remove_file(_path).map_err(map_microvm_error)
             }
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::remove_file(s, path).map_err(|err| match err {
+                mimobox_core::Sandbox::remove_file(s, _path).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -685,34 +638,32 @@ impl Sandbox {
     }
 
     /// 重命名/移动文件。
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), SdkError> {
+    pub fn rename(&mut self, _from: &str, _to: &str) -> Result<(), SdkError> {
         self.ensure_backend("/bin/test")?;
         let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => {
-                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "rename",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => {
-                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "rename",
+                "Use microVM backend for isolated file operations",
+            )),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => s.rename(_from, _to).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(s) => s.rename(_from, _to).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => {
+                s.rename(_from, _to).map_err(map_microvm_error)
             }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.rename(from, to).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::rename(s, from, to).map_err(|err| match err {
+                mimobox_core::Sandbox::rename(s, _from, _to).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -721,32 +672,30 @@ impl Sandbox {
     }
 
     /// 返回文件元信息。
-    pub fn stat(&mut self, path: &str) -> Result<FileStat, SdkError> {
+    pub fn stat(&mut self, _path: &str) -> Result<FileStat, SdkError> {
         self.ensure_backend("/bin/test")?;
         let inner = self.require_inner()?;
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
-                mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                other => SdkError::from_sandbox_execute_error(other),
-            }),
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "stat",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => {
-                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "stat",
+                "Use microVM backend for isolated file operations",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.stat(path).map_err(map_microvm_error),
+            SandboxInner::MicroVm(s) => s.stat(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.stat(path).map_err(map_microvm_error),
+            SandboxInner::PooledMicroVm(s) => s.stat(_path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.stat(path).map_err(map_microvm_error),
+            SandboxInner::RestoredPooledMicroVm(s) => s.stat(_path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::stat(s, path).map_err(|err| match err {
+                mimobox_core::Sandbox::stat(s, _path).map_err(|err| match err {
                     mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
                     other => SdkError::from_sandbox_execute_error(other),
                 })
@@ -928,9 +877,21 @@ impl Sandbox {
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => read_file_via_core_or_host(s, path),
+            SandboxInner::Os(s) => read_file_via_core(s, path).map_err(|err| {
+                map_os_core_file_error(
+                    "read_file",
+                    "file reading not supported by current backend",
+                    err,
+                )
+            }),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => read_file_via_core_or_host(s, path),
+            SandboxInner::OsMac(s) => read_file_via_core(s, path).map_err(|err| {
+                map_os_core_file_error(
+                    "read_file",
+                    "file reading not supported by current backend",
+                    err,
+                )
+            }),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::MicroVm(s) => s.read_file(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -938,7 +899,7 @@ impl Sandbox {
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::RestoredPooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => read_file_via_core(s, path),
+            SandboxInner::Wasm(s) => read_file_via_core(s, path).map_err(map_core_file_error),
         }
     }
 
@@ -949,9 +910,21 @@ impl Sandbox {
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => write_file_via_core_or_host(s, path, data),
+            SandboxInner::Os(s) => write_file_via_core(s, path, data).map_err(|err| {
+                map_os_core_file_error(
+                    "write_file",
+                    "file writing not supported by current backend",
+                    err,
+                )
+            }),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => write_file_via_core_or_host(s, path, data),
+            SandboxInner::OsMac(s) => write_file_via_core(s, path, data).map_err(|err| {
+                map_os_core_file_error(
+                    "write_file",
+                    "file writing not supported by current backend",
+                    err,
+                )
+            }),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::MicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -961,7 +934,9 @@ impl Sandbox {
                 s.write_file(path, data).map_err(map_microvm_error)
             }
             #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => write_file_via_core(s, path, data),
+            SandboxInner::Wasm(s) => {
+                write_file_via_core(s, path, data).map_err(map_core_file_error)
+            }
         }
     }
 
@@ -1409,6 +1384,32 @@ mod tests {
         sandbox.active_isolation
     }
 
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    fn assert_os_file_operation_unsupported<T>(
+        result: Result<T, SdkError>,
+        operation: &str,
+        expected_suggestion: &str,
+    ) {
+        match result {
+            Err(SdkError::Sandbox {
+                code,
+                message,
+                suggestion,
+            }) => {
+                assert_eq!(code, ErrorCode::UnsupportedPlatform);
+                assert_eq!(
+                    message,
+                    format!(
+                        "OS backend does not support {operation}: file operations bypass sandbox isolation"
+                    )
+                );
+                assert_eq!(suggestion.as_deref(), Some(expected_suggestion));
+            }
+            Err(other) => panic!("期望 OS 文件 API 返回 UnsupportedPlatform，实际为: {other}"),
+            Ok(_) => panic!("期望 OS 文件 API 被拒绝，实际却成功"),
+        }
+    }
+
     #[cfg(feature = "vm")]
     fn vm_pool_is_initialized(sandbox: &Sandbox) -> bool {
         sandbox.vm_pool.is_some()
@@ -1587,18 +1588,15 @@ mod tests {
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
-    fn test_sdk_list_dir_returns_entries() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
-        std::fs::write(temp_dir.path().join("entry.txt"), "test").expect("写入测试文件失败");
+    fn test_sdk_list_dir_returns_unsupported_on_os_backend() {
         let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
 
-        let entries = sandbox
-            .list_dir(&temp_dir.path().to_string_lossy())
-            .expect("list_dir 应成功");
+        let result = sandbox.list_dir("/tmp");
 
-        assert!(
-            entries.iter().any(|entry| entry.name == "entry.txt"),
-            "返回结果应包含测试文件: {entries:?}"
+        assert_os_file_operation_unsupported(
+            result,
+            "list_dir",
+            "Use microVM backend for isolated file operations",
         );
         sandbox.destroy().expect("销毁沙箱失败");
     }
@@ -1610,7 +1608,11 @@ mod tests {
 
         let result = sandbox.list_dir("/nonexistent/path");
 
-        assert!(result.is_err(), "不存在路径应返回错误");
+        assert_os_file_operation_unsupported(
+            result,
+            "list_dir",
+            "Use microVM backend for isolated file operations",
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
@@ -1624,7 +1626,11 @@ mod tests {
 
         let result = sandbox.list_dir(&file_path.to_string_lossy());
 
-        assert!(result.is_err(), "文件路径应返回错误");
+        assert_os_file_operation_unsupported(
+            result,
+            "list_dir",
+            "Use microVM backend for isolated file operations",
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
@@ -1634,34 +1640,30 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        let entries = sandbox
-            .list_dir(&temp_dir.path().to_string_lossy())
-            .expect("list_dir 空目录应成功");
+        let result = sandbox.list_dir(&temp_dir.path().to_string_lossy());
 
-        assert!(entries.is_empty(), "空目录应返回空 Vec");
+        assert_os_file_operation_unsupported(
+            result,
+            "list_dir",
+            "Use microVM backend for isolated file operations",
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
-    fn test_sdk_file_exists_returns_expected_result() {
+    fn test_sdk_file_exists_returns_unsupported_on_os_backend() {
         let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
         let file_path = temp_dir.path().join("exists.txt");
         std::fs::write(&file_path, "test").expect("写入测试文件失败");
-        let missing_path = temp_dir.path().join("missing.txt");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        assert!(
-            sandbox
-                .file_exists(&file_path.to_string_lossy())
-                .expect("file_exists 应成功"),
-            "已存在文件应返回 true"
-        );
-        assert!(
-            !sandbox
-                .file_exists(&missing_path.to_string_lossy())
-                .expect("file_exists 应成功"),
-            "不存在文件应返回 false"
+        let result = sandbox.file_exists(&file_path.to_string_lossy());
+
+        assert_os_file_operation_unsupported(
+            result,
+            "file_exists",
+            "Use microVM backend for isolated file operations",
         );
         sandbox.destroy().expect("销毁沙箱失败");
     }
@@ -1674,13 +1676,16 @@ mod tests {
         std::fs::write(&file_path, "test").expect("写入测试文件失败");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        sandbox
-            .remove_file(&file_path.to_string_lossy())
-            .expect("remove_file 应成功");
+        let result = sandbox.remove_file(&file_path.to_string_lossy());
 
+        assert_os_file_operation_unsupported(
+            result,
+            "remove_file",
+            "Use microVM backend for isolated file operations",
+        );
         assert!(
-            !file_path.exists(),
-            "remove_file 后测试文件不应继续存在: {}",
+            file_path.exists(),
+            "remove_file 被拒绝后测试文件应继续存在: {}",
             file_path.display()
         );
         sandbox.destroy().expect("销毁沙箱失败");
@@ -1695,15 +1700,18 @@ mod tests {
         std::fs::write(&source_path, "test").expect("写入测试文件失败");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        sandbox
-            .rename(
-                &source_path.to_string_lossy(),
-                &target_path.to_string_lossy(),
-            )
-            .expect("rename 应成功");
+        let result = sandbox.rename(
+            &source_path.to_string_lossy(),
+            &target_path.to_string_lossy(),
+        );
 
-        assert!(!source_path.exists(), "源文件应不存在");
-        assert!(target_path.exists(), "目标文件应存在");
+        assert_os_file_operation_unsupported(
+            result,
+            "rename",
+            "Use microVM backend for isolated file operations",
+        );
+        assert!(source_path.exists(), "rename 被拒绝后源文件应继续存在");
+        assert!(!target_path.exists(), "rename 被拒绝后目标文件不应存在");
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
@@ -1715,15 +1723,13 @@ mod tests {
         std::fs::write(&file_path, "stat").expect("写入测试文件失败");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        let stat = sandbox
-            .stat(&file_path.to_string_lossy())
-            .expect("stat 应成功");
+        let result = sandbox.stat(&file_path.to_string_lossy());
 
-        assert_eq!(stat.path, file_path.to_string_lossy().as_ref());
-        assert!(stat.is_file, "stat 应标记为普通文件");
-        assert!(!stat.is_dir, "stat 不应标记为目录");
-        assert!(stat.size > 0, "stat 应返回文件大小");
-        assert!(stat.modified_ms.is_some(), "stat 应返回修改时间");
+        assert_os_file_operation_unsupported(
+            result,
+            "stat",
+            "Use microVM backend for isolated file operations",
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
@@ -1734,14 +1740,23 @@ mod tests {
         let file_path = temp_dir.path().join("roundtrip.txt");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        sandbox
-            .write_file(&file_path.to_string_lossy(), b"sdk-roundtrip")
-            .expect("write_file 应成功");
-        let data = sandbox
-            .read_file(&file_path.to_string_lossy())
-            .expect("read_file 应成功");
+        let write_result = sandbox.write_file(&file_path.to_string_lossy(), b"sdk-roundtrip");
+        let read_result = sandbox.read_file(&file_path.to_string_lossy());
 
-        assert_eq!(data, b"sdk-roundtrip");
+        assert_os_file_operation_unsupported(
+            write_result,
+            "write_file",
+            "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+        );
+        assert_os_file_operation_unsupported(
+            read_result,
+            "read_file",
+            "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+        );
+        assert!(
+            !file_path.exists(),
+            "write_file 被拒绝后不应在宿主文件系统创建文件"
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 
@@ -1828,13 +1843,15 @@ mod tests {
     fn test_sdk_file_api_rejects_path_traversal() {
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
-        assert!(
-            sandbox.file_exists("/../etc/passwd").is_err(),
-            "路径遍历应被拒绝"
+        assert_os_file_operation_unsupported(
+            sandbox.file_exists("/../etc/passwd"),
+            "file_exists",
+            "Use microVM backend for isolated file operations",
         );
-        assert!(
-            sandbox.remove_file("/tmp/../etc/passwd").is_err(),
-            "路径遍历应被拒绝"
+        assert_os_file_operation_unsupported(
+            sandbox.remove_file("/tmp/../etc/passwd"),
+            "remove_file",
+            "Use microVM backend for isolated file operations",
         );
         sandbox.destroy().expect("销毁沙箱失败");
     }
