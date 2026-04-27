@@ -26,6 +26,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/showkw/mimobox"
 homepage = "https://mimobox.io"
+rust-version = "1.85"
 
 [workspace.dependencies]
 # 内部 crate
