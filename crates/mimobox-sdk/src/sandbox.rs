@@ -198,6 +198,11 @@ fn build_fallback_command_args(
     options: &SdkExecOptions,
 ) -> Result<Vec<String>, SdkError> {
     // OS/Wasm 后端的超时来自 SandboxConfig；per-command timeout 仅 VM 后端支持。
+    if options.timeout.is_some() {
+        tracing::warn!(
+            "per-command timeout is not supported by OS/Wasm backends;              using sandbox config timeout instead"
+        );
+    }
     let _ = options.timeout;
 
     if let Some(cwd) = options.cwd.as_deref() {
