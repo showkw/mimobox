@@ -498,6 +498,15 @@ class SandboxLifecycleError(SandboxError):
     ...
 
 
+class SandboxTimeoutError(SandboxError):
+    """Raised when a sandbox operation times out.
+
+    Maps from ErrorCode::CommandTimeout and HttpTimeout.
+    Inherits from SandboxError for unified catching.
+    """
+    ...
+
+
 __all__ = [
     "DirEntry",
     "ExecuteResult",
@@ -509,6 +518,7 @@ __all__ = [
     "SandboxError",
     "SandboxHttpError",
     "SandboxLifecycleError",
+    "SandboxTimeoutError",
     "SandboxProcessError",
     "Snapshot",
     "SnapshotOps",

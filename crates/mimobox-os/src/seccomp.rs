@@ -54,6 +54,8 @@ const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
 // socket 参数约束
 const AF_UNIX: u32 = 1;
 const AF_INET: u32 = 2;
+// AF_NETLINK(16) 被隐式拒绝：socket domain 白名单仅允许 AF_UNIX 和 AF_INET/AF_INET6，
+// 不在白名单中的 domain（包括 AF_NETLINK）均触发 SECCOMP_RET_TRAP。
 const SOCK_STREAM: u32 = 1;
 const SOCK_CLOEXEC: u32 = 0x80000;
 const SOCK_NONBLOCK: u32 = 0x800;
