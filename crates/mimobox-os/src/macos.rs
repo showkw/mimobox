@@ -1703,6 +1703,13 @@ mod tests {
             })
             .expect("创建 PTY 会话失败");
 
+        // 等待 shell 就绪信号，消除竞态条件
+        let _ready = read_pty_until(
+            session.output_rx(),
+            b"ready",
+            Duration::from_secs(5),
+        );
+
         session
             .send_input(b"hello-pty\n")
             .expect("发送 PTY 输入失败");
