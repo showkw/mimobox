@@ -1,8 +1,8 @@
-//! macOS sandbox backend (Seatbelt / sandbox-exec).
+//! macOS sandbox backend (Seatbelt / sandbox_init).
 //!
 //! Implements process-level sandbox isolation with the native macOS Seatbelt framework.
-//! Runs commands through `sandbox-exec -p "<seatbelt_policy>"` and uses the Seatbelt
-//! policy language to restrict filesystem access, networking, process execution, and more.
+//! Applies Seatbelt policy in the child process before `exec` and uses the Seatbelt policy
+//! language to restrict filesystem access, networking, process execution, and more.
 //!
 //! # Security Policy
 //!
@@ -16,6 +16,7 @@
 //! | Memory limits | Unsupported | `RLIMIT_AS` cannot be reduced from an unlimited value on macOS; a warning is logged instead. |
 
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -29,6 +30,15 @@ use mimobox_core::{
 };
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn sandbox_init(
+        profile: *const libc::c_char,
+        flags: u64,
+        errorbuf: *mut *mut libc::c_char,
+    ) -> libc::c_int;
+}
 
 /// Sensitive user directory suffixes, relative to `$HOME`, whose reads must be denied explicitly.
 ///
@@ -52,11 +62,15 @@ const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".config/solana",
     ".config/starknet",
 ];
+const SANDBOX_LITERAL_PROFILE: u64 = 0;
+const SANDBOX_INIT_FAILURE_EXIT_CODE: i32 = 71;
+const SANDBOX_INIT_FAILURE_MESSAGE: &[u8] =
+    b"sandbox-exec: sandbox_apply: Operation not permitted\n";
 
 /// macOS Seatbelt sandbox backend.
 ///
-/// Runs commands through `sandbox-exec -p "<seatbelt_policy>"` and uses the native
-/// macOS Seatbelt framework for sandbox isolation.
+/// Applies generated Seatbelt policies with `sandbox_init` in child processes before
+/// executing the requested command.
 ///
 /// # Platform Limitations
 ///
@@ -103,6 +117,68 @@ fn waitpid_raw(pid: libc::pid_t) -> std::io::Result<i32> {
     }
 }
 
+fn policy_to_cstring(policy: String) -> Result<CString, SandboxError> {
+    CString::new(policy)
+        .map_err(|_| SandboxError::ExecutionFailed("Seatbelt policy contains NUL byte".to_string()))
+}
+
+fn create_child_process_group() -> std::io::Result<()> {
+    // SAFETY: pre_exec 运行在 fork 后、exec 前的子进程；setpgid(0, 0) 只影响当前子进程，
+    // 用于让超时清理可以杀掉整个派生进程组。
+    let ret = unsafe { libc::setpgid(0, 0) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn configure_pty_controlling_terminal() -> std::io::Result<()> {
+    // SAFETY: pre_exec 运行在 fork 后、exec 前的子进程；setsid 只影响当前子进程，
+    // 使其成为新会话首进程和进程组 leader。
+    if unsafe { libc::setsid() } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    #[allow(clippy::cast_lossless)]
+    {
+        // SAFETY: Command 已将 PTY slave 连接到 STDIN_FILENO；TIOCSCTTY 让该 slave
+        // 成为当前新会话的控制终端，不访问 Rust 托管内存。
+        if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_seatbelt_policy_or_exit(profile: *const libc::c_char) {
+    let mut errorbuf: *mut libc::c_char = std::ptr::null_mut();
+    // SAFETY: profile 指向 fork 前构造并由 pre_exec 闭包捕获的 NUL 结尾 CString；
+    // errorbuf 指向当前栈上的有效输出槽，sandbox_init 只在当前子进程应用策略。
+    let ret = unsafe { sandbox_init(profile, SANDBOX_LITERAL_PROFILE, &mut errorbuf) };
+    if ret == 0 {
+        return;
+    }
+
+    if !errorbuf.is_null() {
+        // SAFETY: sandbox_init 失败时返回的 errorbuf 由系统分配；按 API 要求释放一次。
+        unsafe { libc::free(errorbuf.cast::<libc::c_void>()) };
+    }
+
+    // SAFETY: STDERR_FILENO 已由 Command 完成重定向；写入静态错误文本不访问悬垂内存。
+    let _ = unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            SANDBOX_INIT_FAILURE_MESSAGE.as_ptr().cast::<libc::c_void>(),
+            SANDBOX_INIT_FAILURE_MESSAGE.len(),
+        )
+    };
+
+    // SAFETY: Seatbelt 策略未应用时必须立即终止子进程，避免未沙箱化执行用户命令。
+    unsafe { libc::_exit(SANDBOX_INIT_FAILURE_EXIT_CODE) };
+}
+
 fn wait_child_with_timeout(
     pid: libc::pid_t,
     timeout: Duration,
@@ -126,7 +202,7 @@ fn wait_child_with_timeout(
         }
         Err(RecvTimeoutError::Timeout) => {
             tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
-            // SECURITY: sandbox-exec 允许 process-fork，超时必须回收整个进程组，
+            // SECURITY: Seatbelt 允许 process-fork，超时必须回收整个进程组，
             // 否则其派生进程会在 supervisor 返回后继续存活。
             // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
@@ -291,34 +367,29 @@ impl Sandbox for MacOsSandbox {
         let start = Instant::now();
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
-        // 生成 Seatbelt 策略
+        // 生成 Seatbelt 策略，并在 fork 前转换为 CString，避免 pre_exec 中分配内存。
         let policy = self.generate_policy();
         tracing::debug!("Seatbelt 策略:\n{policy}");
+        let policy = policy_to_cstring(policy)?;
 
-        // 构造 sandbox-exec 命令: sandbox-exec -p "<policy>" -- <cmd>...
-        let mut args = vec!["-p".to_string(), policy, "--".to_string()];
-        args.extend(cmd.iter().cloned());
-
-        // SAFETY: pre_exec installs only async-signal-safe process group setup before exec.
+        // SAFETY: pre_exec 在子进程 exec 前建立独立进程组并应用 Seatbelt 策略；
+        // 闭包捕获的 CString 在子进程调用 sandbox_init 时仍然有效。
         let mut child = unsafe {
-            Command::new("sandbox-exec")
-                .args(&args)
+            Command::new(&cmd[0])
+                .args(&cmd[1..])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .pre_exec(|| {
-                    // SAFETY: pre_exec 中只调用 async-signal-safe 的 setpgid(0, 0)，
-                    // 为超时路径建立独立进程组，避免只杀掉 sandbox-exec 自身。
-                    let ret = libc::setpgid(0, 0);
-                    if ret != 0 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
+                .pre_exec(move || {
+                    create_child_process_group()?;
+                    apply_seatbelt_policy_or_exit(policy.as_ptr());
+                    Ok(())
                 })
                 .spawn()
         }
-        .map_err(|e| SandboxError::ExecutionFailed(format!("failed to start sandbox-exec: {e}")))?;
+        .map_err(|e| {
+            SandboxError::ExecutionFailed(format!("failed to start sandboxed command: {e}"))
+        })?;
         let pid = child.id() as libc::pid_t;
 
         let (exit_status, timed_out) =
@@ -385,6 +456,7 @@ impl Sandbox for MacOsSandbox {
         let allocated = allocate_pty(config.size)?;
         let policy = self.generate_policy();
         tracing::debug!("PTY Seatbelt 策略:\n{policy}");
+        let policy = policy_to_cstring(policy)?;
 
         let slave_file = File::options()
             .read(true)
@@ -400,12 +472,9 @@ impl Sandbox for MacOsSandbox {
             SandboxError::ExecutionFailed(format!("failed to clone PTY stdout: {error}"))
         })?;
 
-        let mut args = vec!["-p".to_string(), policy, "--".to_string()];
-        args.extend(config.command.iter().cloned());
-
-        let mut command = Command::new("sandbox-exec");
+        let mut command = Command::new(&config.command[0]);
         command
-            .args(&args)
+            .args(&config.command[1..])
             .env_clear()
             .envs(build_child_env(&config))
             .stdin(Stdio::from(stdin_slave))
@@ -416,26 +485,18 @@ impl Sandbox for MacOsSandbox {
             command.current_dir(cwd);
         }
 
-        // SAFETY: pre_exec installs only async-signal-safe session and PTY control setup before exec.
+        // SAFETY: pre_exec 在子进程 exec 前接管 PTY 并应用 Seatbelt 策略；
+        // 闭包捕获的 CString 在 sandbox_init 调用期间有效。
         let child = unsafe {
-            command.pre_exec(|| {
-                // SAFETY: pre_exec 中仅调用 async-signal-safe 的 setsid/ioctl，
-                // 让 sandbox-exec 成为新的会话首进程并接管 PTY 作为控制终端。
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                #[allow(clippy::cast_lossless)]
-                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
+            command.pre_exec(move || {
+                configure_pty_controlling_terminal()?;
+                apply_seatbelt_policy_or_exit(policy.as_ptr());
                 Ok(())
             })
         }
         .spawn()
         .map_err(|error| {
-            SandboxError::ExecutionFailed(format!("failed to start sandbox-exec PTY: {error}"))
+            SandboxError::ExecutionFailed(format!("failed to start sandboxed PTY: {error}"))
         })?;
 
         Ok(build_session(
