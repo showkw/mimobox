@@ -17,13 +17,13 @@ This document defines the performance baselines and measurement boundaries used 
 
 | Metric | Start | End | Notes |
 | --- | --- | --- | --- |
-| OS-level cold start | Before `PlatformSandbox::new()` | After `execute(/bin/true)` returns | Includes create, execute, and destroy lifecycle |
-| Wasm cold start | Before `WasmSandbox::new()` | After `execute(wasm)` returns | May be affected by module cache |
-| Warm pool hot acquisition | Before `pool.acquire()` | After `drop()` completes | Measures object acquisition only, excluding command execution |
-| microVM cold start | Before `create_vm()` | After `run_command(echo)` returns | Includes create, boot, execute, and shutdown lifecycle |
-| microVM snapshot restore | Before `create_vm_for_restore()` | After `run_command(echo)` returns | In-memory snapshot, not file restore |
-| microVM pooled snapshot restore | `RestorePool::restore()` takes out an empty-shell VM | memory write + vCPU restore complete | Excludes command execution; the empty-shell VM is pre-created by the pool |
-| microVM warm pool hot path | Before `pool.acquire()` | After `pooled.execute(echo)` returns | Light load |
+| OS-level cold start | Before creating OS-level sandbox | After executing `/bin/true` | Includes create, execute, and destroy lifecycle |
+| Wasm cold start | Before creating Wasm sandbox | After executing Wasm module | May be affected by module cache |
+| Warm pool hot acquisition | Before acquiring from warm pool | After releasing sandbox completes | Measures object acquisition only, excluding command execution |
+| microVM cold start | Before creating microVM | After executing echo command | Includes create, boot, execute, and shutdown lifecycle |
+| microVM snapshot restore | Before creating microVM for restore | After executing echo command | In-memory snapshot, not file restore |
+| microVM pooled snapshot restore | Acquiring pre-created empty-shell VM from pool | After memory write and vCPU restore are complete | Excludes command execution; the empty-shell VM is pre-created by the pool |
+| microVM warm pool hot path | Before acquiring from warm pool | After executing echo in pooled VM | Light load |
 
 ## Interpretation Notes
 

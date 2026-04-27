@@ -1,4 +1,6 @@
-# LangChain Integration for mimobox
+# LangChain Integration for MimoBox
+
+Use MimoBox as a sandbox tool in your LangChain agents.
 
 This example shows how to expose the mimobox sandbox as LangChain tools. Agents
 can execute Python, Node.js, or Bash code in temporary sandboxes, or create a
@@ -34,4 +36,3 @@ From this directory:
 ```bash
 python demo.py
 ```
-

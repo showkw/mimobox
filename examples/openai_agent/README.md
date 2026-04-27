@@ -1,4 +1,6 @@
-# OpenAI Agents SDK Integration for mimobox
+# OpenAI Agents SDK Integration for MimoBox
+
+Use MimoBox as a sandbox tool with OpenAI Agents SDK.
 
 This example shows how to expose the mimobox sandbox as tools for the OpenAI
 Agents SDK. The agent can execute code, read files, and write files inside a

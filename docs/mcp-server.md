@@ -259,23 +259,11 @@ Add the following to the MCP configuration in Claude Desktop:
 
 ## 5. Running
 
-OS-level backend:
+Start the MCP server with stdio transport:
 
 ```bash
 mimobox-mcp
 ```
-
-microVM backend:
-
-```bash
-mimobox-mcp
-```
-
-Install the binary by downloading `mimobox-mcp` from the
-[latest GitHub Release](https://github.com/showkw/mimobox/releases/latest) and
-placing it in `PATH`. `scripts/install.sh` installs the `mimobox` CLI only; use
-the release page to obtain the MCP server binary. If a precompiled binary is not
-available for your platform, build from source as a fallback.
 
 ## 6. Feature Gates
 
