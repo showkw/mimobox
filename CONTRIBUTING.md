@@ -88,7 +88,7 @@ Security-related code must preserve the default-deny principle:
 ## PR Process
 Recommended workflow:
 1. Fork the repository.
-2. Create a feature branch from the latest main branch.
+2. Create a feature branch from the latest master branch.
 3. Complete the code, test, and documentation changes.
 4. Run `scripts/check.sh` and `scripts/test.sh`.
 5. Commit and push the branch.
@@ -111,7 +111,7 @@ Do not disclose security vulnerability details in public issues, public discussi
 Please report through the private channel specified in `SECURITY.md`, and include reproduction steps, impact scope, and environment information.
 
 ## CI Notes
-CI runs baseline checks on Pull Requests and main branch updates. These usually include formatting, Clippy, Linux and macOS tests, Wasm backend tests, documentation builds, doctest, and security audits.
+CI runs baseline checks on Pull Requests and master branch updates. These usually include formatting, Clippy, Linux and macOS tests, Wasm backend tests, documentation builds, doctest, and security audits.
 
 microVM tests that require `/dev/kvm` are usually run only in Linux environments with KVM permissions.
 

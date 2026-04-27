@@ -52,6 +52,8 @@ mimobox-sdk = "0.1.0-alpha"
 
 ### MCP Server
 
+> **Note**: MCP Server is currently available for Linux only.
+
 ```bash
 mimobox-mcp                              # stdio mode (default)
 mimobox-mcp --transport http --port 8080 # Streamable HTTP mode
@@ -108,9 +110,9 @@ with Sandbox() as sandbox:
 ```
 
 ```python
-# File API
+# File API (requires Linux + KVM / microVM backend)
 with Sandbox() as sandbox:
-    sandbox.write_file("/tmp/hello.py", "print('hello')")
+    sandbox.write_file("/tmp/hello.py", b"print('hello')")
     result = sandbox.execute("python3 /tmp/hello.py")
     entries = sandbox.list_dir("/tmp")
 ```

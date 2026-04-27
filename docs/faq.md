@@ -14,7 +14,13 @@ cargo build --workspace --release
 
 ### Q: `pip install mimobox` fails. Is the Python package available on PyPI?
 
-Python wheels are not published to PyPI yet. Build the Python package from source with `maturin`, then install the generated wheel.
+The Python package is published on [PyPI](https://pypi.org/project/mimobox/). Install it directly:
+
+```bash
+pip install mimobox
+```
+
+If `pip install` fails, ensure your Python version is 3.8 or newer. To build from source instead, use `maturin`:
 
 ```bash
 git clone https://github.com/showkw/mimobox.git
