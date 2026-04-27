@@ -17,6 +17,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::sync::mpsc;
 
+fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    use pyo3::types::PyBytes;
+    if data.is_instance_of::<PyBytes>() {
+        Ok(data.downcast::<PyBytes>()?.as_bytes().to_vec())
+    } else if let Ok(s) = data.extract::<String>() {
+        Ok(s.into_bytes())
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "data must be str or bytes",
+        ))
+    }
+}
+
 mod tracing {
     macro_rules! tracing_warn {
         ($message:literal, code = ?$code:expr) => {
@@ -301,6 +314,7 @@ struct PySandbox {
 #[pyclass(name = "StreamEvent")]
 #[derive(Debug, Clone)]
 struct PyStreamEvent {
+    event_type: String,
     stdout: Option<Vec<u8>>,
     stderr: Option<Vec<u8>>,
     exit_code: Option<i32>,
@@ -309,6 +323,11 @@ struct PyStreamEvent {
 
 #[pymethods]
 impl PyStreamEvent {
+    #[getter]
+    fn event_type(&self) -> &str {
+        &self.event_type
+    }
+
     /// Returns stdout bytes chunk, if present.
     #[getter]
     fn stdout<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
@@ -342,30 +361,35 @@ impl From<StreamEvent> for PyStreamEvent {
     fn from(event: StreamEvent) -> Self {
         match event {
             StreamEvent::Stdout(data) => Self {
+                event_type: "stdout".to_string(),
                 stdout: Some(data),
                 stderr: None,
                 exit_code: None,
                 timed_out: false,
             },
             StreamEvent::Stderr(data) => Self {
+                event_type: "stderr".to_string(),
                 stdout: None,
                 stderr: Some(data),
                 exit_code: None,
                 timed_out: false,
             },
             StreamEvent::Exit(code) => Self {
+                event_type: "exit".to_string(),
                 stdout: None,
                 stderr: None,
                 exit_code: Some(code),
                 timed_out: false,
             },
             StreamEvent::TimedOut => Self {
+                event_type: "timeout".to_string(),
                 stdout: None,
                 stderr: None,
                 exit_code: None,
                 timed_out: true,
             },
             _ => Self {
+                event_type: "unknown".to_string(),
                 stdout: None,
                 stderr: None,
                 exit_code: None,
@@ -392,8 +416,9 @@ impl PyFileSystem {
     }
 
     /// 写入文件。
-    fn write(&self, py: Python<'_>, path: &str, data: Vec<u8>) -> PyResult<()> {
-        self.sandbox.call_method1(py, "write_file", (path, data))?;
+    fn write(&self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let bytes = extract_bytes_data(data)?;
+        self.sandbox.call_method1(py, "write_file", (path, bytes))?;
         Ok(())
     }
 
@@ -836,9 +861,10 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If the write operation fails.
-    fn write_file(&mut self, path: &str, data: Vec<u8>) -> PyResult<()> {
+    fn write_file(&mut self, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let bytes = extract_bytes_data(data)?;
         let sandbox = self.inner_mut()?;
-        sandbox.write_file(path, &data).map_err(map_sdk_error)
+        sandbox.write_file(path, &bytes).map_err(map_sdk_error)
     }
 
     /// Capture a snapshot of the current sandbox state.
