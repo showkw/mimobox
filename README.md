@@ -35,6 +35,7 @@ pip install target/wheels/*.whl
 ```toml
 [dependencies]
 mimobox-sdk = { git = "https://github.com/showkw/mimobox.git", branch = "master" }
+# 发布后改为：mimobox-sdk = "0.1.0"
 ```
 
 ### From Source
