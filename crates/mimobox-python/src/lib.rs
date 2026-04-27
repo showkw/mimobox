@@ -1042,7 +1042,7 @@ fn build_python_config(
         builder = builder.allowed_http_domains(domains);
     }
 
-    Ok(builder.build())
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {

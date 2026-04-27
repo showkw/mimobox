@@ -83,6 +83,8 @@ pub struct Sandbox {
 impl RestorePool {
     /// Creates a fixed-size restore pool from the base configuration.
     pub fn new(config: RestorePoolConfig) -> Result<Self, SdkError> {
+        config.base_config.validate()?;
+
         let sandbox_config = config.base_config.to_sandbox_config();
         let microvm_config = config.base_config.to_microvm_config()?;
         let inner = mimobox_vm::RestorePool::new(
@@ -108,7 +110,9 @@ impl RestorePool {
             .map_err(map_restore_pool_error)?;
         Ok(Sandbox::from_initialized_inner(
             SandboxInner::RestoredPooledMicroVm(restored),
-            Config::builder().isolation(IsolationLevel::MicroVm).build(),
+            Config::builder()
+                .isolation(IsolationLevel::MicroVm)
+                .build()?,
         ))
     }
 
@@ -372,13 +376,15 @@ impl Sandbox {
     /// let config = Config::builder()
     ///     .isolation(IsolationLevel::Os)
     ///     .timeout(std::time::Duration::from_secs(10))
-    ///     .build();
+    ///     .build()?;
     /// let mut sandbox = Sandbox::with_config(config)?;
     /// # Ok(())
     /// # }
     /// ```
     #[allow(unused_mut)]
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
+        config.validate()?;
+
         let sandbox = Self::new_uninitialized(config);
 
         #[cfg(feature = "vm")]
@@ -405,6 +411,8 @@ impl Sandbox {
         config: Config,
         pool_config: mimobox_vm::VmPoolConfig,
     ) -> Result<Self, SdkError> {
+        config.validate()?;
+
         let mut sandbox = Self::new_uninitialized(config);
         let sandbox_config = sandbox.config.to_sandbox_config();
         let microvm_config = sandbox.config.to_microvm_config()?;
@@ -426,7 +434,7 @@ impl Sandbox {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = Config::builder()
     ///     .isolation(IsolationLevel::MicroVm)
-    ///     .build();
+    ///     .build()?;
     /// let mut sandbox = Sandbox::with_config(config)?;
     /// let snapshot = sandbox.snapshot()?;
     /// assert!(snapshot.size() > 0);
@@ -478,7 +486,9 @@ impl Sandbox {
                 mimobox_vm::MicrovmSandbox::restore(&snapshot.inner).map_err(map_microvm_error)?;
             Ok(Self::from_initialized_inner(
                 SandboxInner::MicroVm(sandbox),
-                Config::builder().isolation(IsolationLevel::MicroVm).build(),
+                Config::builder()
+                    .isolation(IsolationLevel::MicroVm)
+                    .build()?,
             ))
         }
 
@@ -1525,6 +1535,27 @@ mod tests {
         assert_eq!(active_isolation(&sandbox), None);
     }
 
+    #[test]
+    fn with_config_rejects_invalid_config_before_backend_creation() {
+        let mut config = Config::default();
+        config.memory_limit_mb = Some(0);
+
+        let result = Sandbox::with_config(config);
+
+        assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn with_pool_rejects_invalid_config_before_backend_creation() {
+        let mut config = Config::default();
+        config.vm_vcpu_count = 0;
+
+        let result = Sandbox::with_pool(config, mimobox_vm::VmPoolConfig::default());
+
+        assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
     #[cfg(feature = "vm")]
     #[test]
     fn default_auto_config_does_not_prepare_vm_pool() {
@@ -1536,7 +1567,10 @@ mod tests {
     #[cfg(feature = "vm")]
     #[test]
     fn explicit_microvm_config_marks_pool_as_eligible_on_supported_builds() {
-        let config = Config::builder().isolation(IsolationLevel::MicroVm).build();
+        let config = Config::builder()
+            .isolation(IsolationLevel::MicroVm)
+            .build()
+            .expect("配置校验失败");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
         assert!(should_prepare_vm_pool(&config));
@@ -1548,7 +1582,10 @@ mod tests {
     #[cfg(feature = "vm")]
     #[test]
     fn auto_untrusted_config_marks_pool_as_eligible_on_supported_builds() {
-        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+        let config = Config::builder()
+            .trust_level(TrustLevel::Untrusted)
+            .build()
+            .expect("配置校验失败");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
         assert!(should_prepare_vm_pool(&config));
@@ -1569,7 +1606,10 @@ mod tests {
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     #[test]
     fn wait_ready_untrusted_fails_without_vm() {
-        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+        let config = Config::builder()
+            .trust_level(TrustLevel::Untrusted)
+            .build()
+            .expect("配置校验失败");
         let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
 
         let result = sandbox.wait_ready(Duration::from_millis(1));
@@ -1679,7 +1719,10 @@ mod tests {
 
     #[test]
     fn create_pty_auto_untrusted_fails_closed() {
-        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+        let config = Config::builder()
+            .trust_level(TrustLevel::Untrusted)
+            .build()
+            .expect("配置校验失败");
         let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
 
         let result = sandbox.create_pty("/bin/sh");
@@ -1977,9 +2020,11 @@ mod tests {
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     #[test]
     fn create_pty_microvm_is_rejected() {
-        let mut sandbox =
-            Sandbox::with_config(Config::builder().isolation(IsolationLevel::MicroVm).build())
-                .expect("创建沙箱失败");
+        let config = Config::builder()
+            .isolation(IsolationLevel::MicroVm)
+            .build()
+            .expect("配置校验失败");
+        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
 
         let result = sandbox.create_pty("/bin/sh");
 
@@ -2001,7 +2046,8 @@ mod tests {
             .vm_memory_mb(microvm_config.memory_mb)
             .kernel_path(microvm_config.kernel_path.clone())
             .rootfs_path(microvm_config.rootfs_path.clone())
-            .build();
+            .build()
+            .expect("配置校验失败");
         let mut microvm = mimobox_vm::MicrovmSandbox::new_with_base(
             mimobox_core::SandboxConfig::default(),
             microvm_config,
@@ -2051,7 +2097,8 @@ mod tests {
             .vm_memory_mb(microvm_config.memory_mb)
             .kernel_path(microvm_config.kernel_path.clone())
             .rootfs_path(microvm_config.rootfs_path.clone())
-            .build();
+            .build()
+            .expect("配置校验失败");
         let mut sandbox = Sandbox::with_config(config).expect("创建 pooled VM 沙箱失败");
         let source_path = "/sandbox/sdk-file-api.txt";
         let target_path = "/sandbox/sdk-file-api-renamed.txt";

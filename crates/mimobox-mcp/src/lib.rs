@@ -846,7 +846,7 @@ fn create_sandbox_with_options(
         builder = builder.memory_limit_mb(memory_limit_mb);
     }
 
-    Sandbox::with_config(builder.build())
+    Sandbox::with_config(builder.build()?)
 }
 
 fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> {

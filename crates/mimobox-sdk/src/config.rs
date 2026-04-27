@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "vm")]
 use crate::error::SdkError;
 use mimobox_core::{SandboxConfig, SeccompProfile};
+
+const MAX_TIMEOUT: Duration = Duration::from_secs(86_400);
 
 /// Isolation level selection strategy.
 ///
@@ -198,12 +199,52 @@ impl Config {
     /// let config = Config::builder()
     ///     .isolation(IsolationLevel::Os)
     ///     .timeout(Duration::from_secs(10))
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.isolation, IsolationLevel::Os);
     /// ```
     pub fn builder() -> ConfigBuilder {
         ConfigBuilder::default()
+    }
+
+    /// 校验 SDK 配置，避免非法配置进入后端。
+    pub(crate) fn validate(&self) -> Result<(), SdkError> {
+        if self.memory_limit_mb == Some(0) {
+            return Err(SdkError::Config(
+                "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
+            ));
+        }
+
+        if self.cpu_period_us == 0 {
+            return Err(SdkError::Config(
+                "cpu_period_us=0 无效，请设为正整数".to_string(),
+            ));
+        }
+
+        if self.timeout.is_some_and(|timeout| timeout > MAX_TIMEOUT) {
+            return Err(SdkError::Config(
+                "timeout 超过最大值 86400 秒（24小时）".to_string(),
+            ));
+        }
+
+        if self.vm_vcpu_count == 0 {
+            return Err(SdkError::Config(
+                "vm_vcpu_count=0 无效，请设为正整数".to_string(),
+            ));
+        }
+
+        if self.vm_memory_mb == 0 {
+            return Err(SdkError::Config(
+                "vm_memory_mb=0 无效，请设为正整数".to_string(),
+            ));
+        }
+
+        for domain in resolve_allowed_http_domains(self) {
+            validate_http_domain(&domain)?;
+        }
+
+        Ok(())
     }
 
     /// Converts to the internal `mimobox_core::SandboxConfig`.
@@ -281,6 +322,38 @@ fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfi
     }
 }
 
+fn validate_http_domain(domain: &str) -> Result<(), SdkError> {
+    if domain.is_empty()
+        || domain
+            .chars()
+            .any(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
+        || has_invalid_domain_wildcard(domain)
+        || is_plain_ip_domain(domain)
+    {
+        return Err(SdkError::Config(format!(
+            "allowed_http_domains 包含无效域名: {domain}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn has_invalid_domain_wildcard(domain: &str) -> bool {
+    let wildcard_count = domain.chars().filter(|character| *character == '*').count();
+    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*."))
+}
+
+fn is_plain_ip_domain(domain: &str) -> bool {
+    let has_digit = domain.chars().any(|character| character.is_ascii_digit());
+    let has_dot = domain.contains('.');
+
+    has_digit
+        && has_dot
+        && domain
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+}
+
 #[cfg(feature = "vm")]
 fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
     let requested_memory_mb = u64::from(config.vm_memory_mb);
@@ -299,7 +372,7 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
 /// Fluent builder for constructing [`Config`] instances.
 ///
 /// All methods consume and return `self`, enabling method chaining.
-/// Call [`build()`](ConfigBuilder::build) to produce the final `Config`.
+/// Call [`build()`](ConfigBuilder::build) to validate and produce the final `Config`.
 ///
 /// # Examples
 ///
@@ -312,7 +385,8 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
 ///     .timeout(Duration::from_secs(60))
 ///     .memory_limit_mb(256)
 ///     .allowed_http_domains(["api.openai.com"])
-///     .build();
+///     .build()
+///     .expect("配置校验失败");
 ///
 /// assert_eq!(config.isolation, IsolationLevel::MicroVm);
 /// ```
@@ -331,7 +405,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .isolation(IsolationLevel::Wasm)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.isolation, IsolationLevel::Wasm);
     /// ```
@@ -352,7 +427,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .trust_level(TrustLevel::Untrusted)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.trust_level, TrustLevel::Untrusted);
     /// ```
@@ -370,7 +446,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .network(NetworkPolicy::AllowDomains(vec!["api.openai.com".to_string()]))
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
     /// ```
@@ -391,7 +468,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .timeout(Duration::from_secs(10))
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.timeout, Some(Duration::from_secs(10)));
     /// ```
@@ -412,7 +490,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .memory_limit_mb(256)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.memory_limit_mb, Some(256));
     /// ```
@@ -447,7 +526,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .fs_readonly(["/usr", "/lib"])
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.fs_readonly.len(), 2);
     /// ```
@@ -465,7 +545,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .fs_readwrite(["/tmp", "/workspace"])
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.fs_readwrite.len(), 2);
     /// ```
@@ -485,7 +566,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .allow_fork(true)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert!(config.allow_fork);
     /// ```
@@ -506,7 +588,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .allowed_http_domains(["api.openai.com", "*.openai.com"])
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.allowed_http_domains.len(), 2);
     /// ```
@@ -529,7 +612,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .vm_vcpu_count(4)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.vm_vcpu_count, 4);
     /// ```
@@ -549,7 +633,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .vm_memory_mb(512)
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.vm_memory_mb, 512);
     /// ```
@@ -569,7 +654,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .kernel_path("/opt/mimobox/vmlinux")
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.kernel_path, Some(std::path::PathBuf::from("/opt/mimobox/vmlinux")));
     /// ```
@@ -589,7 +675,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.rootfs_path, Some(std::path::PathBuf::from("/opt/mimobox/rootfs.cpio.gz")));
     /// ```
@@ -607,7 +694,8 @@ impl ConfigBuilder {
     ///
     /// let config = Config::builder()
     ///     .no_timeout()
-    ///     .build();
+    ///     .build()
+    ///     .expect("配置校验失败");
     ///
     /// assert_eq!(config.timeout, None);
     /// ```
@@ -616,18 +704,19 @@ impl ConfigBuilder {
         self
     }
 
-    /// Produce the final `Config`.
+    /// Validate and produce the final `Config`.
     ///
     /// # Examples
     ///
     /// ```
     /// use mimobox_sdk::Config;
     ///
-    /// let config = Config::builder().build();
+    /// let config = Config::builder().build().expect("配置校验失败");
     /// assert_eq!(config.isolation, mimobox_sdk::IsolationLevel::Auto);
     /// ```
-    pub fn build(self) -> Config {
-        self.inner
+    pub fn build(self) -> Result<Config, SdkError> {
+        self.inner.validate()?;
+        Ok(self.inner)
     }
 }
 
@@ -647,7 +736,11 @@ mod tests {
 
     #[test]
     fn builder_can_override_microvm_resource_config() {
-        let config = Config::builder().vm_vcpu_count(4).vm_memory_mb(768).build();
+        let config = Config::builder()
+            .vm_vcpu_count(4)
+            .vm_memory_mb(768)
+            .build()
+            .expect("配置校验失败");
 
         assert_eq!(config.vm_vcpu_count, 4);
         assert_eq!(config.vm_memory_mb, 768);
@@ -658,7 +751,8 @@ mod tests {
         let config = Config::builder()
             .kernel_path("/opt/mimobox/vmlinux")
             .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
-            .build();
+            .build()
+            .expect("配置校验失败");
 
         assert_eq!(
             config.kernel_path,
@@ -674,7 +768,8 @@ mod tests {
     fn allow_domains_keep_direct_network_denied_and_forward_whitelist() {
         let config = Config::builder()
             .network(NetworkPolicy::AllowDomains(vec!["example.com".to_string()]))
-            .build();
+            .build()
+            .expect("配置校验失败");
 
         assert!(config.to_sandbox_config().deny_network);
         assert_eq!(
@@ -688,7 +783,8 @@ mod tests {
         let config = Config::builder()
             .network(NetworkPolicy::AllowAll)
             .allow_fork(true)
-            .build();
+            .build()
+            .expect("配置校验失败");
         let sandbox_config = config.to_sandbox_config();
 
         assert!(!sandbox_config.deny_network);
@@ -702,10 +798,14 @@ mod tests {
     fn timeout_rounds_up_instead_of_truncating_subsecond_precision() {
         let config = Config::builder()
             .timeout(Duration::from_millis(1_500))
-            .build();
+            .build()
+            .expect("配置校验失败");
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(2));
 
-        let config = Config::builder().timeout(Duration::from_millis(1)).build();
+        let config = Config::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .expect("配置校验失败");
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
     }
 
@@ -713,7 +813,8 @@ mod tests {
     fn explicit_allowed_http_domains_are_forwarded_to_sandbox_config() {
         let config = Config::builder()
             .allowed_http_domains(["api.openai.com", "*.openai.com"])
-            .build();
+            .build()
+            .expect("配置校验失败");
         let sandbox_config = config.to_sandbox_config();
 
         assert_eq!(
@@ -730,7 +831,8 @@ mod tests {
                 "example.com".to_string(),
             ]))
             .allowed_http_domains(["api.openai.com", "*.openai.com"])
-            .build();
+            .build()
+            .expect("配置校验失败");
         let sandbox_config = config.to_sandbox_config();
 
         assert_eq!(
@@ -740,6 +842,37 @@ mod tests {
                 "*.openai.com".to_string(),
                 "example.com".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn builder_rejects_zero_memory_limit() {
+        let result = Config::builder().memory_limit_mb(0).build();
+
+        assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[test]
+    fn builder_rejects_invalid_http_domain() {
+        let result = Config::builder()
+            .allowed_http_domains(["127.0.0.1"])
+            .build();
+
+        assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[test]
+    fn builder_accepts_allowed_domains_policy() {
+        let config = Config::builder()
+            .network(NetworkPolicy::AllowDomains(vec![
+                "*.example.com".to_string(),
+            ]))
+            .build()
+            .expect("AllowDomains 应允许受控代理白名单");
+
+        assert_eq!(
+            config.to_sandbox_config().allowed_http_domains,
+            vec!["*.example.com".to_string()]
         );
     }
 
@@ -765,7 +898,8 @@ mod tests {
             .cpu_period(100_000)
             .kernel_path("/srv/mimobox/vmlinux")
             .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
-            .build();
+            .build()
+            .expect("配置校验失败");
         let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
 
         assert_eq!(microvm_config.vcpu_count, 4);
@@ -788,7 +922,8 @@ mod tests {
         let config = Config::builder()
             .vm_memory_mb(768)
             .memory_limit_mb(256)
-            .build();
+            .build()
+            .expect("配置校验失败");
         let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
 
         assert_eq!(microvm_config.memory_mb, 256);
@@ -800,7 +935,8 @@ mod tests {
         let config = Config::builder()
             .vm_memory_mb(768)
             .memory_limit_mb(u64::MAX)
-            .build();
+            .build()
+            .expect("配置校验失败");
         let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
 
         assert_eq!(microvm_config.memory_mb, 768);
