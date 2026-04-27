@@ -65,7 +65,7 @@ struct ManagedSandbox {
 pub struct CreateSandboxRequest {
     /// Optional isolation level: auto, os, wasm, microvm.
     isolation_level: Option<String>,
-    /// Default sandbox timeout in milliseconds.
+    /// Default execution timeout in milliseconds for commands run in this sandbox.
     timeout_ms: Option<u64>,
     /// Sandbox memory limit in MiB.
     memory_limit_mb: Option<u64>,
@@ -85,7 +85,7 @@ pub struct ExecuteCodeRequest {
     code: String,
     /// Optional language: python, javascript, node, bash, sh.
     language: Option<String>,
-    /// Execution timeout in milliseconds. Only applies to temporary sandboxes.
+    /// Execution timeout in milliseconds. Only applies when sandbox_id is not provided (temporary sandbox). For existing sandboxes, use the sandbox's own timeout.
     timeout_ms: Option<u64>,
 }
 
@@ -349,7 +349,7 @@ impl Default for MimoboxServer {
 
 #[tool_router]
 impl MimoboxServer {
-    #[tool(description = "Create a reusable mimobox sandbox instance")]
+    #[tool(description = "Create a reusable sandbox instance. Supports isolation levels: auto (default, routes to best backend), os (OS-level sandbox), wasm (WebAssembly sandbox), microvm (KVM-based microVM, Linux only). Optional timeout_ms and memory_limit_mb.")]
     async fn create_sandbox(
         &self,
         Parameters(request): Parameters<CreateSandboxRequest>,
@@ -480,7 +480,7 @@ impl MimoboxServer {
         }))
     }
 
-    #[tool(description = "Execute a code snippet in a mimobox sandbox")]
+    #[tool(description = "Execute a code snippet in a sandbox. Supports languages: python, javascript, node, bash, sh. If sandbox_id is provided, runs in an existing sandbox; otherwise creates a temporary sandbox for this execution.")]
     async fn execute_code(
         &self,
         Parameters(request): Parameters<ExecuteCodeRequest>,
@@ -508,7 +508,7 @@ impl MimoboxServer {
         Ok(Json(format_execute_result(result)))
     }
 
-    #[tool(description = "Read a file from a microVM-backed mimobox sandbox as base64")]
+    #[tool(description = "Read a file from a sandbox and return its content as base64. Requires microVM isolation level. The path must be absolute.")]
     async fn read_file(
         &self,
         Parameters(request): Parameters<ReadFileRequest>,
@@ -547,7 +547,7 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Write a base64-encoded file into a microVM-backed mimobox sandbox")]
+    #[tool(description = "Write base64-encoded content to a file in a sandbox. Requires microVM isolation level. The path must be absolute.")]
     async fn write_file(
         &self,
         Parameters(request): Parameters<WriteFileRequest>,
@@ -588,7 +588,7 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Create a memory snapshot of a microVM-backed sandbox")]
+    #[tool(description = "Create a memory snapshot of a microVM-backed sandbox. The snapshot can later be restored or used to fork new sandbox instances.")]
     async fn snapshot(
         &self,
         Parameters(request): Parameters<SnapshotRequest>,
@@ -705,7 +705,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Execute an HTTP request from a microVM sandbox through a controlled proxy with domain whitelist"
+        description = "Send an HTTP GET or POST request through the sandbox proxy. Requires microVM isolation level with domain whitelist configured. Only HTTPS targets on whitelisted domains are allowed."
     )]
     async fn http_request(
         &self,
@@ -741,7 +741,7 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "List directory entries in a mimobox sandbox")]
+    #[tool(description = "List directory entries in a sandbox. Returns file name, type (file/dir/symlink), size, and symlink flag for each entry. Requires microVM isolation level.")]
     async fn list_dir(
         &self,
         Parameters(request): Parameters<ListDirRequest>,
