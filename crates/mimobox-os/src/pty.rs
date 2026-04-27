@@ -190,9 +190,12 @@ fn to_portable_size(size: CorePtySize) -> portable_pty::PtySize {
     }
 }
 
+const PTY_OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
+
 fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender<PtyEvent>) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
+        let mut total_bytes: usize = 0;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -201,6 +204,13 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender
                         .send(PtyEvent::Output(buffer[..n].to_vec()))
                         .is_err()
                     {
+                        break;
+                    }
+                    total_bytes += n;
+                    if total_bytes >= PTY_OUTPUT_SIZE_LIMIT {
+                        let _ = output_tx.send(PtyEvent::Output(
+                            b"\n[mimobox] PTY output exceeded 4MB limit, truncated\n".to_vec(),
+                        ));
                         break;
                     }
                 }
