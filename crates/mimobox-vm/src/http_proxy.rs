@@ -18,6 +18,12 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+/// 单个 header value 最大 8KB，防止 guest 通过超大 header 耗尽 host 内存。
+const MAX_HEADER_SIZE: usize = 8 * 1024;
+/// 所有 header key+value 总大小最大 64KB，限制 proxy 内存开销。
+const MAX_TOTAL_HEADERS_SIZE: usize = 64 * 1024;
+/// 最大 header 数量 64，防止 guest 构造大量小 header 绕过总量限制。
+const MAX_HEADER_COUNT: usize = 64;
 
 /// Raw JSON payload accepted by the guest-to-host HTTP proxy protocol.
 ///
@@ -152,6 +158,25 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
             None => None,
         };
 
+        // 校验 header 数量、单个 value 大小和总量，防止 guest 通过 header 耗尽 host 内存
+        if value.headers.len() > MAX_HEADER_COUNT {
+            return Err(HttpProxyError::Internal("too many headers".into()));
+        }
+        let mut total_header_size: usize = 0;
+        for (key, val) in &value.headers {
+            if val.len() > MAX_HEADER_SIZE {
+                return Err(HttpProxyError::Internal("header value too large".into()));
+            }
+            total_header_size = total_header_size
+                .saturating_add(key.len())
+                .saturating_add(val.len());
+        }
+        if total_header_size > MAX_TOTAL_HEADERS_SIZE {
+            return Err(HttpProxyError::Internal(
+                "total headers size exceeds limit".into(),
+            ));
+        }
+
         Ok(Self {
             method: value.method,
             url: value.url,
@@ -184,6 +209,25 @@ impl HttpRequest {
             }
             other => other,
         };
+
+        // 校验 header 数量、单个 value 大小和总量，与 TryFrom 保持一致
+        if headers.len() > MAX_HEADER_COUNT {
+            return Err(HttpProxyError::Internal("too many headers".into()));
+        }
+        let mut total_header_size: usize = 0;
+        for (key, val) in &headers {
+            if val.len() > MAX_HEADER_SIZE {
+                return Err(HttpProxyError::Internal("header value too large".into()));
+            }
+            total_header_size = total_header_size
+                .saturating_add(key.len())
+                .saturating_add(val.len());
+        }
+        if total_header_size > MAX_TOTAL_HEADERS_SIZE {
+            return Err(HttpProxyError::Internal(
+                "total headers size exceeds limit".into(),
+            ));
+        }
 
         Ok(Self {
             method: method.into(),

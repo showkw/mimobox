@@ -986,7 +986,14 @@ fn sanitize_error_message(message: &str) -> String {
     let mut result = message.to_string();
     // 替换绝对路径模式：/Users/<name>/..., /home/<name>/..., /tmp/mimobox-..., /var/folders/...
     // 使用简单的前缀匹配和路径段识别
-    let path_prefixes = ["/Users/", "/home/", "/var/folders/"];
+    let path_prefixes = [
+        "/Users/",
+        "/home/",
+        "/var/folders/",
+        "/tmp/",
+        "/private/tmp/",
+        "/private/var/",
+    ];
     for prefix in path_prefixes {
         while let Some(pos) = result.find(prefix) {
             // 找到路径结束位置（空格、换行、右括号或字符串末尾）

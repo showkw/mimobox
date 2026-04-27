@@ -275,6 +275,13 @@ fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
 pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
     let root_dir = snapshot_root_dir()?;
     fs::create_dir_all(&root_dir)?;
+    // 快照根目录仅限当前用户访问，防止其他用户读取 guest 内存映像
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root_dir, fs::Permissions::from_mode(0o700))
+            .map_err(MicrovmError::Io)?;
+    }
 
     for _ in 0..32 {
         let timestamp = SystemTime::now()
@@ -289,7 +296,16 @@ pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
         ));
 
         match fs::create_dir(&snapshot_dir) {
-            Ok(()) => return Ok(snapshot_dir),
+            Ok(()) => {
+                // 每个快照目录同样限制为当前用户独占访问
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&snapshot_dir, fs::Permissions::from_mode(0o700))
+                        .map_err(MicrovmError::Io)?;
+                }
+                return Ok(snapshot_dir);
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(MicrovmError::Io(error)),
         }

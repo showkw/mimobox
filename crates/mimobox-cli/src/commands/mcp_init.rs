@@ -166,7 +166,21 @@ fn write_mcp_config_atomically(config_path: &Path, content: &str) -> Result<(), 
             "failed to replace MCP config {}: {error}",
             config_path.display()
         ))
-    })
+    })?;
+
+    // MCP 配置文件包含工具路径，限制为当前用户独占读写
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(config_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            CliError::McpInit(format!(
+                "failed to set permissions on MCP config {}: {error}",
+                config_path.display()
+            ))
+        })?;
+    }
+
+    Ok(())
 }
 
 fn warn_if_mcp_binary_outside_cli_dir(binary_path: &Path) {
