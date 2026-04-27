@@ -659,15 +659,29 @@ fn create_engine_config() -> Config {
 
 /// Builds a WASI Preview 1 context.
 ///
+/// Security design:
+/// - WASI preopen paths must not expose ancestors of the private module cache directory. Otherwise
+///   guest code could traverse into the cache namespace when a broad path such as `/tmp` is
+///   preopened.
+/// - `HOME` is set to a virtual sandbox path instead of a host temporary directory so guest code
+///   does not infer or depend on host cache/temp locations.
+/// - `TMPDIR` is intentionally not set. Any temporary directory access must be granted explicitly
+///   through `SandboxConfig` preopens instead of an ambient environment hint.
+///
 /// Configures filesystem access, environment variables, and related settings from `SandboxConfig`.
 /// stdout/stderr are captured into in-memory buffers through `MemoryOutputPipe`.
 fn build_wasi_ctx(
     config: &SandboxConfig,
     args: &[String],
+    cache_dir: Option<&Path>,
     stdout_pipe: MemoryOutputPipe,
     stderr_pipe: MemoryOutputPipe,
 ) -> WasiP1Ctx {
     let mut builder = WasiCtxBuilder::new();
+
+    let is_path_cache_ancestor = |preopen_path: &Path| -> bool {
+        cache_dir.is_some_and(|cache_dir| cache_dir.starts_with(preopen_path))
+    };
 
     // 设置命令行参数
     for arg in args {
@@ -675,7 +689,7 @@ fn build_wasi_ctx(
     }
 
     // 设置最小必要环境变量
-    builder.env("HOME", "/tmp");
+    builder.env("HOME", "/home/sandbox");
     builder.env("PATH", "/usr/bin:/bin");
     builder.env("TERM", "dumb");
     builder.env("SANDBOX", "wasm");
@@ -686,6 +700,15 @@ fn build_wasi_ctx(
 
     // 文件系统访问：仅允许 config 中配置的路径
     for path in &config.fs_readonly {
+        if is_path_cache_ancestor(path) {
+            log_warn!(
+                "Skipping read-only WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
+                path,
+                cache_dir
+            );
+            continue;
+        }
+
         if let Some(path_str) = path.to_str() {
             if path.exists() {
                 // 只授予 READ 权限，WASI 的目录创建/删除等写操作会被拒绝。
@@ -700,6 +723,15 @@ fn build_wasi_ctx(
         }
     }
     for path in &config.fs_readwrite {
+        if is_path_cache_ancestor(path) {
+            log_warn!(
+                "Skipping read-write WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
+                path,
+                cache_dir
+            );
+            continue;
+        }
+
         if let Some(path_str) = path.to_str() {
             if path.exists() {
                 if let Err(e) =
@@ -816,7 +848,13 @@ impl Sandbox for WasmSandbox {
         let stderr_reader = stderr_pipe.clone(); // 保留读取端
 
         // 3. 构建 WASI 上下文
-        let wasi_ctx = build_wasi_ctx(&self.config, cmd, stdout_pipe, stderr_pipe);
+        let wasi_ctx = build_wasi_ctx(
+            &self.config,
+            cmd,
+            self.cache_dir.as_deref(),
+            stdout_pipe,
+            stderr_pipe,
+        );
 
         // 4. 创建 Linker 并注册 WASI Preview 1
         // 注意：Linker 的类型参数必须与 Store data type 一致
