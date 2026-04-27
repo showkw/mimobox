@@ -19,7 +19,7 @@ use tracing::{error, info};
 #[cfg(test)]
 use capture::capture_stderr_bytes;
 #[cfg(test)]
-use commands::mcp_init::{McpOs, inject_mcp_config, mcp_config_path};
+use commands::mcp_init::{McpOs, mcp_config_path};
 #[cfg(test)]
 use commands::run::resolve_run_execution_mode;
 #[cfg(test)]
@@ -31,6 +31,13 @@ pub(crate) const DEFAULT_MEMORY_MB: u64 = 256;
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub(crate) const DEFAULT_BENCH_ITERATIONS: usize = 50;
 pub(crate) const DEFAULT_POOL_SIZE: usize = 16;
+
+#[derive(Debug, clap::Args)]
+struct McpConfigArgs {
+    /// MCP client type (affects config format hint)
+    #[arg(long, value_name = "CLIENT", default_value = "claude")]
+    client: Option<McpClient>,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -70,6 +77,8 @@ enum CliCommand {
     Setup,
     /// Configure mimobox MCP server for a desktop client
     McpInit(McpInitArgs),
+    /// Print MCP server JSON config to stdout
+    McpConfig(McpConfigArgs),
     /// Generate shell completion script to stdout
     Completions(CompletionsArgs),
     /// Print version information
@@ -139,6 +148,7 @@ fn run() -> Result<Option<i32>, CliError> {
         CliCommand::Doctor
             | CliCommand::Setup
             | CliCommand::McpInit(_)
+            | CliCommand::McpConfig(_)
             | CliCommand::Completions(_)
     );
 
@@ -182,6 +192,15 @@ fn run() -> Result<Option<i32>, CliError> {
             }
             return Ok(None);
         }
+        CliCommand::McpConfig(args) => {
+            let binary_path = resolve_mimobox_mcp_binary();
+            let config = inject_mcp_config(serde_json::json!({}), &binary_path)?;
+            let json = serde_json::to_string_pretty(&config)?;
+
+            println!("{json}");
+            print_mcp_config_hints(args.client.unwrap_or(McpClient::Claude));
+            return Ok(None);
+        }
         CliCommand::Completions(args) => {
             handle_completions(args);
             return Ok(None);
@@ -195,6 +214,32 @@ fn run() -> Result<Option<i32>, CliError> {
         info!("CLI execution completed");
     }
     Ok(exit_code)
+}
+
+fn print_mcp_config_hints(client: McpClient) {
+    let hints = [
+        (
+            McpClient::Claude,
+            "Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json",
+        ),
+        (
+            McpClient::ClaudeCode,
+            "Claude Code: ~/.claude/settings.json",
+        ),
+        (McpClient::Cursor, "Cursor: ~/.cursor/mcp.json"),
+        (
+            McpClient::Windsurf,
+            "Windsurf: ~/.codeium/windsurf/mcp_config.json",
+        ),
+    ];
+
+    println!("# Add this to your MCP client config file");
+    for (_, hint) in hints.iter().filter(|(candidate, _)| *candidate == client) {
+        println!("# {hint}");
+    }
+    for (_, hint) in hints.iter().filter(|(candidate, _)| *candidate != client) {
+        println!("# {hint}");
+    }
 }
 
 #[cfg(test)]
@@ -626,6 +671,32 @@ mod tests {
     }
 
     #[test]
+    fn mcp_config_subcommand_parses_default_client() {
+        let cli = Cli::try_parse_from(["mimobox", "mcp-config"])
+            .expect("mcp-config should parse successfully");
+
+        match cli.command {
+            CliCommand::McpConfig(args) => {
+                assert_eq!(args.client, Some(McpClient::Claude));
+            }
+            _ => panic!("expected mcp-config subcommand"),
+        }
+    }
+
+    #[test]
+    fn mcp_config_subcommand_parses_with_client_flag() {
+        let cli = Cli::try_parse_from(["mimobox", "mcp-config", "--client", "cursor"])
+            .expect("mcp-config --client should parse successfully");
+
+        match cli.command {
+            CliCommand::McpConfig(args) => {
+                assert_eq!(args.client, Some(McpClient::Cursor));
+            }
+            _ => panic!("expected mcp-config subcommand"),
+        }
+    }
+
+    #[test]
     fn mcp_init_subcommand_parses_clients() {
         for (raw_client, expected_client) in [
             ("claude", McpClient::Claude),
@@ -642,6 +713,20 @@ mod tests {
                 }
                 _ => panic!("expected mcp-init subcommand"),
             }
+        }
+    }
+
+    #[test]
+    fn mcp_init_subcommand_parses_claude_code_client() {
+        let cli = Cli::try_parse_from(["mimobox", "mcp-init", "claude-code"])
+            .expect("mcp-init claude-code should parse successfully");
+
+        match cli.command {
+            CliCommand::McpInit(args) => {
+                assert_eq!(args.client, Some(McpClient::ClaudeCode));
+                assert!(!args.all);
+            }
+            _ => panic!("expected mcp-init subcommand"),
         }
     }
 
@@ -715,6 +800,20 @@ mod tests {
         assert_eq!(
             mcp_config_path(McpClient::Windsurf, McpOs::Macos, &home),
             PathBuf::from("/home/alice/.codeium/windsurf/mcp_config.json")
+        );
+    }
+
+    #[test]
+    fn mcp_config_path_includes_claude_code() {
+        let home = PathBuf::from("/home/alice");
+
+        assert_eq!(
+            mcp_config_path(McpClient::ClaudeCode, McpOs::Linux, &home),
+            PathBuf::from("/home/alice/.claude/settings.json")
+        );
+        assert_eq!(
+            mcp_config_path(McpClient::ClaudeCode, McpOs::Macos, &home),
+            PathBuf::from("/home/alice/.claude/settings.json")
         );
     }
 

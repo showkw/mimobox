@@ -6,7 +6,12 @@ use super::*;
 
 pub(crate) fn handle_mcp_init(args: McpInitArgs) -> Result<(), CliError> {
     let clients = if args.all {
-        vec![McpClient::Claude, McpClient::Cursor, McpClient::Windsurf]
+        vec![
+            McpClient::Claude,
+            McpClient::ClaudeCode,
+            McpClient::Cursor,
+            McpClient::Windsurf,
+        ]
     } else {
         vec![
             args.client
@@ -156,6 +161,7 @@ pub(crate) fn mcp_config_path(client: McpClient, os: McpOs, home_dir: &Path) -> 
                 .join("Claude")
                 .join("claude_desktop_config.json"),
         },
+        McpClient::ClaudeCode => home_dir.join(".claude").join("settings.json"),
         McpClient::Cursor => home_dir.join(".cursor").join("mcp.json"),
         McpClient::Windsurf => home_dir
             .join(".codeium")
@@ -168,8 +174,19 @@ impl McpClient {
     pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::Claude => "Claude",
+            Self::ClaudeCode => "Claude Code",
             Self::Cursor => "Cursor",
             Self::Windsurf => "Windsurf",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_code_display_name_is_human_readable() {
+        assert_eq!(McpClient::ClaudeCode.display_name(), "Claude Code");
     }
 }

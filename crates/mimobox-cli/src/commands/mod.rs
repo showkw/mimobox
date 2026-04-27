@@ -15,7 +15,7 @@ pub(crate) use cat::handle_cat;
 pub(crate) use code::handle_code;
 pub(crate) use completions::{CompletionsArgs, handle_completions};
 pub(crate) use ls::handle_ls;
-pub(crate) use mcp_init::handle_mcp_init;
+pub(crate) use mcp_init::{handle_mcp_init, inject_mcp_config, resolve_mimobox_mcp_binary};
 pub(crate) use run::handle_run;
 #[cfg(test)]
 pub(crate) use run::handle_run_via_sdk;
@@ -60,6 +60,8 @@ pub(crate) enum BenchTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum McpClient {
     Claude,
+    #[value(name = "claude-code")]
+    ClaudeCode,
     Cursor,
     Windsurf,
 }
