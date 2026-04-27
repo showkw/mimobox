@@ -1,7 +1,5 @@
-# mimobox
-
-> Cross-platform Agent Sandbox for AI agents, written in Rust.
-> Three-layer isolation: OS (Landlock+Seccomp), Wasm (Wasmtime), microVM (KVM).
+> MimoBox — Local Sandbox Runtime for AI Agents.
+> Multi-layer isolation: OS (Landlock+Seccomp), Wasm (Wasmtime), microVM (KVM).
 
 ## Documentation
 

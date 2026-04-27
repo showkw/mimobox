@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# mimobox CLI 安装脚本：从 GitHub Release 下载当前平台对应的二进制。
+# MimoBox CLI installer: downloads the platform-appropriate binary from GitHub Releases.
 
 REPO="showkw/mimobox"
 VERSION="latest"

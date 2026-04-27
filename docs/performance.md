@@ -1,4 +1,4 @@
-# mimobox Performance
+# MimoBox Performance
 
 This document defines the performance baselines and measurement boundaries used by the root README.
 

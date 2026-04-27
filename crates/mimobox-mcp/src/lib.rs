@@ -667,7 +667,7 @@ impl MimoboxServer {
 impl ServerHandler for MimoboxServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "mimobox MCP Server: sandbox lifecycle, execution, and microVM file transfer tools",
+            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents. Provides sandbox lifecycle, code execution, file transfer, snapshot, fork, and HTTP proxy tools.",
         )
     }
 }

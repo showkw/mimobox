@@ -1,4 +1,4 @@
-# mimobox-wasm
+# MimoBox Wasm Backend
 
 Wasm sandbox backend for mimobox, powered by Wasmtime and the Cranelift JIT.
 

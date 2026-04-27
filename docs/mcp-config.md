@@ -1,10 +1,10 @@
-# MCP 配置模板
+# MCP Configuration Templates
 
-mimobox MCP Server 支持多种 AI 编码工具和平台。以下为各平台的配置模板。
+The mimobox MCP Server supports multiple AI coding tools and platforms. Below are the configuration templates for each.
 
 ## Claude Desktop
 
-配置文件路径：
+Config file location:
 - macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
 - Linux: ~/.config/Claude/claude_desktop_config.json
 
@@ -22,7 +22,7 @@ mimobox MCP Server 支持多种 AI 编码工具和平台。以下为各平台的
 
 ## Cursor
 
-在 Cursor Settings > MCP 中添加：
+Add in Cursor Settings > MCP:
 
 ```json
 {
@@ -52,9 +52,9 @@ mimobox MCP Server 支持多种 AI 编码工具和平台。以下为各平台的
 }
 ```
 
-## HTTP 模式（适合 Web 应用）
+## HTTP Mode (for Web Applications)
 
-先启动 mimobox-mcp --transport http --port 8080，然后配置：
+Start the server with `mimobox-mcp --transport http --port 8080`, then configure:
 
 ```json
 {

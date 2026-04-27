@@ -1,4 +1,4 @@
-# mimobox-python
+# MimoBox Python SDK
 
 PyO3 Python bindings for mimobox sandbox execution with context manager support.
 

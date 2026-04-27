@@ -1,4 +1,4 @@
-# mimobox-core
+# MimoBox Core
 
 Core traits and shared types for the mimobox sandbox system.
 
