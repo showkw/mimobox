@@ -242,6 +242,8 @@ mod syscall_nr {
     pub const CONNECT: u32 = 42;
     /// syscall number for accept(2).
     pub const ACCEPT: u32 = 43;
+    /// syscall number for accept4(2).
+    pub const ACCEPT4: u32 = 288;
     /// syscall number for sendto(2).
     pub const SENDTO: u32 = 44;
     /// syscall number for recvfrom(2).
@@ -476,6 +478,41 @@ mod syscall_nr {
     pub const FACCESSAT2: u32 = 439;
 }
 
+const NETWORK_ALLOWED_SYSCALLS: &[u32] = &[
+    syscall_nr::SOCKET,
+    syscall_nr::CONNECT,
+    syscall_nr::ACCEPT,
+    syscall_nr::SENDTO,
+    syscall_nr::RECVFROM,
+    syscall_nr::SENDMSG,
+    syscall_nr::RECVMSG,
+    syscall_nr::SHUTDOWN,
+    syscall_nr::BIND,
+    syscall_nr::LISTEN,
+    syscall_nr::GETSOCKNAME,
+    syscall_nr::GETPEERNAME,
+    syscall_nr::SETSOCKOPT,
+    syscall_nr::GETSOCKOPT,
+];
+
+const DENY_NETWORK_SYSCALLS: &[u32] = &[
+    syscall_nr::SOCKET,
+    syscall_nr::CONNECT,
+    syscall_nr::BIND,
+    syscall_nr::LISTEN,
+    syscall_nr::ACCEPT,
+    syscall_nr::ACCEPT4,
+    syscall_nr::SENDTO,
+    syscall_nr::RECVFROM,
+    syscall_nr::SENDMSG,
+    syscall_nr::RECVMSG,
+    syscall_nr::SHUTDOWN,
+    syscall_nr::GETSOCKNAME,
+    syscall_nr::GETPEERNAME,
+    syscall_nr::SETSOCKOPT,
+    syscall_nr::GETSOCKOPT,
+];
+
 /// Builds the system call allowlist for the Essential profile using least privilege.
 ///
 /// Dangerous system calls that are explicitly excluded and why:
@@ -495,6 +532,10 @@ mod syscall_nr {
 /// - Performance monitoring: perf_event_open(298).
 /// - Process personality: personality(135).
 /// - Kernel logs: syslog(103) — prevents information disclosure.
+///
+/// 注意：Essential profile 中的 SOCKET/CONNECT 仅服务于 AF_UNIX IPC 兼容场景；
+/// 当 `deny_network=true` 时，最终 Seccomp allowlist 必须移除它们，避免沙箱进程
+/// 通过 AF_UNIX 连接宿主 D-Bus、systemd、X11 等服务。
 fn essential_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     vec![
@@ -657,25 +698,32 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
 ///
 /// Adds network-related system calls on top of Essential.
 fn network_syscalls() -> Vec<u32> {
-    use syscall_nr::*;
     let mut syscalls = essential_syscalls();
-    syscalls.extend_from_slice(&[
-        SOCKET,
-        CONNECT,
-        ACCEPT,
-        SENDTO,
-        RECVFROM,
-        SENDMSG,
-        RECVMSG,
-        SHUTDOWN,
-        BIND,
-        LISTEN,
-        GETSOCKNAME,
-        GETPEERNAME,
-        SETSOCKOPT,
-        GETSOCKOPT,
-    ]);
+    syscalls.extend_from_slice(NETWORK_ALLOWED_SYSCALLS);
     syscalls
+}
+
+fn allowed_syscalls_for_profile(profile: SeccompProfile, deny_network: bool) -> Vec<u32> {
+    let mut allowed = match profile {
+        SeccompProfile::Essential => essential_syscalls(),
+        SeccompProfile::Network => network_syscalls(),
+        SeccompProfile::EssentialWithFork => fork_allowed_syscalls(),
+        SeccompProfile::NetworkWithFork => {
+            let mut syscalls = fork_allowed_syscalls();
+            syscalls.extend_from_slice(NETWORK_ALLOWED_SYSCALLS);
+            syscalls
+        }
+    };
+
+    // 排序以优化 BPF 跳转，并确保去重后再按 deny_network 收窄权限。
+    allowed.sort_unstable();
+    allowed.dedup();
+
+    if deny_network {
+        allowed.retain(|syscall| !DENY_NETWORK_SYSCALLS.contains(syscall));
+    }
+
+    allowed
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1255,38 +1303,8 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
 ///
 /// This function uses `unsafe` to call the `prctl` system call. It must be called in the child
 /// process after `fork` and before `exec`. `PR_SET_NO_NEW_PRIVS` must be set before calling it.
-pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
-    let allowed = match profile {
-        SeccompProfile::Essential => essential_syscalls(),
-        SeccompProfile::Network => network_syscalls(),
-        SeccompProfile::EssentialWithFork => fork_allowed_syscalls(),
-        SeccompProfile::NetworkWithFork => {
-            let mut syscalls = fork_allowed_syscalls();
-            use syscall_nr::*;
-            syscalls.extend_from_slice(&[
-                SOCKET,
-                CONNECT,
-                ACCEPT,
-                SENDTO,
-                RECVFROM,
-                SENDMSG,
-                RECVMSG,
-                SHUTDOWN,
-                BIND,
-                LISTEN,
-                GETSOCKNAME,
-                GETPEERNAME,
-                SETSOCKOPT,
-                GETSOCKOPT,
-            ]);
-            syscalls
-        }
-    };
-    // 排序以优化 BPF 跳转
-    let mut allowed = allowed;
-    allowed.sort_unstable();
-    allowed.dedup();
-
+pub fn apply_seccomp(profile: SeccompProfile, deny_network: bool) -> Result<(), SandboxError> {
+    let allowed = allowed_syscalls_for_profile(profile, deny_network);
     let constraints = build_arg_constraints(profile, &allowed);
     let prog = build_bpf_program(&allowed, &constraints);
 
@@ -1332,8 +1350,10 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        BIND, CLONE, CLONE3, CONNECT, FCNTL, FUTEX, IOCTL, LISTEN, MADVISE, MMAP, MPROTECT, READ,
-        RECVFROM, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SENDTO, SETPGID, SETSID, SOCKET, TGKILL,
+        ACCEPT, ACCEPT4, BIND, CLONE, CLONE3, CONNECT, FCNTL, FUTEX, GETPEERNAME, GETSOCKNAME,
+        GETSOCKOPT, IOCTL, LISTEN, MADVISE, MMAP, MPROTECT, READ, RECVFROM, RECVMSG,
+        RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SENDMSG, SENDTO, SETPGID, SETSID, SETSOCKOPT, SHUTDOWN,
+        SOCKET, TGKILL,
     };
     use super::{
         AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BIND_MAX_ADDRLEN, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ,
@@ -1344,8 +1364,9 @@ mod tests {
         MAP_GROWSDOWN, MAP_HUGETLB, MAP_LOCKED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC,
         SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
         SECCOMP_RET_ALLOW, SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
-        SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints,
-        build_bpf_program, essential_syscalls, fork_allowed_syscalls, network_syscalls,
+        SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP,
+        allowed_syscalls_for_profile, build_arg_constraints, build_bpf_program, essential_syscalls,
+        fork_allowed_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1447,19 +1468,7 @@ mod tests {
     }
 
     fn program_for_profile(profile: SeccompProfile) -> Vec<SockFilter> {
-        let mut allowed = match profile {
-            SeccompProfile::Essential => essential_syscalls(),
-            SeccompProfile::Network => network_syscalls(),
-            SeccompProfile::EssentialWithFork => fork_allowed_syscalls(),
-            SeccompProfile::NetworkWithFork => {
-                let mut syscalls = fork_allowed_syscalls();
-                syscalls.extend(network_syscalls());
-                syscalls
-            }
-        };
-        allowed.sort_unstable();
-        allowed.dedup();
-
+        let allowed = allowed_syscalls_for_profile(profile, false);
         let constraints = build_arg_constraints(profile, &allowed);
         build_bpf_program(&allowed, &constraints)
     }
@@ -1517,6 +1526,49 @@ mod tests {
         assert!(
             !syscalls.contains(&CLONE3),
             "clone3 的 clone_args 位于用户态指针中，经典 seccomp-bpf 无法安全约束"
+        );
+    }
+
+    #[test]
+    fn test_deny_network_removes_socket_syscalls() {
+        let network_syscalls = [
+            SOCKET,
+            CONNECT,
+            BIND,
+            LISTEN,
+            ACCEPT,
+            ACCEPT4,
+            SENDTO,
+            RECVFROM,
+            SENDMSG,
+            RECVMSG,
+            SHUTDOWN,
+            GETSOCKNAME,
+            GETPEERNAME,
+            SETSOCKOPT,
+            GETSOCKOPT,
+        ];
+
+        for profile in [
+            SeccompProfile::Essential,
+            SeccompProfile::Network,
+            SeccompProfile::EssentialWithFork,
+            SeccompProfile::NetworkWithFork,
+        ] {
+            let allowed = allowed_syscalls_for_profile(profile, true);
+
+            for syscall in network_syscalls {
+                assert!(
+                    !allowed.contains(&syscall),
+                    "deny_network=true 时 {profile:?} 不应允许网络 syscall {syscall}"
+                );
+            }
+        }
+
+        let allowed = allowed_syscalls_for_profile(SeccompProfile::Essential, false);
+        assert!(
+            allowed.contains(&SOCKET) && allowed.contains(&CONNECT),
+            "deny_network=false 时 Essential profile 应保持 AF_UNIX IPC 兼容行为"
         );
     }
 

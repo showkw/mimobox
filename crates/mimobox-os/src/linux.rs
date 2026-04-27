@@ -537,7 +537,7 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
         (true, SeccompProfile::Network) => SeccompProfile::NetworkWithFork,
         (_, other) => other,
     };
-    if let Err(e) = seccomp::apply_seccomp(effective_profile) {
+    if let Err(e) = seccomp::apply_seccomp(effective_profile, config.deny_network) {
         // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
         unsafe {
             write_error(2, &format!("Seccomp error: {e}"));

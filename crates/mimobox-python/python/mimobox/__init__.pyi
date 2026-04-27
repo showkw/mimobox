@@ -510,6 +510,7 @@ class SandboxTimeoutError(SandboxError):
 __all__ = [
     "DirEntry",
     "ExecuteResult",
+    "FileStat",
     "FileSystem",
     "HttpResponse",
     "Network",

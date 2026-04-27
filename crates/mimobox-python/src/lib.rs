@@ -987,6 +987,18 @@ impl PySandbox {
         self.close()?;
         Ok(false)
     }
+
+    /// 自动清理资源（Python GC 时调用）。
+    ///
+    /// 不如 close() 可靠（异常可能被吞），但作为最后防线防止 sandbox 泄漏。
+    fn __del__(&mut self) {
+        if let Some(sandbox) = self.inner.take() {
+            // 不传播错误，__del__ 中不允许 raise。
+            if let Err(err) = sandbox.destroy() {
+                eprintln!("mimobox: Sandbox.__del__ 清理失败: {err}");
+            }
+        }
+    }
 }
 
 impl PySandbox {
