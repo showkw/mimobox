@@ -21,11 +21,7 @@ pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, Cl
 
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     {
-        let deny_network = if args.allow_network {
-            false
-        } else {
-            args.deny_network
-        };
+        let deny_network = !args.allow_network;
         let config = build_snapshot_sdk_config(&args, deny_network)?;
 
         info!(

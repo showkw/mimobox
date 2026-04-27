@@ -89,11 +89,7 @@ fn backend_to_sdk_isolation(backend: Backend) -> SdkIsolationLevel {
 }
 
 fn resolve_shell_deny_network(args: &ShellArgs) -> bool {
-    if args.allow_network {
-        false
-    } else {
-        args.deny_network
-    }
+    !args.allow_network
 }
 
 #[cfg(unix)]

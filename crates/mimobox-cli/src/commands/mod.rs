@@ -520,7 +520,7 @@ pub(crate) fn build_cli_sdk_config(
     timeout: Option<u64>,
     allow_fork: bool,
 ) -> SdkConfig {
-    let mut config = build_sdk_config(None, timeout, false, allow_fork);
+    let mut config = build_sdk_config(None, timeout, true, allow_fork);
     config.isolation = backend_to_sdk_isolation(backend);
     config
 }
@@ -568,11 +568,7 @@ pub(crate) fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
 }
 
 pub(crate) fn resolve_run_deny_network(args: &RunArgs) -> bool {
-    if args.allow_network {
-        false
-    } else {
-        args.deny_network
-    }
+    !args.allow_network
 }
 
 pub(crate) fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
