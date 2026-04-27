@@ -42,7 +42,7 @@ Tool requests are deserialized into Rust request structures through `Parameters<
 | `snapshot` | Creates a memory snapshot of a microVM sandbox | `sandbox_id` | `sandbox_id`, `size_bytes` |
 | `fork` | Forks a microVM sandbox (CoW) | `sandbox_id` | `original_sandbox_id`, `new_sandbox_id` |
 | `http_request` | Sends an HTTP request through a controlled proxy | `sandbox_id`, `url`, `method` | `sandbox_id`, `status`, `body` |
-| `list_dir` | Lists directory contents inside a sandbox | `sandbox_id`, `path`, `depth` (optional) | `sandbox_id`, `entries[]` with name, type, and size |
+| `list_dir` | Lists directory contents inside a sandbox | `sandbox_id`, `path` | `sandbox_id`, `entries[]` with name, type, and size |
 
 ## 3. Tool Details
 

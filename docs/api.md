@@ -848,7 +848,7 @@ pub enum FileType {
 pub struct DirEntry {
     pub name: String,
     pub file_type: FileType,
-    pub size: Option<u64>,
+    pub size: u64,
     pub is_symlink: bool,
 }
 ```
@@ -859,7 +859,7 @@ pub struct DirEntry {
 |-------|------|-------------|
 | `name` | `String` | Entry name relative to the listed directory |
 | `file_type` | `FileType` | Entry kind: `File`, `Dir`, `Symlink`, or `Other` |
-| `size` | `Option<u64>` | File size in bytes when available |
+| `size` | `u64` | File size in bytes |
 | `is_symlink` | `bool` | `true` if the entry is a symbolic link |
 
 ---
@@ -1174,6 +1174,8 @@ pub enum ErrorCode {
     CommandTimeout,
     CommandExit(i32),
     CommandKilled,
+    MemoryLimitExceeded,
+    CpuLimitExceeded,
     FileNotFound,
     FilePermissionDenied,
     FileTooLarge,
@@ -1198,6 +1200,8 @@ Each variant has a stable string representation via `as_str()`:
 | `CommandTimeout` | `"command_timeout"` | Command exceeded the timeout |
 | `CommandExit(n)` | `"command_exit"` | Command exited with non-zero code |
 | `CommandKilled` | `"command_killed"` | Command was forcefully killed |
+| `MemoryLimitExceeded` | `"memory_limit_exceeded"` | Process killed because it exceeded the configured memory limit |
+| `CpuLimitExceeded` | `"cpu_limit_exceeded"` | Process killed because it exceeded the configured CPU limit |
 | `FileNotFound` | `"file_not_found"` | Target file does not exist |
 | `FilePermissionDenied` | `"file_permission_denied"` | Insufficient file permissions |
 | `FileTooLarge` | `"file_too_large"` | File or transfer exceeds size limit |
