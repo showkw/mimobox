@@ -87,7 +87,7 @@ fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
         .any(|line| line.contains(NAMESPACE_FALLBACK_MARKER))
     {
         tracing::warn!(
-            "命名空间降级: unshare(full_flags) 失败，已回退到不含 user namespace 的隔离模式"
+            "命名空间降级: unshare(full_flags) 失败，已回退到不含 user/pid namespace 的隔离模式"
         );
     }
 }
@@ -193,6 +193,45 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
             "setrlimit(RLIMIT_AS, {limit_mb}MB) 失败: errno={errno}"
         ));
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remount_proc_for_pid_namespace() -> Result<(), String> {
+    // 新 mount namespace 默认可能继承 shared propagation，先私有化避免挂载传播到宿主。
+    let propagation_ret = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if propagation_ret != 0 {
+        return Err(format!(
+            "mount(/, MS_REC|MS_PRIVATE) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let proc_flags = (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong;
+    let mount_ret = unsafe {
+        libc::mount(
+            c"proc".as_ptr(),
+            c"/proc".as_ptr(),
+            c"proc".as_ptr(),
+            proc_flags,
+            std::ptr::null(),
+        )
+    };
+    if mount_ret != 0 {
+        return Err(format!(
+            "mount(proc, /proc) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
     Ok(())
 }
 
@@ -381,7 +420,7 @@ fn validate_path(path: &str) -> Result<(), SandboxError> {
 /// 2. Set process count limit when fork is allowed.
 /// 3. Apply Landlock filesystem isolation.
 /// 4. Unshare namespaces with user namespace fallback.
-/// 5. Fork once after `CLONE_NEWPID` when needed, and let the intermediate process wait.
+/// 5. Fork once after `CLONE_NEWPID`, then remount `/proc` inside the PID namespace.
 /// 6. Apply Seccomp-bpf system call filtering as the final step before `exec`.
 /// 7. Execute the command with `execvp`.
 fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> ! {
@@ -464,36 +503,42 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
     }
 
     // 3. unshare 命名空间
-    let ns_flags = CloneFlags::CLONE_NEWNS
+    let pid_ns_flags = CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWNET
         | CloneFlags::CLONE_NEWIPC;
+    let fallback_ns_flags =
+        CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWIPC;
 
-    let full_flags = CloneFlags::CLONE_NEWUSER | ns_flags;
+    let full_flags = CloneFlags::CLONE_NEWUSER | pid_ns_flags;
 
-    let ns_result = nix::sched::unshare(full_flags);
-
-    if let Err(e) = ns_result {
-        let msg = format!("unshare(full_flags) failed: {e}, retrying without user ns");
-        // SAFETY: This is the forked child; write_error writes directly to stderr without unwinding.
-        unsafe {
-            write_error(2, &msg);
-        }
-
-        if let Err(e2) = nix::sched::unshare(ns_flags) {
-            // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
-            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+    let has_new_pid_namespace = match nix::sched::unshare(full_flags) {
+        Ok(()) => true,
+        Err(e) => {
+            let msg = format!("unshare(full_flags) failed: {e}, retrying without user/pid ns");
+            // SAFETY: This is the forked child; write_error writes directly to stderr without unwinding.
             unsafe {
-                write_error(2, &format!("unshare(ns_flags) also failed (fatal): {e2}"));
-                libc::_exit(121);
+                write_error(2, &msg);
             }
+
+            if let Err(e2) = nix::sched::unshare(fallback_ns_flags) {
+                // 致命 #5 修复：unshare 失败必须终止，否则无命名空间隔离
+                // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                unsafe {
+                    write_error(
+                        2,
+                        &format!("unshare(fallback_ns_flags) failed (fatal): {e2}"),
+                    );
+                    libc::_exit(121);
+                }
+            }
+            false
         }
-    }
+    };
 
     // 4. CLONE_NEWPID 需要 fork 才生效
-    // 致命 #6 修复：简化逻辑 — 仅在首次 unshare 成功时需要 reexec
-    // （CLONE_NEWPID 已包含在 full_flags 中，无需二次尝试）
-    if ns_result.is_ok() {
+    // fallback 分支故意不包含 CLONE_NEWPID，因为 unshare(CLONE_NEWPID) 不 fork 不会影响当前进程。
+    if has_new_pid_namespace {
         // SAFETY: This child intentionally forks once after CLONE_NEWPID so the namespace takes effect.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
@@ -513,7 +558,14 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
                 }
             }
             Ok(ForkResult::Child) => {
-                // 孙进程：继续应用 seccomp 并执行命令
+                // 孙进程：PID namespace 已生效，先刷新 /proc 视图，再继续应用 seccomp。
+                if let Err(e) = remount_proc_for_pid_namespace() {
+                    // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                    unsafe {
+                        write_error(2, &format!("remount /proc failed: {e}"));
+                        libc::_exit(123);
+                    }
+                }
             }
             Err(e) => {
                 // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
