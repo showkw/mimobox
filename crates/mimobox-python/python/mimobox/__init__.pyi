@@ -481,6 +481,22 @@ class SandboxProcessError(SandboxError):
     ...
 
 
+class SandboxMemoryError(SandboxError):
+    """Raised when a sandbox process is killed due to memory limit.
+
+    Maps from ErrorCode::MemoryLimitExceeded.
+    """
+    ...
+
+
+class SandboxCpuLimitError(SandboxError):
+    """Raised when a sandbox process is killed due to CPU limit.
+
+    Maps from ErrorCode::CpuLimitExceeded.
+    """
+    ...
+
+
 class SandboxHttpError(SandboxError):
     """Raised when an HTTP proxy request fails or the target host is denied.
 
@@ -516,11 +532,13 @@ __all__ = [
     "Network",
     "Process",
     "Sandbox",
+    "SandboxCpuLimitError",
     "SandboxError",
     "SandboxHttpError",
     "SandboxLifecycleError",
-    "SandboxTimeoutError",
+    "SandboxMemoryError",
     "SandboxProcessError",
+    "SandboxTimeoutError",
     "Snapshot",
     "SnapshotOps",
     "StreamEvent",
