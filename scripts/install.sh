@@ -8,6 +8,7 @@ VERSION="latest"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="mimobox"
 TMP_FILE="${TMPDIR:-/tmp}/mimobox-install.$$"
+TMP_CHECKSUM="${TMPDIR:-/tmp}/mimobox-install.$$.sha256"
 
 COLOR_GREEN=""
 COLOR_RED=""
@@ -45,7 +46,7 @@ die() {
 }
 
 cleanup() {
-  rm -f "$TMP_FILE"
+  rm -f "$TMP_FILE" "$TMP_CHECKSUM"
 }
 
 usage() {
@@ -144,16 +145,47 @@ build_url() {
 
 download() {
   info "Downloading mimobox CLI: $DOWNLOAD_URL"
+  checksum_url="$DOWNLOAD_URL.sha256"
 
   if command -v curl >/dev/null 2>&1; then
     curl -fSL "$DOWNLOAD_URL" -o "$TMP_FILE" || die "Download failed: $DOWNLOAD_URL"
+    curl -fSL "$checksum_url" -o "$TMP_CHECKSUM" || die "Download failed: $checksum_url"
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$TMP_FILE" "$DOWNLOAD_URL" || die "Download failed: $DOWNLOAD_URL"
+    wget -O "$TMP_CHECKSUM" "$checksum_url" || die "Download failed: $checksum_url"
   else
     die "curl or wget is required to download mimobox CLI"
   fi
 
   chmod +x "$TMP_FILE"
+}
+
+verify_checksum() {
+  [ -s "$TMP_CHECKSUM" ] || die "Checksum file is empty: $TMP_CHECKSUM"
+  expected_hash=""
+  read -r expected_hash _ < "$TMP_CHECKSUM" || true
+  [ -n "${expected_hash:-}" ] || die "Checksum file does not contain a hash: $TMP_CHECKSUM"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_hash="$(sha256sum "$TMP_FILE")" || die "Failed to calculate checksum with sha256sum"
+    actual_hash="${actual_hash%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_hash="$(shasum -a 256 "$TMP_FILE")" || die "Failed to calculate checksum with shasum"
+    actual_hash="${actual_hash%% *}"
+  elif command -v openssl >/dev/null 2>&1; then
+    actual_hash="$(openssl dgst -sha256 "$TMP_FILE")" || die "Failed to calculate checksum with openssl"
+    actual_hash="${actual_hash##* }"
+  else
+    die "sha256sum, shasum, or openssl is required to verify checksum"
+  fi
+
+  if [ "$expected_hash" != "$actual_hash" ]; then
+    error "Expected checksum: $expected_hash"
+    error "Actual checksum:   $actual_hash"
+    die "Checksum verification failed"
+  fi
+
+  success "Checksum verified"
 }
 
 ensure_install_dir() {
@@ -224,6 +256,7 @@ main() {
   info "Install directory: $INSTALL_DIR"
 
   download
+  verify_checksum
   install_binary
   verify
 }
