@@ -1976,7 +1976,6 @@ mod tests {
     #[test]
     fn list_dir_vm_backend_unavailable_on_current_platform() {
         // 非 Linux+KVM 平台，VM 后端不可用；实际 VM list_dir 测试在 Linux + vm feature 下运行。
-        assert!(true, "VM list_dir 测试在当前平台不可用，此为编译验证骨架");
     }
 
     #[cfg(all(

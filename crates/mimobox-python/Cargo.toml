@@ -22,6 +22,10 @@ shlex = { workspace = true }
 [build-dependencies]
 pyo3-build-config = "0.24"
 
+[features]
+os = ["mimobox-sdk/os"]
+vm = ["mimobox-sdk/vm"]
+
 [lints]
 workspace = true
 
