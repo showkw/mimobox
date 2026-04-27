@@ -38,6 +38,16 @@ use tokio::sync::Mutex;
 use tokio::task::JoinError;
 use tracing::error;
 
+/// MCP 文件读写单次最大 10MB，避免 base64 请求或响应耗尽内存。
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+/// MCP 目录列表最多返回 10,000 项，兼顾大型目录排查和响应体大小控制。
+const MAX_LIST_DIR_ENTRIES: usize = 10_000;
+/// MCP 命令 stdout/stderr 单流最大 4MB，与底层 OS 输出保护保持同量级。
+const MAX_EXECUTE_OUTPUT: usize = 4 * 1024 * 1024;
+/// 单个 MCP server 最多保留 64 个沙箱，防止客户端无限创建实例造成 DoS。
+const MAX_SANDBOXES: usize = 64;
+
 #[derive(Clone)]
 pub struct MimoboxServer {
     pub(crate) sandboxes: Arc<Mutex<HashMap<u64, ManagedSandbox>>>,
@@ -355,9 +365,28 @@ impl MimoboxServer {
         .map_err(|error| to_error(format_join_error(error)))?
         .map_err(|error| to_error(format_sdk_error(error)))?;
 
-        let sandbox_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
         let mut sandboxes = self.sandboxes.lock().await;
+        if sandboxes.len() >= MAX_SANDBOXES {
+            drop(sandboxes);
+            match tokio::task::spawn_blocking(move || sandbox.destroy()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        error = %format_sdk_error(err),
+                        "Failed to destroy created sandbox on quota exceeded"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %format_join_error(err),
+                        "Created sandbox cleanup task failed on quota exceeded"
+                    );
+                }
+            }
+            return Err(to_error(sandbox_quota_exceeded()));
+        }
+
+        let sandbox_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         sandboxes.insert(
             sandbox_id,
             ManagedSandbox {
@@ -494,6 +523,13 @@ impl MimoboxServer {
                 })
                 .await
                 .map_err(to_error)?;
+            if content.len() > MAX_FILE_SIZE {
+                return Err(to_error(format!(
+                    "file too large: {} bytes exceeds {} byte limit",
+                    content.len(),
+                    MAX_FILE_SIZE
+                )));
+            }
             let size_bytes = content.len();
 
             Ok(Json(ReadFileResponse {
@@ -521,6 +557,13 @@ impl MimoboxServer {
             let data = STANDARD
                 .decode(&request.content)
                 .map_err(|err| to_error(format!("content is not valid base64: {err}")))?;
+            if data.len() > MAX_FILE_SIZE {
+                return Err(to_error(format!(
+                    "content too large: {} bytes exceeds {} byte limit",
+                    data.len(),
+                    MAX_FILE_SIZE
+                )));
+            }
             let size_bytes = data.len();
             let path = request.path;
             self.with_managed_sandbox(request.sandbox_id, {
@@ -616,10 +659,29 @@ impl MimoboxServer {
                 }
             };
 
-            let new_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
             let mut sandboxes = self.sandboxes.lock().await;
             sandboxes.insert(request.sandbox_id, managed);
+            if sandboxes.len() >= MAX_SANDBOXES {
+                drop(sandboxes);
+                match tokio::task::spawn_blocking(move || forked.destroy()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            error = %format_sdk_error(err),
+                            "Failed to destroy forked sandbox on quota exceeded"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %format_join_error(err),
+                            "Forked sandbox cleanup task failed on quota exceeded"
+                        );
+                    }
+                }
+                return Err(to_error(sandbox_quota_exceeded()));
+            }
+
+            let new_id = self.next_id.fetch_add(1, Ordering::Relaxed);
             sandboxes.insert(
                 new_id,
                 ManagedSandbox {
@@ -684,18 +746,45 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ListDirRequest>,
     ) -> Result<Json<ListDirResponse>, Json<ErrorResponse>> {
-        let entries = self
+        let path = request.path;
+        let sdk_entries = self
             .with_managed_sandbox(request.sandbox_id, {
-                let path = request.path.clone();
+                let path = path.clone();
                 move |sandbox| sandbox.list_dir(&path)
             })
-            .await
-            .map_err(to_error)?;
+            .await;
+
+        let entries = match sdk_entries {
+            Ok(mut entries) => {
+                truncate_list_dir_entries(&mut entries);
+                entries.into_iter().map(format_list_dir_entry).collect()
+            }
+            Err(error) if should_fallback_list_dir(&error) => {
+                let command = build_list_dir_fallback_command(&path);
+                let result = self
+                    .with_managed_sandbox(request.sandbox_id, move |sandbox| {
+                        sandbox.execute(&command)
+                    })
+                    .await
+                    .map_err(to_error)?;
+                if result.exit_code != Some(0) {
+                    return Err(to_error(format!(
+                        "list_dir failed for {path}: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    )));
+                }
+
+                let mut entries = format_list_dir_fallback_entries(&result.stdout);
+                truncate_list_dir_entries(&mut entries);
+                entries
+            }
+            Err(error) => return Err(to_error(error)),
+        };
 
         Ok(Json(ListDirResponse {
             sandbox_id: request.sandbox_id,
-            path: request.path,
-            entries: entries.into_iter().map(format_list_dir_entry).collect(),
+            path,
+            entries,
         }))
     }
 
@@ -785,6 +874,13 @@ fn sandbox_not_found(sandbox_id: u64) -> String {
     format!("sandbox instance not found for sandbox_id={sandbox_id}")
 }
 
+fn sandbox_quota_exceeded() -> String {
+    format!(
+        "sandbox quota exceeded: maximum {} sandboxes allowed",
+        MAX_SANDBOXES
+    )
+}
+
 #[cfg(not(feature = "vm"))]
 fn vm_feature_required(operation: &str) -> String {
     format!(
@@ -811,12 +907,25 @@ fn shell_single_quote(value: &str) -> String {
 
 fn format_execute_result(result: ExecuteResult) -> ExecuteResponse {
     ExecuteResponse {
-        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+        stdout: format_execute_output(&result.stdout),
+        stderr: format_execute_output(&result.stderr),
         exit_code: result.exit_code,
         timed_out: result.timed_out,
         elapsed_ms: result.elapsed.as_millis(),
     }
+}
+
+fn format_execute_output(output: &[u8]) -> String {
+    if output.len() <= MAX_EXECUTE_OUTPUT {
+        return String::from_utf8_lossy(output).into_owned();
+    }
+
+    let marker = format!("... [truncated, {} bytes total]", output.len());
+    let keep_len = MAX_EXECUTE_OUTPUT.saturating_sub(marker.len());
+    let mut truncated = Vec::with_capacity(keep_len + marker.len());
+    truncated.extend_from_slice(&output[..keep_len]);
+    truncated.extend_from_slice(marker.as_bytes());
+    String::from_utf8_lossy(&truncated).into_owned()
 }
 
 fn format_list_dir_entry(entry: DirEntry) -> ListDirEntry {
@@ -833,6 +942,42 @@ fn format_list_dir_entry(entry: DirEntry) -> ListDirEntry {
     }
 }
 
+fn truncate_list_dir_entries<T>(entries: &mut Vec<T>) {
+    if entries.len() > MAX_LIST_DIR_ENTRIES {
+        tracing::warn!(
+            count = entries.len(),
+            limit = MAX_LIST_DIR_ENTRIES,
+            "list_dir result truncated"
+        );
+        entries.truncate(MAX_LIST_DIR_ENTRIES);
+    }
+}
+
+fn should_fallback_list_dir(error: &str) -> bool {
+    error.contains("[unsupported_platform]") && error.contains("does not support list_dir")
+}
+
+fn build_list_dir_fallback_command(path: &str) -> String {
+    format!(
+        "sh -c 'dir=$1; if [ ! -d \"$dir\" ]; then echo \"not found: $dir\" >&2; exit 66; fi; cd \"$dir\" || exit 66; ls -1A' sh {}",
+        shell_single_quote(path)
+    )
+}
+
+fn format_list_dir_fallback_entries(stdout: &[u8]) -> Vec<ListDirEntry> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .take(MAX_LIST_DIR_ENTRIES + 1)
+        .map(|name| ListDirEntry {
+            name: name.to_string(),
+            // OS fallback 只能在沙箱内安全读取名称，避免额外 stat 泄露宿主路径语义。
+            file_type: "other".to_string(),
+            size: 0,
+            is_symlink: false,
+        })
+        .collect()
+}
+
 /// 脱敏错误消息中的宿主路径信息。
 ///
 /// 将常见宿主路径前缀替换为占位符，防止通过 MCP 错误响应泄露
@@ -841,15 +986,12 @@ fn sanitize_error_message(message: &str) -> String {
     let mut result = message.to_string();
     // 替换绝对路径模式：/Users/<name>/..., /home/<name>/..., /tmp/mimobox-..., /var/folders/...
     // 使用简单的前缀匹配和路径段识别
-    let path_prefixes = [
-        "/Users/",
-        "/home/",
-        "/var/folders/",
-    ];
+    let path_prefixes = ["/Users/", "/home/", "/var/folders/"];
     for prefix in path_prefixes {
         while let Some(pos) = result.find(prefix) {
             // 找到路径结束位置（空格、换行、右括号或字符串末尾）
-            let end = result[pos..].find(|c: char| c == ' ' || c == '\n' || c == ')')
+            let end = result[pos..]
+                .find(|c: char| c == ' ' || c == '\n' || c == ')')
                 .map(|i| pos + i)
                 .unwrap_or(result.len());
             result.replace_range(pos..end, &format!("{prefix}<redacted>"));
@@ -857,7 +999,8 @@ fn sanitize_error_message(message: &str) -> String {
     }
     // 脱敏 rootfs 相关路径
     while let Some(pos) = result.find("/rootfs") {
-        let end = result[pos..].find(|c: char| c == ' ' || c == '\n' || c == ')')
+        let end = result[pos..]
+            .find(|c: char| c == ' ' || c == '\n' || c == ')')
             .map(|i| pos + i)
             .unwrap_or(result.len());
         result.replace_range(pos..end, "/rootfs<redacted>");
@@ -1152,6 +1295,32 @@ mod tests {
         assert_eq!(resp.exit_code, None);
         assert!(resp.timed_out);
         assert_eq!(resp.elapsed_ms, 100);
+    }
+
+    #[test]
+    fn test_format_execute_result_truncates_large_output() {
+        let stdout_len = MAX_EXECUTE_OUTPUT + 1;
+        let stderr_len = MAX_EXECUTE_OUTPUT + 2;
+        let result = ExecuteResult::new(
+            vec![b'a'; stdout_len],
+            vec![b'b'; stderr_len],
+            Some(0),
+            false,
+            Duration::from_millis(1),
+        );
+
+        let resp = format_execute_result(result);
+
+        assert_eq!(resp.stdout.len(), MAX_EXECUTE_OUTPUT);
+        assert_eq!(resp.stderr.len(), MAX_EXECUTE_OUTPUT);
+        assert!(
+            resp.stdout
+                .ends_with(&format!("... [truncated, {stdout_len} bytes total]"))
+        );
+        assert!(
+            resp.stderr
+                .ends_with(&format!("... [truncated, {stderr_len} bytes total]"))
+        );
     }
 
     // ── sandbox_not_found ──────────────────────────────────────────────

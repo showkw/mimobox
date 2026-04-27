@@ -26,7 +26,9 @@ type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
 type AllowedOrigins = Arc<Vec<String>>;
 
+/// HTTP stateful session 最多保留 100 个 server handle，限制 registry 内存增长。
 const MAX_CONCURRENT_SESSIONS: usize = 100;
+/// CORS 通配符仅允许精确的 "*" 项，避免误把带星号的字符串当成全开放。
 const WILDCARD_ORIGIN: &str = "*";
 
 /// 启动 MCP HTTP 服务器。
@@ -105,7 +107,11 @@ fn register_server(server_registry: &ServerRegistry, server: MimoboxServer) -> i
             max_sessions = MAX_CONCURRENT_SESSIONS,
             "MCP HTTP session registry 已达到上限，移除最早的 server handle"
         );
-        drop(servers.remove(0));
+        let evicted = servers.remove(0);
+        tracing::warn!("Evicting oldest MCP session, cleaning up its sandboxes");
+        tokio::spawn(async move {
+            evicted.cleanup_all().await;
+        });
     }
     servers.push(server);
     Ok(())
@@ -129,7 +135,12 @@ fn allowed_hosts(bind_addr: &str) -> Vec<String> {
 
 fn parse_allowed_origins(allowed_origins: Option<String>) -> Vec<String> {
     match allowed_origins {
-        Some(origins) if origins.contains(WILDCARD_ORIGIN) => {
+        Some(origins)
+            if origins
+                .split(',')
+                .map(str::trim)
+                .any(|o| o == WILDCARD_ORIGIN) =>
+        {
             tracing::warn!("CORS 配置为完全开放模式(*)，请勿在生产环境使用");
             vec![WILDCARD_ORIGIN.to_string()]
         }
@@ -272,4 +283,23 @@ fn apply_cors_headers(headers: &mut HeaderMap, allowed_origin: Option<&HeaderVal
         HeaderName::from_static("access-control-expose-headers"),
         HeaderValue::from_static("Mcp-Session-Id, Mcp-Protocol-Version"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_allowed_origins_wildcard_requires_exact_segment() {
+        let origins = parse_allowed_origins(Some("https://*.example.com".to_string()));
+
+        assert_eq!(origins, vec!["https://*.example.com".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_allowed_origins_accepts_exact_wildcard_segment() {
+        let origins = parse_allowed_origins(Some("http://localhost:3000, *".to_string()));
+
+        assert_eq!(origins, vec![WILDCARD_ORIGIN.to_string()]);
+    }
 }
