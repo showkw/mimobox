@@ -10,10 +10,13 @@
 //! - stdout/stderr captured into in-memory buffers through `MemoryOutputPipe` with a built-in capacity limit.
 //! - Dual execution-time limits with fuel and epoch interruption.
 
+use std::fs::{OpenOptions, Permissions};
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{
@@ -80,6 +83,15 @@ const DEFAULT_MEMORY_LIMIT_MB: u64 = 64;
 /// Epoch tick interval: 10 ms.
 const EPOCH_TICK_INTERVAL_MS: u64 = 10;
 
+/// Wasmtime serialized module cache namespace.
+///
+/// Wasmtime 43.0.1 is the currently resolved workspace dependency version. Keeping it in the
+/// cache directory isolates serialized modules from incompatible runtime upgrades.
+const WASMTIME_CACHE_VERSION: &str = "43.0.1";
+
+/// Engine configuration namespace for serialized module cache entries.
+const ENGINE_CONFIG_CACHE_KEY: &str = "opt-speed-fuel-epoch-stack512k-parallel";
+
 /// Dynamically calculates the fuel limit from `timeout_secs`.
 ///
 /// [IMPORTANT-01 fix] Roughly maps `timeout_secs` to a fuel quota.
@@ -115,7 +127,7 @@ fn truncate_output(data: Vec<u8>, label: &str) -> Vec<u8> {
 pub struct WasmSandbox {
     engine: Arc<Engine>,
     config: SandboxConfig,
-    cache_dir: PathBuf,
+    cache_dir: Option<PathBuf>,
     epoch_running: Arc<AtomicBool>,
     epoch_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -129,6 +141,33 @@ fn content_hash(data: &[u8]) -> String {
     format!("{:x}", hash)
 }
 
+fn get_wasmtime_version() -> &'static str {
+    WASMTIME_CACHE_VERSION
+}
+
+fn cache_namespace() -> String {
+    format!(
+        "wasmtime-{}-{}",
+        get_wasmtime_version(),
+        ENGINE_CONFIG_CACHE_KEY
+    )
+}
+
+fn current_euid() -> u32 {
+    // SAFETY: geteuid() 是无副作用的系统调用，始终返回当前进程有效 uid。
+    unsafe { libc::geteuid() as u32 }
+}
+
+fn metadata_mtime_nanos(meta: &std::fs::Metadata) -> Option<u64> {
+    let nanos = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    u64::try_from(nanos).ok()
+}
+
 /// Gets a lightweight metadata fingerprint for a file: size plus modification time.
 ///
 /// Used to quickly determine whether a file may have changed, avoiding a full file read and
@@ -136,13 +175,348 @@ fn content_hash(data: &[u8]) -> String {
 fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let size = meta.len();
-    let mtime = meta
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_nanos() as u64;
+    let mtime = metadata_mtime_nanos(&meta)?;
     Some((size, mtime))
+}
+
+fn validate_cache_dir_security(path: &Path) -> bool {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            log_warn!("Failed to stat cache directory {:?}: {}", path, e);
+            return false;
+        }
+    };
+
+    if !meta.file_type().is_dir() {
+        log_warn!("Cache path is not a real directory: {:?}", path);
+        return false;
+    }
+
+    let uid = current_euid();
+    if meta.uid() != uid {
+        log_warn!(
+            "Cache directory owner mismatch: path={:?}, owner={}, expected={}",
+            path,
+            meta.uid(),
+            uid
+        );
+        return false;
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        log_warn!(
+            "Cache directory has insecure permissions: path={:?}, mode={:o}",
+            path,
+            mode
+        );
+        return false;
+    }
+
+    true
+}
+
+fn ensure_cache_dir_security(path: &Path) -> bool {
+    if let Err(e) = std::fs::create_dir_all(path) {
+        log_warn!("Failed to create cache directory {:?}: {}", path, e);
+        return false;
+    }
+
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            log_warn!("Failed to stat cache directory {:?}: {}", path, e);
+            return false;
+        }
+    };
+
+    if !meta.file_type().is_dir() {
+        log_warn!("Cache path is not a real directory: {:?}", path);
+        return false;
+    }
+
+    let uid = current_euid();
+    if meta.uid() != uid {
+        log_warn!(
+            "Refusing to use cache directory with unexpected owner: path={:?}, owner={}, expected={}",
+            path,
+            meta.uid(),
+            uid
+        );
+        return false;
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o700
+        && let Err(e) = std::fs::set_permissions(path, Permissions::from_mode(0o700))
+    {
+        log_warn!(
+            "Failed to tighten cache directory permissions for {:?}: {}",
+            path,
+            e
+        );
+        return false;
+    }
+
+    validate_cache_dir_security(path)
+}
+
+fn validate_cache_file_security(path: &Path) -> bool {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log_warn!("Failed to stat cache file {:?}: {}", path, e);
+            }
+            return false;
+        }
+    };
+
+    if !meta.file_type().is_file() {
+        log_warn!("Cache path is not a regular file: {:?}", path);
+        return false;
+    }
+
+    let uid = current_euid();
+    if meta.uid() != uid {
+        log_warn!(
+            "Cache file owner mismatch: path={:?}, owner={}, expected={}",
+            path,
+            meta.uid(),
+            uid
+        );
+        return false;
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        log_warn!(
+            "Cache file has insecure permissions: path={:?}, mode={:o}",
+            path,
+            mode
+        );
+        return false;
+    }
+
+    true
+}
+
+fn remove_file_if_exists(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log_warn!("Failed to remove cache file {:?}: {}", path, e),
+    }
+}
+
+fn cache_file_mtime(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    metadata_mtime_nanos(&meta)
+}
+
+#[derive(Debug)]
+struct CacheRecord {
+    hash: String,
+    mtime_nanos: u64,
+}
+
+fn parse_cache_record(contents: &str) -> Option<CacheRecord> {
+    let (hash, mtime_nanos) = contents.trim().split_once(':')?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some(CacheRecord {
+        hash: hash.to_string(),
+        mtime_nanos: mtime_nanos.parse().ok()?,
+    })
+}
+
+fn read_cache_record(path: &Path) -> Option<CacheRecord> {
+    if !validate_cache_file_security(path) {
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            log_warn!("Failed to read cache record {:?}: {}", path, e);
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+
+    match parse_cache_record(&contents) {
+        Some(record) => Some(record),
+        None => {
+            log_warn!("Invalid cache record format: {:?}", path);
+            remove_file_if_exists(path);
+            None
+        }
+    }
+}
+
+fn cache_metadata_path(cache_path: &Path) -> PathBuf {
+    cache_path.with_extension("cwasm.meta")
+}
+
+fn private_tmp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "cache".into());
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        nonce
+    ))
+}
+
+fn write_private_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp_path = private_tmp_path(path);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, path)?;
+        std::fs::set_permissions(path, Permissions::from_mode(0o600))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        remove_file_if_exists(&tmp_path);
+    }
+
+    result
+}
+
+fn write_cache_record(path: &Path, hash: &str, cache_mtime_nanos: u64) {
+    let record = format!("{}:{}", hash, cache_mtime_nanos);
+    if let Err(e) = write_private_file_atomic(path, record.as_bytes()) {
+        log_warn!("Failed to write cache record {:?}: {}", path, e);
+    }
+}
+
+fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<u8>> {
+    if !validate_cache_file_security(path) {
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let before_mtime = match cache_file_mtime(path) {
+        Some(mtime) => mtime,
+        None => {
+            log_warn!("Failed to read cache file mtime before read: {:?}", path);
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+    if before_mtime != expected_mtime_nanos {
+        log_warn!(
+            "Cache file mtime mismatch before read: path={:?}, expected={}, actual={}",
+            path,
+            expected_mtime_nanos,
+            before_mtime
+        );
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let cached = match std::fs::read(path) {
+        Ok(cached) => cached,
+        Err(e) => {
+            log_warn!("Failed to read cache file {:?}: {}", path, e);
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+
+    if !validate_cache_file_security(path) {
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let after_mtime = match cache_file_mtime(path) {
+        Some(mtime) => mtime,
+        None => {
+            log_warn!("Failed to read cache file mtime after read: {:?}", path);
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+    if after_mtime != before_mtime || after_mtime != expected_mtime_nanos {
+        log_warn!(
+            "Cache file changed during read: path={:?}, expected={}, before={}, after={}",
+            path,
+            expected_mtime_nanos,
+            before_mtime,
+            after_mtime
+        );
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    Some(cached)
+}
+
+fn load_cached_module(
+    engine: &Engine,
+    wasm_path: &Path,
+    cache_path: &Path,
+    expected_mtime_nanos: u64,
+    record_path: Option<&Path>,
+    label: &str,
+) -> Option<Module> {
+    let cached = match read_secure_cache_file(cache_path, expected_mtime_nanos) {
+        Some(cached) => cached,
+        None => {
+            if let Some(record_path) = record_path {
+                remove_file_if_exists(record_path);
+            }
+            return None;
+        }
+    };
+
+    // SAFETY: 只在私有缓存目录通过 owner=当前 euid、mode=0700 校验后进入此路径；
+    // 缓存文件和记录文件也必须为 owner=当前 euid、mode=0600。
+    // 读取前后均校验缓存文件 mtime 与记录值一致，若文件被替换或修改会删除并重新编译。
+    // 因此传入 bytes 只来自本程序在同一缓存命名空间中此前 Module::serialize() 写入的受控缓存。
+    match unsafe { Module::deserialize(engine, &cached) } {
+        Ok(module) => {
+            log_info!("Loaded module from cache ({}): {:?}", label, wasm_path);
+            Some(module)
+        }
+        Err(e) => {
+            log_warn!("Cache deserialization failed, recompiling: {}", e);
+            remove_file_if_exists(cache_path);
+            remove_file_if_exists(&cache_metadata_path(cache_path));
+            if let Some(record_path) = record_path {
+                remove_file_if_exists(record_path);
+            }
+            None
+        }
+    }
+}
+
+fn compile_uncached_module(engine: &Engine, wasm_path: &Path) -> Result<Module, SandboxError> {
+    let file_data = std::fs::read(wasm_path)
+        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
+    compile_module_from_bytes(engine, wasm_path, &file_data)
 }
 
 fn compile_module_from_bytes(
@@ -171,9 +545,19 @@ fn compile_module_from_bytes(
 fn get_cached_module(
     engine: &Engine,
     wasm_path: &Path,
-    cache_dir: &Path,
+    cache_dir: Option<&Path>,
 ) -> Result<Module, SandboxError> {
-    let _ = std::fs::create_dir_all(cache_dir);
+    let cache_dir = match cache_dir {
+        Some(cache_dir) if ensure_cache_dir_security(cache_dir) => cache_dir,
+        Some(cache_dir) => {
+            log_warn!(
+                "Wasm cache directory is insecure; compiling without disk cache: {:?}",
+                cache_dir
+            );
+            return compile_uncached_module(engine, wasm_path);
+        }
+        None => return compile_uncached_module(engine, wasm_path),
+    };
 
     let fingerprint = match file_fingerprint(wasm_path) {
         Some(fp) => fp,
@@ -186,35 +570,22 @@ fn get_cached_module(
         }
     };
 
-    // 缓存映射文件：记录 "fingerprint -> sha256_hash" 的映射
+    // 缓存映射文件：记录 "fingerprint -> sha256_hash:cache_mtime_nanos" 的映射
     // 文件名格式: {size}_{mtime_nanos}.map
     let map_file = cache_dir.join(format!("{}_{}.map", fingerprint.0, fingerprint.1));
 
     // 尝试通过映射文件找到对应的缓存
-    if let Ok(hash) = std::fs::read_to_string(&map_file) {
-        let cache_path = cache_dir.join(format!("{}.cwasm", hash.trim()));
-        match std::fs::read(&cache_path) {
-            Ok(cached) => {
-                // SAFETY: 缓存文件由本系统生成，Engine 配置未变。
-                // Module::deserialize 要求输入数据来自相同 Engine 配置的 serialize() 输出。
-                // 我们在缓存写入时确保了这一点，因此反序列化是安全的。
-                match unsafe { Module::deserialize(engine, &cached) } {
-                    Ok(module) => {
-                        log_info!("Loaded module from cache: {:?}", wasm_path);
-                        return Ok(module);
-                    }
-                    Err(e) => {
-                        // 反序列化失败：缓存可能损坏或 Engine 配置变更，静默降级重新编译
-                        log_warn!("Cache deserialization failed, recompiling: {}", e);
-                        let _ = std::fs::remove_file(&cache_path);
-                        let _ = std::fs::remove_file(&map_file);
-                    }
-                }
-            }
-            Err(_) => {
-                // 缓存文件不存在，映射过期，清理并重新编译
-                let _ = std::fs::remove_file(&map_file);
-            }
+    if let Some(record) = read_cache_record(&map_file) {
+        let cache_path = cache_dir.join(format!("{}.cwasm", record.hash));
+        if let Some(module) = load_cached_module(
+            engine,
+            wasm_path,
+            &cache_path,
+            record.mtime_nanos,
+            Some(&map_file),
+            "fingerprint match",
+        ) {
+            return Ok(module);
         }
     }
 
@@ -223,23 +594,30 @@ fn get_cached_module(
         .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
     let hash = content_hash(&file_data);
     let cache_path = cache_dir.join(format!("{}.cwasm", hash));
+    let cache_metadata_file = cache_metadata_path(&cache_path);
 
     // 检查是否已有相同内容的缓存（文件内容相同但元数据不同）
-    if let Ok(cached) = std::fs::read(&cache_path) {
-        // SAFETY: 缓存文件由本系统生成，Engine 配置未变。
-        // Module::deserialize 要求输入数据来自相同 Engine 配置的 serialize() 输出。
-        // 我们在缓存写入时确保了这一点，因此反序列化是安全的。
-        match unsafe { Module::deserialize(engine, &cached) } {
-            Ok(module) => {
-                // 更新映射文件
-                let _ = std::fs::write(&map_file, &hash);
-                log_info!("Loaded module from cache (content match): {:?}", wasm_path);
+    if let Some(record) = read_cache_record(&cache_metadata_file) {
+        if record.hash == hash {
+            if let Some(module) = load_cached_module(
+                engine,
+                wasm_path,
+                &cache_path,
+                record.mtime_nanos,
+                Some(&cache_metadata_file),
+                "content match",
+            ) {
+                write_cache_record(&map_file, &hash, record.mtime_nanos);
                 return Ok(module);
             }
-            Err(e) => {
-                log_warn!("Cache deserialization failed, recompiling: {}", e);
-                let _ = std::fs::remove_file(&cache_path);
-            }
+        } else {
+            log_warn!(
+                "Cache metadata hash mismatch: path={:?}, expected={}, actual={}",
+                cache_metadata_file,
+                hash,
+                record.hash
+            );
+            remove_file_if_exists(&cache_metadata_file);
         }
     }
 
@@ -248,16 +626,20 @@ fn get_cached_module(
 
     // 序列化到缓存目录（原子写入：先写临时文件再 rename，避免并发读到不完整数据）
     if let Ok(serialized) = module.serialize() {
-        let tmp_path = cache_path.with_extension("cwasm.tmp");
-        if std::fs::write(&tmp_path, &serialized).is_ok() {
-            // rename 在同一文件系统上是原子的
-            if let Err(e) = std::fs::rename(&tmp_path, &cache_path) {
-                log_warn!("Failed to rename cache file: {}", e);
-                let _ = std::fs::remove_file(&tmp_path);
+        match write_private_file_atomic(&cache_path, &serialized) {
+            Ok(()) => {
+                if let Some(cache_mtime_nanos) = cache_file_mtime(&cache_path) {
+                    write_cache_record(&map_file, &hash, cache_mtime_nanos);
+                    write_cache_record(&cache_metadata_file, &hash, cache_mtime_nanos);
+                } else {
+                    log_warn!("Failed to record cache file mtime: {:?}", cache_path);
+                    remove_file_if_exists(&cache_path);
+                    remove_file_if_exists(&cache_metadata_file);
+                    remove_file_if_exists(&map_file);
+                }
             }
+            Err(e) => log_warn!("Failed to write cache file {:?}: {}", cache_path, e),
         }
-        // 更新映射文件
-        let _ = std::fs::write(&map_file, &hash);
     }
 
     log_info!("Compiled and cached module: {:?}", wasm_path);
@@ -368,10 +750,16 @@ impl Sandbox for WasmSandbox {
                 SandboxError::ExecutionFailed(format!("Failed to start Wasm epoch ticker: {}", e))
             })?;
 
-        // [IMPORTANT-02 修复] 使用用户专属缓存目录，避免不同用户之间的缓存污染
-        // SAFETY: geteuid() 是无副作用的系统调用，始终返回有效的 uid。
-        let uid = unsafe { libc::geteuid() };
-        let cache_dir = std::env::temp_dir().join(format!("mimobox-cache-{}", uid));
+        // [IMPORTANT-02 修复] 使用用户和 Wasmtime 版本专属缓存目录，避免跨用户和跨版本缓存污染。
+        let uid = current_euid();
+        let cache_dir =
+            std::env::temp_dir().join(format!("mimobox-cache-{}-{}", uid, cache_namespace()));
+        let cache_dir = if ensure_cache_dir_security(&cache_dir) {
+            Some(cache_dir)
+        } else {
+            log_warn!("Wasm disk cache disabled because cache directory is insecure");
+            None
+        };
 
         log_info!(
             "Created Wasm sandbox backend, memory_limit={:?}MB, timeout={:?}s, cache_dir={:?}",
@@ -416,7 +804,7 @@ impl Sandbox for WasmSandbox {
         }
 
         // 1. 获取或编译模块（带缓存）
-        let module = get_cached_module(&self.engine, wasm_path, &self.cache_dir)?;
+        let module = get_cached_module(&self.engine, wasm_path, self.cache_dir.as_deref())?;
 
         // 2. [IMPORTANT-03 说明] stdout/stderr 缓冲区容量限制
         // MemoryOutputPipe 的 capacity 参数是写入上限而非初始容量，
