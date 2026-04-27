@@ -296,7 +296,7 @@ impl PySnapshot {
 /// * `isolation` - Isolation level: `"auto"`, `"os"`, `"wasm"`, or `"microvm"`.
 /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
 ///   Supports glob patterns like `"*.openai.com"`.
-#[pyclass(name = "Sandbox", unsendable)]
+#[pyclass(name = "Sandbox")]
 struct PySandbox {
     inner: Option<RustSandbox>,
 }
@@ -684,6 +684,7 @@ impl PySandbox {
     #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
     fn execute(
         &mut self,
+        py: Python<'_>,
         command: &str,
         env: Option<std::collections::HashMap<String, String>>,
         timeout: Option<f64>,
@@ -704,22 +705,17 @@ impl PySandbox {
             }
             None => command.to_string(),
         };
-        let result = match (env, timeout) {
-            (Some(env), Some(timeout)) => sandbox
-                .execute_with_env_and_timeout(
-                    &effective_command,
-                    env,
-                    parse_python_timeout(timeout)?,
-                )
-                .map_err(map_sdk_error)?,
-            (Some(env), None) => sandbox
-                .execute_with_env(&effective_command, env)
-                .map_err(map_sdk_error)?,
-            (None, Some(timeout)) => sandbox
-                .execute_with_timeout(&effective_command, parse_python_timeout(timeout)?)
-                .map_err(map_sdk_error)?,
-            (None, None) => sandbox.execute(&effective_command).map_err(map_sdk_error)?,
-        };
+        let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
+        let result = py
+            .allow_threads(|| match (env, parsed_timeout) {
+                (Some(env), Some(timeout)) => {
+                    sandbox.execute_with_env_and_timeout(&effective_command, env, timeout)
+                }
+                (Some(env), None) => sandbox.execute_with_env(&effective_command, env),
+                (None, Some(timeout)) => sandbox.execute_with_timeout(&effective_command, timeout),
+                (None, None) => sandbox.execute(&effective_command),
+            })
+            .map_err(map_sdk_error)?;
         Ok(result.into())
     }
 
@@ -745,6 +741,7 @@ impl PySandbox {
     #[pyo3(signature = (language, code, *, env=None, timeout=None, cwd=None))]
     fn execute_code(
         &mut self,
+        py: Python<'_>,
         language: &str,
         code: &str,
         env: Option<std::collections::HashMap<String, String>>,
@@ -752,7 +749,7 @@ impl PySandbox {
         cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
         let command = build_python_code_command(language, code)?;
-        self.execute(&command, env, timeout, cwd)
+        self.execute(py, &command, env, timeout, cwd)
     }
 
     /// Execute a command and return a streaming iterator of events.
@@ -765,9 +762,12 @@ impl PySandbox {
     ///
     /// A `StreamIterator` yielding `StreamEvent` objects for stdout,
     /// stderr chunks and the final exit event.
-    fn stream_execute(&mut self, command: &str) -> PyResult<PyStreamIterator> {
+    fn stream_execute(&mut self, py: Python<'_>, command: &str) -> PyResult<PyStreamIterator> {
         let sandbox = self.inner_mut()?;
-        let receiver = sandbox.stream_execute(command).map_err(map_sdk_error)?;
+        let command = command.to_string();
+        let receiver = py
+            .allow_threads(|| sandbox.stream_execute(&command))
+            .map_err(map_sdk_error)?;
         Ok(PyStreamIterator {
             receiver: Some(receiver),
         })
@@ -775,10 +775,11 @@ impl PySandbox {
 
     /// Wait until the sandbox is ready to accept commands.
     #[pyo3(signature = (timeout_secs=None))]
-    fn wait_ready(&mut self, timeout_secs: Option<f64>) -> PyResult<()> {
+    fn wait_ready(&mut self, py: Python<'_>, timeout_secs: Option<f64>) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
         let timeout = parse_python_timeout(timeout_secs.unwrap_or(30.0))?;
-        sandbox.wait_ready(timeout).map_err(map_sdk_error)
+        py.allow_threads(|| sandbox.wait_ready(timeout))
+            .map_err(map_sdk_error)
     }
 
     /// Return whether the sandbox is currently ready.
@@ -799,35 +800,45 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If the directory cannot be read.
-    fn list_dir(&mut self, path: &str) -> PyResult<Vec<PyDirEntry>> {
+    fn list_dir(&mut self, py: Python<'_>, path: &str) -> PyResult<Vec<PyDirEntry>> {
         let sandbox = self.inner_mut()?;
-        let entries = sandbox.list_dir(path).map_err(map_sdk_error)?;
+        let path = path.to_string();
+        let entries = py
+            .allow_threads(|| sandbox.list_dir(&path))
+            .map_err(map_sdk_error)?;
         Ok(entries.into_iter().map(PyDirEntry::from).collect())
     }
 
     /// 检查指定路径的文件是否存在。
-    fn file_exists(&mut self, path: &str) -> PyResult<bool> {
+    fn file_exists(&mut self, py: Python<'_>, path: &str) -> PyResult<bool> {
         let sandbox = self.inner_mut()?;
-        sandbox.file_exists(path).map_err(map_sdk_error)
+        let path = path.to_string();
+        py.allow_threads(|| sandbox.file_exists(&path))
+            .map_err(map_sdk_error)
     }
 
     /// 删除指定路径的文件或空目录。
-    fn remove_file(&mut self, path: &str) -> PyResult<()> {
+    fn remove_file(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
-        sandbox.remove_file(path).map_err(map_sdk_error)
+        let path = path.to_string();
+        py.allow_threads(|| sandbox.remove_file(&path))
+            .map_err(map_sdk_error)
     }
 
     /// 重命名/移动文件。
-    fn rename(&mut self, from: &str, to: &str) -> PyResult<()> {
+    fn rename(&mut self, py: Python<'_>, from: &str, to: &str) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
-        sandbox.rename(from, to).map_err(map_sdk_error)
+        let from = from.to_string();
+        let to = to.to_string();
+        py.allow_threads(|| sandbox.rename(&from, &to))
+            .map_err(map_sdk_error)
     }
 
     /// 返回文件元信息。
-    fn stat(&mut self, path: &str) -> PyResult<PyFileStat> {
+    fn stat(&mut self, py: Python<'_>, path: &str) -> PyResult<PyFileStat> {
         let sandbox = self.inner_mut()?;
-        sandbox
-            .stat(path)
+        let path = path.to_string();
+        py.allow_threads(|| sandbox.stat(&path))
             .map(PyFileStat::from)
             .map_err(map_sdk_error)
     }
@@ -847,9 +858,11 @@ impl PySandbox {
     /// * `FileNotFoundError` - If the file does not exist.
     /// * `PermissionError` - If access is denied.
     /// * `SandboxError` - If the read operation fails.
-    fn read_file(&mut self, path: &str) -> PyResult<Vec<u8>> {
+    fn read_file(&mut self, py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
         let sandbox = self.inner_mut()?;
-        sandbox.read_file(path).map_err(map_sdk_error)
+        let path = path.to_string();
+        py.allow_threads(|| sandbox.read_file(&path))
+            .map_err(map_sdk_error)
     }
 
     /// Write bytes to a file inside the sandbox.
@@ -862,10 +875,12 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If the write operation fails.
-    fn write_file(&mut self, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn write_file(&mut self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = extract_bytes_data(data)?;
         let sandbox = self.inner_mut()?;
-        sandbox.write_file(path, &bytes).map_err(map_sdk_error)
+        let path = path.to_string();
+        py.allow_threads(|| sandbox.write_file(&path, &bytes))
+            .map_err(map_sdk_error)
     }
 
     /// Capture a snapshot of the current sandbox state.
@@ -878,9 +893,11 @@ impl PySandbox {
     ///
     /// * `SandboxError` - If snapshotting fails.
     #[pyo3(name = "_capture_snapshot")]
-    fn capture_snapshot(&mut self) -> PyResult<PySnapshot> {
+    fn capture_snapshot(&mut self, py: Python<'_>) -> PyResult<PySnapshot> {
         let sandbox = self.inner_mut()?;
-        let snapshot = sandbox.snapshot().map_err(map_sdk_error)?;
+        let snapshot = py
+            .allow_threads(|| sandbox.snapshot())
+            .map_err(map_sdk_error)?;
         Ok(PySnapshot { inner: snapshot })
     }
 
@@ -916,9 +933,9 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If forking fails.
-    fn fork(&mut self) -> PyResult<Self> {
+    fn fork(&mut self, py: Python<'_>) -> PyResult<Self> {
         let sandbox = self.inner_mut()?;
-        let forked = sandbox.fork().map_err(map_sdk_error)?;
+        let forked = py.allow_threads(|| sandbox.fork()).map_err(map_sdk_error)?;
         Ok(Self {
             inner: Some(forked),
         })
@@ -962,9 +979,10 @@ impl PySandbox {
     ///
     /// Safe to call multiple times; subsequent calls after the first are no-ops.
     /// Also called automatically by the context manager exit.
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(sandbox) = self.inner.take() {
-            sandbox.destroy().map_err(map_sdk_error)?;
+            py.allow_threads(|| sandbox.destroy())
+                .map_err(map_sdk_error)?;
         }
 
         Ok(())
@@ -980,11 +998,12 @@ impl PySandbox {
     /// Does not suppress exceptions (always returns `False`).
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.close()?;
+        self.close(py)?;
         Ok(false)
     }
 

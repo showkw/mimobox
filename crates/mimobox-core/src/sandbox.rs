@@ -249,6 +249,25 @@ impl SandboxConfig {
         self.cpu_period_us = period_us;
         self
     }
+
+    /// 校验配置合法性，返回不合理项的描述。
+    pub fn validate(&self) -> Result<(), SandboxError> {
+        // 网络拒绝时白名单不应有内容。
+        if self.deny_network && !self.allowed_http_domains.is_empty() {
+            return Err(SandboxError::ExecutionFailed(
+                "deny_network=true 但 allowed_http_domains 非空，请将 deny_network 设为 false 或清空 allowed_http_domains".to_string(),
+            ));
+        }
+
+        // memory_limit_mb=Some(0) 无意义。
+        if self.memory_limit_mb == Some(0) {
+            return Err(SandboxError::ExecutionFailed(
+                "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Result of a sandbox command execution.
