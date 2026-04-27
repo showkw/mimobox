@@ -102,10 +102,14 @@ const FUTEX_ALLOWED_OPS: &[u32] = &[
 ];
 
 // clone namespace flags 约束
-// 移除 CLONE_NEWCGROUP 位（与 CLONE_CHILD_CLEARTID 共享 bit 25），
-// 避免误杀 bash 等程序创建子进程时的正常 clone 调用。
-// 包含：CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET
-const CLONE_NAMESPACE_MASK: u32 = 0x4C02_0000;
+// 包含 6 个 namespace flag：
+// CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET|CLONE_NEWUSER|CLONE_NEWPID。
+// 排除 CLONE_NEWCGROUP：该位与 CLONE_CHILD_CLEARTID 冲突，避免误杀正常 clone 调用。
+const CLONE_NAMESPACE_MASK: u32 = 0x7C02_0000;
+
+// mprotect prot 约束（x86_64）
+// 拒绝为既有内存页追加执行权限，降低 JIT spraying / W^X 绕过风险。
+const PROT_EXEC: u32 = 0x4;
 
 // mmap flags 约束（x86_64）
 // args[3] = flags 参数需要检查
@@ -127,6 +131,40 @@ const MAP_STACK: u32 = 0x20000;
 const MAP_HUGETLB: u32 = 0x40000;
 #[allow(dead_code)]
 const MAP_LOCKED: u32 = 0x2000;
+const MAP_GROWSDOWN: u32 = 0x100;
+
+// fcntl cmd 白名单（Linux x86_64）
+// 5/6/7 是 F_GETLK/F_SETLK/F_SETLKW，不纳入白名单，避免文件锁相关副作用。
+const F_DUPFD: u32 = 0;
+const F_GETFD: u32 = 1;
+const F_SETFD: u32 = 2;
+const F_GETFL: u32 = 3;
+const F_SETFL: u32 = 4;
+const F_SETOWN: u32 = 8;
+const F_GETOWN: u32 = 9;
+const FCNTL_ALLOWED_CMDS: &[u32] = &[
+    F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_GETOWN, F_SETOWN,
+];
+
+// madvise advice 白名单（Linux x86_64）
+const MADV_NORMAL: u32 = 0;
+const MADV_RANDOM: u32 = 1;
+const MADV_SEQUENTIAL: u32 = 2;
+const MADV_WILLNEED: u32 = 3;
+const MADV_DONTNEED: u32 = 4;
+const MADV_FREE: u32 = 8;
+const MADV_MERGEABLE: u32 = 12;
+const MADV_HUGEPAGE: u32 = 14;
+const MADVISE_ALLOWED_ADVICE: &[u32] = &[
+    MADV_NORMAL,
+    MADV_RANDOM,
+    MADV_SEQUENTIAL,
+    MADV_WILLNEED,
+    MADV_DONTNEED,
+    MADV_FREE,
+    MADV_MERGEABLE,
+    MADV_HUGEPAGE,
+];
 
 const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
@@ -651,6 +689,9 @@ enum SeccompArgConstraint {
     PrctlOp,
     FutexOp,
     MmapFlags,
+    MprotectProt,
+    FcntlCmd,
+    MadviseAdvice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -744,7 +785,7 @@ fn arg_constraint_for_syscall(
 }
 
 fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<ConstrainedSyscall> {
-    let mut constraints = Vec::with_capacity(12);
+    let mut constraints = Vec::with_capacity(15);
     let is_network_profile = matches!(
         profile,
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
@@ -755,6 +796,14 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::MMAP,
             constraint: SeccompArgConstraint::MmapFlags,
+        });
+    }
+
+    // mprotect(10) 的 prot 参数（args[2]）约束：拒绝 PROT_EXEC。
+    if allowed.contains(&syscall_nr::MPROTECT) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::MPROTECT,
+            constraint: SeccompArgConstraint::MprotectProt,
         });
     }
 
@@ -814,6 +863,14 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
+    // fcntl(72) 的 cmd 参数（args[1]）约束：只允许文件描述符/状态 flag 基础操作。
+    if allowed.contains(&syscall_nr::FCNTL) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::FCNTL,
+            constraint: SeccompArgConstraint::FcntlCmd,
+        });
+    }
+
     // prctl(157) 必须约束 arg0 为只读查询操作（如 PR_CAPBSET_READ），
     // 防止攻击者执行 PR_SET_DUMPABLE 等修改安全属性的操作。
     if allowed.contains(&syscall_nr::PRCTL) {
@@ -828,6 +885,14 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::FUTEX,
             constraint: SeccompArgConstraint::FutexOp,
+        });
+    }
+
+    // madvise(28) 的 advice 参数（args[2]）约束：拒绝 DONTDUMP 等隐藏内存内容路径。
+    if allowed.contains(&syscall_nr::MADVISE) {
+        constraints.push(ConstrainedSyscall {
+            nr: syscall_nr::MADVISE,
+            constraint: SeccompArgConstraint::MadviseAdvice,
         });
     }
 
@@ -1039,6 +1104,44 @@ fn build_futex_arg_check_block() -> Vec<SockFilter> {
     block
 }
 
+fn build_fcntl_cmd_arg_check_block() -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(FCNTL_ALLOWED_CMDS.len() + 5);
+
+    // cmd 是 fcntl 的第二个参数（args[1]），高 32 位非零视为非法扩展。
+    block.push(load_abs(seccomp_arg_hi_offset(1)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_TRAP));
+    block.push(load_abs(seccomp_arg_lo_offset(1)));
+
+    for (index, &cmd) in FCNTL_ALLOWED_CMDS.iter().enumerate() {
+        let instructions_to_skip = (FCNTL_ALLOWED_CMDS.len() - index) as u8;
+        block.push(jump_eq(cmd, instructions_to_skip, 0));
+    }
+
+    block.push(ret(SECCOMP_RET_TRAP));
+    block.push(ret(SECCOMP_RET_ALLOW));
+    block
+}
+
+fn build_madvise_advice_arg_check_block() -> Vec<SockFilter> {
+    let mut block = Vec::with_capacity(MADVISE_ALLOWED_ADVICE.len() + 5);
+
+    // advice 是 madvise 的第三个参数（args[2]），只允许无权限扩展语义的提示值。
+    block.push(load_abs(seccomp_arg_hi_offset(2)));
+    block.push(jump_eq(0, 1, 0));
+    block.push(ret(SECCOMP_RET_TRAP));
+    block.push(load_abs(seccomp_arg_lo_offset(2)));
+
+    for (index, &advice) in MADVISE_ALLOWED_ADVICE.iter().enumerate() {
+        let instructions_to_skip = (MADVISE_ALLOWED_ADVICE.len() - index) as u8;
+        block.push(jump_eq(advice, instructions_to_skip, 0));
+    }
+
+    block.push(ret(SECCOMP_RET_TRAP));
+    block.push(ret(SECCOMP_RET_ALLOW));
+    block
+}
+
 fn build_clone_arg_check_block() -> Vec<SockFilter> {
     vec![
         // flags 是 unsigned long；高 32 位不应携带额外 flag。
@@ -1052,6 +1155,17 @@ fn build_clone_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
+fn build_mprotect_prot_arg_check_block() -> Vec<SockFilter> {
+    vec![
+        // prot 是第三个参数（args[2]）；命中 PROT_EXEC 即拒绝。
+        load_abs(seccomp_arg_lo_offset(2)),
+        alu_and(PROT_EXEC),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_TRAP),
+        ret(SECCOMP_RET_ALLOW),
+    ]
+}
+
 fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
     vec![
         // flags 是 int 参数；高 32 位不应携带额外 flag。
@@ -1059,6 +1173,12 @@ fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
         // 加载 flags 低 32 位。
+        load_abs(seccomp_arg_lo_offset(3)),
+        // 拒绝可能锁定内存、申请大页或扩展栈映射的危险 flags。
+        alu_and(MAP_LOCKED | MAP_HUGETLB | MAP_GROWSDOWN),
+        jump_eq(0, 1, 0),
+        ret(SECCOMP_RET_TRAP),
+        // 重新加载 flags 低 32 位，检查必须包含 MAP_PRIVATE 或 MAP_SHARED。
         load_abs(seccomp_arg_lo_offset(3)),
         // 必须包含 MAP_PRIVATE 或 MAP_SHARED，否则拒绝 mmap。
         alu_and(MAP_PRIVATE | MAP_SHARED),
@@ -1081,6 +1201,9 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
         SeccompArgConstraint::PrctlOp => build_prctl_arg_check_block(),
         SeccompArgConstraint::FutexOp => build_futex_arg_check_block(),
         SeccompArgConstraint::MmapFlags => build_mmap_flags_arg_check_block(),
+        SeccompArgConstraint::MprotectProt => build_mprotect_prot_arg_check_block(),
+        SeccompArgConstraint::FcntlCmd => build_fcntl_cmd_arg_check_block(),
+        SeccompArgConstraint::MadviseAdvice => build_madvise_advice_arg_check_block(),
     }
 }
 
@@ -1228,19 +1351,20 @@ pub fn apply_seccomp(profile: SeccompProfile) -> Result<(), SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::syscall_nr::{
-        BIND, CLONE, CLONE3, CONNECT, FUTEX, IOCTL, LISTEN, MMAP, READ, RECVFROM, RT_SIGQUEUEINFO,
-        RT_TGSIGQUEUEINFO, SENDTO, SETPGID, SETSID, SOCKET, TGKILL,
+        BIND, CLONE, CLONE3, CONNECT, FCNTL, FUTEX, IOCTL, LISTEN, MADVISE, MMAP, MPROTECT, READ,
+        RECVFROM, RT_SIGQUEUEINFO, RT_TGSIGQUEUEINFO, SENDTO, SETPGID, SETSID, SOCKET, TGKILL,
     };
     use super::{
         AF_INET, AF_UNIX, AUDIT_ARCH_X86_64, BIND_MAX_ADDRLEN, BPF_ABS, BPF_ALU, BPF_AND, BPF_JEQ,
         BPF_JGT, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W, CLONE_NAMESPACE_MASK,
-        ConstrainedSyscall, FIONBIO, FUTEX_WAIT, FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE,
-        FUTEX_WAKE, FUTEX_WAKE_PRIVATE, LISTEN_MAX_BACKLOG, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE,
-        MAP_SHARED, SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE,
-        SECCOMP_DATA_NR, SECCOMP_RET_ALLOW, SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK,
-        SOCK_STREAM, SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP,
-        build_arg_constraints, build_bpf_program, essential_syscalls, fork_allowed_syscalls,
-        network_syscalls,
+        ConstrainedSyscall, F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FIONBIO, FUTEX_WAIT,
+        FUTEX_WAIT_BITSET_PRIVATE, FUTEX_WAIT_PRIVATE, FUTEX_WAKE, FUTEX_WAKE_PRIVATE,
+        LISTEN_MAX_BACKLOG, MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MAP_ANONYMOUS, MAP_FIXED,
+        MAP_GROWSDOWN, MAP_HUGETLB, MAP_LOCKED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC,
+        SECCOMP_DATA_ARCH, SECCOMP_DATA_ARG_SIZE, SECCOMP_DATA_ARGS_BASE, SECCOMP_DATA_NR,
+        SECCOMP_RET_ALLOW, SECCOMP_RET_TRAP, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
+        SeccompArgConstraint, SockFilter, TCGETS, TIOCGPGRP, TIOCSPGRP, build_arg_constraints,
+        build_bpf_program, essential_syscalls, fork_allowed_syscalls, network_syscalls,
     };
     use mimobox_core::SeccompProfile;
 
@@ -1571,6 +1695,31 @@ mod tests {
     }
 
     #[test]
+    fn test_fcntl_constraint_allows_safe_cmds() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        for cmd in [F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_DUPFD] {
+            let safe_cmd = FakeSeccompData::new(FCNTL).with_arg(1, cmd as u64);
+            assert_eq!(run_bpf(&program, safe_cmd), SECCOMP_RET_ALLOW);
+        }
+    }
+
+    #[test]
+    fn test_fcntl_constraint_blocks_dangerous_cmds() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // Linux x86_64 上 F_SETLK=6，文件锁命令不在白名单内。
+        let f_setlk = FakeSeccompData::new(FCNTL).with_arg(1, 6);
+        assert_eq!(run_bpf(&program, f_setlk), SECCOMP_RET_TRAP);
+
+        let unknown_cmd = FakeSeccompData::new(FCNTL).with_arg(1, 99);
+        assert_eq!(run_bpf(&program, unknown_cmd), SECCOMP_RET_TRAP);
+
+        let high_bits_set = FakeSeccompData::new(FCNTL).with_arg(1, (1_u64 << 32) | F_GETFD as u64);
+        assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
     fn test_futex_constraint_allows_only_whitelisted_ops() {
         let program = program_for_profile(SeccompProfile::Essential);
 
@@ -1605,6 +1754,32 @@ mod tests {
     }
 
     #[test]
+    fn test_madvise_constraint_allows_safe_advice() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let normal = FakeSeccompData::new(MADVISE).with_arg(2, MADV_NORMAL as u64);
+        assert_eq!(run_bpf(&program, normal), SECCOMP_RET_ALLOW);
+
+        let dontneed = FakeSeccompData::new(MADVISE).with_arg(2, MADV_DONTNEED as u64);
+        assert_eq!(run_bpf(&program, dontneed), SECCOMP_RET_ALLOW);
+
+        let free = FakeSeccompData::new(MADVISE).with_arg(2, MADV_FREE as u64);
+        assert_eq!(run_bpf(&program, free), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_madvise_constraint_blocks_dangerous_advice() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        // MADV_DONTDUMP=16 可能用于隐藏内存内容，必须拒绝。
+        let dontdump = FakeSeccompData::new(MADVISE).with_arg(2, 16);
+        assert_eq!(run_bpf(&program, dontdump), SECCOMP_RET_TRAP);
+
+        let hwbug = FakeSeccompData::new(MADVISE).with_arg(2, 99);
+        assert_eq!(run_bpf(&program, hwbug), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
     fn test_clone_constraint_blocks_namespace_flags() {
         let program = program_for_profile(SeccompProfile::EssentialWithFork);
 
@@ -1619,6 +1794,44 @@ mod tests {
 
         let high_bits_set = FakeSeccompData::new(CLONE).with_arg(0, 1_u64 << 32);
         assert_eq!(run_bpf(&program, high_bits_set), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_clone_constraint_blocks_newuser_flag() {
+        let program = program_for_profile(SeccompProfile::EssentialWithFork);
+
+        let newuser = FakeSeccompData::new(CLONE).with_arg(0, 0x1000_0000);
+        assert_eq!(run_bpf(&program, newuser), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_clone_constraint_blocks_newpid_flag() {
+        let program = program_for_profile(SeccompProfile::EssentialWithFork);
+
+        let newpid = FakeSeccompData::new(CLONE).with_arg(0, 0x2000_0000);
+        assert_eq!(run_bpf(&program, newpid), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_mprotect_constraint_allows_safe_prot() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let prot_read = FakeSeccompData::new(MPROTECT).with_arg(2, 1);
+        assert_eq!(run_bpf(&program, prot_read), SECCOMP_RET_ALLOW);
+
+        let prot_read_write = FakeSeccompData::new(MPROTECT).with_arg(2, 3);
+        assert_eq!(run_bpf(&program, prot_read_write), SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
+    fn test_mprotect_constraint_blocks_exec() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let prot_exec = FakeSeccompData::new(MPROTECT).with_arg(2, PROT_EXEC as u64);
+        assert_eq!(run_bpf(&program, prot_exec), SECCOMP_RET_TRAP);
+
+        let prot_read_exec = FakeSeccompData::new(MPROTECT).with_arg(2, (1 | PROT_EXEC) as u64);
+        assert_eq!(run_bpf(&program, prot_read_exec), SECCOMP_RET_TRAP);
     }
 
     #[test]
@@ -1657,6 +1870,31 @@ mod tests {
         // 高 32 位非零 -> TRAP
         let high_bits = FakeSeccompData::new(MMAP).with_arg(3, (1_u64 << 32) | MAP_PRIVATE as u64);
         assert_eq!(run_bpf(&program, high_bits), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_locked() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let locked = FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_LOCKED) as u64);
+        assert_eq!(run_bpf(&program, locked), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_hugetlb() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let hugetlb = FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_HUGETLB) as u64);
+        assert_eq!(run_bpf(&program, hugetlb), SECCOMP_RET_TRAP);
+    }
+
+    #[test]
+    fn test_mmap_constraint_blocks_growsdown() {
+        let program = program_for_profile(SeccompProfile::Essential);
+
+        let growsdown =
+            FakeSeccompData::new(MMAP).with_arg(3, (MAP_PRIVATE | MAP_GROWSDOWN) as u64);
+        assert_eq!(run_bpf(&program, growsdown), SECCOMP_RET_TRAP);
     }
 
     #[test]
