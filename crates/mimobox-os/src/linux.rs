@@ -4,7 +4,9 @@ use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use nix::sched::CloneFlags;
@@ -22,6 +24,15 @@ use crate::seccomp;
 
 #[cfg(target_os = "linux")]
 const CGROUP_V2_ROOT: &str = "/sys/fs/cgroup";
+const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
+const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
+
+#[derive(Debug)]
+struct OutputCapture {
+    data: Vec<u8>,
+    truncated: bool,
+    read_error: Option<String>,
+}
 
 /// Creates a pipe with `pipe2` and `O_CLOEXEC`.
 ///
@@ -224,6 +235,128 @@ fn cleanup_cgroup(path: &Path) {
 
 fn kill_process_group(pid: libc::pid_t, signal: Signal) {
     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal);
+}
+
+fn read_limited_output<R, F>(reader: &mut R, label: &'static str, mut on_limit: F) -> OutputCapture
+where
+    R: Read,
+    F: FnMut(),
+{
+    let mut data = Vec::new();
+    let mut chunk = [0_u8; OUTPUT_READ_CHUNK_SIZE];
+
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                return OutputCapture {
+                    data,
+                    truncated: false,
+                    read_error: None,
+                };
+            }
+            Ok(n) => {
+                let remaining = OUTPUT_SIZE_LIMIT.saturating_sub(data.len());
+                if n <= remaining {
+                    data.extend_from_slice(&chunk[..n]);
+                    continue;
+                }
+
+                data.extend_from_slice(&chunk[..remaining]);
+                on_limit();
+                tracing::warn!(
+                    "{label} 输出超过 {} 字节上限，已截断并终止子进程组",
+                    OUTPUT_SIZE_LIMIT
+                );
+                return OutputCapture {
+                    data,
+                    truncated: true,
+                    read_error: None,
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return OutputCapture {
+                    data,
+                    truncated: false,
+                    read_error: Some(error.to_string()),
+                };
+            }
+        }
+    }
+}
+
+fn spawn_pipe_reader(
+    label: &'static str,
+    fd: RawFd,
+    child_pid: libc::pid_t,
+    output_limit_triggered: Arc<AtomicBool>,
+) -> Receiver<OutputCapture> {
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        // SAFETY: fd 的所有权只转移给当前读取线程，由 File 在 drop 时关闭。
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let capture = read_limited_output(&mut file, label, || {
+            if !output_limit_triggered.swap(true, Ordering::SeqCst) {
+                kill_process_group(child_pid, Signal::SIGKILL);
+            }
+        });
+        let _ = tx.send(capture);
+    });
+
+    rx
+}
+
+fn receive_output_capture(rx: Receiver<OutputCapture>, label: &'static str) -> OutputCapture {
+    match rx.recv() {
+        Ok(capture) => capture,
+        Err(error) => OutputCapture {
+            data: Vec::new(),
+            truncated: false,
+            read_error: Some(format!("{label} 读取线程异常退出: {error}")),
+        },
+    }
+}
+
+fn log_output_read_error(label: &'static str, capture: &OutputCapture) {
+    if let Some(error) = &capture.read_error {
+        tracing::warn!("读取 {label} 失败: {error}");
+    }
+}
+
+fn append_output_truncation_marker(
+    stderr_buf: &mut Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+) {
+    if !stdout_truncated && !stderr_truncated {
+        return;
+    }
+
+    let streams = match (stdout_truncated, stderr_truncated) {
+        (true, true) => "stdout/stderr",
+        (true, false) => "stdout",
+        (false, true) => "stderr",
+        (false, false) => return,
+    };
+    let marker = format!(
+        "\n[mimobox] {streams} output exceeded {} bytes limit; output truncated and process group terminated\n",
+        OUTPUT_SIZE_LIMIT
+    );
+    let marker = marker.as_bytes();
+
+    if stderr_buf.len() + marker.len() <= OUTPUT_SIZE_LIMIT {
+        stderr_buf.extend_from_slice(marker);
+        return;
+    }
+
+    if marker.len() >= OUTPUT_SIZE_LIMIT {
+        stderr_buf.truncate(OUTPUT_SIZE_LIMIT);
+        return;
+    }
+
+    stderr_buf.truncate(OUTPUT_SIZE_LIMIT - marker.len());
+    stderr_buf.extend_from_slice(marker);
 }
 
 /// 验证路径参数：非空且不包含路径遍历。
@@ -619,6 +752,20 @@ impl Sandbox for LinuxSandbox {
                     libc::close(stderr_write_fd);
                 }
 
+                let output_limit_triggered = Arc::new(AtomicBool::new(false));
+                let stdout_rx = spawn_pipe_reader(
+                    "stdout",
+                    stdout_read_fd,
+                    child.as_raw(),
+                    Arc::clone(&output_limit_triggered),
+                );
+                let stderr_rx = spawn_pipe_reader(
+                    "stderr",
+                    stderr_read_fd,
+                    child.as_raw(),
+                    Arc::clone(&output_limit_triggered),
+                );
+
                 #[cfg(target_os = "linux")]
                 let cgroup_path = if self.config.cpu_quota_us.is_some() {
                     match configure_cpu_cgroup(
@@ -633,11 +780,8 @@ impl Sandbox for LinuxSandbox {
                         Err(error) => {
                             kill_process_group(child.as_raw(), Signal::SIGKILL);
                             let _ = waitpid(child, None);
-                            // SAFETY: fd 有效且不再需要，避免 cgroup 配置失败时泄漏管道读端。
-                            unsafe {
-                                libc::close(stdout_read_fd);
-                                libc::close(stderr_read_fd);
-                            }
+                            let _ = receive_output_capture(stdout_rx, "stdout");
+                            let _ = receive_output_capture(stderr_rx, "stderr");
                             return Err(error);
                         }
                     }
@@ -655,28 +799,20 @@ impl Sandbox for LinuxSandbox {
                     )
                 };
 
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
+                let stdout_capture = receive_output_capture(stdout_rx, "stdout");
+                let stderr_capture = receive_output_capture(stderr_rx, "stderr");
+                log_output_read_error("stdout", &stdout_capture);
+                log_output_read_error("stderr", &stderr_capture);
 
-                if !timed_out {
-                    // SAFETY: fd 有效且未被其他代码接管，from_raw_fd 获取所有权
-                    let mut stdout_file = unsafe { std::fs::File::from_raw_fd(stdout_read_fd) };
-                    // SAFETY: stderr_read_fd 有效且未被其他代码接管，from_raw_fd 获取所有权
-                    let mut stderr_file = unsafe { std::fs::File::from_raw_fd(stderr_read_fd) };
-                    if let Err(e) = stdout_file.read_to_end(&mut stdout_buf) {
-                        tracing::warn!("读取 stdout 失败: {e}");
-                    }
-                    if let Err(e) = stderr_file.read_to_end(&mut stderr_buf) {
-                        tracing::warn!("读取 stderr 失败: {e}");
-                    }
-                } else {
-                    // 超时时关闭管道 fd
-                    // SAFETY: fd 有效且不再需要
-                    unsafe {
-                        libc::close(stdout_read_fd);
-                        libc::close(stderr_read_fd);
-                    }
-                }
+                let stdout_truncated = stdout_capture.truncated;
+                let stderr_truncated = stderr_capture.truncated;
+                let stdout_buf = stdout_capture.data;
+                let mut stderr_buf = stderr_capture.data;
+                append_output_truncation_marker(
+                    &mut stderr_buf,
+                    stdout_truncated,
+                    stderr_truncated,
+                );
 
                 let elapsed = start.elapsed();
 
