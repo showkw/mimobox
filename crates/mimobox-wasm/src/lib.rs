@@ -886,11 +886,18 @@ impl Sandbox for WasmSandbox {
         }
 
         let wasm_path = Path::new(&cmd[0]);
-        if !wasm_path.exists() {
-            return Err(SandboxError::ExecutionFailed(format!(
-                "Wasm file does not exist: {:?}",
-                wasm_path
-            )));
+        let wasm_meta = std::fs::symlink_metadata(wasm_path).map_err(|_| {
+            SandboxError::ExecutionFailed("Wasm file does not exist".into())
+        })?;
+        if wasm_meta.file_type().is_symlink() {
+            return Err(SandboxError::ExecutionFailed(
+                "Wasm file path must not be a symlink".into(),
+            ));
+        }
+        if !wasm_meta.file_type().is_file() {
+            return Err(SandboxError::ExecutionFailed(
+                "Wasm path is not a regular file".into(),
+            ));
         }
 
         // [MINOR-07] 预检查文件大小，防止超大文件导致编译时 OOM
