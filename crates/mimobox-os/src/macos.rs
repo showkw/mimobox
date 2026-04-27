@@ -389,6 +389,36 @@ fn validate_path(path: &str) -> Result<(), SandboxError> {
     Ok(())
 }
 
+/// 验证路径可以安全嵌入 SBPL 字符串字面量。
+///
+/// 采用白名单策略：只允许 ASCII 字母数字、路径分隔符 `/`
+/// 以及常见路径字符 `. _ - + @`。空格、引号、反斜杠、
+/// 括号、NULL 字节、换行和其他控制字符均拒绝，避免 Seatbelt
+/// 策略字符串注入。
+fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
+    if path.is_empty() {
+        return Err(SandboxError::ExecutionFailed(
+            "path must not be empty".to_string(),
+        ));
+    }
+
+    for (i, byte) in path.bytes().enumerate() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => {}
+            b'/' | b'.' | b'_' | b'-' | b'+' | b'@' => {}
+            _ => {
+                let ch = path[i..].chars().next().unwrap_or('?');
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "path contains unsafe character for SBPL: {:?} (byte position {i}). Only alphanumeric, /, ., _, -, +, @ are allowed in sandbox paths.",
+                    ch
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl MacOsSandbox {
     fn push_subpath_rule<I, P>(rules: &mut Vec<String>, operation: &str, paths: I)
     where
@@ -409,14 +439,23 @@ impl MacOsSandbox {
 
     fn push_subpath(subpaths: &mut Vec<String>, seen: &mut HashSet<String>, path: &Path) {
         let raw = path.to_string_lossy().to_string();
-        if seen.insert(raw.clone()) {
-            subpaths.push(format!("(subpath \"{raw}\")"));
+        if validate_sbpl_path(&raw).is_ok() {
+            if seen.insert(raw.clone()) {
+                subpaths.push(format!("(subpath \"{raw}\")"));
+            }
+        } else {
+            tracing::warn!(path = ?raw, "SBPL 路径验证失败，跳过");
+            return;
         }
 
         if let Ok(real) = std::fs::canonicalize(path) {
             let resolved = real.to_string_lossy().to_string();
-            if seen.insert(resolved.clone()) {
-                subpaths.push(format!("(subpath \"{resolved}\")"));
+            if validate_sbpl_path(&resolved).is_ok() {
+                if seen.insert(resolved.clone()) {
+                    subpaths.push(format!("(subpath \"{resolved}\")"));
+                }
+            } else {
+                tracing::warn!(path = ?resolved, "SBPL canonicalize 路径验证失败，跳过");
             }
         }
     }
@@ -1074,6 +1113,76 @@ mod tests {
 
         let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
         assert!(sb.file_exists("").is_err(), "file_exists 应拒绝空路径");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_accepts_normal_paths() {
+        assert!(
+            validate_sbpl_path("/tmp/sandbox").is_ok(),
+            "正常路径应通过验证"
+        );
+        assert!(
+            validate_sbpl_path("/usr/local/bin/my-app_v2.1").is_ok(),
+            "包含 . _ - 的路径应通过验证"
+        );
+        assert!(
+            validate_sbpl_path("/tmp/test+flag@host").is_ok(),
+            "包含 + @ 的路径应通过验证"
+        );
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_double_quote() {
+        let result = validate_sbpl_path("/path/with\"quote");
+        assert!(result.is_err(), "包含双引号的路径应被拒绝");
+        assert!(
+            result.unwrap_err().to_string().contains("unsafe character"),
+            "错误消息应说明包含不安全字符"
+        );
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_backslash() {
+        let result = validate_sbpl_path("/path\\with\\backslash");
+        assert!(result.is_err(), "包含反斜杠的路径应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_injection_attempt() {
+        let result = validate_sbpl_path(
+            "/path\")(allow process-exec (subpath \"/usr/bin\")(allow file-read* (subpath \"/",
+        );
+        assert!(result.is_err(), "注入尝试应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_newline() {
+        let result = validate_sbpl_path("/tmp/path\nwith\nnewline");
+        assert!(result.is_err(), "包含换行符的路径应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_null_byte() {
+        let result = validate_sbpl_path("/tmp/path\0with\0null");
+        assert!(result.is_err(), "包含 NULL 字节的路径应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_empty() {
+        let result = validate_sbpl_path("");
+        assert!(result.is_err(), "空路径应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_sbpl_path_rejects_parentheses() {
+        assert!(
+            validate_sbpl_path("/tmp/path(with").is_err(),
+            "包含括号的路径应被拒绝"
+        );
+        assert!(
+            validate_sbpl_path("/tmp/path)with").is_err(),
+            "包含右括号的路径应被拒绝"
+        );
     }
 
     #[test]
