@@ -463,7 +463,7 @@ class SandboxError(Exception):
 
     Certain error codes also map to standard Python built-in exceptions:
 
-    - TimeoutError: command or HTTP timeout (ErrorCode::CommandTimeout, HttpTimeout)
+    - SandboxTimeoutError: command or HTTP timeout (ErrorCode::CommandTimeout, HttpTimeout)
     - FileNotFoundError: file not found (ErrorCode::FileNotFound, IO NotFound)
     - PermissionError: access denied (ErrorCode::FilePermissionDenied, IO PermissionDenied)
     - ValueError: invalid configuration (ErrorCode::InvalidConfig)
