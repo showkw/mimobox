@@ -5,7 +5,7 @@ All notable changes to mimobox are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-04-26
+## [0.1.0-alpha] - 2026-04-26
 
 ### Added
 

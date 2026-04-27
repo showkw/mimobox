@@ -797,6 +797,7 @@ fn to_error(error: impl Into<String>) -> Json<ErrorResponse> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mimobox_sdk::ErrorCode;
