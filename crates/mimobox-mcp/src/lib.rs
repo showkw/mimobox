@@ -1001,7 +1001,7 @@ fn sanitize_error_message(message: &str) -> String {
         while let Some(pos) = result.find(prefix) {
             // 找到路径结束位置（空格、换行、右括号或字符串末尾）
             let end = result[pos..]
-                .find(|c: char| c == ' ' || c == '\n' || c == ')')
+                .find([' ', '\n', ')'])
                 .map(|i| pos + i)
                 .unwrap_or(result.len());
             result.replace_range(pos..end, &format!("{prefix}<redacted>"));
@@ -1010,7 +1010,7 @@ fn sanitize_error_message(message: &str) -> String {
     // 脱敏 rootfs 相关路径
     while let Some(pos) = result.find("/rootfs") {
         let end = result[pos..]
-            .find(|c: char| c == ' ' || c == '\n' || c == ')')
+            .find([' ', '\n', ')'])
             .map(|i| pos + i)
             .unwrap_or(result.len());
         result.replace_range(pos..end, "/rootfs<redacted>");

@@ -455,10 +455,10 @@ impl MacOsSandbox {
     /// 7. `(allow process-fork)` — allows fork for shell commands.
     /// 8. `(deny network*)` — denies network access.
     fn generate_policy(&self) -> String {
-        let mut rules = Vec::new();
-
-        rules.push("(version 1)".to_string());
-        rules.push("(deny default)".to_string());
+        let mut rules = vec![
+            "(version 1)".to_string(),
+            "(deny default)".to_string(),
+        ];
 
         // 文件读取：全局允许（macOS dyld/Frameworks 启动依赖大量系统路径）
         rules.push("(allow file-read*)".to_string());
