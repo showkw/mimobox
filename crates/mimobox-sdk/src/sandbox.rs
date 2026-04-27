@@ -267,7 +267,11 @@ fn validate_env_key(key: &str) -> Result<(), SdkError> {
 }
 
 fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
-    if cwd.contains("..") {
+    use std::path::Component;
+    if std::path::Path::new(cwd)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
         return Err(SdkError::Config(
             "invalid cwd: 包含路径遍历符 '..'".to_string(),
         ));

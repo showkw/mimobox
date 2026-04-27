@@ -20,7 +20,7 @@ fn os_config() -> Config {
         .isolation(IsolationLevel::Os)
         .timeout(Duration::from_secs(10))
         .memory_limit_mb(256)
-        .build()
+        .build().expect("valid config")
 }
 
 #[cfg(target_os = "linux")]
@@ -41,7 +41,7 @@ fn bench_config_builder_chain(c: &mut Criterion) {
                 .isolation(IsolationLevel::Os)
                 .timeout(Duration::from_secs(10))
                 .memory_limit_mb(256)
-                .build();
+                .build().expect("valid config");
             black_box(config);
         });
     });
