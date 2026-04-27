@@ -192,7 +192,10 @@ mod tests {
             } => {
                 assert_eq!(code, ErrorCode::CommandKilled);
                 assert_eq!(message, "process killed by seccomp");
-                assert!(suggestion.is_none());
+                assert!(
+                    suggestion.is_some(),
+                    "suggestion should be populated for CommandKilled"
+                );
             }
             other => panic!("expected sandbox error, got {other:?}"),
         }
