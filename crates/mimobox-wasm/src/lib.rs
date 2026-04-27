@@ -18,6 +18,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
+use tracing::{info, warn};
 use wasmtime::{
     Config, Engine, Linker, Module, OptLevel, Store, StoreLimits, StoreLimitsBuilder, Trap,
 };
@@ -36,27 +37,6 @@ use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
 struct StoreData {
     wasi: WasiP1Ctx,
     limits: StoreLimits,
-}
-
-/// Logging macro.
-fn wasm_logging_enabled() -> bool {
-    std::env::var_os("MIMOBOX_WASM_QUIET").is_none()
-}
-
-macro_rules! log_info {
-    ($($arg:tt)*) => {
-        if wasm_logging_enabled() {
-            eprintln!("[mimobox:wasm:info] {}", format!($($arg)*))
-        }
-    };
-}
-
-macro_rules! log_warn {
-    ($($arg:tt)*) => {
-        if wasm_logging_enabled() {
-            eprintln!("[mimobox:wasm:warn] {}", format!($($arg)*))
-        }
-    };
 }
 
 /// Fuel estimation factor: about 15 million Wasm instructions (fuel) per second, including 50% headroom.
@@ -107,7 +87,7 @@ fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
 /// Reads output and truncates it to the maximum size.
 fn truncate_output(data: Vec<u8>, label: &str) -> Vec<u8> {
     if data.len() > MAX_OUTPUT_SIZE {
-        log_warn!(
+        warn!(
             "{} output exceeded limit ({} > {} bytes), truncated",
             label,
             data.len(),
@@ -180,19 +160,19 @@ fn validate_cache_dir_security(path: &Path) -> bool {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) => {
-            log_warn!("Failed to stat cache directory {:?}: {}", path, e);
+            warn!("Failed to stat cache directory {:?}: {}", path, e);
             return false;
         }
     };
 
     if !meta.file_type().is_dir() {
-        log_warn!("Cache path is not a real directory: {:?}", path);
+        warn!("Cache path is not a real directory: {:?}", path);
         return false;
     }
 
     let uid = current_euid();
     if meta.uid() != uid {
-        log_warn!(
+        warn!(
             "Cache directory owner mismatch: path={:?}, owner={}, expected={}",
             path,
             meta.uid(),
@@ -203,7 +183,7 @@ fn validate_cache_dir_security(path: &Path) -> bool {
 
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o700 {
-        log_warn!(
+        warn!(
             "Cache directory has insecure permissions: path={:?}, mode={:o}",
             path,
             mode
@@ -216,26 +196,26 @@ fn validate_cache_dir_security(path: &Path) -> bool {
 
 fn ensure_cache_dir_security(path: &Path) -> bool {
     if let Err(e) = std::fs::create_dir_all(path) {
-        log_warn!("Failed to create cache directory {:?}: {}", path, e);
+        warn!("Failed to create cache directory {:?}: {}", path, e);
         return false;
     }
 
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) => {
-            log_warn!("Failed to stat cache directory {:?}: {}", path, e);
+            warn!("Failed to stat cache directory {:?}: {}", path, e);
             return false;
         }
     };
 
     if !meta.file_type().is_dir() {
-        log_warn!("Cache path is not a real directory: {:?}", path);
+        warn!("Cache path is not a real directory: {:?}", path);
         return false;
     }
 
     let uid = current_euid();
     if meta.uid() != uid {
-        log_warn!(
+        warn!(
             "Refusing to use cache directory with unexpected owner: path={:?}, owner={}, expected={}",
             path,
             meta.uid(),
@@ -248,7 +228,7 @@ fn ensure_cache_dir_security(path: &Path) -> bool {
     if mode != 0o700
         && let Err(e) = std::fs::set_permissions(path, Permissions::from_mode(0o700))
     {
-        log_warn!(
+        warn!(
             "Failed to tighten cache directory permissions for {:?}: {}",
             path,
             e
@@ -264,20 +244,20 @@ fn validate_cache_file_security(path: &Path) -> bool {
         Ok(meta) => meta,
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                log_warn!("Failed to stat cache file {:?}: {}", path, e);
+                warn!("Failed to stat cache file {:?}: {}", path, e);
             }
             return false;
         }
     };
 
     if !meta.file_type().is_file() {
-        log_warn!("Cache path is not a regular file: {:?}", path);
+        warn!("Cache path is not a regular file: {:?}", path);
         return false;
     }
 
     let uid = current_euid();
     if meta.uid() != uid {
-        log_warn!(
+        warn!(
             "Cache file owner mismatch: path={:?}, owner={}, expected={}",
             path,
             meta.uid(),
@@ -288,7 +268,7 @@ fn validate_cache_file_security(path: &Path) -> bool {
 
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o600 {
-        log_warn!(
+        warn!(
             "Cache file has insecure permissions: path={:?}, mode={:o}",
             path,
             mode
@@ -303,7 +283,7 @@ fn remove_file_if_exists(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => log_warn!("Failed to remove cache file {:?}: {}", path, e),
+        Err(e) => warn!("Failed to remove cache file {:?}: {}", path, e),
     }
 }
 
@@ -339,7 +319,7 @@ fn read_cache_record(path: &Path) -> Option<CacheRecord> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(e) => {
-            log_warn!("Failed to read cache record {:?}: {}", path, e);
+            warn!("Failed to read cache record {:?}: {}", path, e);
             remove_file_if_exists(path);
             return None;
         }
@@ -348,7 +328,7 @@ fn read_cache_record(path: &Path) -> Option<CacheRecord> {
     match parse_cache_record(&contents) {
         Some(record) => Some(record),
         None => {
-            log_warn!("Invalid cache record format: {:?}", path);
+            warn!("Invalid cache record format: {:?}", path);
             remove_file_if_exists(path);
             None
         }
@@ -405,7 +385,7 @@ fn write_private_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 fn write_cache_record(path: &Path, hash: &str, cache_mtime_nanos: u64) {
     let record = format!("{}:{}", hash, cache_mtime_nanos);
     if let Err(e) = write_private_file_atomic(path, record.as_bytes()) {
-        log_warn!("Failed to write cache record {:?}: {}", path, e);
+        warn!("Failed to write cache record {:?}: {}", path, e);
     }
 }
 
@@ -418,13 +398,13 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
     let before_mtime = match cache_file_mtime(path) {
         Some(mtime) => mtime,
         None => {
-            log_warn!("Failed to read cache file mtime before read: {:?}", path);
+            warn!("Failed to read cache file mtime before read: {:?}", path);
             remove_file_if_exists(path);
             return None;
         }
     };
     if before_mtime != expected_mtime_nanos {
-        log_warn!(
+        warn!(
             "Cache file mtime mismatch before read: path={:?}, expected={}, actual={}",
             path,
             expected_mtime_nanos,
@@ -437,7 +417,7 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
     let cached = match std::fs::read(path) {
         Ok(cached) => cached,
         Err(e) => {
-            log_warn!("Failed to read cache file {:?}: {}", path, e);
+            warn!("Failed to read cache file {:?}: {}", path, e);
             remove_file_if_exists(path);
             return None;
         }
@@ -451,13 +431,13 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
     let after_mtime = match cache_file_mtime(path) {
         Some(mtime) => mtime,
         None => {
-            log_warn!("Failed to read cache file mtime after read: {:?}", path);
+            warn!("Failed to read cache file mtime after read: {:?}", path);
             remove_file_if_exists(path);
             return None;
         }
     };
     if after_mtime != before_mtime || after_mtime != expected_mtime_nanos {
-        log_warn!(
+        warn!(
             "Cache file changed during read: path={:?}, expected={}, before={}, after={}",
             path,
             expected_mtime_nanos,
@@ -495,11 +475,11 @@ fn load_cached_module(
     // 因此传入 bytes 只来自本程序在同一缓存命名空间中此前 Module::serialize() 写入的受控缓存。
     match unsafe { Module::deserialize(engine, &cached) } {
         Ok(module) => {
-            log_info!("Loaded module from cache ({}): {:?}", label, wasm_path);
+            info!("Loaded module from cache ({}): {:?}", label, wasm_path);
             Some(module)
         }
         Err(e) => {
-            log_warn!("Cache deserialization failed, recompiling: {}", e);
+            warn!("Cache deserialization failed, recompiling: {}", e);
             remove_file_if_exists(cache_path);
             remove_file_if_exists(&cache_metadata_path(cache_path));
             if let Some(record_path) = record_path {
@@ -547,7 +527,7 @@ fn get_cached_module(
     let cache_dir = match cache_dir {
         Some(cache_dir) if ensure_cache_dir_security(cache_dir) => cache_dir,
         Some(cache_dir) => {
-            log_warn!(
+            warn!(
                 "Wasm cache directory is insecure; compiling without disk cache: {:?}",
                 cache_dir
             );
@@ -608,7 +588,7 @@ fn get_cached_module(
                 return Ok(module);
             }
         } else {
-            log_warn!(
+            warn!(
                 "Cache metadata hash mismatch: path={:?}, expected={}, actual={}",
                 cache_metadata_file,
                 hash,
@@ -629,17 +609,17 @@ fn get_cached_module(
                     write_cache_record(&map_file, &hash, cache_mtime_nanos);
                     write_cache_record(&cache_metadata_file, &hash, cache_mtime_nanos);
                 } else {
-                    log_warn!("Failed to record cache file mtime: {:?}", cache_path);
+                    warn!("Failed to record cache file mtime: {:?}", cache_path);
                     remove_file_if_exists(&cache_path);
                     remove_file_if_exists(&cache_metadata_file);
                     remove_file_if_exists(&map_file);
                 }
             }
-            Err(e) => log_warn!("Failed to write cache file {:?}: {}", cache_path, e),
+            Err(e) => warn!("Failed to write cache file {:?}: {}", cache_path, e),
         }
     }
 
-    log_info!("Compiled and cached module: {:?}", wasm_path);
+    info!("Compiled and cached module: {:?}", wasm_path);
     Ok(module)
 }
 
@@ -791,7 +771,7 @@ fn build_wasi_ctx(
     // 文件系统访问：仅允许 config 中配置的路径
     for path in &config.fs_readonly {
         if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
-            log_warn!(
+            warn!(
                 "Skipping read-only WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
                 path,
                 cache_dir
@@ -805,16 +785,16 @@ fn build_wasi_ctx(
                 if let Err(e) =
                     builder.preopened_dir(path, path_str, DirPerms::READ, FilePerms::READ)
                 {
-                    log_warn!("Failed to preopen read-only dir {:?}: {}", path, e);
+                    warn!("Failed to preopen read-only dir {:?}: {}", path, e);
                 }
             } else {
-                log_warn!("Read-only path does not exist: {:?}", path);
+                warn!("Read-only path does not exist: {:?}", path);
             }
         }
     }
     for path in &config.fs_readwrite {
         if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
-            log_warn!(
+            warn!(
                 "Skipping read-write WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
                 path,
                 cache_dir
@@ -827,18 +807,18 @@ fn build_wasi_ctx(
                 if let Err(e) =
                     builder.preopened_dir(path, path_str, DirPerms::all(), FilePerms::all())
                 {
-                    log_warn!("Failed to preopen read-write dir {:?}: {}", path, e);
+                    warn!("Failed to preopen read-write dir {:?}: {}", path, e);
                 }
             } else {
-                log_warn!("Read-write path does not exist: {:?}", path);
+                warn!("Read-write path does not exist: {:?}", path);
             }
         }
     }
 
     if config.deny_network {
-        log_info!("WASI network denied by SandboxConfig; no sockets are preopened");
+        info!("WASI network denied by SandboxConfig; no sockets are preopened");
     } else {
-        log_warn!(
+        warn!(
             "SandboxConfig allows network, but WASI backend cannot enable network access; keeping network denied"
         );
     }
@@ -860,11 +840,11 @@ impl Sandbox for WasmSandbox {
         let cache_dir = if ensure_cache_dir_security(&cache_dir) {
             Some(cache_dir)
         } else {
-            log_warn!("Wasm disk cache disabled because cache directory is insecure");
+            warn!("Wasm disk cache disabled because cache directory is insecure");
             None
         };
 
-        log_info!(
+        info!(
             "Created Wasm sandbox backend, memory_limit={:?}MB, timeout={:?}s, cache_dir={:?}",
             config.memory_limit_mb,
             config.timeout_secs,
@@ -999,7 +979,7 @@ impl Sandbox for WasmSandbox {
                         if let Some(exit) = find_exit_code(&e) {
                             Some(exit)
                         } else if is_fuel_exhausted(&store) || is_epoch_interrupt(&e) {
-                            log_warn!(
+                            warn!(
                                 "Execution timed out (fuel exhausted or epoch deadline exceeded)"
                             );
                             let elapsed = start.elapsed();
@@ -1015,10 +995,10 @@ impl Sandbox for WasmSandbox {
                                 timed_out: true,
                             });
                         } else if is_memory_trap(&e) {
-                            log_info!("Wasm memory limit exceeded, mapping to exit code 1");
+                            info!("Wasm memory limit exceeded, mapping to exit code 1");
                             Some(1)
                         } else {
-                            log_warn!("Wasm execution error: {}", e);
+                            warn!("Wasm execution error: {}", e);
                             None
                         }
                     }
@@ -1033,10 +1013,10 @@ impl Sandbox for WasmSandbox {
                             if let Some(exit) = find_exit_code(&e) {
                                 Some(exit)
                             } else if is_memory_trap(&e) {
-                                log_info!("Wasm memory limit exceeded, mapping to exit code 1");
+                                info!("Wasm memory limit exceeded, mapping to exit code 1");
                                 Some(1)
                             } else {
-                                log_warn!("main function execution failed: {}", e);
+                                warn!("main function execution failed: {}", e);
                                 None
                             }
                         }
@@ -1056,7 +1036,7 @@ impl Sandbox for WasmSandbox {
         let stdout = truncate_output(stdout_reader.contents().to_vec(), "stdout");
         let stderr = truncate_output(stderr_reader.contents().to_vec(), "stderr");
 
-        log_info!(
+        info!(
             "Wasm execution completed, exit_code={:?}, elapsed={:.2}ms",
             exit_code,
             elapsed.as_secs_f64() * 1000.0
@@ -1072,7 +1052,7 @@ impl Sandbox for WasmSandbox {
     }
 
     fn destroy(self) -> Result<(), SandboxError> {
-        log_info!("Destroying Wasm sandbox backend");
+        info!("Destroying Wasm sandbox backend");
         Ok(())
     }
 }

@@ -19,6 +19,7 @@ wasmtime-wasi.workspace = true
 sha2.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+tracing.workspace = true
 
 [features]
 default = []

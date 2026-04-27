@@ -318,15 +318,6 @@ impl SandboxConfig {
             ));
         }
 
-        if let Some(cpu_quota_us) = self.cpu_quota_us {
-            if cpu_quota_us > self.cpu_period_us {
-                eprintln!(
-                    "警告：cpu_quota_us={cpu_quota_us} 大于 cpu_period_us={}，允许超额分配",
-                    self.cpu_period_us
-                );
-            }
-        }
-
         Ok(())
     }
 }
