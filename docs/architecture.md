@@ -90,7 +90,7 @@ The current Cargo workspace contains 8 crates:
 |-- crates/mimobox-mcp
 |    |-- rmcp server
 |    |-- stdio transport
-|    `-- 10 MCP tools
+|    `-- 11 MCP tools
 |
 `-- crates/mimobox-python
      |-- PyO3 module
@@ -275,7 +275,7 @@ MimoboxServer
 
 `ManagedSandbox` stores an SDK `Sandbox` instance, creation timestamp, and runtime duration statistics. MCP tool functions deserialize request parameters through `Parameters<T>`, then call the SDK to complete creation, execution, file, snapshot, fork, and HTTP operations.
 
-The server currently exposes 10 tools:
+The server currently exposes 11 tools:
 
 | Tool | Description |
 | --- | --- |
@@ -289,6 +289,7 @@ The server currently exposes 10 tools:
 | `snapshot` | Create a microVM memory snapshot |
 | `fork` | Fork a microVM sandbox based on CoW |
 | `http_request` | Send an HTTP request through the controlled proxy |
+| `list_dir` | List directory contents inside a sandbox |
 
 When `execute_code` and `execute_command` are called without `sandbox_id`, they create a temporary sandbox and automatically destroy it after execution completes.
 

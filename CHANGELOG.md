@@ -13,7 +13,7 @@ and version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Added a unified Rust SDK: `Sandbox`, `Config`, builder configuration, command execution, streaming output, file read/write, directory listing, HTTP requests, snapshots, Fork, PTY, resource closing, and related APIs.
 - Added a Python SDK (PyO3): covering command execution, code execution, streaming output, working directory parameters, directory listing, file transfer, HTTP requests, snapshots, Fork, `close()`, type stubs, and structured lifecycle exceptions.
 - Added CLI tooling: command execution, JSON output, PTY sessions, snapshot management, environment diagnostics, initialization, shell completions, MCP initialization, and automatic backend routing.
-- Added the MCP Server crate, providing stdio transport and 10 sandbox tools based on rmcp, enabling Agents to invoke mimobox capabilities through MCP.
+- Added the MCP Server crate, providing stdio transport and 11 sandbox tools based on rmcp, enabling Agents to invoke mimobox capabilities through MCP.
 - Added the Linux OS sandbox backend: Landlock, Seccomp-bpf, Namespaces, cgroups v2, network-deny by default, resource limits, and fail-closed security semantics.
 - Added the macOS OS sandbox backend: local sandboxed execution and file access restrictions based on Seatbelt.
 - Added the Wasm sandbox backend: lightweight isolated execution based on Wasmtime, WASI Preview 2, and the Component Model.

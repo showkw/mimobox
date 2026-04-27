@@ -8,7 +8,7 @@ This document describes how `mimobox-mcp` runs, its tool list, parameter structu
 
 `mimobox-mcp` is the MCP Server implementation for mimobox. It is built on the `rmcp` framework and communicates with MCP clients through stdio transport.
 
-The current service exposes 10 tools covering:
+The current service exposes 11 tools covering:
 
 - Sandbox lifecycle management.
 - Command and code execution.
@@ -42,6 +42,7 @@ Tool requests are deserialized into Rust request structures through `Parameters<
 | `snapshot` | Creates a memory snapshot of a microVM sandbox | `sandbox_id` | `sandbox_id`, `size_bytes` |
 | `fork` | Forks a microVM sandbox (CoW) | `sandbox_id` | `original_sandbox_id`, `new_sandbox_id` |
 | `http_request` | Sends an HTTP request through a controlled proxy | `sandbox_id`, `url`, `method` | `sandbox_id`, `status`, `body` |
+| `list_dir` | Lists directory contents inside a sandbox | `sandbox_id`, `path`, `depth` (optional) | `sandbox_id`, `entries[]` with name, type, and size |
 
 ## 3. Tool Details
 
