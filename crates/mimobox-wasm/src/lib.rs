@@ -13,7 +13,7 @@
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -694,6 +694,63 @@ fn global_engine() -> Result<Arc<Engine>, SandboxError> {
         .map_err(|e| SandboxError::ExecutionFailed(e.clone()))
 }
 
+/// 检查路径是否是缓存目录的祖先或后代（基于 canonicalize 的双向检查）。
+///
+/// 使用 canonicalize() 解析符号链接和 .. 路径组件，防止攻击者通过符号链接
+/// 将 preopen 路径指向缓存目录的祖先，从而绕过保护。
+///
+/// 安全模型：guest 不得获得任何覆盖缓存目录的 preopen（无论是只读还是读写），
+/// 因为 Module::deserialize 是 unsafe 的，要求缓存文件可信。
+fn is_path_cache_ancestor(path: &Path, cache_dir: &Path) -> bool {
+    let Ok(canonical_path) = path.canonicalize() else {
+        // 路径不存在时无法 canonicalize，安全起见保守处理：回退到词法检查。
+        return is_lexical_ancestor(path, cache_dir);
+    };
+    let Ok(canonical_cache) = cache_dir.canonicalize() else {
+        return false;
+    };
+
+    canonical_path == canonical_cache
+        || canonical_path.starts_with(&canonical_cache)
+        || canonical_cache.starts_with(&canonical_path)
+}
+
+/// 不存在路径的保守回退：词法前缀检查。
+///
+/// 当路径不存在无法 canonicalize 时，退而求其次检查词法前缀关系。
+/// 这种保守策略确保即使路径尚未创建，也不会意外暴露缓存目录。
+fn is_lexical_ancestor(path: &Path, cache_dir: &Path) -> bool {
+    let normalize = |path: &Path| -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !normalized.pop()
+                        && !matches!(
+                            normalized.components().next_back(),
+                            Some(Component::RootDir)
+                        )
+                    {
+                        normalized.push(component.as_os_str());
+                    }
+                }
+                Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+        normalized
+    };
+
+    let normalized_path = normalize(path);
+    let normalized_cache = normalize(cache_dir);
+
+    normalized_path == normalized_cache
+        || normalized_path.starts_with(&normalized_cache)
+        || normalized_cache.starts_with(&normalized_path)
+}
+
 /// Builds a WASI Preview 1 context.
 ///
 /// Security design:
@@ -716,10 +773,6 @@ fn build_wasi_ctx(
 ) -> WasiP1Ctx {
     let mut builder = WasiCtxBuilder::new();
 
-    let is_path_cache_ancestor = |preopen_path: &Path| -> bool {
-        cache_dir.is_some_and(|cache_dir| cache_dir.starts_with(preopen_path))
-    };
-
     // 设置命令行参数
     for arg in args {
         builder.arg(arg);
@@ -737,7 +790,7 @@ fn build_wasi_ctx(
 
     // 文件系统访问：仅允许 config 中配置的路径
     for path in &config.fs_readonly {
-        if is_path_cache_ancestor(path) {
+        if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
             log_warn!(
                 "Skipping read-only WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
                 path,
@@ -760,7 +813,7 @@ fn build_wasi_ctx(
         }
     }
     for path in &config.fs_readwrite {
-        if is_path_cache_ancestor(path) {
+        if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
             log_warn!(
                 "Skipping read-write WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
                 path,
@@ -1194,6 +1247,8 @@ pub fn run_wasm_benchmark(
 mod tests {
     use super::*;
     use mimobox_core::Sandbox;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use wasmtime::{Instance, Store};
 
     fn test_config() -> SandboxConfig {
@@ -1237,6 +1292,57 @@ mod tests {
             result.is_ok(),
             "Failed to destroy sandbox: {:?}",
             result.err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cache_preopen_symlink_to_cache_ancestor_is_rejected() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+        let cache_dir = root.join("cache");
+        let link_path = root.join("preopen-link");
+
+        std::fs::create_dir(&cache_dir).expect("Failed to create cache dir");
+        symlink(root, &link_path).expect("Failed to create symlink");
+
+        assert!(
+            is_path_cache_ancestor(&link_path, &cache_dir),
+            "symlink 指向缓存目录祖先时必须拒绝 preopen"
+        );
+    }
+
+    #[test]
+    fn test_cache_preopen_parent_dir_component_is_rejected() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+        let cache_dir = root.join("cache");
+        let nested_cache_dir = cache_dir.join("nested");
+        let work_dir = root.join("work");
+        let preopen_path = work_dir.join("..").join("cache").join("nested");
+
+        std::fs::create_dir_all(&nested_cache_dir).expect("Failed to create nested cache dir");
+        std::fs::create_dir(&work_dir).expect("Failed to create work dir");
+
+        assert!(
+            is_path_cache_ancestor(&preopen_path, &cache_dir),
+            ".. 组件解析后指向缓存目录后代时必须拒绝 preopen"
+        );
+    }
+
+    #[test]
+    fn test_cache_preopen_non_ancestor_path_is_allowed() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let root = temp_dir.path();
+        let cache_dir = root.join("cache");
+        let sibling_dir = root.join("cache-sibling");
+
+        std::fs::create_dir(&cache_dir).expect("Failed to create cache dir");
+        std::fs::create_dir(&sibling_dir).expect("Failed to create sibling dir");
+
+        assert!(
+            !is_path_cache_ancestor(&sibling_dir, &cache_dir),
+            "普通兄弟路径不能因字符串前缀相同被误判为缓存目录祖先或后代"
         );
     }
 
