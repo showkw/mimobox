@@ -43,6 +43,8 @@ mod tracing {
 create_exception!(mimobox, SandboxError, pyo3::exceptions::PyException);
 create_exception!(mimobox, SandboxTimeoutError, SandboxError);
 create_exception!(mimobox, SandboxProcessError, SandboxError);
+create_exception!(mimobox, SandboxMemoryError, SandboxError);
+create_exception!(mimobox, SandboxCpuLimitError, SandboxError);
 create_exception!(mimobox, SandboxHttpError, SandboxError);
 create_exception!(mimobox, SandboxLifecycleError, SandboxError);
 
@@ -1096,6 +1098,8 @@ fn map_sdk_error(error: SdkError) -> PyErr {
                 ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => {
                     SandboxTimeoutError::new_err(detail)
                 }
+                ErrorCode::MemoryLimitExceeded => SandboxMemoryError::new_err(detail),
+                ErrorCode::CpuLimitExceeded => SandboxCpuLimitError::new_err(detail),
                 ErrorCode::FileNotFound => PyFileNotFoundError::new_err(detail),
                 ErrorCode::FilePermissionDenied => PyPermissionError::new_err(detail),
                 ErrorCode::FileTooLarge => SandboxError::new_err(detail),
@@ -1152,6 +1156,8 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SandboxError", py.get_type::<SandboxError>())?;
     module.add("SandboxTimeoutError", py.get_type::<SandboxTimeoutError>())?;
     module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
+    module.add("SandboxMemoryError", py.get_type::<SandboxMemoryError>())?;
+    module.add("SandboxCpuLimitError", py.get_type::<SandboxCpuLimitError>())?;
     module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
     module.add(
         "SandboxLifecycleError",

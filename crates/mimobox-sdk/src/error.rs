@@ -99,13 +99,33 @@ impl SdkError {
                 message: "command execution timed out".into(),
                 suggestion: Some("increase Config.timeout or per-command timeout".into()),
             },
-            mimobox_core::SandboxError::ExecutionFailed(msg) => Self::Sandbox {
-                code: ErrorCode::CommandKilled,
-                message: msg,
-                suggestion: Some(
-                    "Command may have been killed due to memory limits or seccomp policy. Check sandbox resource limits.".to_string(),
-                ),
-            },
+            mimobox_core::SandboxError::ExecutionFailed(msg) => {
+                let msg_lower = msg.to_lowercase();
+                let code = if msg_lower.contains("oom")
+                    || msg_lower.contains("memory")
+                    || msg_lower.contains("memory_limit")
+                    || msg_lower.contains("out of memory")
+                {
+                    ErrorCode::MemoryLimitExceeded
+                } else if msg_lower.contains("cpu")
+                    || msg_lower.contains("cpu_quota")
+                    || msg_lower.contains("cpu_limit")
+                {
+                    ErrorCode::CpuLimitExceeded
+                } else {
+                    ErrorCode::CommandKilled
+                };
+                let suggestion = match &code {
+                    ErrorCode::MemoryLimitExceeded => "Increase Config.memory_limit_mb or optimize the command's memory usage.".to_string(),
+                    ErrorCode::CpuLimitExceeded => "Increase Config.cpu_quota_us or optimize the command's CPU usage.".to_string(),
+                    _ => "Command may have been killed due to seccomp policy or invalid input. Check sandbox resource limits.".to_string(),
+                };
+                Self::Sandbox {
+                    code,
+                    message: msg,
+                    suggestion: Some(suggestion),
+                }
+            }
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
@@ -196,6 +216,32 @@ mod tests {
                     suggestion.is_some(),
                     "suggestion should be populated for CommandKilled"
                 );
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_failed_with_oom_maps_to_memory_limit_exceeded() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
+            "process killed by OOM killer".to_string(),
+        ));
+        match error {
+            SdkError::Sandbox { code, .. } => {
+                assert_eq!(code, ErrorCode::MemoryLimitExceeded);
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_failed_with_cpu_maps_to_cpu_limit_exceeded() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
+            "cpu_quota exceeded".to_string(),
+        ));
+        match error {
+            SdkError::Sandbox { code, .. } => {
+                assert_eq!(code, ErrorCode::CpuLimitExceeded);
             }
             other => panic!("expected sandbox error, got {other:?}"),
         }

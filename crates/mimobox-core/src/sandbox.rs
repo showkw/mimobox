@@ -76,6 +76,10 @@ pub enum ErrorCode {
     InvalidConfig,
     /// The current platform or backend does not support this capability.
     UnsupportedPlatform,
+    /// 沙箱内存超限被杀（OOM killer 或 cgroups memory.limit）。
+    MemoryLimitExceeded,
+    /// 沙箱 CPU 配额耗尽（cgroups cpu.stat throttle）。
+    CpuLimitExceeded,
 }
 
 impl ErrorCode {
@@ -101,6 +105,8 @@ impl ErrorCode {
             Self::SandboxCreateFailed => "sandbox_create_failed",
             Self::InvalidConfig => "invalid_config",
             Self::UnsupportedPlatform => "unsupported_platform",
+            Self::MemoryLimitExceeded => "memory_limit_exceeded",
+            Self::CpuLimitExceeded => "cpu_limit_exceeded",
             _ => "unknown_error",
         }
     }
