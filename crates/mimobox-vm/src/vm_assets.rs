@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use crate::vm::{MicrovmConfig, MicrovmError};
+use crate::vm::{MicrovmConfig, MicrovmError, sanitize_path_display};
 
 const DEFAULT_VM_ASSETS_SUBDIR: &str = ".mimobox/assets";
 
@@ -51,14 +51,14 @@ pub fn microvm_config_from_assets_dir(
     if !kernel_path.exists() {
         return Err(MicrovmError::InvalidConfig(format!(
             "missing kernel image: {}",
-            kernel_path.display()
+            sanitize_path_display(&kernel_path)
         )));
     }
 
     if !rootfs_path.exists() {
         return Err(MicrovmError::InvalidConfig(format!(
             "missing rootfs: {}",
-            rootfs_path.display()
+            sanitize_path_display(&rootfs_path)
         )));
     }
 

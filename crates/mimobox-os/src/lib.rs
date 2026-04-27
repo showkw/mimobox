@@ -50,6 +50,10 @@ mod pty;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxSandbox;
 
+/// 实际应用的隔离级别报告
+#[cfg(target_os = "linux")]
+pub use linux::IsolationReport;
+
 /// Warm pool types for reusing pre-initialized OS sandboxes.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool, run_pool_benchmark};

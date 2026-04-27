@@ -10,7 +10,7 @@ use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::vm::{MicrovmConfig, MicrovmError};
+use crate::vm::{MicrovmConfig, MicrovmError, sanitize_path_display};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
 const SNAPSHOT_VERSION: u16 = 2;
@@ -230,7 +230,7 @@ fn verify_memory_hash(
     let Some(expected_hash) = expected_hash else {
         tracing::warn!(
             "文件快照缺少 memory_hash，跳过 memory.bin 完整性校验: {}",
-            memory_path.display()
+            sanitize_path_display(memory_path)
         );
         return Ok(());
     };
@@ -241,7 +241,7 @@ fn verify_memory_hash(
 
     Err(MicrovmError::SnapshotFormat(format!(
         "memory.bin hash mismatch ({}): expected {expected_hash}, actual {actual_hash}",
-        memory_path.display()
+        sanitize_path_display(memory_path)
     )))
 }
 
@@ -320,7 +320,7 @@ fn state_file_path(memory_path: &Path) -> Result<PathBuf, MicrovmError> {
     let snapshot_dir = memory_path.parent().ok_or_else(|| {
         MicrovmError::SnapshotFormat(format!(
             "snapshot file path missing parent directory: {}",
-            memory_path.display()
+            sanitize_path_display(memory_path)
         ))
     })?;
     Ok(snapshot_dir.join(SNAPSHOT_STATE_FILE_NAME))
@@ -352,7 +352,7 @@ fn load_snapshot_state_from_memory_file(
     let state: SnapshotStateFile = serde_json::from_slice(&state_bytes).map_err(|error| {
         MicrovmError::SnapshotFormat(format!(
             "failed to parse state.json ({}): {error}",
-            state_path.display()
+            sanitize_path_display(&state_path)
         ))
     })?;
 

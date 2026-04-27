@@ -30,7 +30,10 @@ use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_request};
 use crate::snapshot::MicrovmSnapshot;
-use crate::vm::{GuestCommandResult, GuestFileErrorKind, MicrovmConfig, MicrovmError, StreamEvent};
+use crate::vm::{
+    GuestCommandResult, GuestFileErrorKind, MicrovmConfig, MicrovmError, StreamEvent,
+    sanitize_path_display,
+};
 use crate::vm::{GuestExecOptions, LifecycleError};
 
 mod boot;
@@ -133,7 +136,7 @@ impl AssetCache {
         let metadata = fs::metadata(path).map_err(|err| {
             MicrovmError::Backend(format!(
                 "failed to read asset metadata: {}: {err}",
-                path.display()
+                sanitize_path_display(path)
             ))
         })?;
         let mtime = metadata
@@ -154,7 +157,7 @@ impl AssetCache {
             .map_err(|err| {
                 MicrovmError::Backend(format!(
                     "failed to read asset file: {}: {err}",
-                    path.display()
+                    sanitize_path_display(path)
                 ))
             })?
             .into();
@@ -1110,7 +1113,7 @@ impl KvmBackend {
     fn load_rootfs_metadata(&mut self) -> Result<(), MicrovmError> {
         let metadata = format!(
             "rootfs={};size={};initrd={:#x};cmdline={:#x};transport={:?}",
-            self.config.rootfs_path.display(),
+            sanitize_path_display(&self.config.rootfs_path),
             self.rootfs_bytes.len(),
             self.initrd_addr,
             self.cmdline_addr,

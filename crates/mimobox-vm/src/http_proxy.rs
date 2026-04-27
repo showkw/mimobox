@@ -381,19 +381,22 @@ fn validate_dns_resolution(url: &reqwest::Url) -> Result<IpAddr, HttpProxyError>
         .to_socket_addrs()
         .map_err(|err| HttpProxyError::ConnectFail(format!("DNS resolution failed: {err}")))?;
 
+    select_verified_ip(host, addrs)
+}
+
+fn select_verified_ip(
+    host: &str,
+    addrs: impl IntoIterator<Item = SocketAddr>,
+) -> Result<IpAddr, HttpProxyError> {
     let mut has_addr = false;
-    let mut verified_ip = None;
 
     for addr in addrs {
         has_addr = true;
         let ip = addr.ip();
         if is_private_ip(ip) {
-            return Err(HttpProxyError::DnsRebind(format!(
-                "{host} resolved to private address {}",
-                ip
-            )));
+            continue;
         }
-        verified_ip.get_or_insert(ip);
+        return Ok(ip);
     }
 
     if !has_addr {
@@ -402,9 +405,9 @@ fn validate_dns_resolution(url: &reqwest::Url) -> Result<IpAddr, HttpProxyError>
         )));
     }
 
-    verified_ip.ok_or_else(|| {
-        HttpProxyError::DnsRebind(format!("{host} resolved only to private addresses"))
-    })
+    Err(HttpProxyError::DnsRebind(format!(
+        "{host} resolved only to private addresses"
+    )))
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -513,5 +516,16 @@ mod tests {
 
         let err = validate_dns_resolution(&url).expect_err("localhost 必须被拒绝");
         assert!(matches!(err, HttpProxyError::DnsRebind(_)));
+    }
+
+    #[test]
+    fn dns_resolution_selects_first_public_address() {
+        let private_addr = SocketAddr::from(([127, 0, 0, 1], 443));
+        let public_addr = SocketAddr::from(([8, 8, 8, 8], 443));
+
+        let ip = select_verified_ip("example.com", [private_addr, public_addr])
+            .expect("存在非私有 IP 时必须返回该 IP");
+
+        assert_eq!(ip, public_addr.ip());
     }
 }

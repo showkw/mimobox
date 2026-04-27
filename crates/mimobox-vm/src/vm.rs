@@ -23,6 +23,13 @@ use crate::vm_assets::resolve_vm_assets_dir;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::kvm::{KvmBackend, restore_runtime_state};
 
+/// 返回适合外部错误消息展示的脱敏路径片段。
+pub(crate) fn sanitize_path_display(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<path>".to_string())
+}
+
 /// Configuration for a single microVM instance.
 ///
 /// The configuration describes the guest CPU and memory shape plus the host-side
@@ -111,14 +118,14 @@ impl MicrovmConfig {
         if !self.kernel_path.exists() {
             return Err(MicrovmError::InvalidConfig(format!(
                 "kernel_path does not exist: {}",
-                self.kernel_path.display()
+                sanitize_path_display(&self.kernel_path)
             )));
         }
 
         if !self.rootfs_path.exists() {
             return Err(MicrovmError::InvalidConfig(format!(
                 "rootfs_path does not exist: {}",
-                self.rootfs_path.display()
+                sanitize_path_display(&self.rootfs_path)
             )));
         }
 

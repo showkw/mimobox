@@ -79,15 +79,26 @@ fn command_log_summary(cmd: &[String]) -> String {
 
 const NAMESPACE_FALLBACK_MARKER: &str = "unshare(full_flags) failed";
 
-fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
+/// 检测 stderr 中是否包含 namespace 降级标记
+fn namespace_fallback_detected(stderr_buf: &[u8]) -> bool {
     let stderr = String::from_utf8_lossy(stderr_buf);
-    if stderr
+    stderr
         .lines()
         .any(|line| line.contains(NAMESPACE_FALLBACK_MARKER))
-    {
+}
+
+fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
+    if namespace_fallback_detected(stderr_buf) {
         tracing::warn!(
             "命名空间降级: unshare(full_flags) 失败，已回退到不含 user/pid namespace 的隔离模式"
         );
+    }
+}
+
+fn apply_namespace_fallback_to_report(report: &mut IsolationReport, stderr_buf: &[u8]) {
+    if namespace_fallback_detected(stderr_buf) {
+        report.user_namespace = false;
+        report.pid_namespace = false;
     }
 }
 
@@ -117,6 +128,39 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
     Ok(())
 }
 
+/// 实际应用的隔离级别报告
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsolationReport {
+    /// 是否成功启用 user namespace。
+    pub user_namespace: bool,
+    /// 是否成功启用 pid namespace。
+    pub pid_namespace: bool,
+    /// 是否成功启用 network namespace。
+    pub network_namespace: bool,
+    /// 是否成功启用 mount namespace。
+    pub mount_namespace: bool,
+    /// 是否成功启用 ipc namespace。
+    pub ipc_namespace: bool,
+    /// 是否成功启用 Landlock。
+    pub landlock: bool,
+    /// 是否成功启用 seccomp。
+    pub seccomp: bool,
+}
+
+impl Default for IsolationReport {
+    fn default() -> Self {
+        Self {
+            user_namespace: true,
+            pid_namespace: true,
+            network_namespace: true,
+            mount_namespace: true,
+            ipc_namespace: true,
+            landlock: true,
+            seccomp: true,
+        }
+    }
+}
+
 /// Linux OS-level sandbox backend.
 ///
 /// `LinuxSandbox` executes commands in a child process and applies OS isolation
@@ -127,6 +171,7 @@ pub struct LinuxSandbox {
     config: SandboxConfig,
     #[cfg(target_os = "linux")]
     last_cgroup_path: Option<PathBuf>,
+    last_isolation_report: IsolationReport,
 }
 
 /// Writes to a file descriptor in the child process without depending on Rust `std`, making it safe after `fork`.
@@ -626,6 +671,11 @@ impl LinuxSandbox {
         }
     }
 
+    /// 返回最近一次执行的隔离级别报告
+    pub fn isolation_report(&self) -> IsolationReport {
+        self.last_isolation_report
+    }
+
     /// Runs the child-process main flow by applying security policies before executing the command.
     ///
     /// Execution order (security policies are applied as early as possible to minimize race windows):
@@ -739,10 +789,13 @@ impl Sandbox for LinuxSandbox {
             config,
             #[cfg(target_os = "linux")]
             last_cgroup_path: None,
+            last_isolation_report: IsolationReport::default(),
         })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
+        self.last_isolation_report = IsolationReport::default();
+
         if cmd.is_empty() {
             return Err(SandboxError::ExecutionFailed(
                 "command must not be empty".into(),
@@ -866,6 +919,10 @@ impl Sandbox for LinuxSandbox {
                 match wait_result {
                     WaitStatus::Exited(_, code) => {
                         log_namespace_fallback_from_stderr(&stderr_buf);
+                        apply_namespace_fallback_to_report(
+                            &mut self.last_isolation_report,
+                            &stderr_buf,
+                        );
                         tracing::info!(
                             "子进程退出, code={}, elapsed={:.2}ms",
                             code,
@@ -881,6 +938,10 @@ impl Sandbox for LinuxSandbox {
                     }
                     WaitStatus::Signaled(_, sig, _) => {
                         log_namespace_fallback_from_stderr(&stderr_buf);
+                        apply_namespace_fallback_to_report(
+                            &mut self.last_isolation_report,
+                            &stderr_buf,
+                        );
                         let code = -(sig as i32);
                         if timed_out {
                             tracing::warn!(
@@ -904,6 +965,10 @@ impl Sandbox for LinuxSandbox {
                     }
                     _ => {
                         log_namespace_fallback_from_stderr(&stderr_buf);
+                        apply_namespace_fallback_to_report(
+                            &mut self.last_isolation_report,
+                            &stderr_buf,
+                        );
                         Ok(SandboxResult {
                             stdout: stdout_buf,
                             stderr: stderr_buf,
@@ -1091,6 +1156,61 @@ mod tests {
         config.timeout_secs = Some(10);
         config.memory_limit_mb = Some(256);
         config
+    }
+
+    #[test]
+    fn test_isolation_report_default_all_true() {
+        let report = IsolationReport::default();
+        assert!(report.user_namespace, "默认 user_namespace 应为 true");
+        assert!(report.pid_namespace, "默认 pid_namespace 应为 true");
+        assert!(report.network_namespace, "默认 network_namespace 应为 true");
+        assert!(report.mount_namespace, "默认 mount_namespace 应为 true");
+        assert!(report.ipc_namespace, "默认 ipc_namespace 应为 true");
+        assert!(report.landlock, "默认 landlock 应为 true");
+        assert!(report.seccomp, "默认 seccomp 应为 true");
+    }
+
+    #[test]
+    fn test_namespace_fallback_detected_with_marker() {
+        let stderr = b"some output\nunshare(full_flags) failed: EPERM, retrying without user/pid ns\nmore output";
+        assert!(namespace_fallback_detected(stderr), "应检测到降级 marker");
+    }
+
+    #[test]
+    fn test_namespace_fallback_detected_without_marker() {
+        let stderr = b"normal output without any fallback marker";
+        assert!(
+            !namespace_fallback_detected(stderr),
+            "不应检测到降级 marker"
+        );
+    }
+
+    #[test]
+    fn test_namespace_fallback_updates_report() {
+        let mut report = IsolationReport::default();
+        let stderr = b"unshare(full_flags) failed: EPERM, retrying without user/pid ns";
+
+        apply_namespace_fallback_to_report(&mut report, stderr);
+
+        assert!(!report.user_namespace, "降级后 user_namespace 应为 false");
+        assert!(!report.pid_namespace, "降级后 pid_namespace 应为 false");
+        assert!(
+            report.network_namespace,
+            "network namespace 不应被标记为降级"
+        );
+        assert!(report.mount_namespace, "mount namespace 不应被标记为降级");
+        assert!(report.ipc_namespace, "ipc namespace 不应被标记为降级");
+        assert!(report.landlock, "Landlock 不应被 namespace 降级影响");
+        assert!(report.seccomp, "Seccomp 不应被 namespace 降级影响");
+    }
+
+    #[test]
+    fn test_isolation_report_initial_state() {
+        let config = SandboxConfig::default();
+        let sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let report = sb.isolation_report();
+        assert!(report.user_namespace, "初始状态 user_namespace 应为 true");
+        assert!(report.pid_namespace, "初始状态 pid_namespace 应为 true");
     }
 
     fn assert_unsupported_operation<T>(operation: &str, result: Result<T, SandboxError>) {
