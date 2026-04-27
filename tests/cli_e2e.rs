@@ -182,7 +182,10 @@ fn explicit_os_backend() {
     assert!(response.elapsed_ms >= 0.0, "elapsed_ms 不应为负数");
     assert_eq!(response.memory_mb, Some(256));
     assert_eq!(response.timeout_secs, Some(30));
-    assert!(response.deny_network, "默认应设置 deny_network（网络默认拒绝）");
+    assert!(
+        response.deny_network,
+        "默认应设置 deny_network（网络默认拒绝）"
+    );
     assert!(!response.allow_fork, "默认不应允许 fork");
     assert!(
         response.stdout.contains("hello"),

@@ -46,6 +46,7 @@ pub(crate) enum Backend {
     Auto,
     Os,
     Wasm,
+    #[value(name = "kvm", help = "KVM-based microVM backend")]
     Kvm,
 }
 
@@ -621,19 +622,19 @@ pub(crate) fn validate_resource_args(
 ) -> Result<(), CliError> {
     if let Some(memory) = memory.filter(|value| !(16..=32768).contains(value)) {
         return Err(CliError::Args(format!(
-            "memory 参数必须在 16..=32768 MB 范围内，当前值：{memory}"
+            "memory must be between 16 and 32768 MB, got: {memory}"
         )));
     }
 
     if let Some(timeout) = timeout.filter(|value| *value != 0 && !(1..=3600).contains(value)) {
         return Err(CliError::Args(format!(
-            "timeout 参数必须为 0（无超时）或在 1..=3600 秒范围内，当前值：{timeout}"
+            "timeout must be 0 (no timeout) or between 1 and 3600 seconds, got: {timeout}"
         )));
     }
 
     if !(1..=16).contains(&vcpu_count) {
         return Err(CliError::Args(format!(
-            "vcpu_count 参数必须在 1..=16 范围内，当前值：{vcpu_count}"
+            "vcpu_count must be between 1 and 16, got: {vcpu_count}"
         )));
     }
 
@@ -779,9 +780,12 @@ mod tests {
             .expect_err("memory higher than 32 GB should be rejected");
 
         assert_eq!(low.code(), "args_error");
-        assert!(low.to_string().contains("memory 参数必须在 16..=32768 MB"));
+        assert!(
+            low.to_string()
+                .contains("memory must be between 16 and 32768 MB")
+        );
         assert_eq!(high.code(), "args_error");
-        assert!(high.to_string().contains("当前值：32769"));
+        assert!(high.to_string().contains("got: 32769"));
     }
 
     #[test]
@@ -793,7 +797,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("timeout 参数必须为 0（无超时）或在 1..=3600 秒范围内")
+                .contains("timeout must be 0 (no timeout) or between 1 and 3600 seconds")
         );
     }
 
@@ -805,8 +809,8 @@ mod tests {
             .expect_err("more than 16 vCPUs should be rejected");
 
         assert_eq!(zero.code(), "args_error");
-        assert!(zero.to_string().contains("当前值：0"));
+        assert!(zero.to_string().contains("got: 0"));
         assert_eq!(high.code(), "args_error");
-        assert!(high.to_string().contains("当前值：17"));
+        assert!(high.to_string().contains("got: 17"));
     }
 }

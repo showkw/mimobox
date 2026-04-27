@@ -349,7 +349,9 @@ impl Default for MimoboxServer {
 
 #[tool_router]
 impl MimoboxServer {
-    #[tool(description = "Create a reusable sandbox instance. Supports isolation levels: auto (default, routes to best backend), os (OS-level sandbox), wasm (WebAssembly sandbox), microvm (KVM-based microVM, Linux only). Optional timeout_ms and memory_limit_mb.")]
+    #[tool(
+        description = "Create a reusable sandbox instance. Supports isolation levels: auto (default, routes to best backend), os (OS-level sandbox), wasm (WebAssembly sandbox), microvm (KVM-based microVM, Linux only). Optional timeout_ms and memory_limit_mb."
+    )]
     async fn create_sandbox(
         &self,
         Parameters(request): Parameters<CreateSandboxRequest>,
@@ -480,7 +482,9 @@ impl MimoboxServer {
         }))
     }
 
-    #[tool(description = "Execute a code snippet in a sandbox. Supports languages: python, javascript, node, bash, sh. If sandbox_id is provided, runs in an existing sandbox; otherwise creates a temporary sandbox for this execution.")]
+    #[tool(
+        description = "Execute a code snippet in a sandbox. Supports languages: python, javascript, node, bash, sh. If sandbox_id is provided, runs in an existing sandbox; otherwise creates a temporary sandbox for this execution."
+    )]
     async fn execute_code(
         &self,
         Parameters(request): Parameters<ExecuteCodeRequest>,
@@ -508,7 +512,9 @@ impl MimoboxServer {
         Ok(Json(format_execute_result(result)))
     }
 
-    #[tool(description = "Read a file from a sandbox and return its content as base64. Requires microVM isolation level. The path must be absolute.")]
+    #[tool(
+        description = "Read a file from a sandbox and return its content as base64. Requires microVM isolation level. The path must be absolute."
+    )]
     async fn read_file(
         &self,
         Parameters(request): Parameters<ReadFileRequest>,
@@ -547,7 +553,9 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Write base64-encoded content to a file in a sandbox. Requires microVM isolation level. The path must be absolute.")]
+    #[tool(
+        description = "Write base64-encoded content to a file in a sandbox. Requires microVM isolation level. The path must be absolute."
+    )]
     async fn write_file(
         &self,
         Parameters(request): Parameters<WriteFileRequest>,
@@ -588,7 +596,9 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "Create a memory snapshot of a microVM-backed sandbox. The snapshot can later be restored or used to fork new sandbox instances.")]
+    #[tool(
+        description = "Create a memory snapshot of a microVM-backed sandbox. The snapshot can later be restored or used to fork new sandbox instances."
+    )]
     async fn snapshot(
         &self,
         Parameters(request): Parameters<SnapshotRequest>,
@@ -741,7 +751,9 @@ impl MimoboxServer {
         }
     }
 
-    #[tool(description = "List directory entries in a sandbox. Returns file name, type (file/dir/symlink), size, and symlink flag for each entry. Requires microVM isolation level.")]
+    #[tool(
+        description = "List directory entries in a sandbox. Returns file name, type (file/dir/symlink), size, and symlink flag for each entry. Requires microVM isolation level."
+    )]
     async fn list_dir(
         &self,
         Parameters(request): Parameters<ListDirRequest>,
@@ -820,7 +832,7 @@ impl MimoboxServer {
 impl ServerHandler for MimoboxServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents. Provides sandbox lifecycle, code execution, file transfer, snapshot, fork, and HTTP proxy tools.",
+            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents.\n\nProvides 11 tools for secure code execution and sandbox management:\n\nLIFECYCLE: create_sandbox (isolation: auto/os/wasm/microvm), destroy_sandbox, list_sandboxes\nEXECUTION: execute_code (python/node/bash/sh), execute_command (shell commands)\nFILES: read_file, write_file, list_dir (microVM only for read/write)\nADVANCED: snapshot, fork (microVM CoW memory cloning), http_request (HTTPS proxy with domain whitelist)\n\nTYPICAL WORKFLOW:\n1. create_sandbox -> get sandbox_id\n2. execute_code/execute_command with sandbox_id for persistent sessions\n3. Use snapshot+fork for fast parallel execution from pre-warmed state\n4. destroy_sandbox when done\n\nOr use execute_code/execute_command without sandbox_id for fire-and-forget ephemeral execution.",
         )
     }
 }

@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::execute_with_env`
 
-*(requires `vm` feature)*
+*(requires `vm` feature for native support; env injection via `execute()` is available on all backends in Python SDK and CLI)*
 
 ```rust
 #[cfg(feature = "vm")]
@@ -220,7 +220,7 @@ Executes a command with additional environment variables injected into the micro
 
 ### `Sandbox::execute_with_timeout`
 
-*(requires `vm` feature)*
+*(requires `vm` feature for per-command timeout; global timeout is available on all backends)*
 
 ```rust
 #[cfg(feature = "vm")]
@@ -235,7 +235,7 @@ Executes a command with a per-call timeout override. This overrides the global `
 
 ### `Sandbox::execute_with_env_and_timeout`
 
-*(requires `vm` feature)*
+*(requires `vm` feature for native env injection and per-command timeout; env injection via `execute()` is available on all backends in Python SDK and CLI; global timeout is available on all backends)*
 
 ```rust
 #[cfg(feature = "vm")]
@@ -274,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::execute_with_cwd`
 
-*(requires `vm` feature)*
+*(requires `vm` feature for native support; cwd via `execute()` is available on all backends in Python SDK and CLI)*
 
 ```rust
 #[cfg(feature = "vm")]

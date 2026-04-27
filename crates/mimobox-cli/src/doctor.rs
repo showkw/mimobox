@@ -10,10 +10,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[cfg(target_os = "linux")]
-use tracing::{info, warn};
 #[cfg(not(target_os = "linux"))]
 use tracing::info;
+#[cfg(target_os = "linux")]
+use tracing::{info, warn};
 
 const APP_HOME_SUBDIR: &str = ".mimobox";
 const ASSETS_SUBDIR: &str = ".mimobox/assets";
@@ -721,7 +721,7 @@ fn check_toolchain() -> CheckResult {
         (Some(rustc), Some(cargo)) => CheckResult {
             name: "Rust toolchain".to_string(),
             status: CheckStatus::Ok,
-            message: format!("{rustc}，{cargo}"),
+            message: format!("{rustc}, {cargo}"),
             hint: None,
         },
         (None, Some(cargo)) => CheckResult {

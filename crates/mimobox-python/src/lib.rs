@@ -58,7 +58,7 @@ create_exception!(mimobox, SandboxLifecycleError, SandboxError);
 ///
 /// * `stdout` - Standard output as a UTF-8 string (lossy decoded).
 /// * `stderr` - Standard error as a UTF-8 string (lossy decoded).
-/// * `exit_code` - Process exit code. `-1` when unavailable (e.g., timeout).
+/// * `exit_code` - Exit code of the process. `-1` when the process was killed by a signal (timeout, OOM, etc.). Use `timed_out` field and exception types (`SandboxTimeoutError`, `SandboxMemoryError`, `SandboxProcessError`) to distinguish kill reasons.
 /// * `timed_out` - Whether the command exceeded its time limit.
 #[pyclass(name = "ExecuteResult")]
 #[derive(Debug, Clone)]
@@ -80,8 +80,9 @@ impl From<ExecuteResult> for PyExecuteResult {
         Self {
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
-            // 底层在超时等场景可能无退出码，这里统一映射为 -1，
-            // 并通过 timed_out 字段让调用方区分超时与正常退出。
+            // When the underlying process was killed (timeout, OOM, etc.), exit_code is None.
+            // We map it to -1 as a sentinel value consistent with Unix convention for signal-killed processes.
+            // Callers should use the timed_out field and exception types to distinguish the kill reason.
             exit_code: result.exit_code.unwrap_or(-1),
             timed_out: result.timed_out,
             elapsed: if result.elapsed.is_zero() {
@@ -1157,7 +1158,10 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SandboxTimeoutError", py.get_type::<SandboxTimeoutError>())?;
     module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
     module.add("SandboxMemoryError", py.get_type::<SandboxMemoryError>())?;
-    module.add("SandboxCpuLimitError", py.get_type::<SandboxCpuLimitError>())?;
+    module.add(
+        "SandboxCpuLimitError",
+        py.get_type::<SandboxCpuLimitError>(),
+    )?;
     module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
     module.add(
         "SandboxLifecycleError",

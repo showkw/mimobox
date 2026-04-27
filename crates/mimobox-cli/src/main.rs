@@ -175,7 +175,10 @@ fn run() -> Result<Option<i32>, CliError> {
 
     if !is_human_readable_command {
         info!("mimobox CLI starting");
-        info!(command_type = command_type_name(&cli.command), "CLI arguments parsed");
+        info!(
+            command_type = command_type_name(&cli.command),
+            "CLI arguments parsed"
+        );
     }
 
     let response = match cli.command {

@@ -147,10 +147,16 @@ async fn test_list_dir_ephemeral() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_list_dir_with_sandbox() -> Result<()> {
     let client = setup_client().await?;
-    let create_result = call_tool_with_client(&client, "create_sandbox", json!({})).await?;
+    let create_result = call_tool_with_client(
+        &client,
+        "create_sandbox",
+        json!({"isolation_level": "microvm"}),
+    )
+    .await?;
     let sandbox_id = create_result
         .structured_content
         .as_ref()
@@ -181,10 +187,16 @@ async fn test_list_dir_with_sandbox() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_list_dir_nonexistent_path() -> Result<()> {
     let client = setup_client().await?;
-    let create_result = call_tool_with_client(&client, "create_sandbox", json!({})).await?;
+    let create_result = call_tool_with_client(
+        &client,
+        "create_sandbox",
+        json!({"isolation_level": "microvm"}),
+    )
+    .await?;
     let sandbox_id = create_result
         .structured_content
         .as_ref()

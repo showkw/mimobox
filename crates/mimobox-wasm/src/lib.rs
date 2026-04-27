@@ -185,8 +185,7 @@ fn validate_cache_dir_security(path: &Path) -> bool {
     if mode != 0o700 {
         warn!(
             "Cache directory has insecure permissions: path={:?}, mode={:o}",
-            path,
-            mode
+            path, mode
         );
         return false;
     }
@@ -230,8 +229,7 @@ fn ensure_cache_dir_security(path: &Path) -> bool {
     {
         warn!(
             "Failed to tighten cache directory permissions for {:?}: {}",
-            path,
-            e
+            path, e
         );
         return false;
     }
@@ -270,8 +268,7 @@ fn validate_cache_file_security(path: &Path) -> bool {
     if mode != 0o600 {
         warn!(
             "Cache file has insecure permissions: path={:?}, mode={:o}",
-            path,
-            mode
+            path, mode
         );
         return false;
     }
@@ -406,9 +403,7 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
     if before_mtime != expected_mtime_nanos {
         warn!(
             "Cache file mtime mismatch before read: path={:?}, expected={}, actual={}",
-            path,
-            expected_mtime_nanos,
-            before_mtime
+            path, expected_mtime_nanos, before_mtime
         );
         remove_file_if_exists(path);
         return None;
@@ -439,10 +434,7 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
     if after_mtime != before_mtime || after_mtime != expected_mtime_nanos {
         warn!(
             "Cache file changed during read: path={:?}, expected={}, before={}, after={}",
-            path,
-            expected_mtime_nanos,
-            before_mtime,
-            after_mtime
+            path, expected_mtime_nanos, before_mtime, after_mtime
         );
         remove_file_if_exists(path);
         return None;
@@ -590,9 +582,7 @@ fn get_cached_module(
         } else {
             warn!(
                 "Cache metadata hash mismatch: path={:?}, expected={}, actual={}",
-                cache_metadata_file,
-                hash,
-                record.hash
+                cache_metadata_file, hash, record.hash
             );
             remove_file_if_exists(&cache_metadata_file);
         }
@@ -773,8 +763,7 @@ fn build_wasi_ctx(
         if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
             warn!(
                 "Skipping read-only WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
-                path,
-                cache_dir
+                path, cache_dir
             );
             continue;
         }
@@ -796,8 +785,7 @@ fn build_wasi_ctx(
         if cache_dir.is_some_and(|cache_dir| is_path_cache_ancestor(path, cache_dir)) {
             warn!(
                 "Skipping read-write WASI preopen because it exposes cache ancestor: path={:?}, cache={:?}",
-                path,
-                cache_dir
+                path, cache_dir
             );
             continue;
         }
@@ -846,9 +834,7 @@ impl Sandbox for WasmSandbox {
 
         info!(
             "Created Wasm sandbox backend, memory_limit={:?}MB, timeout={:?}s, cache_dir={:?}",
-            config.memory_limit_mb,
-            config.timeout_secs,
-            cache_dir,
+            config.memory_limit_mb, config.timeout_secs, cache_dir,
         );
 
         Ok(Self {
@@ -866,9 +852,8 @@ impl Sandbox for WasmSandbox {
         }
 
         let wasm_path = Path::new(&cmd[0]);
-        let wasm_meta = std::fs::symlink_metadata(wasm_path).map_err(|_| {
-            SandboxError::ExecutionFailed("Wasm file does not exist".into())
-        })?;
+        let wasm_meta = std::fs::symlink_metadata(wasm_path)
+            .map_err(|_| SandboxError::ExecutionFailed("Wasm file does not exist".into()))?;
         if wasm_meta.file_type().is_symlink() {
             return Err(SandboxError::ExecutionFailed(
                 "Wasm file path must not be a symlink".into(),

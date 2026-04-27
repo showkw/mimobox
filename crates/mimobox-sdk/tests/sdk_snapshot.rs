@@ -15,6 +15,7 @@ fn snapshot_config() -> Config {
         .kernel_path(microvm_config.kernel_path)
         .rootfs_path(microvm_config.rootfs_path)
         .build()
+        .expect("valid snapshot config")
 }
 
 fn assert_stdout(result: mimobox_sdk::ExecuteResult, expected_stdout: &[u8]) {

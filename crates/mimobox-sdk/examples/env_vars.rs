@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::builder().isolation(IsolationLevel::MicroVm).build()?;
+    let config = Config::builder()
+        .isolation(IsolationLevel::MicroVm)
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let mut env = HashMap::new();

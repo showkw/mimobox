@@ -115,7 +115,6 @@ impl EmptyVmSlot {
         backend.set_pending_restore_profile(restore_profile);
         Ok(backend)
     }
-
 }
 
 /// Configuration for the snapshot restore pool.
