@@ -1196,6 +1196,14 @@ mod tests {
         let mut config = test_config();
         config.allow_fork = true;
         config.seccomp_profile = SeccompProfile::Network;
+        config.fs_readonly = vec![
+            "/usr".into(),
+            "/lib".into(),
+            "/lib64".into(),
+            "/bin".into(),
+            "/sbin".into(),
+        ];
+        config.fs_readwrite = vec!["/tmp".into()];
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
         let cmd = vec![

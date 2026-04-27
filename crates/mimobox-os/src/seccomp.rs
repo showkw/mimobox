@@ -762,18 +762,6 @@ fn ret(action: u32) -> SockFilter {
     }
 }
 
-fn forward_jump_offset(from: usize, to: usize, target: &str) -> u8 {
-    assert!(to > from, "BPF 跳转目标 {target} 必须位于当前指令之后");
-
-    let offset = to - from - 1;
-    assert!(
-        offset <= u8::MAX as usize,
-        "BPF 跳转到 {target} 的偏移过大: {offset}"
-    );
-
-    offset as u8
-}
-
 fn arg_constraint_for_syscall(
     nr: u32,
     constraints: &[ConstrainedSyscall],
@@ -1218,13 +1206,11 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
 /// [3]     Load seccomp_data.nr
 /// [4..]   Syscall allowlist chain
 ///         - constrained syscall: JEQ -> inline argument block, JF skips the block
-///         - unconstrained syscall: JEQ -> shared ALLOW
-/// [N-2]   TRAP (default)
-/// [N-1]   ALLOW
+///         - unconstrained syscall: JEQ -> inline ALLOW, JF skips inline ALLOW
+/// [N-1]   TRAP (default)
 /// ```
 fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec<SockFilter> {
-    let mut prog = Vec::with_capacity(4 + allowed.len() + constraints.len() * 18 + 2);
-    let mut allow_jump_indexes = Vec::new();
+    let mut prog = Vec::with_capacity(5 + allowed.len() * 2 + constraints.len() * 18);
 
     // 架构校验必须在读取 syscall number 前执行，避免跨架构 syscall 号绕过。
     prog.push(load_abs(SECCOMP_DATA_ARCH));
@@ -1244,19 +1230,12 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
             prog.push(jump_eq(syscall_nr, 0, block.len() as u8));
             prog.extend(block);
         } else {
-            let jump_index = prog.len();
-            prog.push(jump_eq(syscall_nr, 0, 0));
-            allow_jump_indexes.push(jump_index);
+            prog.push(jump_eq(syscall_nr, 0, 1));
+            prog.push(ret(SECCOMP_RET_ALLOW));
         }
     }
 
     prog.push(ret(SECCOMP_RET_TRAP));
-    let allow_index = prog.len();
-    prog.push(ret(SECCOMP_RET_ALLOW));
-
-    for jump_index in allow_jump_indexes {
-        prog[jump_index].jt = forward_jump_offset(jump_index, allow_index, "ALLOW");
-    }
 
     assert!(
         prog.len() <= BPF_MAX_INSTRUCTIONS,
