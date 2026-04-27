@@ -25,39 +25,39 @@ This builds the default workspace members. By default, it focuses on the OS back
 
 ### 2.3 Docker One-Command Trial
 
-如果只想快速试用 mimobox，可以直接构建 Docker 镜像。镜像会在 builder 阶段编译 `mimobox` CLI，并把 microVM 所需的 `vmlinux` 与 `rootfs.cpio.gz` 打包到 `/opt/mimobox-assets`。镜像内的 guest rootfs 已包含 Python3 与 Node.js 运行时。
+To quickly try MimoBox, build the Docker image directly. The image compiles the `mimobox` CLI during the builder stage and packages the microVM assets `vmlinux` and `rootfs.cpio.gz` into `/opt/mimobox-assets`. The guest rootfs includes Python 3 and Node.js runtimes.
 
-前置要求：Docker Engine 20.10+。
+Prerequisite: Docker Engine 20.10+.
 
 ```bash
 docker build -t mimobox/sandbox .
 ```
 
-启动交互式 shell：
+Start an interactive shell:
 
 ```bash
 docker run -it --rm --device /dev/kvm mimobox/sandbox
 ```
 
-执行单条命令：
+Run a single command:
 
 ```bash
 docker run -it --rm --device /dev/kvm mimobox/sandbox run --backend auto --command '/bin/echo hello'
 ```
 
-如果当前环境没有 KVM，可以明确使用 OS 后端降级运行：
+If the current environment does not have KVM, explicitly fall back to the OS backend:
 
 ```bash
 docker run -it --rm mimobox/sandbox shell --backend os
 ```
 
-KVM 说明：
+KVM notes:
 
-- microVM 后端需要宿主机暴露 `/dev/kvm`，因此 Linux 上推荐带 `--device /dev/kvm` 运行。
-- 如果 `/dev/kvm` 不存在或权限不足，入口脚本只会输出警告，不会退出；`--backend auto` 会尝试回退到可用后端。
-- macOS 与 Windows 的 Docker Desktop 通常不会向容器暴露 KVM，因此不能在该路径下使用 microVM 后端。
+- The microVM backend requires the host to expose `/dev/kvm`, so on Linux, run with `--device /dev/kvm`.
+- If `/dev/kvm` is missing or has insufficient permissions, the entrypoint script prints a warning and continues; `--backend auto` attempts to fall back to an available backend.
+- Docker Desktop on macOS and Windows usually does not expose KVM to containers, so the microVM backend cannot be used through this path.
 
-也可以使用 docker-compose：
+Alternatively, use docker-compose:
 
 ```yaml
 services:
@@ -73,7 +73,7 @@ services:
     command: ["shell", "--backend", "auto"]
 ```
 
-然后运行：
+Then run:
 
 ```bash
 docker compose run --rm mimobox
