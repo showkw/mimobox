@@ -19,6 +19,8 @@ use crate::DEFAULT_MEMORY_MB;
 use crate::capture::capture_stderr_bytes;
 
 pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
+    validate_resource_args(args.memory, args.timeout, args.vcpu_count)?;
+
     let deny_network = resolve_run_deny_network(&args);
     info!(
         backend = ?args.backend,

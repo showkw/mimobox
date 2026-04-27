@@ -50,12 +50,8 @@ pub(crate) fn configure_mcp_client(
     }
 
     let json = serde_json::to_string_pretty(&updated_config)?;
-    fs::write(config_path, format!("{json}\n")).map_err(|error| {
-        CliError::McpInit(format!(
-            "failed to write MCP config {}: {error}",
-            config_path.display()
-        ))
-    })?;
+    backup_mcp_config(config_path)?;
+    write_mcp_config_atomically(config_path, &format!("{json}\n"))?;
 
     println!("Configured mimobox-mcp for {}", client.display_name());
     println!("Config: {}", config_path.display());
@@ -92,7 +88,9 @@ pub(crate) fn inject_mcp_config(
     binary_path: &str,
 ) -> Result<serde_json::Value, CliError> {
     if !config.is_object() {
-        config = serde_json::json!({});
+        return Err(CliError::McpInit(
+            "MCP config root must be a JSON object".to_string(),
+        ));
     }
 
     let root = config
@@ -123,15 +121,76 @@ pub(crate) fn inject_mcp_config(
 pub(crate) fn resolve_mimobox_mcp_binary() -> String {
     let binary_name = "mimobox-mcp";
 
-    std::env::var_os("PATH")
+    let Some(resolved_path) = std::env::var_os("PATH")
         .and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|path| path.join(binary_name))
                 .find(|candidate| candidate.is_file())
         })
-        .and_then(|path| fs::canonicalize(&path).ok().or(Some(path)))
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| binary_name.to_string())
+        .map(|path| fs::canonicalize(&path).unwrap_or(path))
+    else {
+        return binary_name.to_string();
+    };
+
+    warn_if_mcp_binary_outside_cli_dir(&resolved_path);
+    resolved_path.to_string_lossy().into_owned()
+}
+
+fn backup_mcp_config(config_path: &Path) -> Result<(), CliError> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let backup_path = path_with_suffix(config_path, ".bak");
+    fs::copy(config_path, &backup_path).map_err(|error| {
+        CliError::McpInit(format!(
+            "failed to create MCP config backup {}: {error}",
+            backup_path.display()
+        ))
+    })?;
+
+    Ok(())
+}
+
+fn write_mcp_config_atomically(config_path: &Path, content: &str) -> Result<(), CliError> {
+    let tmp_path = path_with_suffix(config_path, ".tmp");
+    fs::write(&tmp_path, content).map_err(|error| {
+        CliError::McpInit(format!(
+            "failed to write temporary MCP config {}: {error}",
+            tmp_path.display()
+        ))
+    })?;
+
+    fs::rename(&tmp_path, config_path).map_err(|error| {
+        CliError::McpInit(format!(
+            "failed to replace MCP config {}: {error}",
+            config_path.display()
+        ))
+    })
+}
+
+fn warn_if_mcp_binary_outside_cli_dir(binary_path: &Path) {
+    let Some(expected_prefix) = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok())
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+
+    if !binary_path.starts_with(&expected_prefix) {
+        tracing::warn!(
+            binary_path = %binary_path.display(),
+            expected_prefix = %expected_prefix.display(),
+            "resolved mimobox-mcp binary is outside the CLI executable directory"
+        );
+    }
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,5 +247,18 @@ mod tests {
     #[test]
     fn claude_code_display_name_is_human_readable() {
         assert_eq!(McpClient::ClaudeCode.display_name(), "Claude Code");
+    }
+
+    #[test]
+    fn inject_mcp_config_rejects_non_object_root() {
+        let error = inject_mcp_config(serde_json::json!(["not", "object"]), "/bin/mimobox-mcp")
+            .expect_err("non-object MCP config root should be rejected");
+
+        assert_eq!(error.code(), "mcp_init_error");
+        assert!(
+            error
+                .to_string()
+                .contains("MCP config root must be a JSON object")
+        );
     }
 }

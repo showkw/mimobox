@@ -13,6 +13,8 @@ use tracing::{error, info};
 use super::*;
 
 pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
+    validate_resource_args(args.memory, args.timeout, args.vcpu_count)?;
+
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     {
         let _ = args;

@@ -31,6 +31,8 @@ pub(crate) fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
 
     #[cfg(unix)]
     {
+        validate_resource_args(args.memory, args.timeout, 1)?;
+
         let deny_network = resolve_shell_deny_network(&args);
         let sdk_config = build_shell_sdk_config(&args, deny_network);
         let pty_config = SdkPtyConfig {

@@ -612,6 +612,32 @@ pub(crate) fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
     error.into()
 }
 
+pub(crate) fn validate_resource_args(
+    memory: Option<u64>,
+    timeout: Option<u64>,
+    vcpu_count: u8,
+) -> Result<(), CliError> {
+    if let Some(memory) = memory.filter(|value| !(16..=32768).contains(value)) {
+        return Err(CliError::Args(format!(
+            "memory 参数必须在 16..=32768 MB 范围内，当前值：{memory}"
+        )));
+    }
+
+    if let Some(timeout) = timeout.filter(|value| *value != 0 && !(1..=3600).contains(value)) {
+        return Err(CliError::Args(format!(
+            "timeout 参数必须为 0（无超时）或在 1..=3600 秒范围内，当前值：{timeout}"
+        )));
+    }
+
+    if !(1..=16).contains(&vcpu_count) {
+        return Err(CliError::Args(format!(
+            "vcpu_count 参数必须在 1..=16 范围内，当前值：{vcpu_count}"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn finish_sdk_operation<T>(
     sandbox: SdkSandbox,
     result: Result<T, mimobox_sdk::SdkError>,
@@ -728,5 +754,57 @@ pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> S
         message.clone()
     } else {
         "unknown panic".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_resource_args_accepts_boundaries() {
+        assert!(validate_resource_args(Some(16), Some(0), 1).is_ok());
+        assert!(validate_resource_args(Some(32768), Some(1), 16).is_ok());
+        assert!(validate_resource_args(None, Some(3600), 8).is_ok());
+        assert!(validate_resource_args(None, None, 1).is_ok());
+    }
+
+    #[test]
+    fn validate_resource_args_rejects_memory_out_of_range() {
+        let low = validate_resource_args(Some(15), None, 1)
+            .expect_err("memory lower than 16 MB should be rejected");
+        let high = validate_resource_args(Some(32769), None, 1)
+            .expect_err("memory higher than 32 GB should be rejected");
+
+        assert_eq!(low.code(), "args_error");
+        assert!(low.to_string().contains("memory 参数必须在 16..=32768 MB"));
+        assert_eq!(high.code(), "args_error");
+        assert!(high.to_string().contains("当前值：32769"));
+    }
+
+    #[test]
+    fn validate_resource_args_rejects_timeout_out_of_range() {
+        let error = validate_resource_args(None, Some(3601), 1)
+            .expect_err("timeout higher than 3600 seconds should be rejected");
+
+        assert_eq!(error.code(), "args_error");
+        assert!(
+            error
+                .to_string()
+                .contains("timeout 参数必须为 0（无超时）或在 1..=3600 秒范围内")
+        );
+    }
+
+    #[test]
+    fn validate_resource_args_rejects_vcpu_count_out_of_range() {
+        let zero =
+            validate_resource_args(None, None, 0).expect_err("zero vCPU count should be rejected");
+        let high = validate_resource_args(None, None, 17)
+            .expect_err("more than 16 vCPUs should be rejected");
+
+        assert_eq!(zero.code(), "args_error");
+        assert!(zero.to_string().contains("当前值：0"));
+        assert_eq!(high.code(), "args_error");
+        assert!(high.to_string().contains("当前值：17"));
     }
 }
