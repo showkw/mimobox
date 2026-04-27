@@ -1,9 +1,0 @@
-[package]
-name = "kvm-ioctls"
-version = "0.19.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-description = "离线构建用的最小 kvm-ioctls 兼容层"
-
-[lib]
-path = "src/lib.rs"

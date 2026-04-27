@@ -103,7 +103,7 @@ fn bench_hot_acquire(c: &mut Criterion) {
                 drop(sandbox);
                 let elapsed_us = hot_path_start.elapsed().as_secs_f64() * 1_000_000.0;
 
-                if (index as usize) % stride == 0 {
+                if (index as usize).is_multiple_of(stride) {
                     sampled_us.push(elapsed_us);
                 }
             }
