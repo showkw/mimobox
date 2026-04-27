@@ -29,21 +29,15 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 
 ### Python
 
-> Python wheels are coming to PyPI. For now, build from source (requires Rust toolchain):
-
 ```bash
-git clone https://github.com/showkw/mimobox.git && cd mimobox
-pip install maturin
-maturin build --release -m crates/mimobox-python/Cargo.toml
-pip install target/wheels/*.whl
+pip install mimobox
 ```
 
 ### Rust
 
 ```toml
 [dependencies]
-mimobox-sdk = { git = "https://github.com/showkw/mimobox.git", branch = "master" }
-# After crates.io publication: mimobox-sdk = "0.1.0"
+mimobox-sdk = "0.1.0-alpha"
 ```
 
 ### MCP Server
