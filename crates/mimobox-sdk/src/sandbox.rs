@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Internal backend instance enum.
 ///
@@ -128,7 +128,8 @@ impl RestorePool {
 }
 
 macro_rules! dispatch_execute {
-    ($inner:expr, $binding:ident, $expr:expr) => {
+    ($inner:expr, $binding:ident, $expr:expr, $ctx:literal) => {{
+        debug!(context = $ctx, "dispatching execute");
         match $inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
             SandboxInner::Os($binding) => $expr,
@@ -143,7 +144,7 @@ macro_rules! dispatch_execute {
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm($binding) => $expr,
         }
-    };
+    }};
 }
 
 /// Dispatch macro for the three VM-only variants (`MicroVm`, `PooledMicroVm`,
@@ -553,7 +554,7 @@ impl Sandbox {
         let args = parse_command(command)?;
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
-        dispatch_execute!(inner, s, s.execute_for_sdk(&args))
+        dispatch_execute!(inner, s, s.execute_for_sdk(&args), "execute")
     }
 
     /// Execute code in the given language inside the sandbox.
@@ -911,7 +912,12 @@ impl Sandbox {
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
 
-        dispatch_execute!(inner, sandbox, sandbox.stream_execute_for_sdk(&args))
+        dispatch_execute!(
+            inner,
+            sandbox,
+            sandbox.stream_execute_for_sdk(&args),
+            "stream_execute"
+        )
     }
 
     /// Reads file contents from the active sandbox backend.
@@ -1541,8 +1547,10 @@ mod tests {
 
     #[test]
     fn with_config_rejects_invalid_config_before_backend_creation() {
-        let mut config = Config::default();
-        config.memory_limit_mb = Some(0);
+        let config = Config {
+            memory_limit_mb: Some(0),
+            ..Config::default()
+        };
 
         let result = Sandbox::with_config(config);
 
@@ -1552,8 +1560,10 @@ mod tests {
     #[cfg(feature = "vm")]
     #[test]
     fn with_pool_rejects_invalid_config_before_backend_creation() {
-        let mut config = Config::default();
-        config.vm_vcpu_count = 0;
+        let config = Config {
+            vm_vcpu_count: 0,
+            ..Config::default()
+        };
 
         let result = Sandbox::with_pool(config, mimobox_vm::VmPoolConfig::default());
 

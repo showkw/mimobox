@@ -979,7 +979,10 @@ mod tests {
         let result = validate_sbpl_path("/path/with\"quote");
         assert!(result.is_err(), "包含双引号的路径应被拒绝");
         assert!(
-            result.unwrap_err().to_string().contains("unsafe character"),
+            result
+                .expect_err("包含双引号的路径应被拒绝")
+                .to_string()
+                .contains("unsafe character"),
             "错误消息应说明包含不安全字符"
         );
     }

@@ -16,6 +16,8 @@ pub(crate) fn handle_version() -> VersionResponse {
     VersionResponse {
         name: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
+        git_hash: env!("MIMOBOX_GIT_HASH"),
+        target_triple: env!("MIMOBOX_TARGET_TRIPLE"),
         enabled_features,
         target_os: std::env::consts::OS,
     }

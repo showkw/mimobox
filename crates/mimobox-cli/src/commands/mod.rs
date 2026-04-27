@@ -379,6 +379,8 @@ pub(crate) struct BenchResponse {
 pub(crate) struct VersionResponse {
     pub(crate) name: &'static str,
     pub(crate) version: &'static str,
+    pub(crate) git_hash: &'static str,
+    pub(crate) target_triple: &'static str,
     pub(crate) enabled_features: Vec<&'static str>,
     pub(crate) target_os: &'static str,
 }

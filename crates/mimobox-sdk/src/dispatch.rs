@@ -83,6 +83,7 @@ macro_rules! impl_stream_execute_for_core_backend {
                 &mut self,
                 args: &[String],
             ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+                tracing::debug!(backend = stringify!($ty), "dispatching stream_execute");
                 CoreSandbox::execute(self, args)
                     .map(ExecuteResult::from)
                     .map(stream_from_execute_result)
@@ -147,6 +148,7 @@ macro_rules! impl_stream_execute_for_sdk {
                 &mut self,
                 args: &[String],
             ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+                tracing::debug!(backend = stringify!($ty), "dispatching stream_execute");
                 self.stream_execute(args)
                     .map(bridge_vm_stream)
                     .map_err(map_microvm_error)
