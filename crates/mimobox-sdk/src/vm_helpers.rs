@@ -322,6 +322,7 @@ pub(crate) fn map_restore_pool_error(error: mimobox_vm::RestorePoolError) -> Sdk
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

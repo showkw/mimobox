@@ -777,7 +777,7 @@ mod tests {
                 .expect("file_exists 失败")
         );
 
-        let _ = sb.execute(&vec![
+        let _ = sb.execute(&[
             "/bin/rm".to_string(),
             "-f".to_string(),
             "/tmp/mimobox_exists_test".to_string(),
@@ -831,7 +831,7 @@ mod tests {
                 .expect("file_exists 失败")
         );
 
-        let _ = sb.execute(&vec![
+        let _ = sb.execute(&[
             "/bin/rm".to_string(),
             "-f".to_string(),
             "/tmp/mimobox_rename_dst".to_string(),
@@ -858,7 +858,7 @@ mod tests {
         assert!(info.size > 0);
         assert!(info.modified_ms.is_some());
 
-        let _ = sb.execute(&vec![
+        let _ = sb.execute(&[
             "/bin/rm".to_string(),
             "-f".to_string(),
             "/tmp/mimobox_stat_test".to_string(),

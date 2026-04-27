@@ -1,6 +1,7 @@
 .env
 logs/
 target/
+vendor/
 *.swp
 *~
 .DS_Store

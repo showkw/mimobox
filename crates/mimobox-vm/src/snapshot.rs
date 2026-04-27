@@ -194,6 +194,7 @@ pub(crate) fn memory_sha256_hex(memory: &[u8]) -> String {
     digest_to_hex(hasher.finalize())
 }
 
+#[allow(dead_code)]
 fn memory_file_sha256_hex(memory_path: &Path) -> Result<String, MicrovmError> {
     let mut file = fs::File::open(memory_path)?;
     let mut hasher = Sha256::new();
@@ -252,6 +253,7 @@ fn verify_memory_hash_bytes(
     verify_memory_hash(memory_path, &memory_sha256_hex(memory), expected_hash)
 }
 
+#[allow(dead_code)]
 fn verify_memory_hash_file(
     memory_path: &Path,
     expected_hash: Option<&str>,
@@ -316,6 +318,7 @@ struct LoadedSnapshotState {
 }
 
 /// 读取文件快照元数据并校验 `memory.bin` 完整性，但不在内存中保留 guest memory。
+#[allow(dead_code)]
 pub(crate) fn load_state_from_memory_file(
     memory_path: &Path,
 ) -> Result<(SandboxConfig, MicrovmConfig, Vec<u8>), MicrovmError> {

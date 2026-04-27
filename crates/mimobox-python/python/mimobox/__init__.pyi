@@ -332,6 +332,22 @@ class Sandbox:
         """
         ...
 
+    def file_exists(self, path: str) -> bool:
+        """Check if a file exists inside the sandbox."""
+        ...
+
+    def remove_file(self, path: str) -> None:
+        """Remove a file or empty directory inside the sandbox."""
+        ...
+
+    def rename(self, from: str, to: str) -> None:
+        """Rename or move a file inside the sandbox."""
+        ...
+
+    def stat(self, path: str) -> FileStat:
+        """Return file metadata inside the sandbox."""
+        ...
+
     def read_file(self, path: str) -> bytes:
         """Read a file from inside the sandbox.
 
