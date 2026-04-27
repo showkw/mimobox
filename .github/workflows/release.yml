@@ -93,10 +93,13 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
+            extra-args: ''
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            extra-args: '-i python3.10'
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            extra-args: '-i python3.10'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +114,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release
+          args: --release ${{ matrix.extra-args }}
           target: ${{ matrix.target }}
           manylinux: auto
           working-directory: crates/mimobox-python
