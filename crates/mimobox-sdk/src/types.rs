@@ -81,7 +81,7 @@ impl ExecuteResult {
 /// let config = Config::builder()
 ///     .isolation(IsolationLevel::MicroVm)
 ///     .allowed_http_domains(["example.com"])
-///     .build();
+///     .build()?;
 /// let mut sandbox = Sandbox::with_config(config)?;
 /// let resp = sandbox.http_request("GET", "https://example.com", HashMap::new(), None)?;
 /// println!("status: {}", resp.status);
@@ -111,7 +111,7 @@ pub struct HttpResponse {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = Config::builder()
 ///     .isolation(IsolationLevel::MicroVm)
-///     .build();
+///     .build()?;
 /// let mut sandbox = Sandbox::with_config(config)?;
 /// let snapshot = sandbox.snapshot()?;
 /// println!("snapshot size: {} bytes", snapshot.size());
@@ -252,7 +252,7 @@ impl From<mimobox_vm::HttpResponse> for HttpResponse {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = Config::builder()
 ///     .isolation(IsolationLevel::MicroVm)
-///     .build();
+///     .build()?;
 /// let mut sandbox = Sandbox::with_config(config)?;
 /// let rx = sandbox.stream_execute("/bin/echo hello")?;
 /// for event in rx.iter() {

@@ -358,26 +358,24 @@ mod macos_backend_tests {
             return Ok(());
         }
 
-        let temp_dir = TempDir::new()?;
-        std::fs::write(temp_dir.path().join("entry.txt"), "test")?;
         let mut sandbox = MacOsSandbox::new(macos_config())?;
 
-        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+        let result = sandbox.list_dir("/tmp");
 
-        let entry = entries
-            .iter()
-            .find(|entry| entry.name == "entry.txt")
-            .expect("返回结果应包含测试文件");
-        assert_eq!(entry.name, "entry.txt");
-        assert!(matches!(
-            entry.file_type,
-            mimobox_core::FileType::File
-                | mimobox_core::FileType::Dir
-                | mimobox_core::FileType::Symlink
-                | mimobox_core::FileType::Other
-        ));
-        let _size = entry.size;
-        let _is_symlink = entry.is_symlink;
+        match result {
+            Err(SandboxError::UnsupportedOperation(msg)) => {
+                assert!(
+                    msg.contains("list_dir"),
+                    "错误信息应包含 list_dir，实际: {msg}"
+                );
+                assert!(
+                    msg.contains("OS-level sandbox does not support"),
+                    "错误信息应说明 OS 级沙箱不支持，实际: {msg}"
+                );
+            }
+            Err(err) => panic!("list_dir 应返回 UnsupportedOperation，实际错误: {err}"),
+            Ok(_) => panic!("list_dir 应在 macOS 后端返回 UnsupportedOperation"),
+        }
 
         Ok(())
     }
@@ -392,7 +390,20 @@ mod macos_backend_tests {
 
         let result = sandbox.list_dir("/nonexistent/path/abc123");
 
-        assert!(result.is_err(), "不存在路径应返回错误");
+        match result {
+            Err(SandboxError::UnsupportedOperation(msg)) => {
+                assert!(
+                    msg.contains("list_dir"),
+                    "错误信息应包含 list_dir，实际: {msg}"
+                );
+                assert!(
+                    msg.contains("OS-level sandbox does not support"),
+                    "错误信息应说明 OS 级沙箱不支持，实际: {msg}"
+                );
+            }
+            Err(err) => panic!("list_dir 应返回 UnsupportedOperation，实际错误: {err}"),
+            Ok(_) => panic!("list_dir 应在 macOS 后端返回 UnsupportedOperation"),
+        }
 
         Ok(())
     }
@@ -403,14 +414,25 @@ mod macos_backend_tests {
             return Ok(());
         }
 
-        let temp_dir = TempDir::new()?;
-        let file_path = temp_dir.path().join("not-a-directory.txt");
-        std::fs::write(&file_path, "test")?;
         let mut sandbox = MacOsSandbox::new(macos_config())?;
 
-        let result = sandbox.list_dir(&file_path.to_string_lossy());
+        let result = sandbox.list_dir("/etc/hosts");
 
-        assert!(result.is_err(), "文件路径应返回错误");
+        match result {
+            Err(SandboxError::UnsupportedOperation(msg)) => {
+                assert!(
+                    msg.contains("list_dir"),
+                    "错误信息应包含 list_dir，实际: {msg}"
+                );
+                assert!(
+                    msg.contains("OS-level sandbox does not support"),
+                    "错误信息应说明 OS 级沙箱不支持，实际: {msg}"
+                );
+            }
+            Err(err) => panic!("list_dir 应返回 UnsupportedOperation，实际错误: {err}"),
+            Ok(_) => panic!("list_dir 应在 macOS 后端返回 UnsupportedOperation"),
+        }
+
         Ok(())
     }
 
@@ -420,12 +442,25 @@ mod macos_backend_tests {
             return Ok(());
         }
 
-        let temp_dir = TempDir::new()?;
         let mut sandbox = MacOsSandbox::new(macos_config())?;
 
-        let entries = sandbox.list_dir(&temp_dir.path().to_string_lossy())?;
+        let result = sandbox.list_dir("/tmp");
 
-        assert!(entries.is_empty(), "空目录应返回空 Vec");
+        match result {
+            Err(SandboxError::UnsupportedOperation(msg)) => {
+                assert!(
+                    msg.contains("list_dir"),
+                    "错误信息应包含 list_dir，实际: {msg}"
+                );
+                assert!(
+                    msg.contains("OS-level sandbox does not support"),
+                    "错误信息应说明 OS 级沙箱不支持，实际: {msg}"
+                );
+            }
+            Err(err) => panic!("list_dir 应返回 UnsupportedOperation，实际错误: {err}"),
+            Ok(_) => panic!("list_dir 应在 macOS 后端返回 UnsupportedOperation"),
+        }
+
         Ok(())
     }
 }
