@@ -1,4 +1,8 @@
 .env
+.env.*
+.envrc
+.npmrc
+.pypirc
 logs/
 target/
 vendor/
@@ -30,6 +34,8 @@ vm-assets/
 *.crt
 *.p12
 *.pfx
+id_rsa
+id_ed25519
 
 # 凭据文件
 *credentials*

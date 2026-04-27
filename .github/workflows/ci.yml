@@ -42,7 +42,7 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Cargo Clippy Workspace
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-features
 
   test-linux-os:
     runs-on: ubuntu-latest
@@ -129,7 +129,7 @@ jobs:
         run: cargo doc --workspace --no-deps
 
       - name: Cargo Doc Tests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --doc --all-features
 
   security-audit:
     runs-on: ubuntu-latest
