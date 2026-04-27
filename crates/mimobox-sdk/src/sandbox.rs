@@ -1,9 +1,7 @@
 use crate::config::{Config, IsolationLevel};
-use crate::dispatch::ExecuteForSdk;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::dispatch::HttpRequestForSdk;
-#[cfg(all(feature = "vm", target_os = "linux"))]
-use crate::dispatch::StreamExecuteForSdk;
+use crate::dispatch::{ExecuteForSdk, StreamExecuteForSdk};
 use crate::error::SdkError;
 use crate::router::resolve_isolation;
 #[cfg(feature = "vm")]
@@ -21,12 +19,10 @@ use crate::vm_helpers::{
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
 use mimobox_core::{ErrorCode, FileStat, PtyConfig, PtySize, Sandbox as CoreSandbox};
-#[cfg(feature = "vm")]
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
 use std::sync::mpsc;
-#[cfg(feature = "vm")]
 use std::time::Duration;
 use tracing::warn;
 
@@ -147,10 +143,8 @@ macro_rules! dispatch_execute {
 }
 
 /// Dispatch macro for the three VM-only variants (`MicroVm`, `PooledMicroVm`,
-/// `RestoredPooledMicroVm`).
-/// Used by VM-only methods such as `read_file`, `write_file`, `http_request`,
-/// `stream_execute`, and `execute_with_vm_options`.
-/// Non-VM variants uniformly use the fallback expression.
+/// `RestoredPooledMicroVm`). Non-VM variants uniformly use the fallback expression.
+#[cfg(feature = "vm")]
 macro_rules! dispatch_vm {
     ($inner:expr, $binding:ident, $expr:expr, $fallback:expr) => {
         match $inner {
@@ -163,6 +157,189 @@ macro_rules! dispatch_vm {
             _ => $fallback,
         }
     };
+}
+
+#[derive(Debug, Clone, Default)]
+struct SdkExecOptions {
+    env: HashMap<String, String>,
+    timeout: Option<Duration>,
+    cwd: Option<String>,
+}
+
+#[cfg(feature = "vm")]
+impl From<mimobox_vm::GuestExecOptions> for SdkExecOptions {
+    fn from(options: mimobox_vm::GuestExecOptions) -> Self {
+        Self {
+            env: options.env,
+            timeout: options.timeout,
+            cwd: options.cwd,
+        }
+    }
+}
+
+impl SdkExecOptions {
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    fn to_guest_exec_options(&self) -> mimobox_vm::GuestExecOptions {
+        mimobox_vm::GuestExecOptions {
+            env: self.env.clone(),
+            timeout: self.timeout,
+            cwd: self.cwd.clone(),
+        }
+    }
+}
+
+fn build_fallback_command_args(
+    command: &str,
+    options: &SdkExecOptions,
+) -> Result<Vec<String>, SdkError> {
+    // OS/Wasm 后端的超时来自 SandboxConfig；per-command timeout 仅 VM 后端支持。
+    let _ = options.timeout;
+
+    if let Some(cwd) = options.cwd.as_deref() {
+        let cwd = shlex::try_quote(cwd).map_err(|_| {
+            SdkError::Config("cwd contains characters that cannot be shell-escaped".to_string())
+        })?;
+        let env_prefix = build_shell_env_prefix(&options.env)?;
+        return Ok(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("cd {cwd} && exec {env_prefix}{command}"),
+        ]);
+    }
+
+    let args = parse_command(command)?;
+    if options.env.is_empty() {
+        return Ok(args);
+    }
+
+    let mut prefixed = Vec::with_capacity(args.len() + options.env.len() + 1);
+    prefixed.push("/usr/bin/env".to_string());
+    prefixed.extend(build_env_assignments(&options.env)?);
+    prefixed.extend(args);
+    Ok(prefixed)
+}
+
+fn build_shell_env_prefix(env: &HashMap<String, String>) -> Result<String, SdkError> {
+    if env.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut parts = Vec::with_capacity(env.len() + 1);
+    parts.push("/usr/bin/env".to_string());
+    for assignment in build_env_assignments(env)? {
+        let quoted = shlex::try_quote(&assignment).map_err(|_| {
+            SdkError::Config(
+                "environment assignment contains characters that cannot be shell-escaped"
+                    .to_string(),
+            )
+        })?;
+        parts.push(quoted.into_owned());
+    }
+    parts.push(String::new());
+    Ok(parts.join(" "))
+}
+
+fn build_env_assignments(env: &HashMap<String, String>) -> Result<Vec<String>, SdkError> {
+    let mut assignments = Vec::with_capacity(env.len());
+    for (key, value) in env {
+        validate_env_key(key)?;
+        if value.contains('\0') {
+            return Err(SdkError::Config(format!(
+                "environment variable `{key}` contains NUL byte"
+            )));
+        }
+        assignments.push(format!("{key}={value}"));
+    }
+    Ok(assignments)
+}
+
+fn validate_env_key(key: &str) -> Result<(), SdkError> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return Err(SdkError::Config(format!(
+            "invalid environment variable name: `{key}`"
+        )));
+    }
+    Ok(())
+}
+
+fn map_core_file_error(error: mimobox_core::SandboxError) -> SdkError {
+    match error {
+        mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+        other => SdkError::from_sandbox_execute_error(other),
+    }
+}
+
+#[cfg(feature = "wasm")]
+fn read_file_via_core(sandbox: &mut impl CoreSandbox, path: &str) -> Result<Vec<u8>, SdkError> {
+    mimobox_core::Sandbox::read_file(sandbox, path).map_err(map_core_file_error)
+}
+
+fn read_file_via_core_or_host(
+    sandbox: &mut impl CoreSandbox,
+    path: &str,
+) -> Result<Vec<u8>, SdkError> {
+    match mimobox_core::Sandbox::read_file(sandbox, path) {
+        Ok(data) => Ok(data),
+        Err(mimobox_core::SandboxError::ExecutionFailed(message))
+            if message == "file reading not supported by current backend" =>
+        {
+            read_host_file(path)
+        }
+        Err(error) => Err(map_core_file_error(error)),
+    }
+}
+
+#[cfg(feature = "wasm")]
+fn write_file_via_core(
+    sandbox: &mut impl CoreSandbox,
+    path: &str,
+    data: &[u8],
+) -> Result<(), SdkError> {
+    mimobox_core::Sandbox::write_file(sandbox, path, data).map_err(map_core_file_error)
+}
+
+fn write_file_via_core_or_host(
+    sandbox: &mut impl CoreSandbox,
+    path: &str,
+    data: &[u8],
+) -> Result<(), SdkError> {
+    match mimobox_core::Sandbox::write_file(sandbox, path, data) {
+        Ok(()) => Ok(()),
+        Err(mimobox_core::SandboxError::ExecutionFailed(message))
+            if message == "file writing not supported by current backend" =>
+        {
+            write_host_file(path, data)
+        }
+        Err(error) => Err(map_core_file_error(error)),
+    }
+}
+
+fn read_host_file(path: &str) -> Result<Vec<u8>, SdkError> {
+    validate_host_file_path(path)?;
+    std::fs::read(path).map_err(SdkError::Io)
+}
+
+fn write_host_file(path: &str, data: &[u8]) -> Result<(), SdkError> {
+    validate_host_file_path(path)?;
+    std::fs::write(path, data).map_err(SdkError::Io)
+}
+
+fn validate_host_file_path(path: &str) -> Result<(), SdkError> {
+    if path.is_empty() {
+        return Err(SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            "path must not be empty",
+            None,
+        ));
+    }
+    if path.contains("..") {
+        return Err(SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            "path must not contain '..' path traversal",
+            None,
+        ));
+    }
+    Ok(())
 }
 
 impl Sandbox {
@@ -657,16 +834,15 @@ impl Sandbox {
         Ok(PtySession::from_inner(session))
     }
 
-    #[cfg(feature = "vm")]
-    /// Executes a command in the microVM backend with additional environment variables for this call.
+    /// Executes a command with additional environment variables for this call.
     pub fn execute_with_env(
         &mut self,
         command: &str,
         env: HashMap<String, String>,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(
+        self.execute_with_sdk_options(
             command,
-            mimobox_vm::GuestExecOptions {
+            SdkExecOptions {
                 env,
                 timeout: None,
                 cwd: None,
@@ -674,16 +850,15 @@ impl Sandbox {
         )
     }
 
-    #[cfg(feature = "vm")]
-    /// Executes a command in the microVM backend and overrides the timeout for this call.
+    /// Executes a command with a timeout override where the backend supports it.
     pub fn execute_with_timeout(
         &mut self,
         command: &str,
         timeout: Duration,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(
+        self.execute_with_sdk_options(
             command,
-            mimobox_vm::GuestExecOptions {
+            SdkExecOptions {
                 env: HashMap::new(),
                 timeout: Some(timeout),
                 cwd: None,
@@ -691,17 +866,16 @@ impl Sandbox {
         )
     }
 
-    #[cfg(feature = "vm")]
-    /// Executes a command in the microVM backend and overrides both environment variables and timeout.
+    /// Executes a command with additional environment variables and a timeout override.
     pub fn execute_with_env_and_timeout(
         &mut self,
         command: &str,
         env: HashMap<String, String>,
         timeout: Duration,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options(
+        self.execute_with_sdk_options(
             command,
-            mimobox_vm::GuestExecOptions {
+            SdkExecOptions {
                 env,
                 timeout: Some(timeout),
                 cwd: None,
@@ -709,18 +883,19 @@ impl Sandbox {
         )
     }
 
-    #[cfg(feature = "vm")]
-    /// Executes a command in the microVM backend and overrides the working directory for this call.
+    /// Executes a command with a working directory override where the backend supports it.
     pub fn execute_with_cwd(
         &mut self,
         command: &str,
         cwd: &str,
     ) -> Result<ExecuteResult, SdkError> {
-        let options = mimobox_vm::GuestExecOptions {
-            cwd: Some(cwd.to_string()),
-            ..Default::default()
-        };
-        self.execute_with_vm_options_full(command, options)
+        self.execute_with_sdk_options(
+            command,
+            SdkExecOptions {
+                cwd: Some(cwd.to_string()),
+                ..Default::default()
+            },
+        )
     }
 
     #[cfg(feature = "vm")]
@@ -730,7 +905,7 @@ impl Sandbox {
         command: &str,
         options: mimobox_vm::GuestExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options_full_inner(command, options)
+        self.execute_with_sdk_options(command, options.into())
     }
 
     /// Executes a command as a stream of events.
@@ -743,61 +918,51 @@ impl Sandbox {
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(
-            inner,
-            sandbox,
-            sandbox.stream_execute_for_sdk(&args),
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "streaming execution only supports microVM backend",
-                Some(
-                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                        .to_string()
-                ),
-            ))
-        )
+        dispatch_execute!(inner, sandbox, sandbox.stream_execute_for_sdk(&args))
     }
 
-    #[cfg(feature = "vm")]
-    /// Reads file contents from the microVM sandbox.
-    pub fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SdkError> {
-        self.ensure_backend_for_file_ops()?;
+    /// Reads file contents from the active sandbox backend.
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SdkError> {
+        self.ensure_backend("/bin/cat")?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(
-            inner,
-            sandbox,
-            sandbox.read_file(_path).map_err(map_microvm_error),
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "file transfer only supports microVM backend",
-                Some(
-                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                        .to_string()
-                ),
-            ))
-        )
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => read_file_via_core_or_host(s, path),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => read_file_via_core_or_host(s, path),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => s.read_file(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => read_file_via_core(s, path),
+        }
     }
 
-    #[cfg(feature = "vm")]
-    /// Writes file contents into the microVM sandbox.
-    pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), SdkError> {
-        self.ensure_backend_for_file_ops()?;
+    /// Writes file contents into the active sandbox backend.
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SdkError> {
+        self.ensure_backend("/bin/sh")?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(
-            inner,
-            sandbox,
-            sandbox.write_file(_path, _data).map_err(map_microvm_error),
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "file transfer only supports microVM backend",
-                Some(
-                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                        .to_string()
-                ),
-            ))
-        )
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(s) => write_file_via_core_or_host(s, path, data),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(s) => write_file_via_core_or_host(s, path, data),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(s) => {
+                s.write_file(path, data).map_err(map_microvm_error)
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(s) => write_file_via_core(s, path, data),
+        }
     }
 
     #[cfg(feature = "vm")]
@@ -951,32 +1116,31 @@ impl Sandbox {
         }
     }
 
-    #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn execute_with_vm_options(
+    fn execute_with_sdk_options(
         &mut self,
         command: &str,
-        options: mimobox_vm::GuestExecOptions,
+        options: SdkExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_vm_options_full_inner(command, options)
-    }
-
-    #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn execute_with_vm_options_full_inner(
-        &mut self,
-        command: &str,
-        options: mimobox_vm::GuestExecOptions,
-    ) -> Result<ExecuteResult, SdkError> {
-        let args = parse_command(command)?;
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
 
-        dispatch_vm!(
-            inner,
-            sandbox,
-            {
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => {
+                let args = build_fallback_command_args(command, &options)?;
+                sandbox.execute_for_sdk(&args)
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => {
+                let args = build_fallback_command_args(command, &options)?;
+                sandbox.execute_for_sdk(&args)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => {
+                let args = parse_command(command)?;
                 let start = std::time::Instant::now();
                 sandbox
-                    .execute_with_options(&args, options)
+                    .execute_with_options(&args, options.to_guest_exec_options())
                     .map(|result| ExecuteResult {
                         stdout: result.stdout,
                         stderr: result.stderr,
@@ -985,34 +1149,43 @@ impl Sandbox {
                         elapsed: start.elapsed(),
                     })
                     .map_err(map_microvm_error)
-            },
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "per-command VM options only support microVM backend",
-                Some(
-                    "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                        .to_string()
-                ),
-            ))
-        )
-    }
-
-    #[cfg(all(feature = "vm", not(target_os = "linux")))]
-    fn execute_with_vm_options(
-        &mut self,
-        _command: &str,
-        _options: mimobox_vm::GuestExecOptions,
-    ) -> Result<ExecuteResult, SdkError> {
-        Err(SdkError::unsupported_backend("microvm"))
-    }
-
-    #[cfg(all(feature = "vm", not(target_os = "linux")))]
-    fn execute_with_vm_options_full_inner(
-        &mut self,
-        _command: &str,
-        _options: mimobox_vm::GuestExecOptions,
-    ) -> Result<ExecuteResult, SdkError> {
-        Err(SdkError::unsupported_backend("microvm"))
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => {
+                let args = parse_command(command)?;
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options.to_guest_exec_options())
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(map_microvm_error)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(sandbox) => {
+                let args = parse_command(command)?;
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options.to_guest_exec_options())
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(map_microvm_error)
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => {
+                let args = parse_command(command)?;
+                sandbox.execute_for_sdk(&args)
+            }
+        }
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -1551,6 +1724,102 @@ mod tests {
         assert!(!stat.is_dir, "stat 不应标记为目录");
         assert!(stat.size > 0, "stat 应返回文件大小");
         assert!(stat.modified_ms.is_some(), "stat 应返回修改时间");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_read_write_file_roundtrip_on_os_backend() {
+        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("roundtrip.txt");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        sandbox
+            .write_file(&file_path.to_string_lossy(), b"sdk-roundtrip")
+            .expect("write_file 应成功");
+        let data = sandbox
+            .read_file(&file_path.to_string_lossy())
+            .expect("read_file 应成功");
+
+        assert_eq!(data, b"sdk-roundtrip");
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_execute_with_env_on_os_backend() {
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut env = HashMap::new();
+        env.insert("MIMOBOX_SDK_ENV_TEST".to_string(), "works".to_string());
+
+        let result = sandbox
+            .execute_with_env("/usr/bin/env", env)
+            .expect("execute_with_env 应成功");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+
+        assert!(
+            stdout.contains("MIMOBOX_SDK_ENV_TEST=works"),
+            "stdout 应包含注入的环境变量，实际: {stdout}"
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_execute_with_timeout_on_os_backend() {
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let result = sandbox
+            .execute_with_timeout("/bin/echo sdk-timeout", Duration::from_secs(5))
+            .expect("execute_with_timeout 应成功");
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("sdk-timeout"));
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_execute_with_cwd_on_os_backend() {
+        let temp_dir = tempfile::TempDir::new_in("/tmp").expect("创建临时目录失败");
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let result = sandbox
+            .execute_with_cwd("/bin/pwd", &temp_dir.path().to_string_lossy())
+            .expect("execute_with_cwd 应成功");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+
+        assert!(
+            stdout.contains(temp_dir.path().to_string_lossy().as_ref()),
+            "stdout 应包含 cwd，实际: {stdout}"
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_stream_execute_on_os_backend() {
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let receiver = sandbox
+            .stream_execute("/bin/echo sdk-stream")
+            .expect("stream_execute 应成功");
+        let events: Vec<_> = receiver.iter().collect();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Stdout(data)
+                    if String::from_utf8_lossy(data).contains("sdk-stream")
+            )),
+            "stream_execute 应返回 stdout 事件: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Exit(0))),
+            "stream_execute 应返回 Exit(0) 事件: {events:?}"
+        );
         sandbox.destroy().expect("销毁沙箱失败");
     }
 

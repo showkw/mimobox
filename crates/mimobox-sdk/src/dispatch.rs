@@ -11,7 +11,6 @@ pub(crate) trait ExecuteForSdk {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError>;
 }
 
-#[allow(dead_code)]
 pub(crate) trait StreamExecuteForSdk {
     fn stream_execute_for_sdk(
         &mut self,
@@ -58,6 +57,47 @@ impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
             .map_err(SdkError::from_sandbox_execute_error)
     }
 }
+
+fn stream_from_execute_result(result: ExecuteResult) -> mpsc::Receiver<StreamEvent> {
+    let (sender, receiver) = mpsc::sync_channel(32);
+
+    if !result.stdout.is_empty() {
+        let _ = sender.send(StreamEvent::Stdout(result.stdout));
+    }
+    if !result.stderr.is_empty() {
+        let _ = sender.send(StreamEvent::Stderr(result.stderr));
+    }
+    if result.timed_out {
+        let _ = sender.send(StreamEvent::TimedOut);
+    } else {
+        let _ = sender.send(StreamEvent::Exit(result.exit_code.unwrap_or(-1)));
+    }
+
+    receiver
+}
+
+macro_rules! impl_stream_execute_for_core_backend {
+    ($ty:ty) => {
+        impl StreamExecuteForSdk for $ty {
+            fn stream_execute_for_sdk(
+                &mut self,
+                args: &[String],
+            ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+                CoreSandbox::execute(self, args)
+                    .map(ExecuteResult::from)
+                    .map(stream_from_execute_result)
+                    .map_err(SdkError::from_sandbox_execute_error)
+            }
+        }
+    };
+}
+
+#[cfg(all(feature = "os", target_os = "linux"))]
+impl_stream_execute_for_core_backend!(mimobox_os::LinuxSandbox);
+#[cfg(all(feature = "os", target_os = "macos"))]
+impl_stream_execute_for_core_backend!(mimobox_os::MacOsSandbox);
+#[cfg(feature = "wasm")]
+impl_stream_execute_for_core_backend!(mimobox_wasm::WasmSandbox);
 
 // ── VM 后端 MicrovmSandbox 的 ExecuteForSdk（走 CoreSandbox trait） ──
 
