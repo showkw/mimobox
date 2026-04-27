@@ -1,18 +1,25 @@
 [English](README.md)
 
-# mimobox
+# MimoBox
 
 [![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-**mimobox** — 在安全隔离的沙箱中运行 AI 生成的代码。本地运行。无需 API 密钥，无需 Docker，无需云端。
+**安全、本地、即时地运行 AI 生成的代码。**
 
-> **无需 API 密钥。无需 Docker。无需云端。** 下载单个二进制文件即可安全执行代码。OS 级和 Wasm 沙箱在所有平台可用；microVM 隔离在支持 KVM 的 Linux 上可用。
+无需 API 密钥。无需 Docker。无需云端。
 
-mimobox 通过统一的 SDK、CLI、MCP server 和 Python binding，为 AI Agent 工作负载提供安全、自托管的代码执行能力。
+MimoBox 是面向 AI agents 的本地 sandbox runtime。它通过统一的 SDK、CLI、MCP server 和 Python binding，提供多层隔离能力：OS（Landlock + Seccomp）、WebAssembly（Wasmtime）和 microVM（KVM）。下载单个 binary，即可安全地开始执行代码。
 
-## Quick Start
+---
 
-> **平台说明**：macOS 仅支持 OS 级和 Wasm 沙箱。microVM 功能需要支持 KVM 的 Linux（`/dev/kvm`）。MCP server 二进制目前仅支持 Linux。
+## 为什么选择 MimoBox？
+
+- **Local-first** — 完全在你的机器上运行。数据不会离开你的网络，也不需要 API keys。
+- **多层隔离** — OS-level（Landlock + Seccomp + Namespaces）、Wasm（Wasmtime）和 microVM（KVM）后端，并支持智能自动路由。
+- **超低延迟** — OS 冷启动 P50 8.24 ms，Wasm 冷启动 P50 1.01 ms，warm pool acquire P50 0.19 µs。
+- **Agent-native** — 内置包含 11 个 tools 的 MCP server、Python SDK，并开箱支持 LangChain / OpenAI Agents SDK 集成。
+
+## 快速开始
 
 ### 安装
 
@@ -21,12 +28,13 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 ```
 
 ### Python
-> Python wheel 即将发布到 PyPI。当前请从源码构建（需要 Rust 工具链）：
+
+> Python wheels 即将发布到 PyPI。当前请从源码构建（需要 Rust toolchain）：
 
 ```bash
 git clone https://github.com/showkw/mimobox.git && cd mimobox
-cargo build --release -p mimobox-python
-# wheel 将生成在 target/wheels/
+pip install maturin
+maturin build --release -m crates/mimobox-python/Cargo.toml
 pip install target/wheels/*.whl
 ```
 
@@ -35,29 +43,57 @@ pip install target/wheels/*.whl
 ```toml
 [dependencies]
 mimobox-sdk = { git = "https://github.com/showkw/mimobox.git", branch = "master" }
-```
-
-### 从源码构建
-
-```bash
-git clone https://github.com/showkw/mimobox.git && cd mimobox
-cargo build --release -p mimobox-cli --features mimobox-cli/wasm
-```
-
-### 运行
-
-```bash
-mimobox run --backend auto --command "/bin/echo hello"
+# After crates.io publication: mimobox-sdk = "0.1.0"
 ```
 
 ### MCP Server
 
 ```bash
-mimobox-mcp                              # stdio 模式（默认）
-mimobox-mcp --transport http --port 8080 # Streamable HTTP 模式
+mimobox-mcp                              # stdio mode (default)
+mimobox-mcp --transport http --port 8080 # Streamable HTTP mode
 ```
 
-### Python 示例
+添加到你的 MCP client config：
+
+```json
+{
+  "mcpServers": {
+    "mimobox": {
+      "command": "mimobox-mcp"
+    }
+  }
+}
+```
+
+## 集成示例
+
+### LangChain
+
+```python
+from mimobox import Sandbox
+from langchain_core.tools import tool
+
+@tool
+def sandbox_run_command(command: str) -> str:
+    """Run a command inside a secure sandbox."""
+    with Sandbox() as sb:
+        return sb.execute(command).stdout
+```
+
+### OpenAI Agents SDK
+
+```python
+from mimobox import Sandbox
+from agents import function_tool
+
+@function_tool
+def sandbox_execute(command: str) -> str:
+    """Run a command inside a secure sandbox."""
+    with Sandbox() as sb:
+        return sb.execute(command).stdout
+```
+
+### Python SDK
 
 ```python
 from mimobox import Sandbox
@@ -75,100 +111,44 @@ with Sandbox() as sandbox:
     entries = sandbox.list_dir("/tmp")
 ```
 
-### Rust 示例
-
-```rust
-use mimobox_sdk::Sandbox;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sandbox = Sandbox::new()?;
-    let result = sandbox.execute("/bin/echo hello")?;
-    println!("{}", String::from_utf8_lossy(&result.stdout));
-    sandbox.destroy()?;
-    Ok(())
-}
-```
-
-流式输出、文件操作、HTTP proxy、snapshot/fork、CLI 示例和高级 SDK 用法见 [docs/getting-started.md](docs/getting-started.md)。
-
-> **Status**: mimobox 目前处于 **alpha** 阶段（v0.1.x）。它尚未经过正式安全审计。威胁模型和已知限制见 [SECURITY.md](SECURITY.md)。
-
 ## 平台支持
 
-| Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
+| 平台 | OS 沙箱 | Wasm 沙箱 | microVM 沙箱 |
 | --- | --- | --- | --- |
 | Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
 | macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
 
-## 三层隔离
+## 隔离层
 
-| Layer | Backend | Best For | Status |
-| --- | --- | --- | --- |
-| OS-level | Linux Landlock + Seccomp + namespaces; macOS Seatbelt | 快速本地命令和默认智能路由 | Implemented |
-| Wasm | Wasmtime + WASI | 确定性的可移植工作负载 | Implemented |
-| microVM | Linux KVM + guest protocol + pools + snapshot/fork | 强隔离和 Linux 生产工作负载 | Implemented on Linux (requires KVM + guest kernel + rootfs) |
-
-术语表和架构细节见 [docs/architecture.md](docs/architecture.md)。
-
-## 性能概览 P50
-
-| Scenario | Target | Current P50 | Status |
-| --- | --- | --- | --- |
-| OS-level cold start | <10ms | 8.24ms | Meets target |
-| Wasm cold start | <5ms | 1.01ms | Meets target |
-| OS warm pool acquisition | <100us | 0.19us | Meets target |
-| microVM cold start | <300ms | 253ms | Meets target |
-| microVM snapshot restore | <50ms | 69ms non-pooled / 28ms pooled | Pooled path meets target |
-| microVM warm pool hot path | <1ms | 773us | Meets target |
-
-指标定义、benchmark 范围和注意事项维护在 [docs/performance.md](docs/performance.md)。
-
-## 目录结构
-
-```text
-mimobox/
-├── Cargo.toml
-├── README.md
-├── CHANGELOG.md
-├── crates/
-│   ├── mimobox-core/       # Sandbox trait, config, result, and error types
-│   ├── mimobox-os/         # OS-level sandbox backends
-│   ├── mimobox-wasm/       # Wasmtime sandbox backend
-│   ├── mimobox-vm/         # KVM microVM backend, pools, snapshot, fork
-│   ├── mimobox-sdk/        # Unified Rust SDK and smart routing
-│   ├── mimobox-cli/        # CLI entrypoint
-│   ├── mimobox-mcp/        # MCP server (stdio + Streamable HTTP)
-│   └── mimobox-python/     # Python SDK via PyO3
-├── docs/                   # User, API, architecture, MCP, and performance docs
-├── discuss/                # Design notes, reviews, and market analysis
-├── examples/               # Example code
-├── scripts/                # Build, test, run, and setup scripts
-├── tests/                  # Integration tests
-├── wit/                    # WIT interface definitions
-└── logs/                   # Runtime logs
-```
-
-## 路线图
-
-| Status | Direction | Notes |
+| 层级 | 后端 | 最适合 |
 | --- | --- | --- |
-| Completed | Unified SDK + smart routing | `Sandbox::new()` 和 CLI `--backend auto` 已实现 |
-| Completed | OS + Wasm + microVM isolation | Linux KVM、snapshot、restore 和 fork 可验证 |
-| Completed | MCP Server | 面向生命周期、执行、文件、snapshot、fork 和 HTTP proxy 的 10 个 tools，支持 stdio + Streamable HTTP 传输；Seccomp 参数级约束 |
-| Completed | Python SDK | 支持执行、streaming、文件、HTTP、snapshot 和错误的 PyO3 bindings |
-| Planned | Formal vsock data plane | Serial 仍是 bring-up/control path；vsock 是未来 data plane |
-| Planned | Windows backend + GPU/SaaS options | 当前优先级仍是提升 Linux 和 macOS 成熟度 |
+| OS-level | Linux Landlock + Seccomp + Namespaces; macOS Seatbelt | 快速本地命令，默认智能路由 |
+| Wasm | Wasmtime + WASI | 确定性的可移植工作负载 |
+| microVM | Linux KVM + guest protocol + pools + snapshot/fork | 强隔离，生产工作负载 |
+
+## 性能
+
+| 指标 | P50 |
+| --- | ---:|
+| OS cold start | 8.24 ms |
+| Wasm cold start | 1.01 ms |
+| Warm pool acquire | 0.19 µs |
+| microVM cold start | 253 ms |
+| microVM snapshot restore (pooled) | 28 ms |
+
+> **状态**：MimoBox 目前处于 **alpha** 阶段（v0.1.x）。它尚未经过正式安全审计。威胁模型和已知限制见 [SECURITY.md](SECURITY.md)。
 
 ## 文档
 
-- [docs/getting-started.md](docs/getting-started.md) — SDK 和 CLI 示例，包括已移出的 README 章节 6.1-6.5 和 8。
-- [docs/architecture.md](docs/architecture.md) — 架构、智能路由和术语表。
-- [docs/performance.md](docs/performance.md) — 指标定义、benchmark 方法和性能说明。
-- [docs/api.md](docs/api.md) — Rust SDK API 参考。
-- [docs/python-sdk.md](docs/python-sdk.md) — Python SDK 用法。
-- [docs/mcp-server.md](docs/mcp-server.md) — MCP server 设置、tools 和 client 集成。
-- [docs/mcp-integration.md](docs/mcp-integration.md) — MCP 集成说明。
-- [discuss/competitive-analysis.md](discuss/competitive-analysis.md) — 竞品对比和市场定位。
-- [CHANGELOG.md](CHANGELOG.md) — 发布说明和已迁移的 README 版本历史。
+- [快速入门](docs/getting-started.md) — 安装、CLI 使用和 SDK 示例
+- [架构](docs/architecture.md) — Workspace 结构和智能路由
+- [API 参考](docs/api.md) — Rust SDK 类型和方法
+- [Python SDK](docs/python-sdk.md) — Python binding 安装和使用
+- [MCP Server](docs/mcp-server.md) — Tool 参考和 client 集成
+- [MCP 配置](docs/mcp-config.md) — Claude Desktop、Cursor、VS Code 模板
+- [性能](docs/performance.md) — Benchmark 方法和详细指标
+- [FAQ 与故障排除](docs/faq.md) — 常见问题和解决方案
 
-竞品对比被有意保留在本 README 之外；见 [discuss/competitive-analysis.md](discuss/competitive-analysis.md)。
+## 许可证
+
+可按你的选择，基于 [Apache License, Version 2.0](LICENSE-APACHE) 或 [MIT license](LICENSE-MIT) 授权使用。
