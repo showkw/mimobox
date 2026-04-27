@@ -15,7 +15,7 @@
 //! | Process fork | Allowed | Shells and similar commands need to fork child processes. |
 //! | Memory limits | Unsupported | `RLIMIT_AS` cannot be reduced from an unlimited value on macOS; a warning is logged instead. |
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
@@ -32,12 +32,10 @@ use mimobox_core::{
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
 #[cfg(target_os = "macos")]
-/// # Safety
-///
-/// This block declares external C linkage functions from the macOS system library.
-/// These are standard macOS sandbox API functions (sandbox_init) whose signatures
-/// match the system headers. The functions are called only within pre_exec closures
-/// in forked child processes with validated CString pointers, not in multi-threaded contexts.
+// SAFETY: This block declares external C linkage functions from the macOS system library.
+// These are standard macOS sandbox API functions (sandbox_init) whose signatures
+// match the system headers. The functions are called only within pre_exec closures
+// in forked child processes with validated CString pointers, not in multi-threaded contexts.
 unsafe extern "C" {
     fn sandbox_init(
         profile: *const libc::c_char,
@@ -83,6 +81,23 @@ const SANDBOX_LITERAL_PROFILE: u64 = 0;
 const SANDBOX_INIT_FAILURE_EXIT_CODE: i32 = 71;
 const SANDBOX_INIT_FAILURE_MESSAGE: &[u8] =
     b"sandbox-exec: sandbox_apply: Operation not permitted\n";
+
+fn build_safe_child_env() -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "PATH".to_string(),
+            "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin".to_string(),
+        ),
+        ("HOME".to_string(), "/tmp".to_string()),
+        ("TERM".to_string(), "dumb".to_string()),
+        ("USER".to_string(), "sandbox".to_string()),
+        ("LOGNAME".to_string(), "sandbox".to_string()),
+        ("SHELL".to_string(), "/bin/sh".to_string()),
+        ("LANG".to_string(), "C".to_string()),
+        ("TMPDIR".to_string(), "/tmp".to_string()),
+        ("PWD".to_string(), "/tmp".to_string()),
+    ])
+}
 
 /// macOS Seatbelt sandbox backend.
 ///
@@ -437,6 +452,8 @@ impl Sandbox for MacOsSandbox {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .env_clear()
+                .envs(build_safe_child_env())
                 .pre_exec(move || {
                     create_child_process_group()?;
                     apply_seatbelt_policy_or_exit(policy.as_ptr());
@@ -758,6 +775,83 @@ mod tests {
                 );
             })
             .as_deref()
+    }
+
+    fn assert_execute_env_is_sanitized() {
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let result = sb
+            .execute(&["/usr/bin/env".to_string()])
+            .expect("执行 env 失败");
+
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "env 应成功, stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let stdout = String::from_utf8(result.stdout).expect("env 输出必须是 UTF-8");
+
+        for prefix in ["DYLD_", "SSH_", "AWS_", "GPG_"] {
+            assert!(
+                !stdout.lines().any(|line| line.starts_with(prefix)),
+                "子进程环境不应包含 {prefix} 前缀变量, 实际输出:\n{stdout}"
+            );
+        }
+
+        for key in ["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"] {
+            let needle = format!("{key}=");
+            assert!(
+                !stdout.lines().any(|line| line.starts_with(&needle)),
+                "子进程环境不应包含 {key}, 实际输出:\n{stdout}"
+            );
+        }
+
+        assert!(
+            stdout.lines().any(|line| line == "USER=sandbox"),
+            "子进程环境应设置 USER=sandbox, 实际输出:\n{stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "HOME=/tmp"),
+            "子进程环境应设置 HOME=/tmp, 实际输出:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn test_execute_env_is_sanitized() {
+        const HELPER_ENV: &str = "MIMOBOX_EXEC_ENV_SANITIZE_HELPER";
+
+        if std::env::var_os(HELPER_ENV).is_some() {
+            assert_execute_env_is_sanitized();
+            return;
+        }
+
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("获取当前测试二进制路径失败"))
+            .arg("test_execute_env_is_sanitized")
+            .arg("--nocapture")
+            .env(HELPER_ENV, "1")
+            .env("DYLD_MIMOBOX_TEST_SECRET", "1")
+            .env("LD_PRELOAD", "/tmp/mimobox-preload-test")
+            .env("LD_LIBRARY_PATH", "/tmp/mimobox-library-path-test")
+            .env("SSH_AUTH_SOCK", "/tmp/mimobox-ssh-agent-test")
+            .env("AWS_SECRET_ACCESS_KEY", "mimobox-test-secret")
+            .env("GPG_AGENT_INFO", "mimobox-test-secret")
+            .env("BASH_ENV", "/tmp/mimobox-bash-env-test")
+            .env("ENV", "/tmp/mimobox-env-test")
+            .output()
+            .expect("执行环境清理子测试失败");
+
+        assert!(
+            output.status.success(),
+            "环境清理子测试失败, status={:?}, stdout: {}, stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
