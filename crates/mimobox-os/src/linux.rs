@@ -1216,11 +1216,12 @@ mod tests {
         config.seccomp_profile = SeccompProfile::Essential;
         let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
 
-        // fork 应被 seccomp 阻止
+        // dash 对 `sh -c "单个外部命令"` 会直接 execve，不会先 fork。
+        // 两个外部命令可迫使 shell 为第一个命令 fork，从而验证 seccomp 拦截。
         let cmd = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            "/bin/echo forked".to_string(),
+            "/bin/echo parent; /bin/echo child".to_string(),
         ];
         let result = sb.execute(&cmd).expect("执行失败");
 
