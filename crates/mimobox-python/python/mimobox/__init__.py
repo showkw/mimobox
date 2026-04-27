@@ -1,4 +1,4 @@
-"""mimobox — Cross-platform Agent Sandbox for AI agents."""
+"""MimoBox — Local Sandbox Runtime for AI Agents."""
 
 from mimobox.mimobox import (
     DirEntry as DirEntry,
