@@ -2,7 +2,7 @@
 
 # MimoBox
 
-[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
+[![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![PyPI](https://img.shields.io/pypi/v/mimobox.svg)](https://pypi.org/project/mimobox/) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
 **Run AI-generated code safely, locally, and instantly.**
 
@@ -19,6 +19,8 @@ MimoBox is a local sandbox runtime for AI agents. It provides multi-layer isolat
 - **Ultra-low latency** — OS cold start P50 8.24 ms, Wasm cold start P50 1.01 ms, warm pool acquire P50 0.19 µs.
 - **Agent-native** — MCP server with 11 tools, Python SDK, LangChain / OpenAI Agents SDK integration out of the box.
 
+See [Performance](#performance) for detailed benchmarks across all isolation layers.
+
 ## Quick Start
 
 ### Install
@@ -26,6 +28,14 @@ MimoBox is a local sandbox runtime for AI agents. It provides multi-layer isolat
 ```bash
 curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash
 ```
+
+### Try it
+
+```bash
+mimobox run --backend auto --command "/bin/echo hello from MimoBox!"
+```
+
+That's it -- no API keys, no Docker, no cloud. The `auto` backend picks the best isolation layer for your platform.
 
 ### Python
 
