@@ -175,6 +175,8 @@ impl FileStat {
 /// implementations, including filesystem permissions, network policy,
 /// resource limits, and controlled HTTP proxy whitelist.
 ///
+/// 默认拒绝所有文件系统访问，由各后端和 SDK Config 按需填充最小权限集。
+///
 /// # Examples
 ///
 /// ```
@@ -183,6 +185,8 @@ impl FileStat {
 /// let config = SandboxConfig::default();
 /// assert!(config.deny_network);
 /// assert_eq!(config.timeout_secs, Some(30));
+/// assert!(config.fs_readonly.is_empty());
+/// assert!(config.fs_readwrite.is_empty());
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -219,17 +223,8 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            fs_readonly: vec![
-                "/usr".into(),
-                "/lib".into(),
-                "/lib64".into(),
-                "/bin".into(),
-                "/sbin".into(),
-                "/dev".into(),
-                "/proc".into(),
-                "/etc".into(),
-            ],
-            fs_readwrite: vec!["/tmp".into()],
+            fs_readonly: Vec::new(),
+            fs_readwrite: Vec::new(),
             deny_network: true,
             memory_limit_mb: Some(512),
             cpu_quota_us: None,
