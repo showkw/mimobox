@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
         .allow_fork(true)
-        .build();
+        .build()?;
 
     let mut parent = Sandbox::with_config(config)?;
     parent.execute("/bin/echo parent initialized")?;

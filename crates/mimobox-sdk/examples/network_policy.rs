@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .isolation(IsolationLevel::MicroVm)
         .network(NetworkPolicy::AllowDomains(vec!["example.com".to_string()]))
         .allowed_http_domains(["example.com"])
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let response = sandbox.http_request("GET", "https://example.com", HashMap::new(), None)?;

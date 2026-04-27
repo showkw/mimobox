@@ -5,7 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .fs_readonly(["/usr", "/bin", "/lib", "/etc"])
         .fs_readwrite(["/tmp"])
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let result = sandbox

@@ -14,7 +14,7 @@ struct AgentRequest {
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::builder().isolation(IsolationLevel::Os).build();
+    let config = Config::builder().isolation(IsolationLevel::Os).build()?;
     let mut sandbox = Sandbox::with_config(config)?;
 
     println!("agent sandbox isolation: {:?}", sandbox.active_isolation());

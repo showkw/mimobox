@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
         .allowed_http_domains(["api.github.com"])
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let mut headers = HashMap::new();

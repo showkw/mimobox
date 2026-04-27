@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn explicit_microvm_selection_reflects_backend_availability() {
-        let config = Config::builder().isolation(IsolationLevel::MicroVm).build();
+        let config = Config::builder().isolation(IsolationLevel::MicroVm).build().expect("valid config");
         let result = resolve_isolation(&config, "python script.py");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]

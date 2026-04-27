@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .timeout(Duration::from_secs(2))
         .memory_limit_mb(128)
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let result = sandbox.execute("/bin/sleep 10")?;
