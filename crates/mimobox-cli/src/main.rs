@@ -85,6 +85,27 @@ enum CliCommand {
     Version,
 }
 
+/// 返回命令类型名称（不包含命令参数、路径、代码片段等敏感内容）。
+fn command_type_name(cmd: &CliCommand) -> &'static str {
+    match cmd {
+        CliCommand::Run(_) => "run",
+        CliCommand::Code(_) => "code",
+        CliCommand::Ls(_) => "ls",
+        CliCommand::Cat(_) => "cat",
+        CliCommand::Write(_) => "write",
+        CliCommand::Shell(_) => "shell",
+        CliCommand::Snapshot(_) => "snapshot",
+        CliCommand::Restore(_) => "restore",
+        CliCommand::Bench(_) => "bench",
+        CliCommand::Doctor => "doctor",
+        CliCommand::Setup => "setup",
+        CliCommand::McpInit(_) => "mcp-init",
+        CliCommand::McpConfig(_) => "mcp-config",
+        CliCommand::Completions(_) => "completions",
+        CliCommand::Version => "version",
+    }
+}
+
 fn main() -> ExitCode {
     if let Err(error) = init_tracing() {
         if let Err(print_error) = emit_error_json(&error) {
@@ -154,7 +175,7 @@ fn run() -> Result<Option<i32>, CliError> {
 
     if !is_human_readable_command {
         info!("mimobox CLI starting");
-        info!(command = ?cli.command, "CLI arguments parsed");
+        info!(command_type = command_type_name(&cli.command), "CLI arguments parsed");
     }
 
     let response = match cli.command {

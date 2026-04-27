@@ -833,6 +833,39 @@ fn format_list_dir_entry(entry: DirEntry) -> ListDirEntry {
     }
 }
 
+/// 脱敏错误消息中的宿主路径信息。
+///
+/// 将常见宿主路径前缀替换为占位符，防止通过 MCP 错误响应泄露
+/// 宿主文件系统布局（如 /Users/alice/...、/home/...、rootfs 路径等）。
+fn sanitize_error_message(message: &str) -> String {
+    let mut result = message.to_string();
+    // 替换绝对路径模式：/Users/<name>/..., /home/<name>/..., /tmp/mimobox-..., /var/folders/...
+    // 使用简单的前缀匹配和路径段识别
+    let path_prefixes = [
+        "/Users/",
+        "/home/",
+        "/var/folders/",
+    ];
+    for prefix in path_prefixes {
+        while let Some(pos) = result.find(prefix) {
+            // 找到路径结束位置（空格、换行、右括号或字符串末尾）
+            let end = result[pos..].find(|c: char| c == ' ' || c == '\n' || c == ')')
+                .map(|i| pos + i)
+                .unwrap_or(result.len());
+            result.replace_range(pos..end, &format!("{prefix}<redacted>"));
+        }
+    }
+    // 脱敏 rootfs 相关路径
+    while let Some(pos) = result.find("/rootfs") {
+        let end = result[pos..].find(|c: char| c == ' ' || c == '\n' || c == ')')
+            .map(|i| pos + i)
+            .unwrap_or(result.len());
+        result.replace_range(pos..end, "/rootfs<redacted>");
+    }
+    // 脱敏 .snap 文件路径（可能包含宿主路径前缀）
+    result
+}
+
 fn format_sdk_error(error: SdkError) -> String {
     match error {
         SdkError::Sandbox {
@@ -856,7 +889,7 @@ fn format_join_error(error: JoinError) -> String {
 
 fn to_error(error: impl Into<String>) -> Json<ErrorResponse> {
     Json(ErrorResponse {
-        error: error.into(),
+        error: sanitize_error_message(&error.into()),
     })
 }
 

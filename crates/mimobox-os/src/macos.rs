@@ -543,7 +543,7 @@ impl Sandbox for MacOsSandbox {
 
         // 生成 Seatbelt 策略，并在 fork 前转换为 CString，避免 pre_exec 中分配内存。
         let policy = self.generate_policy();
-        tracing::debug!("Seatbelt 策略:\n{policy}");
+        tracing::debug!("Seatbelt 策略已生成 (规则数: {}, 长度: {} bytes)", policy.matches("\n").count() + 1, policy.len());
         let policy = policy_to_cstring(policy)?;
 
         // SAFETY: pre_exec 在子进程 exec 前建立独立进程组并应用 Seatbelt 策略；
@@ -639,7 +639,7 @@ impl Sandbox for MacOsSandbox {
 
         let allocated = allocate_pty(config.size)?;
         let policy = self.generate_policy();
-        tracing::debug!("PTY Seatbelt 策略:\n{policy}");
+        tracing::debug!("PTY Seatbelt 策略已生成 (规则数: {}, 长度: {} bytes)", policy.matches("\n").count() + 1, policy.len());
         let policy = policy_to_cstring(policy)?;
 
         let slave_file = File::options()
