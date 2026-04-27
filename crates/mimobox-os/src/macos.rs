@@ -8,10 +8,10 @@
 //!
 //! | Dimension | Policy | Description |
 //! |------|------|------|
-//! | File reads | Allow globally + deny sensitive paths | macOS process startup depends on many system paths, making precise allowlisting impractical; sensitive user directories are denied explicitly instead. |
+//! | File reads | Allow globally + deny sensitive content | macOS process startup depends on many system paths; sensitive user directories allow metadata discovery but deny content reads explicitly. |
 //! | File writes | Allowlist | Allows only paths configured in `fs_readwrite` (defaults to `/tmp`). |
 //! | Network access | Deny by default | Denies all network operations with `(deny network*)`. |
-//! | Process execution | Path-restricted | Allows only executables under `/bin`, `/usr/bin`, `/sbin`, and `/usr/sbin`. |
+//! | Process execution | Path-restricted | Allows system and Homebrew executables while denying writable execution locations. |
 //! | Process fork | Allowed | Shells and similar commands need to fork child processes. |
 //! | Memory limits | Unsupported | `RLIMIT_AS` cannot be reduced from an unlimited value on macOS; a warning is logged instead. |
 
@@ -44,7 +44,7 @@ unsafe extern "C" {
 ///
 /// macOS process startup depends on many system paths (`dyld`, frameworks, and others),
 /// making precise allowlisting impractical. File reads are allowed globally, while known
-/// sensitive directories such as SSH keys and cloud credentials are denied explicitly.
+/// sensitive directories allow metadata discovery but deny data reads explicitly.
 const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -56,11 +56,22 @@ const SENSITIVE_HOME_SUBPATHS: &[&str] = &[
     ".gitconfig",
     ".npmrc",
     ".pypirc",
+    ".password-store",
+    ".1password",
     ".cargo/credentials",
     ".config/gcloud",
     ".config/gh",
     ".config/solana",
     ".config/starknet",
+    ".zsh_history",
+    ".bash_history",
+    ".git-credentials",
+    "Library/Keychains",
+    "Library/Messages",
+    "Library/Mail",
+    "Library/Cookies",
+    "Library/Application Support/Google",
+    "Library/Application Support/Firefox",
 ];
 const SANDBOX_LITERAL_PROFILE: u64 = 0;
 const SANDBOX_INIT_FAILURE_EXIT_CODE: i32 = 71;
@@ -277,16 +288,29 @@ impl MacOsSandbox {
         }
     }
 
+    fn push_sensitive_path_rules(rules: &mut Vec<String>, path: &str) {
+        rules.push(format!("(allow file-read-metadata (subpath \"{path}\"))"));
+        rules.push(format!("(deny file-read-data (subpath \"{path}\"))"));
+        rules.push(format!("(deny file-write* (subpath \"{path}\"))"));
+    }
+
+    fn push_sensitive_directory_listing_rule(rules: &mut Vec<String>, path: &str) {
+        // Seatbelt 将目录枚举建模为读取目录对象本身的数据；只允许 literal，
+        // 不允许子路径文件内容，保持 Allow Discovery, Deny Content。
+        rules.push(format!("(allow file-read-data (literal \"{path}\"))"));
+    }
+
     /// Generates a Seatbelt policy string from `SandboxConfig`.
     ///
     /// Policy structure using Seatbelt Scheme compiled format version 1:
     /// 1. `(deny default)` — denies all operations by default.
     /// 2. `(allow file-read*)` — allows all file reads required by macOS process startup.
-    /// 3. `(deny file-read* (subpath ...))` — explicitly denies sensitive user directories.
-    /// 4. `(allow file-write* (subpath ...))` — allows writes only to configured paths.
+    /// 3. `(allow file-write* (subpath ...))` — allows writes only to configured paths.
+    /// 4. Sensitive paths allow metadata discovery, deny content reads, and deny writes.
     /// 5. `(allow process-exec (subpath ...))` — restricts executable paths.
-    /// 6. `(allow process-fork)` — allows fork for shell commands.
-    /// 7. `(deny network*)` — denies network access.
+    /// 6. `(deny process-exec (subpath ...))` — denies execution from writable locations.
+    /// 7. `(allow process-fork)` — allows fork for shell commands.
+    /// 8. `(deny network*)` — denies network access.
     fn generate_policy(&self) -> String {
         let mut rules = Vec::new();
 
@@ -296,35 +320,45 @@ impl MacOsSandbox {
         // 文件读取：全局允许（macOS dyld/Frameworks 启动依赖大量系统路径）
         rules.push("(allow file-read*)".to_string());
 
-        // 显式拒绝敏感用户目录（SSH 密钥、云凭证等）
-        // Seatbelt 中后出现的更具体规则覆盖先前的通用规则
-        if let Ok(home) = std::env::var("HOME") {
-            for sub in SENSITIVE_HOME_SUBPATHS {
-                let full_path = format!("{home}/{sub}");
-                if let Ok(canonical) = std::fs::canonicalize(&full_path) {
-                    // 路径存在，拒绝原始路径和 canonicalize 后的路径
-                    rules.push(format!("(deny file-read* (subpath \"{full_path}\"))"));
-                    let resolved = canonical.to_string_lossy().to_string();
-                    if resolved != full_path {
-                        rules.push(format!("(deny file-read* (subpath \"{resolved}\"))"));
-                    }
-                } else {
-                    // 路径不存在也加入拒绝规则，防止运行时创建后读取
-                    rules.push(format!("(deny file-read* (subpath \"{full_path}\"))"));
-                }
-            }
-        }
-
         // 文件写入：仅允许配置的路径（默认 /tmp）
         // macOS 上 /tmp -> /private/tmp，/var -> /private/var 等符号链接
         // Seatbelt 在解析 subpath 规则时使用实际路径，因此需要 canonicalize
         Self::push_subpath_rule(&mut rules, "file-write*", self.config.fs_readwrite.iter());
 
-        // 进程执行：限制为系统路径
+        // 敏感用户目录：允许 stat/list 发现，拒绝读取内容与写入。
+        // Seatbelt 中后出现的更具体规则覆盖先前的通用规则
+        if let Ok(home) = std::env::var("HOME") {
+            for sub in SENSITIVE_HOME_SUBPATHS {
+                let full_path = format!("{home}/{sub}");
+                if let Ok(canonical) = std::fs::canonicalize(&full_path) {
+                    // 路径存在，保护原始路径和 canonicalize 后的路径
+                    Self::push_sensitive_path_rules(&mut rules, &full_path);
+                    if canonical.is_dir() {
+                        Self::push_sensitive_directory_listing_rule(&mut rules, &full_path);
+                    }
+                    let resolved = canonical.to_string_lossy().to_string();
+                    if resolved != full_path {
+                        Self::push_sensitive_path_rules(&mut rules, &resolved);
+                        if canonical.is_dir() {
+                            Self::push_sensitive_directory_listing_rule(&mut rules, &resolved);
+                        }
+                    }
+                } else {
+                    // 路径不存在也加入保护规则，防止运行时创建后读取
+                    Self::push_sensitive_path_rules(&mut rules, &full_path);
+                }
+            }
+        }
+
+        // 进程执行：限制为系统与 Homebrew 路径
         rules.push(
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/sbin\") (subpath \"/usr/sbin\"))"
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/sbin\") (subpath \"/usr/sbin\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\"))"
                 .to_string(),
         );
+
+        // 可写目录禁止执行，防止下载/写入后二进制直接落地执行。
+        rules.push("(deny process-exec (subpath \"/private/tmp\"))".to_string());
+        rules.push("(deny process-exec (subpath \"~/Library/Caches\"))".to_string());
 
         // 进程 fork：允许（shell 等命令需要）
         rules.push("(allow process-fork)".to_string());
@@ -589,6 +623,7 @@ impl Sandbox for MacOsSandbox {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Barrier, OnceLock};
 
     use super::*;
@@ -623,11 +658,37 @@ mod tests {
         ]
     }
 
-    fn seatbelt_subpath(path: &std::path::Path) -> String {
-        let escaped = path_to_string(path)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        format!("(subpath \"{escaped}\")")
+    fn sensitive_rules_for_path(path: &std::path::Path) -> String {
+        let mut rules = Vec::new();
+        let raw = path_to_string(path);
+        MacOsSandbox::push_sensitive_path_rules(&mut rules, &raw);
+        if path.is_dir() {
+            MacOsSandbox::push_sensitive_directory_listing_rule(&mut rules, &raw);
+        }
+
+        if let Ok(canonical) = fs::canonicalize(path) {
+            let resolved = path_to_string(&canonical);
+            if resolved != raw {
+                MacOsSandbox::push_sensitive_path_rules(&mut rules, &resolved);
+                if canonical.is_dir() {
+                    MacOsSandbox::push_sensitive_directory_listing_rule(&mut rules, &resolved);
+                }
+            }
+        }
+
+        rules.join("\n")
+    }
+
+    fn sensitive_test_policy_for_path(path: &std::path::Path) -> String {
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            "(version 1)",
+            "(deny default)",
+            "(allow file-read*)",
+            sensitive_rules_for_path(path),
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
+            "(allow process-fork)",
+        )
     }
 
     fn should_skip_runtime_tests() -> bool {
@@ -1083,28 +1144,7 @@ mod tests {
         let secret_file = sensitive_dir.join("id_rsa");
         fs::create_dir(&sensitive_dir).expect("创建敏感目录失败");
         fs::write(&secret_file, "super-secret").expect("写入敏感文件失败");
-        let canonical_sensitive_dir =
-            fs::canonicalize(&sensitive_dir).expect("解析敏感目录真实路径失败");
-        let raw_deny_rule = format!("(deny file-read* {})", seatbelt_subpath(&sensitive_dir));
-        let deny_rules = if canonical_sensitive_dir == sensitive_dir {
-            raw_deny_rule
-        } else {
-            let canonical_deny_rule = format!(
-                "(deny file-read* {})",
-                seatbelt_subpath(&canonical_sensitive_dir)
-            );
-            format!("{raw_deny_rule}\n{canonical_deny_rule}")
-        };
-
-        let policy = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
-            "(version 1)",
-            "(deny default)",
-            "(allow file-read*)",
-            deny_rules,
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
-            "(allow process-fork)",
-        );
+        let policy = sensitive_test_policy_for_path(&sensitive_dir);
         let secret_path = path_to_string(&secret_file);
         let output = Command::new("sandbox-exec")
             .args([
@@ -1126,6 +1166,109 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&output.stdout).contains("super-secret"),
             "敏感内容不应出现在 stdout"
+        );
+    }
+
+    #[test]
+    fn test_sensitive_path_stat_allowed_via_seatbelt() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let sensitive_dir = temp_dir.path().join(".ssh");
+        let secret_file = sensitive_dir.join("id_rsa");
+        fs::create_dir(&sensitive_dir).expect("创建敏感目录失败");
+        fs::write(&secret_file, "super-secret").expect("写入敏感文件失败");
+
+        let policy = sensitive_test_policy_for_path(&sensitive_dir);
+        let sensitive_path = path_to_string(&sensitive_dir);
+        let list_output = Command::new("sandbox-exec")
+            .args([
+                "-p",
+                policy.as_str(),
+                "--",
+                "/bin/ls",
+                sensitive_path.as_str(),
+            ])
+            .output()
+            .expect("执行 sandbox-exec ls 失败");
+
+        assert!(
+            list_output.status.success(),
+            "Seatbelt 应允许列出敏感目录元数据, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&list_output.stdout),
+            String::from_utf8_lossy(&list_output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&list_output.stdout).contains("id_rsa"),
+            "ls 应列出敏感目录项"
+        );
+
+        let secret_path = path_to_string(&secret_file);
+        let cat_output = Command::new("sandbox-exec")
+            .args([
+                "-p",
+                policy.as_str(),
+                "--",
+                "/bin/cat",
+                secret_path.as_str(),
+            ])
+            .output()
+            .expect("执行 sandbox-exec cat 失败");
+
+        assert!(
+            !cat_output.status.success(),
+            "Seatbelt 应拒绝读取敏感文件内容, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&cat_output.stdout),
+            String::from_utf8_lossy(&cat_output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&cat_output.stdout).contains("super-secret"),
+            "敏感内容不应出现在 stdout"
+        );
+    }
+
+    #[test]
+    fn test_exec_from_tmp_denied_via_seatbelt() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let temp_dir = TempDir::new_in("/tmp").expect("创建 /tmp 临时目录失败");
+        let script_path = temp_dir.path().join("test_exec.sh");
+        fs::write(&script_path, "#!/bin/sh\necho hello\n").expect("写入测试脚本失败");
+
+        let mut permissions = fs::metadata(&script_path)
+            .expect("读取测试脚本权限失败")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("设置测试脚本可执行权限失败");
+
+        let policy = [
+            "(version 1)",
+            "(deny default)",
+            "(allow file-read*)",
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
+            "(deny process-exec (subpath \"/private/tmp\"))",
+            "(allow process-fork)",
+        ]
+        .join("\n");
+        let script = path_to_string(&script_path);
+        let output = Command::new("sandbox-exec")
+            .args(["-p", policy.as_str(), "--", script.as_str()])
+            .output()
+            .expect("执行 sandbox-exec 测试脚本失败");
+
+        assert!(
+            !output.status.success(),
+            "Seatbelt 应拒绝执行 /tmp 下的脚本, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("hello"),
+            "被拒绝执行的脚本不应输出 hello"
         );
     }
 
@@ -1260,12 +1403,28 @@ mod tests {
             "策略应全局允许文件读取（macOS 进程启动需要）"
         );
         assert!(
-            policy.contains("(deny file-read* (subpath"),
-            "策略应显式拒绝敏感路径"
+            policy.contains("(allow file-read-metadata (subpath"),
+            "策略应允许敏感路径元数据发现"
+        );
+        assert!(
+            policy.contains("(deny file-read-data (subpath"),
+            "策略应拒绝读取敏感路径内容"
+        );
+        assert!(
+            policy.contains("(deny file-write* (subpath"),
+            "策略应拒绝写入敏感路径"
         );
         assert!(policy.contains(".ssh"), "策略应拒绝 ~/.ssh");
         assert!(policy.contains(".aws"), "策略应拒绝 ~/.aws");
         assert!(policy.contains(".gnupg"), "策略应拒绝 ~/.gnupg");
+        assert!(
+            policy.contains(".password-store"),
+            "策略应保护密码管理器目录"
+        );
+        assert!(
+            policy.contains("Library/Keychains"),
+            "策略应保护 macOS Keychain"
+        );
         assert!(
             policy.contains("(deny network*)"),
             "策略应包含 deny network"
@@ -1277,6 +1436,22 @@ mod tests {
         assert!(
             policy.contains("(allow process-fork)"),
             "策略应允许进程 fork"
+        );
+        assert!(
+            policy.contains("(deny process-exec (subpath \"/private/tmp\"))"),
+            "策略应拒绝从 /private/tmp 执行"
+        );
+        assert!(
+            policy.contains("(deny process-exec (subpath \"~/Library/Caches\"))"),
+            "策略应拒绝从 ~/Library/Caches 执行"
+        );
+        assert!(
+            policy.contains("(subpath \"/usr/local/bin\")"),
+            "策略应允许 Intel Homebrew bin 路径执行"
+        );
+        assert!(
+            policy.contains("(subpath \"/opt/homebrew/bin\")"),
+            "策略应允许 Apple Silicon Homebrew bin 路径执行"
         );
         assert!(policy.contains("/tmp"), "策略应允许 /tmp 读写");
     }
