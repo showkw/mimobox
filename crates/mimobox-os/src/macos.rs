@@ -359,6 +359,11 @@ impl MacOsSandbox {
         // 可写目录禁止执行，防止下载/写入后二进制直接落地执行。
         rules.push("(deny process-exec (subpath \"/private/tmp\"))".to_string());
         rules.push("(deny process-exec (subpath \"~/Library/Caches\"))".to_string());
+        rules.push("(deny process-exec (literal \"/usr/bin/osascript\"))".to_string());
+        rules.push("(deny process-exec (literal \"/usr/bin/pbcopy\"))".to_string());
+        rules.push("(deny process-exec (literal \"/usr/bin/pbpaste\"))".to_string());
+        rules.push("(deny process-exec (literal \"/usr/sbin/screencapture\"))".to_string());
+        rules.push("(deny process-exec (literal \"/usr/bin/open\"))".to_string());
 
         // 进程 fork：允许（shell 等命令需要）
         rules.push("(allow process-fork)".to_string());
@@ -1445,6 +1450,18 @@ mod tests {
             policy.contains("(deny process-exec (subpath \"~/Library/Caches\"))"),
             "策略应拒绝从 ~/Library/Caches 执行"
         );
+        for blocked_tool in [
+            "/usr/bin/osascript",
+            "/usr/bin/pbcopy",
+            "/usr/bin/pbpaste",
+            "/usr/sbin/screencapture",
+            "/usr/bin/open",
+        ] {
+            assert!(
+                policy.contains(&format!("(deny process-exec (literal \"{blocked_tool}\"))")),
+                "策略应拒绝执行高风险系统工具 {blocked_tool}"
+            );
+        }
         assert!(
             policy.contains("(subpath \"/usr/local/bin\")"),
             "策略应允许 Intel Homebrew bin 路径执行"
