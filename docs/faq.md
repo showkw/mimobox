@@ -1,4 +1,4 @@
-# FAQ & Troubleshooting
+# MimoBox FAQ & Troubleshooting
 
 ## Installation
 

@@ -1,4 +1,4 @@
-# Changelog
+# MimoBox Changelog
 
 All notable changes to mimobox are documented in this file.
 

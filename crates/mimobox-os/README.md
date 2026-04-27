@@ -1,4 +1,4 @@
-# mimobox-os
+# MimoBox OS Backend
 
 OS-level sandbox backend for mimobox Agent Sandbox.
 

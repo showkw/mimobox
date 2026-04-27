@@ -1,18 +1,18 @@
-# examples
+# Examples
 
-`examples/` 收录 `mimobox-sdk` 和 `mimobox` Python 模块的最小可运行示例。
+This directory contains minimal runnable examples for the `mimobox-sdk` Rust crate and the `mimobox` Python module.
 
-## Rust 示例
+## Rust Examples
 
-- `basic.rs`：基本命令执行，演示 `Sandbox::new()` 和 `execute`
-- `streaming.rs`：流式执行，演示 `stream_execute`、`Stdout` / `Stderr` / `Exit` 事件处理
-- `agent_demo.rs`：Agent 集成，演示预设请求、命令生成、沙箱执行和交互模式
-- `agent_streaming.rs`：Agent 流式执行，演示实时处理 `Stdout` / `Stderr` / `Exit` / `TimedOut` 事件
-- `http_proxy.rs`：HTTP 代理，演示 `allowed_http_domains` 和 `http_request`
-- `env_vars.rs`：环境变量注入，演示 `execute_with_env`
-- `file_ops.rs`：文件读写，演示 `write_file` 和 `read_file`
+- `basic.rs`: Basic command execution with `Sandbox::new()` and `execute`
+- `streaming.rs`: Streaming execution with `stream_execute` and `Stdout` / `Stderr` / `Exit` event handling
+- `agent_demo.rs`: Agent integration with preset requests, command generation, sandbox execution, and interactive mode
+- `agent_streaming.rs`: Agent streaming execution with real-time `Stdout` / `Stderr` / `Exit` / `TimedOut` event processing
+- `http_proxy.rs`: HTTP proxy with `allowed_http_domains` and `http_request`
+- `env_vars.rs`: Environment variable injection with `execute_with_env`
+- `file_ops.rs`: File read/write with `write_file` and `read_file`
 
-Rust 示例通过 `crates/mimobox-sdk/Cargo.toml` 注册。校验命令：
+Rust examples are registered in `crates/mimobox-sdk/Cargo.toml`. Verify with:
 
 ```bash
 cd crates/mimobox-sdk
@@ -20,18 +20,18 @@ cargo check --examples
 cargo check --examples --features vm
 ```
 
-说明：
+Notes:
 
-- `basic.rs` 使用默认后端，适合先验证 SDK 基本执行链路
-- `agent_demo.rs` 使用 OS 后端，支持 Linux/macOS，添加 `--interactive` 可进入交互模式
-- `streaming.rs`、`agent_streaming.rs`、`http_proxy.rs`、`env_vars.rs`、`file_ops.rs` 需要 Linux + `vm` feature
-- 在不满足 microVM 条件的环境中，上述示例会打印提示信息，但仍可通过默认 `cargo check --examples`
+- `basic.rs` uses the default backend, suitable for verifying the basic SDK execution path first
+- `agent_demo.rs` uses the OS backend and supports Linux/macOS; add `--interactive` for interactive mode
+- `streaming.rs`, `agent_streaming.rs`, `http_proxy.rs`, `env_vars.rs`, and `file_ops.rs` require Linux + `vm` feature
+- In environments without microVM support, these examples print a notice but still pass `cargo check --examples`
 
-## Python 示例
+## Python Examples
 
-- `python_basic.py`：单文件演示命令执行、流式执行、HTTP 请求、文件读写和环境变量注入
+- `python_basic.py`: Single-file demo covering command execution, streaming output, HTTP requests, file read/write, and environment variable injection
 
-建议先安装 Python 绑定，再运行该示例：
+Install the Python bindings first, then run:
 
 ```bash
 cd crates/mimobox-python
@@ -39,8 +39,8 @@ pip install -e .
 python ../../examples/python_basic.py
 ```
 
-说明：
+Notes:
 
-- Python 示例默认展示基础命令执行
-- 需要 microVM 的部分会通过 `Sandbox(isolation="microvm", allowed_http_domains=[...])` 显式请求后端
-- 若当前平台或构建不支持 microVM，示例会打印对应提示
+- The Python example demonstrates basic command execution by default
+- microVM-dependent features are explicitly requested via `Sandbox(isolation="microvm", allowed_http_domains=[...])`
+- If the platform or build does not support microVM, the example prints an appropriate notice

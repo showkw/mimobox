@@ -1,4 +1,4 @@
-# mimobox Python SDK
+# MimoBox Python SDK
 
 This document describes how to install `mimobox-python`, its public API, exception hierarchy, and complete examples. The prose is in English, while code examples and variable names remain in English as originally written.
 

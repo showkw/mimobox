@@ -36,7 +36,7 @@ pub(crate) const DEFAULT_POOL_SIZE: usize = 16;
 #[command(
     name = "mimobox",
     version,
-    about = "Cross-platform Agent Sandbox CLI",
+    about = "MimoBox — Local Sandbox Runtime for AI Agents",
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {

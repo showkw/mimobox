@@ -1,4 +1,4 @@
-"""mimobox — Cross-platform Agent Sandbox for AI agents."""
+"""MimoBox — Local Sandbox Runtime for AI Agents. Run AI-generated code safely, locally, and instantly."""
 
 from typing import Dict, Iterator, List, Optional, Union
 

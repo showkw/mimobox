@@ -1,4 +1,4 @@
-# mimobox Architecture Design
+# MimoBox Architecture
 
 This document describes the architecture layers, backend implementation mechanisms, SDK intelligent routing, MCP Server, Python bindings, and security boundaries of the current repository. It only records capabilities that actually exist in the current source code, and does not present long-term plans from research documents as current status.
 

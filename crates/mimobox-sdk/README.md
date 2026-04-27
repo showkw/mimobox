@@ -1,4 +1,4 @@
-# mimobox-sdk
+# MimoBox SDK
 
 Unified Rust SDK for mimobox sandboxing across OS, Wasm, and microVM backends.
 

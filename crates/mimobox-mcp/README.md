@@ -1,4 +1,4 @@
-# mimobox-mcp
+# MimoBox MCP Server
 
 MCP server for AI agents, exposing mimobox sandbox operations over stdio.
 

@@ -1,4 +1,4 @@
-# mimobox-cli
+# MimoBox CLI
 
 Command-line interface for [mimobox](https://github.com/showkw/mimobox).
 

@@ -1,18 +1,25 @@
 [中文](README.zh-CN.md)
 
-# mimobox
+# MimoBox
 
 [![CI](https://github.com/showkw/mimobox/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/showkw/mimobox/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT) [![alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-**mimobox** — Run AI-generated code in secure isolated sandboxes. Locally. No API keys, no Docker, no cloud.
+**Run AI-generated code safely, locally, and instantly.**
 
-> **No API keys. No Docker. No cloud required.** Download a single binary and start executing code safely. OS-level + Wasm sandboxes work everywhere; microVM isolation available on Linux with KVM.
+No API keys. No Docker. No cloud.
 
-`mimobox` provides secure, self-hosted code execution for AI Agent workloads through one SDK, CLI, MCP server, and Python binding surface.
+MimoBox is a local sandbox runtime for AI agents. It provides multi-layer isolation — OS (Landlock + Seccomp), WebAssembly (Wasmtime), and microVM (KVM) — through a unified SDK, CLI, MCP server, and Python binding. Download a single binary and start executing code safely.
+
+---
+
+## Why MimoBox?
+
+- **Local-first** — Runs entirely on your machine. No data leaves your network, no API keys required.
+- **Multi-layer isolation** — OS-level (Landlock + Seccomp + Namespaces), Wasm (Wasmtime), and microVM (KVM) backends with smart auto-routing.
+- **Ultra-low latency** — OS cold start P50 8.24 ms, Wasm cold start P50 1.01 ms, warm pool acquire P50 0.19 µs.
+- **Agent-native** — MCP server with 11 tools, Python SDK, LangChain / OpenAI Agents SDK integration out of the box.
 
 ## Quick Start
-
-> **Platform notes**: macOS supports OS-level and Wasm sandboxes only. microVM features require Linux with KVM (`/dev/kvm`). The MCP server binary is currently available for Linux only.
 
 ### Install
 
@@ -21,6 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/insta
 ```
 
 ### Python
+
 > Python wheels are coming to PyPI. For now, build from source (requires Rust toolchain):
 
 ```bash
@@ -35,20 +43,7 @@ pip install target/wheels/*.whl
 ```toml
 [dependencies]
 mimobox-sdk = { git = "https://github.com/showkw/mimobox.git", branch = "master" }
-# 发布后改为：mimobox-sdk = "0.1.0"
-```
-
-### From Source
-
-```bash
-git clone https://github.com/showkw/mimobox.git && cd mimobox
-cargo build --release -p mimobox-cli --features mimobox-cli/wasm
-```
-
-### Run
-
-```bash
-mimobox run --backend auto --command "/bin/echo hello"
+# After crates.io publication: mimobox-sdk = "0.1.0"
 ```
 
 ### MCP Server
@@ -58,11 +53,7 @@ mimobox-mcp                              # stdio mode (default)
 mimobox-mcp --transport http --port 8080 # Streamable HTTP mode
 ```
 
-## 集成到 Agent 框架
-
-### MCP（推荐）
-
-mimobox MCP Server 可直接配置到 Claude Desktop、Cursor、VS Code 等 AI 编码工具中：
+Add to your MCP client config:
 
 ```json
 {
@@ -74,7 +65,7 @@ mimobox MCP Server 可直接配置到 Claude Desktop、Cursor、VS Code 等 AI �
 }
 ```
 
-详见 [MCP 配置指南](docs/mcp-config.md)。
+## Integration Examples
 
 ### LangChain
 
@@ -84,7 +75,7 @@ from langchain_core.tools import tool
 
 @tool
 def sandbox_run_command(command: str) -> str:
-    """在安全沙箱中执行命令。"""
+    """Run a command inside a secure sandbox."""
     with Sandbox() as sb:
         return sb.execute(command).stdout
 ```
@@ -97,14 +88,12 @@ from agents import function_tool
 
 @function_tool
 def sandbox_execute(command: str) -> str:
-    """在安全沙箱中执行命令。"""
+    """Run a command inside a secure sandbox."""
     with Sandbox() as sb:
         return sb.execute(command).stdout
 ```
 
-完整示例见 [examples/langchain/](examples/langchain/) 和 [examples/openai_agent/](examples/openai_agent/)。
-
-### Python
+### Python SDK
 
 ```python
 from mimobox import Sandbox
@@ -122,24 +111,6 @@ with Sandbox() as sandbox:
     entries = sandbox.list_dir("/tmp")
 ```
 
-### Rust
-
-```rust
-use mimobox_sdk::Sandbox;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sandbox = Sandbox::new()?;
-    let result = sandbox.execute("/bin/echo hello")?;
-    println!("{}", String::from_utf8_lossy(&result.stdout));
-    sandbox.destroy()?;
-    Ok(())
-}
-```
-
-For streaming, file operations, HTTP proxy, snapshot/fork, CLI examples, and advanced SDK usage, see [docs/getting-started.md](docs/getting-started.md).
-
-> **Status**: mimobox is in **alpha** (v0.1.x). It has not undergone a formal security audit. See [SECURITY.md](SECURITY.md) for threat model and known limitations.
-
 ## Platform Support
 
 | Platform | OS Sandbox | Wasm Sandbox | microVM Sandbox |
@@ -147,75 +118,37 @@ For streaming, file operations, HTTP proxy, snapshot/fork, CLI examples, and adv
 | Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
 | macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
 
-## Three-Layer Isolation
+## Isolation Layers
 
-| Layer | Backend | Best For | Status |
-| --- | --- | --- | --- |
-| OS-level | Linux Landlock + Seccomp + namespaces; macOS Seatbelt | Fast local commands and default smart routing | Implemented |
-| Wasm | Wasmtime + WASI | Deterministic portable workloads | Implemented |
-| microVM | Linux KVM + guest protocol + pools + snapshot/fork | Strong isolation and Linux production workloads | Implemented on Linux (requires KVM + guest kernel + rootfs) |
-
-Glossary and architecture details live in [docs/architecture.md](docs/architecture.md).
-
-## Performance P50 Summary
-
-| Scenario | Target | Current P50 | Status |
-| --- | --- | --- | --- |
-| OS-level cold start | <10ms | 8.24ms | Meets target |
-| Wasm cold start | <5ms | 1.01ms | Meets target |
-| OS warm pool acquisition | <100us | 0.19us | Meets target |
-| microVM cold start | <300ms | 253ms | Meets target |
-| microVM snapshot restore | <50ms | 69ms non-pooled / 28ms pooled | Pooled path meets target |
-| microVM warm pool hot path | <1ms | 773us | Meets target |
-
-Metric definitions, benchmark scope, and caveats are maintained in [docs/performance.md](docs/performance.md).
-
-## Directory Structure
-
-```text
-mimobox/
-├── Cargo.toml
-├── README.md
-├── CHANGELOG.md
-├── crates/
-│   ├── mimobox-core/       # Sandbox trait, config, result, and error types
-│   ├── mimobox-os/         # OS-level sandbox backends
-│   ├── mimobox-wasm/       # Wasmtime sandbox backend
-│   ├── mimobox-vm/         # KVM microVM backend, pools, snapshot, fork
-│   ├── mimobox-sdk/        # Unified Rust SDK and smart routing
-│   ├── mimobox-cli/        # CLI entrypoint
-│   ├── mimobox-mcp/        # MCP server (stdio + Streamable HTTP)
-│   └── mimobox-python/     # Python SDK via PyO3
-├── docs/                   # User, API, architecture, MCP, and performance docs
-├── discuss/                # Design notes, reviews, and market analysis
-├── examples/               # Example code
-├── scripts/                # Build, test, run, and setup scripts
-├── tests/                  # Integration tests
-├── wit/                    # WIT interface definitions
-└── logs/                   # Runtime logs
-```
-
-## Roadmap
-
-| Status | Direction | Notes |
+| Layer | Backend | Best For |
 | --- | --- | --- |
-| Completed | Unified SDK + smart routing | `Sandbox::new()` and CLI `--backend auto` are implemented |
-| Completed | OS + Wasm + microVM isolation | Linux KVM, snapshot, restore, and fork are verifiable |
-| Completed | MCP Server | 10 tools over stdio + Streamable HTTP for lifecycle, execution, files, snapshots, fork, and HTTP proxy; parameter-level Seccomp constraints |
-| Completed | Python SDK | PyO3 bindings with execution, streaming, files, HTTP, snapshot, and errors |
-| Planned | Formal vsock data plane | Serial remains the bring-up/control path; vsock is the future data plane |
-| Planned | Windows backend + GPU/SaaS options | Current priority remains Linux and macOS maturity |
+| OS-level | Linux Landlock + Seccomp + Namespaces; macOS Seatbelt | Fast local commands, default smart routing |
+| Wasm | Wasmtime + WASI | Deterministic portable workloads |
+| microVM | Linux KVM + guest protocol + pools + snapshot/fork | Strong isolation, production workloads |
+
+## Performance
+
+| Metric | P50 |
+| --- | ---:|
+| OS cold start | 8.24 ms |
+| Wasm cold start | 1.01 ms |
+| Warm pool acquire | 0.19 µs |
+| microVM cold start | 253 ms |
+| microVM snapshot restore (pooled) | 28 ms |
+
+> **Status**: MimoBox is in **alpha** (v0.1.x). It has not undergone a formal security audit. See [SECURITY.md](SECURITY.md) for threat model and known limitations.
 
 ## Documentation
 
-- [docs/getting-started.md](docs/getting-started.md) — SDK and CLI examples, including the removed README sections 6.1-6.5 and 8.
-- [docs/architecture.md](docs/architecture.md) — architecture, smart routing, and glossary.
-- [docs/performance.md](docs/performance.md) — metric definitions, benchmark methodology, and performance notes.
-- [docs/api.md](docs/api.md) — Rust SDK API reference.
-- [docs/python-sdk.md](docs/python-sdk.md) — Python SDK usage.
-- [docs/mcp-server.md](docs/mcp-server.md) — MCP server setup, tools, and client integration.
-- [docs/mcp-integration.md](docs/mcp-integration.md) — MCP integration notes.
-- [discuss/competitive-analysis.md](discuss/competitive-analysis.md) — competitive comparison and market framing.
-- [CHANGELOG.md](CHANGELOG.md) — release notes and moved README version history.
+- [Getting Started](docs/getting-started.md) — Installation, CLI usage, and SDK examples
+- [Architecture](docs/architecture.md) — Workspace structure and smart routing
+- [API Reference](docs/api.md) — Rust SDK types and methods
+- [Python SDK](docs/python-sdk.md) — Python binding installation and usage
+- [MCP Server](docs/mcp-server.md) — Tool reference and client integration
+- [MCP Configuration](docs/mcp-config.md) — Templates for Claude Desktop, Cursor, VS Code
+- [Performance](docs/performance.md) — Benchmark methodology and detailed metrics
+- [FAQ & Troubleshooting](docs/faq.md) — Common issues and solutions
 
-Competitive comparison is intentionally kept out of this README; see [discuss/competitive-analysis.md](discuss/competitive-analysis.md).
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

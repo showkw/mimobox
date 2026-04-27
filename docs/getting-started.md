@@ -1,4 +1,4 @@
-# mimobox Getting Started
+# MimoBox Getting Started
 
 ## 1. Introduction
 

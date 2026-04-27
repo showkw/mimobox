@@ -1,6 +1,6 @@
 > **Note**: The `mimobox-mcp` binary is currently built for Linux only. macOS users can use the CLI and SDK but cannot run the MCP server at this time.
 
-# mimobox MCP Server
+# MimoBox MCP Server
 
 This document describes how `mimobox-mcp` runs, its tool list, parameter structures, and Claude Desktop integration.
 

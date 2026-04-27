@@ -1,7 +1,7 @@
 ---
 > **Note**: The `mimobox-mcp` binary is currently available for Linux only. macOS users can use the CLI and SDK but cannot run the MCP server at this time.
 
-# MCP Client Integration Guide
+# MimoBox MCP Client Integration Guide
 
 This guide explains how to configure MCP clients (Claude Desktop, Cursor IDE) to connect to the mimobox MCP server.
 

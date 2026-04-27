@@ -1,4 +1,4 @@
-# mimobox SDK API Reference
+# MimoBox SDK API Reference
 
 > **Stability note**: This document describes the current public API of `mimobox-sdk` and `mimobox-core`. The API is stabilizing but may still evolve before 1.0.
 

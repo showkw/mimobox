@@ -1,4 +1,4 @@
-# mimobox-vm
+# MimoBox microVM Backend
 
 KVM microVM sandbox backend for mimobox Agent Sandbox.
 
