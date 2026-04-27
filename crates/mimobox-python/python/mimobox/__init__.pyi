@@ -1,6 +1,6 @@
 """mimobox — Cross-platform Agent Sandbox for AI agents."""
 
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Union
 
 
 class ExecuteResult:
@@ -126,6 +126,9 @@ class StreamEvent:
 
     @property
     def timed_out(self) -> bool: ...
+
+    @property
+    def event_type(self) -> str: ...
 
 
 class StreamIterator:
@@ -275,7 +278,7 @@ class Sandbox:
         """
         ...
 
-    def write_file(self, path: str, data: bytes) -> None:
+    def write_file(self, path: str, data: Union[str, bytes]) -> None:
         """Write bytes to a file inside the sandbox.
 
         Args:
