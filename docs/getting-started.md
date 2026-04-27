@@ -8,7 +8,7 @@
 
 ### 2.1 Prerequisites
 
-- Rust 1.82+
+- Rust 1.87+
 - KVM support is required when enabling microVM on Linux
 - Full sandbox tests on Linux should have `sudo` privileges, cgroups v2, and common system paths (`/usr`, `/bin`, `/proc`, etc.)
 - macOS currently supports the OS backend; Windows is still planned

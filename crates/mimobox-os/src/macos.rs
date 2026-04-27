@@ -32,6 +32,12 @@ use mimobox_core::{
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
 #[cfg(target_os = "macos")]
+/// # Safety
+///
+/// This block declares external C linkage functions from the macOS system library.
+/// These are standard macOS sandbox API functions (sandbox_init) whose signatures
+/// match the system headers. The functions are called only within pre_exec closures
+/// in forked child processes with validated CString pointers, not in multi-threaded contexts.
 unsafe extern "C" {
     fn sandbox_init(
         profile: *const libc::c_char,

@@ -108,6 +108,31 @@ For microVM workloads, network egress flows through the HTTP proxy. The proxy
 enforces a domain allowlist, DNS rebinding protection, body size limits, and
 HTTPS-only external destinations.
 
+## Scope
+
+### In Scope
+
+- Vulnerabilities in the mimobox host-side sandbox implementation (OS, Wasm, and microVM backends)
+- Escape vectors that allow sandboxed code to access host resources beyond configured policy
+- Privilege escalation from sandboxed code to the host system
+- Authentication or authorization bypass in the MCP server
+- Supply chain vulnerabilities in the build and release pipeline
+
+### Out of Scope
+
+- **Sandbox internal privilege escalation**: mimobox is designed to let users run arbitrary code inside the sandbox. Escalation within the sandbox boundary (e.g., gaining root inside a microVM guest) is expected behavior, not a vulnerability.
+- **Denial of service against the host**: while we take resource management seriously, the sandbox does not guarantee protection against all DoS vectors on the host.
+- **Social engineering attacks** against mimobox maintainers or infrastructure.
+- **Vulnerabilities in dependencies** that are already publicly disclosed and patched. Please report these to the upstream maintainers directly.
+- **Issues in sandboxed code**: the code running inside the sandbox is the responsibility of the user who executed it.
+
+### Safe Harbor
+
+If you make a good faith effort to report a vulnerability in accordance with this policy, we will not pursue legal action against you. We ask that you:
+- Avoid accessing or modifying user data beyond what is necessary to demonstrate the vulnerability.
+- Report the vulnerability privately before any public disclosure.
+- Allow reasonable time for us to address the issue before disclosing it publicly.
+
 ## Vulnerability Reporting
 
 If you discover a security vulnerability in mimobox, report it responsibly.

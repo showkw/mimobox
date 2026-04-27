@@ -81,6 +81,12 @@ fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
     }
 }
 
+/// # Safety
+///
+/// Must only be called in a forked child process before exec. The function clears
+/// and rebuilds the process environment from a static allowlist, which is safe only
+/// when the process is single-threaded (post-fork). Calling in a multi-threaded
+/// process would race with other threads reading/writing environ.
 unsafe fn reset_child_environment() -> Result<(), ()> {
     // SECURITY: clearenv() 必须成功，失败时不能继续沿用父进程环境，
     // 否则 LD_PRELOAD/BASH_ENV 等注入变量可能带入沙箱子进程。
