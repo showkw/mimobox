@@ -57,6 +57,52 @@ mimobox-mcp                              # stdio mode (default)
 mimobox-mcp --transport http --port 8080 # Streamable HTTP mode
 ```
 
+## 集成到 Agent 框架
+
+### MCP（推荐）
+
+mimobox MCP Server 可直接配置到 Claude Desktop、Cursor、VS Code 等 AI 编码工具中：
+
+```json
+{
+  "mcpServers": {
+    "mimobox": {
+      "command": "mimobox-mcp"
+    }
+  }
+}
+```
+
+详见 [MCP 配置指南](docs/mcp-config.md)。
+
+### LangChain
+
+```python
+from mimobox import Sandbox
+from langchain_core.tools import tool
+
+@tool
+def sandbox_run_command(command: str) -> str:
+    """在安全沙箱中执行命令。"""
+    with Sandbox() as sb:
+        return sb.execute(command).stdout
+```
+
+### OpenAI Agents SDK
+
+```python
+from mimobox import Sandbox
+from agents import function_tool
+
+@function_tool
+def sandbox_execute(command: str) -> str:
+    """在安全沙箱中执行命令。"""
+    with Sandbox() as sb:
+        return sb.execute(command).stdout
+```
+
+完整示例见 [examples/langchain/](examples/langchain/) 和 [examples/openai_agent/](examples/openai_agent/)。
+
 ### Python
 
 ```python
