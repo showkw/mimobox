@@ -1734,7 +1734,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mimobox-cli"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-core"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-mcp"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "axum",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-os"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "criterion",
  "landlock",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-python"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "mimobox-sdk",
  "pyo3",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-sdk"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "criterion",
  "mimobox-core",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-vm"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "base64",
  "criterion",
@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "mimobox-wasm"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "criterion",
