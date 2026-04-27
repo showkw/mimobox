@@ -12,9 +12,12 @@ use mimobox_core::{SandboxConfig, SeccompProfile};
 ///
 /// # Smart Routing Rules (Auto)
 ///
-/// - `.wasm` / `.wat` / `.wast` files → `Wasm`
 /// - `TrustLevel::Untrusted` on Linux + `vm` feature → `MicroVm`
+/// - `.wasm` / `.wat` / `.wast` files → `Wasm`
 /// - All other commands → `Os`
+///
+/// `TrustLevel::Untrusted` has priority over Wasm detection so untrusted Wasm
+/// files cannot bypass the microVM fail-closed requirement.
 ///
 /// # Examples
 ///

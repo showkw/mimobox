@@ -45,6 +45,12 @@ pub(crate) fn resolve_isolation(
 
 /// 自动路由逻辑
 fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, SdkError> {
+    // TrustLevel::Untrusted 必须先于 Wasm 文件检测处理，避免 .wasm/.wat/.wast
+    // 通过轻量 Wasm 路由绕过 microVM 的 fail-closed 边界。
+    if trust_level == TrustLevel::Untrusted {
+        return require_microvm_for_untrusted();
+    }
+
     // 优先检测 Wasm 文件
     if is_wasm_command(command) {
         #[cfg(feature = "wasm")]
@@ -55,11 +61,6 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
             // Wasm 不可用，fallback 到 OS 级
             tracing::debug!("Wasm 后端不可用，fallback 到 OS 级");
         }
-    }
-
-    // 不可信代码必须走 microVM；当前构建或平台不支持时直接 fail-closed。
-    if trust_level == TrustLevel::Untrusted {
-        return require_microvm_for_untrusted();
     }
 
     // 默认走 OS 级
@@ -135,6 +136,34 @@ mod tests {
                 );
             }
             other => panic!("期望 fail-closed 的结构化错误，实际为: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn untrusted_wasm_file_does_not_route_to_wasm() {
+        let result = auto_route(TrustLevel::Untrusted, "module.wasm");
+
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        match result {
+            Err(SdkError::Sandbox {
+                code: ErrorCode::UnsupportedPlatform,
+                message,
+                suggestion,
+            }) => {
+                assert_eq!(
+                    message,
+                    "Untrusted isolation level requires microVM backend, which is not supported on current platform"
+                );
+                assert_eq!(
+                    suggestion.as_deref(),
+                    Some("Use IsolationLevel::Os as alternative")
+                );
+            }
+            Ok(IsolationLevel::Wasm) => panic!("Untrusted .wasm 不应路由到 Wasm 后端"),
+            other => panic!("期望 Untrusted .wasm fail-closed 或进入 MicroVm，实际为: {other:?}"),
         }
     }
 

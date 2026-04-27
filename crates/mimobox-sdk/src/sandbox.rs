@@ -1,4 +1,4 @@
-use crate::config::{Config, IsolationLevel};
+use crate::config::{Config, IsolationLevel, TrustLevel};
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::dispatch::HttpRequestForSdk;
 use crate::dispatch::{ExecuteForSdk, StreamExecuteForSdk};
@@ -999,7 +999,26 @@ impl Sandbox {
         }
 
         let isolation = match self.config.isolation {
-            IsolationLevel::Auto => IsolationLevel::Os,
+            IsolationLevel::Auto => {
+                if self.config.trust_level == TrustLevel::Untrusted {
+                    // Auto 模式不能把 Untrusted 探测初始化降级到 OS；
+                    // microVM 不可用时必须 fail-closed，而不是创建较弱后端。
+                    #[cfg(all(feature = "vm", target_os = "linux"))]
+                    {
+                        IsolationLevel::MicroVm
+                    }
+                    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+                    {
+                        return Err(SdkError::sandbox(
+                            ErrorCode::UnsupportedPlatform,
+                            "Untrusted requires microVM backend",
+                            Some("Use IsolationLevel::Os as alternative".to_string()),
+                        ));
+                    }
+                } else {
+                    IsolationLevel::Os
+                }
+            }
             other => other,
         };
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
@@ -1230,7 +1249,18 @@ impl Sandbox {
 
     fn ensure_backend_for_pty(&mut self) -> Result<(), SdkError> {
         let isolation = match self.config.isolation {
-            IsolationLevel::Auto => IsolationLevel::Os,
+            IsolationLevel::Auto => {
+                if self.config.trust_level == TrustLevel::Untrusted {
+                    // PTY 目前依赖 OS 级后端；Untrusted 不能静默降级到 OS，
+                    // 而 microVM 暂不支持 PTY，因此这里直接拒绝以保持 fail-closed。
+                    return Err(SdkError::sandbox(
+                        ErrorCode::UnsupportedPlatform,
+                        "PTY sessions require OS-level backend, which is not allowed for Untrusted code",
+                        Some("Use TrustLevel::SemiTrusted or Trusted for PTY access".to_string()),
+                    ));
+                }
+                IsolationLevel::Os
+            }
             other => other,
         };
 
@@ -1502,6 +1532,33 @@ mod tests {
         assert!(result.is_ok(), "销毁未初始化沙箱应成功: {:?}", result);
     }
 
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    #[test]
+    fn wait_ready_untrusted_fails_without_vm() {
+        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
+
+        let result = sandbox.wait_ready(Duration::from_millis(1));
+
+        match result {
+            Err(SdkError::Sandbox {
+                code,
+                message,
+                suggestion,
+            }) => {
+                assert_eq!(code, ErrorCode::UnsupportedPlatform);
+                assert_eq!(message, "Untrusted requires microVM backend");
+                assert_eq!(
+                    suggestion.as_deref(),
+                    Some("Use IsolationLevel::Os as alternative")
+                );
+            }
+            other => {
+                panic!("期望 Untrusted wait_ready 在无 microVM 时 fail-closed，实际为: {other:?}")
+            }
+        }
+    }
+
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn destroy_then_drop_does_not_panic() {
@@ -1584,6 +1641,33 @@ mod tests {
 
         drop(session);
         sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[test]
+    fn create_pty_auto_untrusted_fails_closed() {
+        let config = Config::builder().trust_level(TrustLevel::Untrusted).build();
+        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
+
+        let result = sandbox.create_pty("/bin/sh");
+
+        match result {
+            Err(SdkError::Sandbox {
+                code,
+                message,
+                suggestion,
+            }) => {
+                assert_eq!(code, ErrorCode::UnsupportedPlatform);
+                assert_eq!(
+                    message,
+                    "PTY sessions require OS-level backend, which is not allowed for Untrusted code"
+                );
+                assert_eq!(
+                    suggestion.as_deref(),
+                    Some("Use TrustLevel::SemiTrusted or Trusted for PTY access")
+                );
+            }
+            other => panic!("期望 Untrusted + Auto + PTY fail-closed，实际为: {other:?}"),
+        }
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
