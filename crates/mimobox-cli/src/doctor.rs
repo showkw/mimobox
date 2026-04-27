@@ -10,6 +10,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
+use tracing::{info, warn};
+#[cfg(not(target_os = "linux"))]
 use tracing::info;
 
 const APP_HOME_SUBDIR: &str = ".mimobox";
@@ -918,24 +921,73 @@ fn build_missing_rootfs(writer: &mut impl Write, output_path: &Path) -> Result<(
     writeln!(writer, "  rootfs (rootfs.cpio.gz): ✅").map_err(|error| error.to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn find_script(name: &str) -> Option<PathBuf> {
-    if let Ok(current_dir) = env::current_dir() {
-        let cwd_candidate = current_dir.join("scripts").join(name);
-        if cwd_candidate.is_file() {
-            return Some(cwd_candidate);
-        }
-    }
-
+    // 安全：仅使用编译时嵌入的仓库路径，不从 CWD 查找。
+    // 原因：优先查找 CWD 下的 scripts/ 目录会允许恶意目录注入脚本获得代码执行。
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)?
         .to_path_buf();
-    let repo_candidate = repo_root.join("scripts").join(name);
-    if repo_candidate.is_file() {
-        return Some(repo_candidate);
+    let candidate = repo_root.join("scripts").join(name);
+    if validate_script(&candidate, &repo_root) {
+        return Some(candidate);
     }
 
     None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_script(_name: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn validate_script(path: &Path, allowed_prefix: &Path) -> bool {
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            warn!(path = %path.display(), "script path canonicalize failed");
+            return false;
+        }
+    };
+
+    let canonical_prefix = match allowed_prefix.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            warn!(prefix = %allowed_prefix.display(), "script prefix canonicalize failed");
+            return false;
+        }
+    };
+
+    if !canonical.starts_with(&canonical_prefix) {
+        warn!(
+            path = %canonical.display(),
+            prefix = %canonical_prefix.display(),
+            "script path escapes allowed prefix"
+        );
+        return false;
+    }
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            warn!(path = %path.display(), "script metadata read failed");
+            return false;
+        }
+    };
+    if !metadata.is_file() {
+        warn!(path = %path.display(), "script path is not a regular file");
+        return false;
+    }
+
+    let mode = metadata.permissions().mode();
+    if mode & 0o002 != 0 {
+        warn!(path = %path.display(), mode = %format!("{mode:o}"), "script is world-writable");
+        return false;
+    }
+
+    true
 }
 
 fn run_script(script_path: &Path, args: &[(&str, &std::ffi::OsStr)]) -> Result<(), String> {
