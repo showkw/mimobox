@@ -16,8 +16,6 @@ use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::{KVM_IDENTITY_MAP_ADDR, KVM_TSS_ADDR};
 use crate::kvm::{KvmBackend, RestoreProfile, restore_runtime_state};
-#[cfg(feature = "zerocopy-fork")]
-use crate::snapshot::load_state_from_memory_file;
 use crate::vm::LifecycleError;
 use crate::{
     GuestCommandResult, GuestExecOptions, HttpRequest, HttpResponse, MicrovmConfig, MicrovmError,
@@ -118,40 +116,6 @@ impl EmptyVmSlot {
         Ok(backend)
     }
 
-    /// Converts this empty slot into a restored backend using a file-backed memory snapshot.
-    #[cfg(feature = "zerocopy-fork")]
-    pub(crate) fn into_restored_backend_from_file(
-        self,
-        memory_path: &std::path::Path,
-        vcpu_state: &[u8],
-    ) -> Result<KvmBackend, MicrovmError> {
-        let mut backend = KvmBackend::from_slot_components(
-            self.kvm,
-            self.vm_fd,
-            self.vcpus,
-            self.guest_memory,
-            self.base_config,
-            self.config,
-        );
-        backend.set_pending_restore_profile(RestoreProfile::default());
-
-        let mut restore_profile = backend.take_or_seed_restore_profile();
-
-        let restore_memory_started_at = Instant::now();
-        backend.restore_from_file_zerocopy(memory_path)?;
-        restore_profile.memory_state_write = restore_memory_started_at.elapsed();
-
-        restore_profile.cpuid_config = backend.prepare_restored_vcpus()?;
-
-        let runtime_restore_profile = restore_runtime_state(&mut backend, vcpu_state)?;
-        restore_profile.vcpu_state_restore = runtime_restore_profile.vcpu_state_restore;
-        restore_profile.device_state_restore = runtime_restore_profile.device_state_restore;
-
-        backend.set_lifecycle_ready();
-        backend.emit_restore_profile_without_resume(&restore_profile);
-        backend.set_pending_restore_profile(restore_profile);
-        Ok(backend)
-    }
 }
 
 /// Configuration for the snapshot restore pool.
@@ -416,13 +380,6 @@ impl RestorePool {
         snapshot: &SandboxSnapshot,
     ) -> Result<PooledRestoreVm, RestorePoolError> {
         if let Some(memory_path) = snapshot.memory_file_path() {
-            #[cfg(feature = "zerocopy-fork")]
-            {
-                let (_, _, vcpu_state) = load_state_from_memory_file(memory_path)?;
-                return self.restore_from_file(memory_path, vcpu_state.as_slice());
-            }
-
-            #[cfg(not(feature = "zerocopy-fork"))]
             {
                 let snapshot = MicrovmSnapshot::from_memory_file(memory_path)?;
                 let (_, _, memory, vcpu_state) = snapshot.into_parts();
@@ -432,44 +389,6 @@ impl RestorePool {
 
         let data = snapshot.as_bytes().map_err(map_snapshot_access_error)?;
         self.restore_from_bytes(data)
-    }
-
-    #[cfg(feature = "zerocopy-fork")]
-    fn restore_from_file(
-        &self,
-        memory_path: &std::path::Path,
-        vcpu_state: &[u8],
-    ) -> Result<PooledRestoreVm, RestorePoolError> {
-        let slot = {
-            let mut state = self.inner.lock_state()?;
-            state.in_use_count += 1;
-            state.idle.pop_back()
-        };
-
-        let slot = match slot {
-            Some(slot) => slot,
-            None => match self.inner.create_slot() {
-                Ok(slot) => slot,
-                Err(err) => {
-                    self.inner.rollback_in_use();
-                    return Err(err);
-                }
-            },
-        };
-
-        let backend = match slot.into_restored_backend_from_file(memory_path, vcpu_state) {
-            Ok(backend) => backend,
-            Err(err) => {
-                self.inner.rollback_in_use();
-                self.inner.replenish_if_needed();
-                return Err(err.into());
-            }
-        };
-
-        Ok(PooledRestoreVm {
-            backend: Some(backend),
-            pool: Arc::clone(&self.inner),
-        })
     }
 
     /// Returns the current number of idle slots in the restore pool.

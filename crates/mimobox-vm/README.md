@@ -49,7 +49,6 @@ Most applications should use `mimobox-sdk` and select `IsolationLevel::MicroVm` 
 | Feature | Default | Description |
 | --- | --- | --- |
 | `kvm` | No | Enables the Linux KVM backend and virtio/vhost dependencies. |
-| `zerocopy-fork` | No | Enables experimental zero-copy fork support. |
 | `boot-profile` | No | Enables boot profiling instrumentation. |
 | `guest-vsock` | No | Enables guest vsock data-plane experiments. |
 

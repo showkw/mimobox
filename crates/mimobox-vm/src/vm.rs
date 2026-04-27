@@ -14,7 +14,7 @@ use crate::snapshot::MicrovmSnapshot;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::snapshot::load_state_from_memory_file;
 
-#[cfg(all(target_os = "linux", feature = "kvm", not(feature = "zerocopy-fork")))]
+#[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::snapshot::{
     FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir, memory_sha256_hex,
 };
@@ -503,9 +503,6 @@ impl BackendHandle {
                 let mut restore_profile = backend.take_or_seed_restore_profile();
 
                 let restore_memory_started_at = Instant::now();
-                #[cfg(feature = "zerocopy-fork")]
-                backend.restore_from_file_zerocopy(memory_path)?;
-                #[cfg(not(feature = "zerocopy-fork"))]
                 backend.restore_from_file(memory_path)?;
                 restore_profile.memory_state_write = restore_memory_started_at.elapsed();
 
@@ -653,9 +650,9 @@ impl MicrovmSandbox {
 
     /// Creates an independent copy from the current microVM.
     ///
-    /// When the zerocopy-fork feature is enabled, this directly shares guest memory
-    /// and relies on MAP_PRIVATE CoW. Otherwise it keeps the file snapshot restore
-    /// path as a fallback.
+    /// The fork is implemented by writing the current guest memory and runtime
+    /// state to a temporary file-backed snapshot, then restoring a new independent
+    /// microVM from that snapshot.
     #[cfg(all(target_os = "linux", feature = "kvm"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "kvm")))]
     pub fn fork(&mut self) -> Result<Self, MicrovmError> {
@@ -664,34 +661,6 @@ impl MicrovmSandbox {
             return Err(MicrovmError::Lifecycle(LifecycleError::NotReadyForFork));
         }
 
-        #[cfg(feature = "zerocopy-fork")]
-        {
-            let (shared_memory, vcpu_state) = match &self.backend {
-                BackendHandle::Kvm(backend) => backend.snapshot_for_fork()?,
-                BackendHandle::Unsupported => return Err(MicrovmError::UnsupportedPlatform),
-            };
-
-            let mut backend_handle = BackendHandle::create_for_restore(
-                self.base_config.clone(),
-                self.microvm_config.clone(),
-            )?;
-
-            match &mut backend_handle {
-                BackendHandle::Kvm(backend) => {
-                    backend.restore_from_shared_memory(shared_memory, &vcpu_state)?;
-                }
-                BackendHandle::Unsupported => return Err(MicrovmError::UnsupportedPlatform),
-            }
-
-            return Ok(Self {
-                base_config: self.base_config.clone(),
-                microvm_config: self.microvm_config.clone(),
-                state: MicrovmState::Ready,
-                backend: backend_handle,
-            });
-        }
-
-        #[cfg(not(feature = "zerocopy-fork"))]
         {
             use base64::Engine as _;
 

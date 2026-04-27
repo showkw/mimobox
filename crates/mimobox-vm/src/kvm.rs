@@ -2277,91 +2277,6 @@ impl KvmBackend {
         Ok(memory)
     }
 
-    /// Exports vCPU state while cloning shared guest memory for zero-copy fork.
-    ///
-    /// `GuestMemoryMmap` uses `Arc` internally, so cloning only increments the
-    /// reference count without copying data. When the two KVM VM fds each register
-    /// their own `KVM_SET_USER_MEMORY_REGION` pointing at the same mmap region,
-    /// MAP_PRIVATE lets the kernel apply CoW to written pages, keeping memory changes
-    /// isolated between the two VMs.
-    #[cfg(feature = "zerocopy-fork")]
-    pub(crate) fn snapshot_for_fork(&self) -> Result<(GuestMemoryMmap, Vec<u8>), MicrovmError> {
-        let _span = tracing::info_span!("vm_fork").entered();
-        let vcpu_state = encode_runtime_state(self)?;
-        Ok((self.guest_memory.clone(), vcpu_state))
-    }
-
-    /// Zero-copy fork restore: registers the shared `GuestMemoryMmap` in the current
-    /// VM's KVM slot.
-    ///
-    /// This replaces `restore_from_file_zerocopy`, skips file mmap, and directly
-    /// reuses the existing mmap region. The new VM's `vm_fd` registers its own
-    /// `KVM_SET_USER_MEMORY_REGION`, with `userspace_addr` pointing to the shared
-    /// mapping. MAP_PRIVATE lets the kernel provide CoW isolation automatically.
-    #[cfg(feature = "zerocopy-fork")]
-    pub(crate) fn restore_from_shared_memory(
-        &mut self,
-        shared_memory: GuestMemoryMmap,
-        vcpu_state: &[u8],
-    ) -> Result<(), MicrovmError> {
-        let _span = tracing::info_span!("vm_restore").entered();
-        let old_region = kvm_userspace_memory_region {
-            slot: 0,
-            guest_phys_addr: 0,
-            memory_size: 0,
-            userspace_addr: 0,
-            flags: 0,
-        };
-        // SAFETY: KVM defines `memory_size = 0` as unregistering the specified slot.
-        // Slot 0 is the only guest memory region registered by this backend, and an
-        // equally sized new mapping is registered immediately after unregistering it.
-        unsafe {
-            self.vm_fd
-                .set_user_memory_region(old_region)
-                .map_err(to_backend_error)?;
-        }
-
-        let host_addr = shared_memory
-            .get_host_address(GuestAddress(0))
-            .map_err(to_backend_error)? as u64;
-        let memory_size = u64::try_from(self.config.memory_bytes()?)
-            .map_err(|_| MicrovmError::Backend("memory size cannot be converted to u64".into()))?;
-
-        let new_region = kvm_userspace_memory_region {
-            slot: 0,
-            guest_phys_addr: 0,
-            memory_size,
-            userspace_addr: host_addr,
-            flags: 0,
-        };
-        // SAFETY: `userspace_addr` comes from the shared `GuestMemoryMmap` mapping,
-        // whose length matches `memory_size`. Old slot 0 was unregistered before
-        // replacement, so there is no overlap. MAP_PRIVATE ensures KVM writes from
-        // the two VMs trigger CoW and remain isolated.
-        unsafe {
-            self.vm_fd
-                .set_user_memory_region(new_region)
-                .map_err(to_backend_error)?;
-        }
-
-        self.guest_memory = shared_memory;
-
-        let mut restore_profile = self.take_or_seed_restore_profile();
-        let restore_memory_started_at = Instant::now();
-        // Attach shared memory directly with no data copy.
-        restore_profile.memory_state_write = restore_memory_started_at.elapsed();
-
-        restore_profile.cpuid_config = self.prepare_restored_vcpus()?;
-        let runtime_restore_profile = restore_runtime_state(self, vcpu_state)?;
-        restore_profile.vcpu_state_restore = runtime_restore_profile.vcpu_state_restore;
-        restore_profile.device_state_restore = runtime_restore_profile.device_state_restore;
-
-        self.lifecycle = KvmLifecycle::Ready;
-        self.emit_restore_profile_without_resume(&restore_profile);
-        self.set_pending_restore_profile(restore_profile);
-        Ok(())
-    }
-
     /// Restores guest memory from an in-memory byte slice.
     ///
     /// The slice length must exactly match the configured guest memory size.
@@ -2380,94 +2295,11 @@ impl KvmBackend {
             .map_err(to_backend_error)
     }
 
-    /// Zero-copy restore: maps the snapshot file directly as guest memory, replaces
-    /// the current KVM memory region, and skips `write_slice` data copying.
-    #[cfg(feature = "zerocopy-fork")]
-    pub(crate) fn restore_from_file_zerocopy(
-        &mut self,
-        memory_path: &Path,
-    ) -> Result<(), MicrovmError> {
-        use std::fs::File;
-        use vm_memory::{FileOffset, GuestRegionMmap, MmapRegion};
-
-        let file = File::open(memory_path)?;
-        let metadata = file.metadata()?;
-        let file_size = usize::try_from(metadata.len()).map_err(|_| {
-            MicrovmError::SnapshotFormat("snapshot file size exceeds usize range".into())
-        })?;
-
-        let expected_len = self.config.memory_bytes()?;
-        if file_size != expected_len {
-            return Err(MicrovmError::SnapshotFormat(format!(
-                "guest memory file size mismatch: file has {}, expected {}",
-                file_size, expected_len
-            )));
-        }
-
-        let old_region = kvm_userspace_memory_region {
-            slot: 0,
-            guest_phys_addr: 0,
-            memory_size: 0,
-            userspace_addr: 0,
-            flags: 0,
-        };
-        // SAFETY: KVM defines `memory_size = 0` as unregistering the specified slot.
-        // Slot 0 is the only guest memory region registered by this backend, and an
-        // equally sized new mapping is registered immediately after unregistering it.
-        unsafe {
-            self.vm_fd
-                .set_user_memory_region(old_region)
-                .map_err(to_backend_error)?;
-        }
-
-        let file_offset = FileOffset::new(file, 0);
-        let region = MmapRegion::<()>::build(
-            Some(file_offset),
-            file_size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_NORESERVE,
-        )
-        .map_err(|error| MicrovmError::Backend(format!("zero-copy mmap failed: {error}")))?;
-
-        let guest_region = GuestRegionMmap::new(region, GuestAddress(0)).map_err(|error| {
-            MicrovmError::Backend(format!("failed to create GuestRegionMmap: {error}"))
-        })?;
-        let new_guest_memory =
-            GuestMemoryMmap::from_regions(vec![guest_region]).map_err(|error| {
-                MicrovmError::Backend(format!("failed to create GuestMemoryMmap: {error}"))
-            })?;
-
-        let host_addr = new_guest_memory
-            .get_host_address(GuestAddress(0))
-            .map_err(to_backend_error)? as u64;
-        let memory_size = u64::try_from(file_size)
-            .map_err(|_| MicrovmError::Backend("memory size cannot be converted to u64".into()))?;
-
-        let new_region = kvm_userspace_memory_region {
-            slot: 0,
-            guest_phys_addr: 0,
-            memory_size,
-            userspace_addr: host_addr,
-            flags: 0,
-        };
-        // SAFETY: `userspace_addr` comes from the new `GuestMemoryMmap` mapping, whose
-        // length matches `memory_size`. Old slot 0 was unregistered before replacement,
-        // so there is no overlapping region.
-        unsafe {
-            self.vm_fd
-                .set_user_memory_region(new_region)
-                .map_err(to_backend_error)?;
-        }
-
-        self.guest_memory = new_guest_memory;
-        Ok(())
-    }
-
     /// Restores guest memory from a snapshot file using mmap(MAP_PRIVATE).
     ///
     /// Compared with `restore_guest_memory`, which accepts `&[u8]`, this method maps
     /// the file directly and avoids allocating a `Vec<u8>` for the full snapshot file.
-    #[cfg(all(target_os = "linux", not(feature = "zerocopy-fork")))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn restore_from_file(&self, memory_path: &Path) -> Result<(), MicrovmError> {
         use std::fs::File;
         use std::os::unix::io::AsRawFd;

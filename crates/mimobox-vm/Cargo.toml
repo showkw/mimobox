@@ -33,7 +33,6 @@ vmm-sys-util.workspace = true
 [features]
 default = []
 kvm = ["virtio-queue", "vhost"]
-zerocopy-fork = []
 boot-profile = []
 guest-vsock = []
 
