@@ -14,8 +14,7 @@ use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -128,8 +127,6 @@ pub struct WasmSandbox {
     engine: Arc<Engine>,
     config: SandboxConfig,
     cache_dir: Option<PathBuf>,
-    epoch_running: Arc<AtomicBool>,
-    epoch_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Calculates the SHA256 hash of file content.
@@ -657,6 +654,46 @@ fn create_engine_config() -> Config {
     config
 }
 
+static GLOBAL_ENGINE: LazyLock<Result<Arc<Engine>, String>> = LazyLock::new(|| {
+    let engine_config = create_engine_config();
+    let engine = Arc::new(
+        Engine::new(&engine_config)
+            .map_err(|e| format!("Failed to create Wasmtime Engine: {}", e))?,
+    );
+    start_global_epoch_ticker(&engine)?;
+    Ok(engine)
+});
+
+static EPOCH_TICKER_STARTED: OnceLock<()> = OnceLock::new();
+
+fn start_global_epoch_ticker(engine: &Arc<Engine>) -> Result<(), String> {
+    if EPOCH_TICKER_STARTED.get().is_some() {
+        return Ok(());
+    }
+
+    let epoch_thread_engine = Arc::clone(engine);
+    std::thread::Builder::new()
+        .name("mimobox-wasm-epoch-ticker".to_string())
+        .spawn(move || {
+            let tick_interval = std::time::Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
+            loop {
+                std::thread::sleep(tick_interval);
+                epoch_thread_engine.increment_epoch();
+            }
+        })
+        .map_err(|e| format!("Failed to start Wasm epoch ticker: {}", e))?;
+
+    let _ = EPOCH_TICKER_STARTED.set(());
+    Ok(())
+}
+
+fn global_engine() -> Result<Arc<Engine>, SandboxError> {
+    GLOBAL_ENGINE
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|e| SandboxError::ExecutionFailed(e.clone()))
+}
+
 /// Builds a WASI Preview 1 context.
 ///
 /// Security design:
@@ -761,26 +798,7 @@ fn build_wasi_ctx(
 
 impl Sandbox for WasmSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
-        let engine_config = create_engine_config();
-        let engine = Arc::new(Engine::new(&engine_config).map_err(|e| {
-            SandboxError::ExecutionFailed(format!("Failed to create Wasmtime Engine: {}", e))
-        })?);
-
-        let epoch_running = Arc::new(AtomicBool::new(true));
-        let epoch_thread_engine = engine.clone();
-        let epoch_thread_running = epoch_running.clone();
-        let epoch_thread = std::thread::Builder::new()
-            .name("mimobox-wasm-epoch-ticker".to_string())
-            .spawn(move || {
-                let tick_interval = std::time::Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
-                while epoch_thread_running.load(Ordering::Relaxed) {
-                    std::thread::sleep(tick_interval);
-                    epoch_thread_engine.increment_epoch();
-                }
-            })
-            .map_err(|e| {
-                SandboxError::ExecutionFailed(format!("Failed to start Wasm epoch ticker: {}", e))
-            })?;
+        let engine = global_engine()?;
 
         // [IMPORTANT-02 修复] 使用用户和 Wasmtime 版本专属缓存目录，避免跨用户和跨版本缓存污染。
         let uid = current_euid();
@@ -804,8 +822,6 @@ impl Sandbox for WasmSandbox {
             engine,
             config,
             cache_dir,
-            epoch_running,
-            epoch_thread: Some(epoch_thread),
         })
     }
 
@@ -998,17 +1014,6 @@ impl Sandbox for WasmSandbox {
     fn destroy(self) -> Result<(), SandboxError> {
         log_info!("Destroying Wasm sandbox backend");
         Ok(())
-    }
-}
-
-impl Drop for WasmSandbox {
-    fn drop(&mut self) {
-        self.epoch_running.store(false, Ordering::Relaxed);
-        if let Some(epoch_thread) = self.epoch_thread.take()
-            && let Err(e) = epoch_thread.join()
-        {
-            log_warn!("Wasm epoch ticker thread join failed: {:?}", e);
-        }
     }
 }
 

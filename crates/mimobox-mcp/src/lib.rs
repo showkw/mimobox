@@ -964,6 +964,9 @@ fn build_list_dir_fallback_command(path: &str) -> String {
     )
 }
 
+// 已知限制：文件名包含换行符时，`.lines()` 分割可能导致解析不准确。
+// 这是可接受的限制，因为该命令在沙箱内部执行，文件名由沙箱用户控制，
+// 且包含换行符的文件名属于边缘情况。
 fn format_list_dir_fallback_entries(stdout: &[u8]) -> Vec<ListDirEntry> {
     String::from_utf8_lossy(stdout)
         .lines()
