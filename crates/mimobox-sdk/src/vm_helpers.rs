@@ -79,7 +79,11 @@ pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkErro
             message,
             Some("set isolation to `Os` or use default Auto".to_string()),
         ),
-        other => SdkError::sandbox(ErrorCode::SandboxCreateFailed, other.to_string(), None),
+        other => SdkError::sandbox(
+            ErrorCode::SandboxCreateFailed,
+            other.to_string(),
+            Some("Check sandbox lifecycle state and retry with a fresh instance.".to_string()),
+        ),
     }
 }
 
@@ -95,7 +99,11 @@ pub(crate) fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkErr
             "PTY session execution timed out",
             Some("increase Config.timeout or PtyConfig.timeout".to_string()),
         ),
-        other => SdkError::sandbox(ErrorCode::SandboxDestroyed, other.to_string(), None),
+        other => SdkError::sandbox(
+            ErrorCode::SandboxDestroyed,
+            other.to_string(),
+            Some("Ensure sandbox is still alive before PTY operations.".to_string()),
+        ),
     }
 }
 
@@ -117,7 +125,11 @@ pub(crate) fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> Sdk
             ),
         ),
         mimobox_core::SandboxError::Io(error) => SdkError::Io(error),
-        other => SdkError::sandbox(ErrorCode::InvalidConfig, other.to_string(), None),
+        other => SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            other.to_string(),
+            Some("Verify snapshot format compatibility with current mimobox version.".to_string()),
+        ),
     }
 }
 

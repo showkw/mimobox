@@ -11,7 +11,7 @@ use mimobox_sdk::{
 use pyo3::create_exception;
 use pyo3::exceptions::{
     PyConnectionError, PyFileNotFoundError, PyNotImplementedError, PyPermissionError,
-    PyRuntimeError, PyTimeoutError, PyValueError,
+    PyRuntimeError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
@@ -41,6 +41,7 @@ mod tracing {
 }
 
 create_exception!(mimobox, SandboxError, pyo3::exceptions::PyException);
+create_exception!(mimobox, SandboxTimeoutError, SandboxError);
 create_exception!(mimobox, SandboxProcessError, SandboxError);
 create_exception!(mimobox, SandboxHttpError, SandboxError);
 create_exception!(mimobox, SandboxLifecycleError, SandboxError);
@@ -1062,7 +1063,7 @@ fn map_sdk_error(error: SdkError) -> PyErr {
 
             match code {
                 ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => {
-                    PyTimeoutError::new_err(detail)
+                    SandboxTimeoutError::new_err(detail)
                 }
                 ErrorCode::FileNotFound => PyFileNotFoundError::new_err(detail),
                 ErrorCode::FilePermissionDenied => PyPermissionError::new_err(detail),
@@ -1118,6 +1119,7 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySnapshotOps>()?;
     module.add_class::<PyNetwork>()?;
     module.add("SandboxError", py.get_type::<SandboxError>())?;
+    module.add("SandboxTimeoutError", py.get_type::<SandboxTimeoutError>())?;
     module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
     module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
     module.add(

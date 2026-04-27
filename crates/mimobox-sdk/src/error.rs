@@ -102,12 +102,17 @@ impl SdkError {
             mimobox_core::SandboxError::ExecutionFailed(msg) => Self::Sandbox {
                 code: ErrorCode::CommandKilled,
                 message: msg,
-                suggestion: None,
+                suggestion: Some(
+                    "Command may have been killed due to memory limits or seccomp policy. Check sandbox resource limits.".to_string(),
+                ),
             },
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
-                suggestion: None,
+                suggestion: Some(
+                    "For microVM: verify /dev/kvm exists. Use isolation='os' as fallback."
+                        .to_string(),
+                ),
             },
         }
     }
@@ -135,7 +140,10 @@ impl SdkError {
         Self::Sandbox {
             code: ErrorCode::SandboxDestroyed,
             message: err.to_string(),
-            suggestion: None,
+            suggestion: Some(
+                "Create a new sandbox instance. Sandbox objects cannot be reused after close()."
+                    .to_string(),
+            ),
         }
     }
 

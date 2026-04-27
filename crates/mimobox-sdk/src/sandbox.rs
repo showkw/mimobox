@@ -329,14 +329,14 @@ fn validate_host_file_path(path: &str) -> Result<(), SdkError> {
         return Err(SdkError::sandbox(
             ErrorCode::InvalidConfig,
             "path must not be empty",
-            None,
+            Some("Provide a valid absolute or relative file path.".to_string()),
         ));
     }
     if path.contains("..") {
         return Err(SdkError::sandbox(
             ErrorCode::InvalidConfig,
             "path must not contain '..' path traversal",
-            None,
+            Some("Use absolute paths without '..' components.".to_string()),
         ));
     }
     Ok(())
