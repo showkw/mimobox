@@ -527,10 +527,12 @@ impl Sandbox for MacOsSandbox {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::fs;
+    use std::sync::{Arc, Barrier, OnceLock};
 
     use super::*;
     use mimobox_core::{Sandbox, SandboxConfig};
+    use tempfile::TempDir;
 
     /// Creates the default macOS test configuration without memory limits, which macOS does not support.
     fn test_config() -> SandboxConfig {
@@ -538,6 +540,33 @@ mod tests {
         config.timeout_secs = Some(10);
         config.memory_limit_mb = None;
         config
+    }
+
+    fn path_to_string(path: &std::path::Path) -> String {
+        path.to_str().expect("测试路径必须是 UTF-8").to_string()
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', r#"'\''"#))
+    }
+
+    fn write_file_command(path: &std::path::Path, content: &str) -> Vec<String> {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "/usr/bin/printf %s {} > {}",
+                shell_quote(content),
+                shell_quote(&path_to_string(path))
+            ),
+        ]
+    }
+
+    fn seatbelt_subpath(path: &std::path::Path) -> String {
+        let escaped = path_to_string(path)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("(subpath \"{escaped}\")")
     }
 
     fn should_skip_runtime_tests() -> bool {
@@ -739,6 +768,364 @@ mod tests {
             reason.contains("Seatbelt policy enforcement failed"),
             "错误消息应保留高层语义: {reason}"
         );
+    }
+
+    #[test]
+    fn test_validate_path_rejects_empty_string() {
+        let error = validate_path("").expect_err("空路径应被拒绝");
+        assert!(
+            error.to_string().contains("path must not be empty"),
+            "错误消息应说明空路径无效, 实际: {error}"
+        );
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        assert!(sb.file_exists("").is_err(), "file_exists 应拒绝空路径");
+    }
+
+    #[test]
+    fn test_command_log_summary_edge_cases() {
+        assert_eq!(command_log_summary(&[]), "<empty>");
+        assert_eq!(
+            command_log_summary(&["/bin/echo".to_string(), "secret-token".to_string()]),
+            "program=echo, argc=2"
+        );
+        assert_eq!(
+            command_log_summary(&["/".to_string()]),
+            "program=<command>, argc=1"
+        );
+        assert_eq!(
+            command_log_summary(&["".to_string(), "arg".to_string()]),
+            "program=<command>, argc=2"
+        );
+    }
+
+    #[test]
+    fn test_policy_generation_allows_network_when_deny_network_false() {
+        let mut config = test_config();
+        config.deny_network = false;
+        let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
+        let policy = sb.generate_policy();
+
+        assert!(
+            !policy.contains("(deny network*)"),
+            "deny_network=false 时策略不应显式拒绝网络"
+        );
+        assert!(
+            policy.contains("(allow process-exec"),
+            "策略仍应保留进程执行限制"
+        );
+    }
+
+    #[test]
+    fn test_list_dir_with_temp_dir() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let file_path = temp_dir.path().join("alpha.txt");
+        let dir_path = temp_dir.path().join("nested");
+        fs::write(&file_path, "alpha").expect("写入测试文件失败");
+        fs::create_dir(&dir_path).expect("创建测试目录失败");
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut entries = sb
+            .list_dir(&path_to_string(temp_dir.path()))
+            .expect("list_dir 失败");
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let file_entry = entries
+            .iter()
+            .find(|entry| entry.name == "alpha.txt")
+            .expect("应列出测试文件");
+        assert_eq!(file_entry.file_type, FileType::File);
+        assert_eq!(file_entry.size, 5);
+
+        let dir_entry = entries
+            .iter()
+            .find(|entry| entry.name == "nested")
+            .expect("应列出测试目录");
+        assert_eq!(dir_entry.file_type, FileType::Dir);
+    }
+
+    #[test]
+    fn test_stat_on_directory_with_temp_dir() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let nested_dir = temp_dir.path().join("stat-dir");
+        fs::create_dir(&nested_dir).expect("创建测试目录失败");
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let info = sb
+            .stat(&path_to_string(&nested_dir))
+            .expect("stat 目录失败");
+
+        assert_eq!(info.path, path_to_string(&nested_dir));
+        assert!(info.is_dir, "目录 stat 应标记 is_dir");
+        assert!(!info.is_file, "目录 stat 不应标记 is_file");
+        assert!(info.modified_ms.is_some(), "目录应包含修改时间");
+    }
+
+    #[test]
+    fn test_remove_directory_with_temp_dir() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let nested_dir = temp_dir.path().join("remove-dir");
+        fs::create_dir(&nested_dir).expect("创建测试目录失败");
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        sb.remove_file(&path_to_string(&nested_dir))
+            .expect("删除目录失败");
+
+        assert!(!nested_dir.exists(), "remove_file 应删除空目录");
+    }
+
+    #[test]
+    fn test_double_destroy_safety_for_noop_destroy() {
+        let sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        sb.destroy().expect("首次 destroy 不应失败");
+
+        let sb = MacOsSandbox::new(test_config()).expect("再次创建沙箱失败");
+        sb.destroy().expect("重复销毁独立沙箱不应失败");
+    }
+
+    #[test]
+    fn test_pty_empty_command_error() {
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let result = sb.create_pty(mimobox_core::PtyConfig {
+            command: Vec::new(),
+            size: mimobox_core::PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: Some(Duration::from_secs(1)),
+        });
+
+        let Err(error) = result else {
+            panic!("空 PTY 命令应返回错误");
+        };
+        assert!(
+            error.to_string().contains("PTY command must not be empty"),
+            "错误消息应说明 PTY 命令为空, 实际: {error}"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_sandboxes_execute_in_parallel() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let thread_count = 4;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let mut handles = Vec::new();
+
+        for index in 0..thread_count {
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+
+                let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+                let cmd = vec!["/bin/echo".to_string(), format!("sandbox-{index}")];
+                let result = sb.execute(&cmd).expect("并发执行失败");
+
+                assert_eq!(result.exit_code, Some(0), "并发命令应成功");
+                String::from_utf8(result.stdout)
+                    .expect("stdout 应为 UTF-8")
+                    .trim()
+                    .to_string()
+            }));
+        }
+
+        let mut outputs = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("并发测试线程 panic"))
+            .collect::<Vec<_>>();
+        outputs.sort();
+
+        let expected = (0..thread_count)
+            .map(|index| format!("sandbox-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(outputs, expected);
+    }
+
+    #[test]
+    fn test_large_stdout_seq_10000() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/usr/bin/seq".to_string(),
+            "1".to_string(),
+            "10000".to_string(),
+        ];
+        let result = sb.execute(&cmd).expect("执行 seq 失败");
+
+        assert_eq!(result.exit_code, Some(0), "seq 应成功");
+        let stdout = String::from_utf8(result.stdout).expect("stdout 应为 UTF-8");
+        assert_eq!(stdout.lines().count(), 10000, "stdout 应包含 10000 行");
+        assert!(stdout.starts_with("1\n"), "stdout 应从 1 开始");
+        assert!(
+            stdout.trim_end().ends_with("10000"),
+            "stdout 应以 10000 结束"
+        );
+    }
+
+    #[test]
+    fn test_special_chars_in_command_arguments() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let payload = r#"spaces and symbols: !@#$%^&*()[]{};:'",.<>/?\|`~"#;
+        let mut sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let cmd = vec![
+            "/usr/bin/printf".to_string(),
+            "%s\n".to_string(),
+            payload.to_string(),
+        ];
+        let result = sb.execute(&cmd).expect("执行 printf 失败");
+
+        assert_eq!(result.exit_code, Some(0), "printf 应成功");
+        assert_eq!(result.stdout, format!("{payload}\n").into_bytes());
+    }
+
+    #[test]
+    fn test_write_to_system_path_denied() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut config = test_config();
+        config.fs_readwrite = vec!["/tmp".into()];
+        let mut sb = MacOsSandbox::new(config).expect("创建沙箱失败");
+        let target = format!("/System/mimobox_write_denied_{}", std::process::id());
+        let cmd = vec!["/usr/bin/touch".to_string(), target.clone()];
+        let result = sb.execute(&cmd).expect("执行 touch 失败");
+
+        assert_ne!(
+            result.exit_code,
+            Some(0),
+            "写入系统路径应失败, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !std::path::Path::new(&target).exists(),
+            "系统路径不应被创建"
+        );
+    }
+
+    #[test]
+    fn test_sensitive_path_read_denied_via_seatbelt() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let sensitive_dir = temp_dir.path().join(".ssh");
+        let secret_file = sensitive_dir.join("id_rsa");
+        fs::create_dir(&sensitive_dir).expect("创建敏感目录失败");
+        fs::write(&secret_file, "super-secret").expect("写入敏感文件失败");
+        let canonical_sensitive_dir =
+            fs::canonicalize(&sensitive_dir).expect("解析敏感目录真实路径失败");
+        let raw_deny_rule = format!("(deny file-read* {})", seatbelt_subpath(&sensitive_dir));
+        let deny_rules = if canonical_sensitive_dir == sensitive_dir {
+            raw_deny_rule
+        } else {
+            let canonical_deny_rule = format!(
+                "(deny file-read* {})",
+                seatbelt_subpath(&canonical_sensitive_dir)
+            );
+            format!("{raw_deny_rule}\n{canonical_deny_rule}")
+        };
+
+        let policy = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            "(version 1)",
+            "(deny default)",
+            "(allow file-read*)",
+            deny_rules,
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
+            "(allow process-fork)",
+        );
+        let secret_path = path_to_string(&secret_file);
+        let output = Command::new("sandbox-exec")
+            .args([
+                "-p",
+                policy.as_str(),
+                "--",
+                "/bin/cat",
+                secret_path.as_str(),
+            ])
+            .output()
+            .expect("执行 sandbox-exec 失败");
+
+        assert!(
+            !output.status.success(),
+            "Seatbelt 应拒绝读取敏感路径, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("super-secret"),
+            "敏感内容不应出现在 stdout"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_isolation_between_instances() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let dir_one = TempDir::new().expect("创建第一个临时目录失败");
+        let dir_two = TempDir::new().expect("创建第二个临时目录失败");
+
+        let mut config_one = test_config();
+        config_one.fs_readwrite = vec![dir_one.path().into()];
+        let mut config_two = test_config();
+        config_two.fs_readwrite = vec![dir_two.path().into()];
+
+        let mut sb_one = MacOsSandbox::new(config_one).expect("创建第一个沙箱失败");
+        let mut sb_two = MacOsSandbox::new(config_two).expect("创建第二个沙箱失败");
+
+        let own_one = dir_one.path().join("owned-by-one.txt");
+        let own_two = dir_two.path().join("owned-by-two.txt");
+        let result_one = sb_one
+            .execute(&write_file_command(&own_one, "one"))
+            .expect("第一个沙箱写入自身目录失败");
+        let result_two = sb_two
+            .execute(&write_file_command(&own_two, "two"))
+            .expect("第二个沙箱写入自身目录失败");
+
+        assert_eq!(result_one.exit_code, Some(0), "第一个沙箱应能写自身目录");
+        assert_eq!(result_two.exit_code, Some(0), "第二个沙箱应能写自身目录");
+        assert_eq!(
+            fs::read_to_string(&own_one).expect("读取自身文件失败"),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(&own_two).expect("读取自身文件失败"),
+            "two"
+        );
+
+        let blocked_by_one = dir_two.path().join("blocked-by-one.txt");
+        let blocked_by_two = dir_one.path().join("blocked-by-two.txt");
+        let denied_one = sb_one
+            .execute(&write_file_command(&blocked_by_one, "blocked"))
+            .expect("第一个沙箱越权写入命令执行失败");
+        let denied_two = sb_two
+            .execute(&write_file_command(&blocked_by_two, "blocked"))
+            .expect("第二个沙箱越权写入命令执行失败");
+
+        assert_ne!(
+            denied_one.exit_code,
+            Some(0),
+            "第一个沙箱不应写入第二个沙箱目录"
+        );
+        assert_ne!(
+            denied_two.exit_code,
+            Some(0),
+            "第二个沙箱不应写入第一个沙箱目录"
+        );
+        assert!(!blocked_by_one.exists(), "越权文件不应被创建");
+        assert!(!blocked_by_two.exists(), "越权文件不应被创建");
     }
 
     #[test]
