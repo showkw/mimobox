@@ -262,6 +262,26 @@ fn validate_env_key(key: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
+    if cwd.contains("..") {
+        return Err(SdkError::Config(
+            "invalid cwd: 包含路径遍历符 '..'".to_string(),
+        ));
+    }
+
+    if cwd.contains(';') || cwd.contains('|') || cwd.contains('&') {
+        return Err(SdkError::Config(
+            "invalid cwd: 包含 shell 元字符".to_string(),
+        ));
+    }
+
+    if cwd.contains('\n') || cwd.contains('\r') {
+        return Err(SdkError::Config("invalid cwd: 包含换行符".to_string()));
+    }
+
+    Ok(())
+}
+
 fn map_core_file_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
@@ -742,6 +762,10 @@ impl Sandbox {
             ));
         }
 
+        if let Some(cwd) = config.cwd.as_deref() {
+            validate_cwd(cwd)?;
+        }
+
         self.ensure_backend_for_pty()?;
         let inner = self.require_inner()?;
 
@@ -838,6 +862,8 @@ impl Sandbox {
         command: &str,
         cwd: &str,
     ) -> Result<ExecuteResult, SdkError> {
+        validate_cwd(cwd)?;
+
         self.execute_with_sdk_options(
             command,
             SdkExecOptions {
@@ -854,6 +880,10 @@ impl Sandbox {
         command: &str,
         options: mimobox_vm::GuestExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
+        if let Some(cwd) = options.cwd.as_deref() {
+            validate_cwd(cwd)?;
+        }
+
         self.execute_with_sdk_options(command, options.into())
     }
 
@@ -1115,6 +1145,10 @@ impl Sandbox {
         command: &str,
         options: SdkExecOptions,
     ) -> Result<ExecuteResult, SdkError> {
+        if let Some(cwd) = options.cwd.as_deref() {
+            validate_cwd(cwd)?;
+        }
+
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
 

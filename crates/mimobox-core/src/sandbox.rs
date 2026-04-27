@@ -8,6 +8,22 @@ fn default_cpu_period_us() -> u64 {
     100_000
 }
 
+fn has_invalid_domain_wildcard(domain: &str) -> bool {
+    let wildcard_count = domain.chars().filter(|character| *character == '*').count();
+    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*."))
+}
+
+fn is_plain_ip_domain(domain: &str) -> bool {
+    let has_digit = domain.chars().any(|character| character.is_ascii_digit());
+    let has_dot = domain.contains('.');
+
+    has_digit
+        && has_dot
+        && domain
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+}
+
 /// Structured error code for programmatic error matching.
 ///
 /// Each variant has a stable string representation via [`ErrorCode::as_str()`],
@@ -264,6 +280,45 @@ impl SandboxConfig {
             return Err(SandboxError::ExecutionFailed(
                 "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
             ));
+        }
+
+        // timeout_secs 允许关闭，但显式设置时不能超过 24 小时。
+        if let Some(timeout_secs) = self.timeout_secs {
+            const MAX_TIMEOUT_SECS: u64 = 86_400;
+            if timeout_secs > MAX_TIMEOUT_SECS {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "timeout_secs={timeout_secs} 超过最大值 86400（24小时），请设为合理值"
+                )));
+            }
+        }
+
+        for domain in &self.allowed_http_domains {
+            if domain.is_empty()
+                || domain
+                    .chars()
+                    .any(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
+                || has_invalid_domain_wildcard(domain)
+                || is_plain_ip_domain(domain)
+            {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "allowed_http_domains 包含无效域名: {domain}"
+                )));
+            }
+        }
+
+        if self.cpu_period_us == 0 {
+            return Err(SandboxError::ExecutionFailed(
+                "cpu_period_us=0 无效，请设为正整数或 None".to_string(),
+            ));
+        }
+
+        if let Some(cpu_quota_us) = self.cpu_quota_us {
+            if cpu_quota_us > self.cpu_period_us {
+                eprintln!(
+                    "警告：cpu_quota_us={cpu_quota_us} 大于 cpu_period_us={}，允许超额分配",
+                    self.cpu_period_us
+                );
+            }
         }
 
         Ok(())
