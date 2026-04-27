@@ -355,6 +355,14 @@ impl MacOsSandbox {
             "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/sbin\") (subpath \"/usr/sbin\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\"))"
                 .to_string(),
         );
+        rules.push(
+            "(allow process-exec (subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\"))"
+                .to_string(),
+        );
+        rules.push(
+            "(allow process-exec (subpath \"/Library/Developer/CommandLineTools/usr/bin\"))"
+                .to_string(),
+        );
 
         // 可写目录禁止执行，防止下载/写入后二进制直接落地执行。
         rules.push("(deny process-exec (subpath \"/private/tmp\"))".to_string());
@@ -372,6 +380,10 @@ impl MacOsSandbox {
         if self.config.deny_network {
             rules.push("(deny network*)".to_string());
         }
+
+        // Mach IPC：默认拒绝 lookup/register，减少宿主服务访问面。
+        rules.push("(deny mach-lookup)".to_string());
+        rules.push("(deny mach-register)".to_string());
 
         rules.join("\n")
     }
@@ -1435,6 +1447,14 @@ mod tests {
             "策略应包含 deny network"
         );
         assert!(
+            policy.contains("(deny mach-lookup)"),
+            "策略应拒绝 mach-lookup"
+        );
+        assert!(
+            policy.contains("(deny mach-register)"),
+            "策略应拒绝 mach-register"
+        );
+        assert!(
             policy.contains("(allow process-exec"),
             "策略应包含进程执行限制"
         );
@@ -1469,6 +1489,18 @@ mod tests {
         assert!(
             policy.contains("(subpath \"/opt/homebrew/bin\")"),
             "策略应允许 Apple Silicon Homebrew bin 路径执行"
+        );
+        assert!(
+            policy.contains(
+                "(allow process-exec (subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\"))"
+            ),
+            "策略应允许 Xcode Developer 工具链路径执行"
+        );
+        assert!(
+            policy.contains(
+                "(allow process-exec (subpath \"/Library/Developer/CommandLineTools/usr/bin\"))"
+            ),
+            "策略应允许 CommandLineTools 工具链路径执行"
         );
         assert!(policy.contains("/tmp"), "策略应允许 /tmp 读写");
     }
