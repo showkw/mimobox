@@ -35,6 +35,17 @@ class DirEntry:
     is_symlink: bool
 
 
+class FileStat:
+    """File metadata returned by ``Sandbox.stat()`` and ``Sandbox.fs.stat()``."""
+
+    path: str
+    is_dir: bool
+    is_file: bool
+    size: int
+    mode: int
+    modified_ms: Optional[int]
+
+
 class HttpResponse:
     """HTTP response from the host-side proxy.
 
@@ -138,6 +149,52 @@ class StreamIterator:
     def __next__(self) -> Optional[StreamEvent]: ...
 
 
+class FileSystem:
+    def read(self, path: str) -> bytes: ...
+    def write(self, path: str, data: Union[str, bytes]) -> None: ...
+    def list(self, path: str) -> List[DirEntry]: ...
+    def exists(self, path: str) -> bool: ...
+    def remove(self, path: str) -> None: ...
+    def rename(self, from: str, to: str) -> None: ...
+    def stat(self, path: str) -> FileStat: ...
+
+
+class Process:
+    def run(
+        self,
+        command: str,
+        env: Optional[Dict[str, str]] = ...,
+        timeout: Optional[float] = ...,
+        cwd: Optional[str] = ...,
+    ) -> ExecuteResult: ...
+    def run_code(
+        self,
+        language: str,
+        code: str,
+        *,
+        env: Optional[Dict[str, str]] = ...,
+        timeout: Optional[float] = ...,
+        cwd: Optional[str] = ...,
+    ) -> ExecuteResult: ...
+    def stream(self, command: str) -> StreamIterator: ...
+
+
+class SnapshotOps:
+    def __call__(self) -> Snapshot: ...
+    def capture(self) -> Snapshot: ...
+    def fork(self) -> "Sandbox": ...
+
+
+class Network:
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict[str, str]] = ...,
+        body: Optional[bytes] = ...,
+    ) -> HttpResponse: ...
+
+
 class Sandbox:
     """A secure sandbox for executing commands.
 
@@ -160,6 +217,18 @@ class Sandbox:
         isolation: Optional[str] = ...,
         allowed_http_domains: Optional[List[str]] = ...,
     ) -> None: ...
+
+    @property
+    def fs(self) -> FileSystem: ...
+
+    @property
+    def process(self) -> Process: ...
+
+    @property
+    def snapshot(self) -> SnapshotOps: ...
+
+    @property
+    def network(self) -> Network: ...
 
     def execute(
         self,
@@ -290,17 +359,6 @@ class Sandbox:
         """
         ...
 
-    def snapshot(self) -> Snapshot:
-        """Capture a snapshot of the current sandbox state.
-
-        Returns:
-            A ``Snapshot`` that can be used to restore or fork sandboxes.
-
-        Raises:
-            SandboxError: If snapshotting fails.
-        """
-        ...
-
     @classmethod
     def from_snapshot(cls, snapshot: Snapshot) -> "Sandbox":
         """Create a new sandbox by restoring from a snapshot.
@@ -427,13 +485,17 @@ class SandboxLifecycleError(SandboxError):
 __all__ = [
     "DirEntry",
     "ExecuteResult",
+    "FileSystem",
     "HttpResponse",
+    "Network",
+    "Process",
     "Sandbox",
     "SandboxError",
     "SandboxHttpError",
     "SandboxLifecycleError",
     "SandboxProcessError",
     "Snapshot",
+    "SnapshotOps",
     "StreamEvent",
     "StreamIterator",
 ]

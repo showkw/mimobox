@@ -33,5 +33,9 @@ vm-assets/
 # 凭据文件
 *credentials*
 
+# 其他敏感文件
+*.secret
+.netrc
+
 # 日志文件
 *.log
