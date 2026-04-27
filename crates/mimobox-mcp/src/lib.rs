@@ -253,7 +253,24 @@ impl MimoboxServer {
 
         for (id, managed) in drained {
             tracing::debug!(sandbox_id = id, "Signal cleanup: destroying sandbox");
-            match tokio::task::spawn_blocking(move || managed.sandbox.destroy()).await {
+            match tokio::task::spawn_blocking(move || {
+                use std::panic::{AssertUnwindSafe, catch_unwind};
+
+                // Keep cleanup best-effort: a destroy panic for one sandbox must not abort
+                // cleanup of the remaining drained sandboxes.
+                match catch_unwind(AssertUnwindSafe(|| managed.sandbox.destroy())) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::error!(
+                            sandbox_id = id,
+                            "Sandbox destroy panicked during signal cleanup"
+                        );
+                        Err(SdkError::Config("destroy operation panicked".to_string()))
+                    }
+                }
+            })
+            .await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     tracing::warn!(
@@ -286,7 +303,22 @@ impl MimoboxServer {
         drop(sandboxes);
 
         let (managed, result) = tokio::task::spawn_blocking(move || {
-            let result = operation(&mut managed.sandbox);
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+
+            // Recover the managed sandbox even if the operation panics after removal
+            // from the map; otherwise the active sandbox entry would be lost.
+            let result = catch_unwind(AssertUnwindSafe(|| operation(&mut managed.sandbox)));
+            let result = match result {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::error!(
+                        sandbox_id,
+                        "Sandbox operation panicked, sandbox recovered to prevent resource leak"
+                    );
+                    Err(SdkError::Config("operation panicked".to_string()))
+                }
+            };
+
             (managed, result)
         })
         .await
@@ -352,7 +384,24 @@ impl MimoboxServer {
             .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
         drop(sandboxes);
 
-        match tokio::task::spawn_blocking(move || managed.sandbox.destroy()).await {
+        match tokio::task::spawn_blocking(move || {
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+
+            // The sandbox is already removed from the active map; catch unwind so
+            // destroy panics are logged through the normal error path.
+            match catch_unwind(AssertUnwindSafe(|| managed.sandbox.destroy())) {
+                Ok(result) => result,
+                Err(_) => {
+                    error!(
+                        sandbox_id = request.sandbox_id,
+                        "Sandbox destroy panicked, instance removed from active list"
+                    );
+                    Err(SdkError::Config("destroy operation panicked".to_string()))
+                }
+            }
+        })
+        .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 error!(
@@ -537,7 +586,22 @@ impl MimoboxServer {
             drop(sandboxes);
 
             let (managed, fork_result) = tokio::task::spawn_blocking(move || {
-                let fork_result = managed.sandbox.fork();
+                use std::panic::{AssertUnwindSafe, catch_unwind};
+
+                // Recover the managed sandbox even if fork panics after removal
+                // from the map; otherwise the original sandbox would be lost.
+                let fork_result = catch_unwind(AssertUnwindSafe(|| managed.sandbox.fork()));
+                let fork_result = match fork_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::error!(
+                            sandbox_id = request.sandbox_id,
+                            "Sandbox fork panicked, sandbox recovered to prevent resource leak"
+                        );
+                        Err(SdkError::Config("fork operation panicked".to_string()))
+                    }
+                };
+
                 (managed, fork_result)
             })
             .await
