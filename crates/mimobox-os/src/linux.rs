@@ -15,8 +15,7 @@ use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{
-    DirEntry, FileStat, FileType, Sandbox, SandboxConfig, SandboxError, SandboxResult,
-    SeccompProfile,
+    DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile,
 };
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
@@ -396,21 +395,6 @@ fn append_output_truncation_marker(
 
     stderr_buf.truncate(OUTPUT_SIZE_LIMIT - marker.len());
     stderr_buf.extend_from_slice(marker);
-}
-
-/// 验证路径参数：非空且不包含路径遍历。
-fn validate_path(path: &str) -> Result<(), SandboxError> {
-    if path.is_empty() {
-        return Err(SandboxError::ExecutionFailed(
-            "path must not be empty".to_string(),
-        ));
-    }
-    if path.contains("..") {
-        return Err(SandboxError::ExecutionFailed(
-            "path must not contain '..' path traversal".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Applies all child-process security policies and executes the command.
@@ -985,78 +969,24 @@ impl Sandbox for LinuxSandbox {
         }
     }
 
-    fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError> {
-        validate_path(path)?;
-        Ok(std::path::Path::new(path).exists())
+    fn file_exists(&mut self, _path: &str) -> Result<bool, SandboxError> {
+        Err(SandboxError::UnsupportedOperation("OS-level sandbox does not support file_exists: cannot distinguish sandbox-internal paths from host paths after the sandboxed process has exited".to_string()))
     }
 
-    fn remove_file(&mut self, path: &str) -> Result<(), SandboxError> {
-        validate_path(path)?;
-        let p = std::path::Path::new(path);
-        if p.is_dir() {
-            std::fs::remove_dir(p)?;
-        } else {
-            std::fs::remove_file(p)?;
-        }
-        Ok(())
+    fn remove_file(&mut self, _path: &str) -> Result<(), SandboxError> {
+        Err(SandboxError::UnsupportedOperation("OS-level sandbox does not support remove_file: cannot distinguish sandbox-internal paths from host paths after the sandboxed process has exited".to_string()))
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError> {
-        validate_path(from)?;
-        validate_path(to)?;
-        std::fs::rename(from, to)?;
-        Ok(())
+    fn rename(&mut self, _from: &str, _to: &str) -> Result<(), SandboxError> {
+        Err(SandboxError::UnsupportedOperation("OS-level sandbox does not support rename: cannot distinguish sandbox-internal paths from host paths after the sandboxed process has exited".to_string()))
     }
 
-    fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError> {
-        validate_path(path)?;
-        let metadata = std::fs::metadata(path)?;
-        let modified_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode()
-        };
-        #[cfg(not(unix))]
-        let mode: u32 = 0;
-        Ok(FileStat::new(
-            path.to_string(),
-            metadata.is_dir(),
-            metadata.is_file(),
-            metadata.len(),
-            mode,
-            modified_ms,
-        ))
+    fn stat(&mut self, _path: &str) -> Result<FileStat, SandboxError> {
+        Err(SandboxError::UnsupportedOperation("OS-level sandbox does not support stat: cannot distinguish sandbox-internal paths from host paths after the sandboxed process has exited".to_string()))
     }
 
-    fn list_dir(
-        &mut self,
-        path: &str,
-    ) -> Result<Vec<mimobox_core::DirEntry>, mimobox_core::SandboxError> {
-        let entries = std::fs::read_dir(path)?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let metadata = entry.metadata().ok()?;
-                let file_type = if metadata.is_dir() {
-                    FileType::Dir
-                } else if metadata.is_file() {
-                    FileType::File
-                } else {
-                    FileType::Other
-                };
-                Some(DirEntry::new(
-                    entry.file_name().to_string_lossy().into_owned(),
-                    file_type,
-                    metadata.len(),
-                    metadata.file_type().is_symlink(),
-                ))
-            })
-            .collect();
-        Ok(entries)
+    fn list_dir(&mut self, _path: &str) -> Result<Vec<DirEntry>, SandboxError> {
+        Err(SandboxError::UnsupportedOperation("OS-level sandbox does not support list_dir: cannot distinguish sandbox-internal paths from host paths after the sandboxed process has exited".to_string()))
     }
 
     fn destroy(mut self) -> Result<(), SandboxError> {
@@ -1157,114 +1087,54 @@ mod tests {
         config
     }
 
-    #[test]
-    fn test_file_exists() {
-        let mut config = test_config();
-        config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
-        let cmd = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "/bin/echo test > /tmp/mimobox_exists_test".to_string(),
-        ];
-        sb.execute(&cmd).expect("创建测试文件失败");
-
-        assert!(
-            sb.file_exists("/tmp/mimobox_exists_test")
-                .expect("file_exists 失败")
-        );
-        assert!(
-            !sb.file_exists("/tmp/mimobox_not_exists_12345")
-                .expect("file_exists 失败")
-        );
-
-        let _ = sb.execute(&vec![
-            "/bin/rm".to_string(),
-            "-f".to_string(),
-            "/tmp/mimobox_exists_test".to_string(),
-        ]);
+    fn assert_unsupported_operation<T>(operation: &str, result: Result<T, SandboxError>) {
+        match result {
+            Err(SandboxError::UnsupportedOperation(msg)) => {
+                assert!(
+                    msg.contains(operation),
+                    "error should mention {operation}, got: {msg}"
+                );
+                assert!(
+                    msg.contains("OS-level sandbox does not support"),
+                    "got: {msg}"
+                );
+            }
+            Err(err) => panic!("should be UnsupportedOperation, got: {err}"),
+            Ok(_) => panic!("{operation} should return error on OS backend"),
+        }
     }
 
     #[test]
-    fn test_remove_file() {
-        let mut config = test_config();
-        config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
-        let cmd = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "/bin/echo test > /tmp/mimobox_remove_test".to_string(),
-        ];
-        sb.execute(&cmd).expect("创建测试文件失败");
-
-        sb.remove_file("/tmp/mimobox_remove_test")
-            .expect("remove_file 失败");
-        assert!(
-            !sb.file_exists("/tmp/mimobox_remove_test")
-                .expect("file_exists 失败")
-        );
-    }
-
-    #[test]
-    fn test_rename() {
-        let mut config = test_config();
-        config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
-        let cmd = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "/bin/echo test > /tmp/mimobox_rename_src".to_string(),
-        ];
-        sb.execute(&cmd).expect("创建测试文件失败");
-
-        sb.rename("/tmp/mimobox_rename_src", "/tmp/mimobox_rename_dst")
-            .expect("rename 失败");
-        assert!(
-            sb.file_exists("/tmp/mimobox_rename_dst")
-                .expect("file_exists 失败")
-        );
-        assert!(
-            !sb.file_exists("/tmp/mimobox_rename_src")
-                .expect("file_exists 失败")
-        );
-
-        let _ = sb.execute(&vec![
-            "/bin/rm".to_string(),
-            "-f".to_string(),
-            "/tmp/mimobox_rename_dst".to_string(),
-        ]);
-    }
-
-    #[test]
-    fn test_stat() {
-        let mut config = test_config();
-        config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
-        let cmd = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "/bin/echo stat_test > /tmp/mimobox_stat_test".to_string(),
-        ];
-        sb.execute(&cmd).expect("创建测试文件失败");
-
-        let info = sb.stat("/tmp/mimobox_stat_test").expect("stat 失败");
-        assert!(info.is_file);
-        assert!(!info.is_dir);
-        assert!(info.size > 0);
-        assert!(info.modified_ms.is_some());
-
-        let _ = sb.execute(&vec![
-            "/bin/rm".to_string(),
-            "-f".to_string(),
-            "/tmp/mimobox_stat_test".to_string(),
-        ]);
-    }
-
-    #[test]
-    fn test_path_validation_rejects_traversal() {
+    fn test_file_exists_unsupported() {
         let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
-        assert!(sb.file_exists("/../etc/passwd").is_err());
-        assert!(sb.remove_file("/tmp/../etc/passwd").is_err());
+        assert_unsupported_operation("file_exists", sb.file_exists("/tmp/mimobox_exists_test"));
+    }
+
+    #[test]
+    fn test_remove_file_unsupported() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        assert_unsupported_operation("remove_file", sb.remove_file("/tmp/mimobox_remove_test"));
+    }
+
+    #[test]
+    fn test_rename_unsupported() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        assert_unsupported_operation(
+            "rename",
+            sb.rename("/tmp/mimobox_rename_src", "/tmp/mimobox_rename_dst"),
+        );
+    }
+
+    #[test]
+    fn test_stat_unsupported() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        assert_unsupported_operation("stat", sb.stat("/tmp/mimobox_stat_test"));
+    }
+
+    #[test]
+    fn test_list_dir_unsupported() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        assert_unsupported_operation("list_dir", sb.list_dir("/tmp"));
     }
 
     #[cfg(target_os = "linux")]
