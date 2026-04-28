@@ -396,7 +396,7 @@ pub(crate) fn map_os_core_file_error(
     error: SandboxError,
 ) -> SdkError {
     match error {
-        SandboxError::ExecutionFailed(message) if message == unsupported_message => {
+        SandboxError::ExecutionFailed { message, .. } if message == unsupported_message => {
             os_file_operation_unsupported(
                 operation,
                 "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",

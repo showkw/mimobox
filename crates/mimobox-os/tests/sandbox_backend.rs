@@ -298,7 +298,7 @@ mod macos_backend_tests {
 
                 match sandbox.execute(&probe_command) {
                     Ok(_) => None,
-                    Err(SandboxError::ExecutionFailed(message))
+                    Err(SandboxError::ExecutionFailed { message, .. })
                         if message.contains("Seatbelt 策略应用失败") =>
                     {
                         Some(message)

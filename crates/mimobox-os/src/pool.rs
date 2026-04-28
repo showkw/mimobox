@@ -476,9 +476,7 @@ impl PooledSandbox {
     pub fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         match self.sandbox.as_mut() {
             Some(sandbox) => sandbox.execute(cmd),
-            None => Err(SandboxError::ExecutionFailed(
-                "sandbox has been released".to_string(),
-            )),
+            None => Err(SandboxError::new("sandbox has been released")),
         }
     }
 }

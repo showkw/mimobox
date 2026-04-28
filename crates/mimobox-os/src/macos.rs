@@ -258,8 +258,7 @@ fn spawn_memory_watchdog(
 }
 
 fn policy_to_cstring(policy: String) -> Result<CString, SandboxError> {
-    CString::new(policy)
-        .map_err(|_| SandboxError::ExecutionFailed("Seatbelt policy contains NUL byte".to_string()))
+    CString::new(policy).map_err(|_| SandboxError::new("Seatbelt policy contains NUL byte"))
 }
 
 fn create_child_process_group() -> std::io::Result<()> {
@@ -333,9 +332,7 @@ fn wait_child_with_timeout(
             let _ = waiter.join();
             Ok((
                 std::process::ExitStatus::from_raw(
-                    status.map_err(|e| {
-                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
-                    })?,
+                    status.map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))?,
                 ),
                 false,
             ))
@@ -347,24 +344,20 @@ fn wait_child_with_timeout(
             // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
             let status = rx.recv().map_err(|_| {
-                SandboxError::ExecutionFailed(
-                    "waitpid waiter thread disconnected unexpectedly".to_string(),
-                )
+                SandboxError::new("waitpid waiter thread disconnected unexpectedly")
             })?;
             let _ = waiter.join();
             Ok((
                 std::process::ExitStatus::from_raw(
-                    status.map_err(|e| {
-                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
-                    })?,
+                    status.map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))?,
                 ),
                 true,
             ))
         }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
-            Err(SandboxError::ExecutionFailed(
-                "waitpid monitoring thread disconnected unexpectedly".to_string(),
+            Err(SandboxError::new(
+                "waitpid monitoring thread disconnected unexpectedly",
             ))
         }
     }
@@ -522,9 +515,7 @@ fn normalize_sbpl_path(path: &str) -> String {
 /// 策略字符串注入。
 fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
     if path.is_empty() {
-        return Err(SandboxError::ExecutionFailed(
-            "path must not be empty".to_string(),
-        ));
+        return Err(SandboxError::new("path must not be empty"));
     }
 
     for (i, byte) in path.bytes().enumerate() {
@@ -533,7 +524,7 @@ fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
             b'/' | b'.' | b'_' | b'-' | b'+' | b'@' => {}
             _ => {
                 let ch = path[i..].chars().next().unwrap_or('?');
-                return Err(SandboxError::ExecutionFailed(format!(
+                return Err(SandboxError::new(format!(
                     "path contains unsafe character for SBPL: {:?} (byte position {i}). Only alphanumeric, /, ., _, -, +, @ are allowed in sandbox paths.",
                     ch
                 )));
@@ -689,9 +680,7 @@ impl Sandbox for MacOsSandbox {
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "command must not be empty".into(),
-            ));
+            return Err(SandboxError::new("command must not be empty"));
         }
 
         // SECURITY: 日志仅记录程序基名和参数个数，避免 argv 中的 token、URL、路径泄露。
@@ -726,9 +715,7 @@ impl Sandbox for MacOsSandbox {
                 })
                 .spawn()
         }
-        .map_err(|e| {
-            SandboxError::ExecutionFailed(format!("failed to start sandboxed command: {e}"))
-        })?;
+        .map_err(|e| SandboxError::new(format!("failed to start sandboxed command: {e}")))?;
         let pid = child.id() as libc::pid_t;
 
         let child_running = Arc::new(AtomicBool::new(true));
@@ -738,7 +725,7 @@ impl Sandbox for MacOsSandbox {
                 .checked_mul(1024)
                 .and_then(|value| value.checked_mul(1024))
                 .ok_or_else(|| {
-                    SandboxError::ExecutionFailed(format!(
+                    SandboxError::new(format!(
                         "memory_limit_mb={memory_limit_mb} 转换为字节时溢出"
                     ))
                 })?;
@@ -763,7 +750,7 @@ impl Sandbox for MacOsSandbox {
         } else {
             waitpid_raw(pid)
                 .map(|status| (std::process::ExitStatus::from_raw(status), false))
-                .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid failed: {e}")))
+                .map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))
         };
         child_running.store(false, Ordering::SeqCst);
         let (exit_status, mut timed_out) = wait_result?;
@@ -787,7 +774,7 @@ impl Sandbox for MacOsSandbox {
         let exit_code = exit_status.code();
 
         if let Some(reason) = detect_seatbelt_backend_failure(exit_code, &stderr_buf) {
-            return Err(SandboxError::ExecutionFailed(reason));
+            return Err(SandboxError::new(reason));
         }
 
         tracing::info!(
@@ -810,9 +797,7 @@ impl Sandbox for MacOsSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "PTY command must not be empty".into(),
-            ));
+            return Err(SandboxError::new("PTY command must not be empty"));
         }
 
         tracing::info!(
@@ -833,15 +818,13 @@ impl Sandbox for MacOsSandbox {
             .read(true)
             .write(true)
             .open(&allocated.slave_path)
-            .map_err(|error| {
-                SandboxError::ExecutionFailed(format!("failed to open PTY slave: {error}"))
-            })?;
-        let stdin_slave = slave_file.try_clone().map_err(|error| {
-            SandboxError::ExecutionFailed(format!("failed to clone PTY stdin: {error}"))
-        })?;
-        let stdout_slave = slave_file.try_clone().map_err(|error| {
-            SandboxError::ExecutionFailed(format!("failed to clone PTY stdout: {error}"))
-        })?;
+            .map_err(|error| SandboxError::new(format!("failed to open PTY slave: {error}")))?;
+        let stdin_slave = slave_file
+            .try_clone()
+            .map_err(|error| SandboxError::new(format!("failed to clone PTY stdin: {error}")))?;
+        let stdout_slave = slave_file
+            .try_clone()
+            .map_err(|error| SandboxError::new(format!("failed to clone PTY stdout: {error}")))?;
 
         let mut command = Command::new(&config.command[0]);
         command
@@ -864,9 +847,7 @@ impl Sandbox for MacOsSandbox {
             })
         }
         .spawn()
-        .map_err(|error| {
-            SandboxError::ExecutionFailed(format!("failed to start sandboxed PTY: {error}"))
-        })?;
+        .map_err(|error| SandboxError::new(format!("failed to start sandboxed PTY: {error}")))?;
 
         Ok(build_session(
             allocated,

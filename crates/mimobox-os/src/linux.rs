@@ -966,9 +966,7 @@ impl Sandbox for LinuxSandbox {
         self.last_isolation_report = IsolationReport::default();
 
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "command must not be empty".into(),
-            ));
+            return Err(SandboxError::new("command must not be empty"));
         }
 
         #[cfg(target_os = "linux")]
@@ -1199,9 +1197,7 @@ impl Sandbox for LinuxSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "PTY command must not be empty".into(),
-            ));
+            return Err(SandboxError::new("PTY command must not be empty"));
         }
 
         tracing::info!(
@@ -1943,17 +1939,15 @@ fn waitpid_with_timeout(
             kill_process_group(child.as_raw(), Signal::SIGKILL);
 
             let status = rx.recv().map_err(|_| {
-                SandboxError::ExecutionFailed(
-                    "waitpid waiter thread disconnected unexpectedly".to_string(),
-                )
+                SandboxError::new("waitpid waiter thread disconnected unexpectedly")
             })??;
             let _ = waiter.join();
             Ok((status, true))
         }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
-            Err(SandboxError::ExecutionFailed(
-                "waitpid monitoring thread disconnected unexpectedly".to_string(),
+            Err(SandboxError::new(
+                "waitpid monitoring thread disconnected unexpectedly",
             ))
         }
     }

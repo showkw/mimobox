@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+use mimobox_core::SandboxError;
 use mimobox_core::{Sandbox, SandboxConfig, SandboxResult};
 #[cfg(target_os = "linux")]
 use mimobox_os::LinuxSandbox;
@@ -270,7 +272,7 @@ pub(crate) fn execute_kvm_backend(
 
     let memory_limit_mb = config.memory_limit_mb.unwrap_or(DEFAULT_MEMORY_MB);
     let memory_mb = u32::try_from(memory_limit_mb).map_err(|_| {
-        CliError::Sandbox(SandboxError::ExecutionFailed(format!(
+        CliError::Sandbox(SandboxError::new(format!(
             "KVM guest memory exceeds u32 range: {memory_limit_mb} MB"
         )))
     })?;

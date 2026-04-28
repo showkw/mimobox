@@ -10,9 +10,11 @@
 //! - stdout/stderr captured into in-memory buffers through `MemoryOutputPipe` with a built-in capacity limit.
 //! - Dual execution-time limits with fuel and epoch interruption.
 
-use std::fs::{Metadata, OpenOptions, Permissions};
+use std::fs::{File, Metadata, OpenOptions, Permissions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -27,7 +29,7 @@ use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-use mimobox_core::{Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{ExecutionFailureKind, Sandbox, SandboxConfig, SandboxError, SandboxResult};
 
 /// Sandbox Store data combining the WASI context and resource limits.
 ///
@@ -88,11 +90,15 @@ const ENGINE_CONFIG_CACHE_KEY: &str = "opt-speed-fuel-epoch-stack512k-parallel";
 /// to enforce wall-clock timeout.
 fn fuel_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
     match timeout_secs {
-        Some(secs) => secs.checked_mul(FUEL_PER_SECOND).ok_or_else(|| {
-            SandboxError::ExecutionFailed(format!(
-                "timeout_secs={secs} is too large; converting to fuel would overflow"
-            ))
-        }),
+        Some(secs) => {
+            secs.checked_mul(FUEL_PER_SECOND)
+                .ok_or_else(|| SandboxError::ExecutionFailed {
+                    kind: ExecutionFailureKind::CpuLimit,
+                    message: format!(
+                        "timeout_secs={secs} is too large; converting to fuel would overflow"
+                    ),
+                })
+        }
         None => Ok(DEFAULT_FUEL_LIMIT),
     }
 }
@@ -101,13 +107,13 @@ fn fuel_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
 fn memory_limit_bytes(memory_limit_mb: Option<u64>) -> Result<usize, SandboxError> {
     let mb = memory_limit_mb.unwrap_or(DEFAULT_MEMORY_LIMIT_MB);
     let bytes = mb.checked_mul(BYTES_PER_MIB).ok_or_else(|| {
-        SandboxError::ExecutionFailed(format!(
+        SandboxError::new(format!(
             "memory_limit_mb={mb} is too large; converting to bytes would overflow"
         ))
     })?;
 
     usize::try_from(bytes).map_err(|_| {
-        SandboxError::ExecutionFailed(format!(
+        SandboxError::new(format!(
             "memory_limit_mb={mb} is too large for this platform"
         ))
     })
@@ -117,7 +123,7 @@ fn memory_limit_bytes(memory_limit_mb: Option<u64>) -> Result<usize, SandboxErro
 fn epoch_deadline_ticks_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
     match timeout_secs {
         Some(secs) => secs.checked_mul(EPOCH_TICKS_PER_SECOND).ok_or_else(|| {
-            SandboxError::ExecutionFailed(format!(
+            SandboxError::new(format!(
                 "timeout_secs={secs} is too large; converting to epoch ticks would overflow"
             ))
         }),
@@ -198,23 +204,21 @@ fn file_fingerprint(meta: &Metadata) -> Option<(u64, u64)> {
 
 fn open_and_validate_wasm_file(wasm_path: &Path) -> Result<(Metadata, Vec<u8>), SandboxError> {
     let mut file = std::fs::File::open(wasm_path)
-        .map_err(|_| SandboxError::ExecutionFailed("Wasm file does not exist".into()))?;
+        .map_err(|_| SandboxError::new("Wasm file does not exist"))?;
     let wasm_meta = file
         .metadata()
-        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to stat Wasm file: {}", e)))?;
+        .map_err(|e| SandboxError::new(format!("Failed to stat Wasm file: {}", e)))?;
 
     if !wasm_meta.file_type().is_file() {
-        return Err(SandboxError::ExecutionFailed(
-            "Wasm path is not a regular file".into(),
-        ));
+        return Err(SandboxError::new("Wasm path is not a regular file"));
     }
     if wasm_meta.nlink() > 1 {
-        return Err(SandboxError::ExecutionFailed(
-            "Wasm file must not be a hard link (nlink > 1)".into(),
+        return Err(SandboxError::new(
+            "Wasm file must not be a hard link (nlink > 1)",
         ));
     }
     if wasm_meta.len() > MAX_WASM_FILE_SIZE {
-        return Err(SandboxError::ExecutionFailed(format!(
+        return Err(SandboxError::new(format!(
             "Wasm file too large: {} bytes (limit {} bytes)",
             wasm_meta.len(),
             MAX_WASM_FILE_SIZE
@@ -225,9 +229,9 @@ fn open_and_validate_wasm_file(wasm_path: &Path) -> Result<(Metadata, Vec<u8>), 
     let mut bounded_reader = (&mut file).take(MAX_WASM_FILE_SIZE + 1);
     bounded_reader
         .read_to_end(&mut file_data)
-        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
+        .map_err(|e| SandboxError::new(format!("Failed to read Wasm file: {}", e)))?;
     if file_data.len() as u64 > MAX_WASM_FILE_SIZE {
-        return Err(SandboxError::ExecutionFailed(format!(
+        return Err(SandboxError::new(format!(
             "Wasm file too large: {} bytes (limit {} bytes)",
             file_data.len(),
             MAX_WASM_FILE_SIZE
@@ -329,6 +333,14 @@ fn validate_cache_file_security(path: &Path) -> bool {
         }
     };
 
+    validate_cache_file_metadata(path, &meta)
+}
+
+/// 校验缓存文件 metadata 的安全属性（owner、mode、文件类型）。
+///
+/// 从 `validate_cache_file_security` 提取，供已持有文件句柄的调用方复用，
+/// 避免在 flock 保护区间内再做额外的 path-based stat。
+fn validate_cache_file_metadata(path: &Path, meta: &Metadata) -> bool {
     if !meta.file_type().is_file() {
         warn!("Cache path is not a regular file: {:?}", path);
         return false;
@@ -357,6 +369,77 @@ fn validate_cache_file_security(path: &Path) -> bool {
     true
 }
 
+/// 对已打开的缓存文件句柄进行安全校验（owner、mode、文件类型）。
+///
+/// 使用文件句柄自身的 metadata() 而非 path-based stat，确保校验对象
+/// 与 flock 保护的是同一个 inode，消除 TOCTOU。
+fn validate_open_cache_file_security(path: &Path, file: &File) -> bool {
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(e) => {
+            warn!("Failed to stat opened cache file {:?}: {}", path, e);
+            return false;
+        }
+    };
+
+    validate_cache_file_metadata(path, &meta)
+}
+
+/// 对已打开的缓存文件描述符获取 flock 共享锁（LOCK_SH）。
+///
+/// 共享锁允许并发读取但阻止排他锁（LOCK_EX），用于在缓存文件校验和反序列化期间
+/// 防止并发写入方替换文件内容，消除 TOCTOU 竞态窗口。
+///
+/// 锁在 file drop 时由内核自动释放。
+#[cfg(unix)]
+fn acquire_shared_lock(file: &File) -> Result<(), SandboxError> {
+    loop {
+        // SAFETY: flock(LOCK_SH) 仅对有效文件描述符获取共享咨询锁。
+        // 这是安全的，因为：
+        // - file 由 std::fs::File 成功打开并借用，as_raw_fd() 返回的 fd 在调用期间有效；
+        // - LOCK_SH 只申请共享读锁，可与其他共享读锁共存，本函数不持有其他锁，不引入锁顺序死锁；
+        // - flock 锁与 fd 生命周期绑定，file 关闭或 drop 时会由内核自动释放；
+        // - 锁定期间完成缓存文件校验与读取，避免协作写入方在校验和读取之间修改同一缓存文件。
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+        if ret == 0 {
+            return Ok(());
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            // EINTR: 被信号中断，重试
+            continue;
+        }
+
+        return Err(SandboxError::new(format!(
+            "Failed to acquire shared lock on cache file: {}",
+            err
+        )));
+    }
+}
+
+/// 打开缓存文件用于安全读取：使用 O_NOFOLLOW 防止符号链接跟随，并获取 flock 共享锁。
+///
+/// 返回的文件句柄在整个读取和校验期间持有共享锁，调用方在完成读取后 drop 文件即可释放锁。
+fn open_cache_file_for_secure_read(path: &Path) -> Result<File, SandboxError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let file = options
+        .open(path)
+        .map_err(|e| SandboxError::new(format!("Failed to open cache file {:?}: {}", path, e)))?;
+
+    #[cfg(unix)]
+    acquire_shared_lock(&file)?;
+
+    Ok(file)
+}
+
 fn remove_file_if_exists(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -367,6 +450,12 @@ fn remove_file_if_exists(path: &Path) {
 
 fn cache_file_mtime(path: &Path) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
+    metadata_mtime_nanos(&meta)
+}
+
+/// 从已打开的文件句柄获取 mtime，避免额外的 path-based stat。
+fn opened_cache_file_mtime(file: &File) -> Option<u64> {
+    let meta = file.metadata().ok()?;
     metadata_mtime_nanos(&meta)
 }
 
@@ -403,14 +492,34 @@ fn read_cache_record(path: &Path) -> Option<CacheRecord> {
         return None;
     }
 
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
+    // 打开文件并获取 flock(LOCK_SH)，在读取和校验期间持有共享锁，
+    // 防止并发写入方在校验和读取之间替换文件内容（TOCTOU 竞态）。
+    let mut file = match open_cache_file_for_secure_read(path) {
+        Ok(file) => file,
         Err(e) => {
-            warn!("Failed to read cache record {:?}: {}", path, e);
+            warn!(
+                "Failed to open cache record for secure read {:?}: {}",
+                path, e
+            );
             remove_file_if_exists(path);
             return None;
         }
     };
+
+    // 使用 fd-based metadata 校验，确保校验对象与 flock 保护的是同一个 inode
+    if !validate_open_cache_file_security(path, &file) {
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let mut contents = String::new();
+    if let Err(e) = file.read_to_string(&mut contents) {
+        warn!("Failed to read cache record {:?}: {}", path, e);
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    // file drop 时自动释放 flock 共享锁
 
     match parse_cache_record(&contents) {
         Some(record) => Some(record),
@@ -500,7 +609,28 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
         return None;
     }
 
-    let current_mtime = match cache_file_mtime(path) {
+    // 打开文件并获取 flock(LOCK_SH)，在校验和读取期间持有共享锁，
+    // 防止并发写入方在校验和读取之间替换文件内容（TOCTOU 竞态）。
+    // O_NOFOLLOW 防止符号链接跟随，flock 确保文件在校验期间不被替换。
+    let mut file = match open_cache_file_for_secure_read(path) {
+        Ok(file) => file,
+        Err(e) => {
+            warn!(
+                "Failed to open cache file for secure read {:?}: {}",
+                path, e
+            );
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+
+    // 使用 fd-based metadata 校验，确保校验对象与 flock 保护的是同一个 inode
+    if !validate_open_cache_file_security(path, &file) {
+        remove_file_if_exists(path);
+        return None;
+    }
+
+    let current_mtime = match opened_cache_file_mtime(&file) {
         Some(mtime) => mtime,
         None => {
             warn!("Failed to read cache file mtime: {:?}", path);
@@ -517,19 +647,14 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
         return None;
     }
 
-    let cached = match std::fs::read(path) {
-        Ok(cached) => cached,
-        Err(e) => {
-            warn!("Failed to read cache file {:?}: {}", path, e);
-            remove_file_if_exists(path);
-            return None;
-        }
-    };
-
-    if !validate_cache_file_security(path) {
+    let mut cached = Vec::new();
+    if let Err(e) = file.read_to_end(&mut cached) {
+        warn!("Failed to read cache file {:?}: {}", path, e);
         remove_file_if_exists(path);
         return None;
     }
+
+    // file drop 时自动释放 flock 共享锁
 
     let actual_hash = content_hash(&cached);
     if actual_hash != expected_hash {
@@ -591,10 +716,13 @@ fn compile_module_from_bytes(
     // SECURITY: 调用方在读取字节后立刻使用同一份不可变切片编译，
     // 避免“先读取算哈希、再按路径重新打开编译”的 TOCTOU 竞态。
     Module::from_binary(engine, bytes).map_err(|e| {
-        SandboxError::ExecutionFailed(format!(
-            "Failed to load Wasm module ({:?}): {}",
-            wasm_path, e
-        ))
+        let message = format!("Failed to load Wasm module ({:?}): {}", wasm_path, e);
+        let kind = if message.to_lowercase().contains("fuel") {
+            ExecutionFailureKind::CpuLimit
+        } else {
+            ExecutionFailureKind::Unknown
+        };
+        SandboxError::ExecutionFailed { kind, message }
     })
 }
 
@@ -773,7 +901,7 @@ fn global_engine() -> Result<Arc<Engine>, SandboxError> {
     GLOBAL_ENGINE
         .as_ref()
         .map(Arc::clone)
-        .map_err(|e| SandboxError::ExecutionFailed(e.clone()))
+        .map_err(|e| SandboxError::new(e.clone()))
 }
 
 /// 检查路径是否是缓存目录的祖先或后代（基于 canonicalize 的双向检查）。
@@ -918,8 +1046,8 @@ fn build_wasi_ctx(
     if config.deny_network {
         info!("WASI network denied by SandboxConfig; no sockets are preopened");
     } else {
-        return Err(SandboxError::ExecutionFailed(
-            "Wasm backend does not support network access. Tip: use 'os' or 'microvm' isolation for network support, or set NetworkPolicy::DenyAll".to_string(),
+        return Err(SandboxError::new(
+            "Wasm backend does not support network access. Tip: use 'os' or 'microvm' isolation for network support, or set NetworkPolicy::DenyAll",
         ));
     }
 
@@ -962,7 +1090,7 @@ impl Sandbox for WasmSandbox {
         let start = Instant::now();
 
         if cmd.is_empty() {
-            return Err(SandboxError::ExecutionFailed("Command is empty".into()));
+            return Err(SandboxError::new("Command is empty"));
         }
 
         let wasm_path = Path::new(&cmd[0]);
@@ -998,9 +1126,8 @@ impl Sandbox for WasmSandbox {
         // 4. 创建 Linker 并注册 WASI Preview 1
         // 注意：Linker 的类型参数必须与 Store data type 一致
         let mut linker: Linker<StoreData> = Linker::new(&self.engine);
-        p1::add_to_linker_sync(&mut linker, |data| &mut data.wasi).map_err(|e| {
-            SandboxError::ExecutionFailed(format!("Failed to register WASI Preview 1: {}", e))
-        })?;
+        p1::add_to_linker_sync(&mut linker, |data| &mut data.wasi)
+            .map_err(|e| SandboxError::new(format!("Failed to register WASI Preview 1: {}", e)))?;
 
         // 5. [FATAL-01 修复] 创建带资源限制的 Store
         // 将 memory_limit_mb 通过 StoreLimitsBuilder 实际应用到 Wasm 运行时
@@ -1025,7 +1152,7 @@ impl Sandbox for WasmSandbox {
         let fuel_limit = fuel_from_timeout(self.config.timeout_secs)?;
         store
             .set_fuel(fuel_limit)
-            .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to set fuel: {}", e)))?;
+            .map_err(|e| SandboxError::new(format!("Failed to set fuel: {}", e)))?;
 
         // 7. [IMPORTANT-01 补充] 设置 epoch deadline 实现墙钟超时
         // epoch_interruption 可中断包括 WASI I/O 阻塞在内的执行，
@@ -1035,9 +1162,9 @@ impl Sandbox for WasmSandbox {
         store.set_epoch_deadline(epoch_deadline_ticks);
 
         // 8. 实例化模块
-        let instance = linker.instantiate(&mut store, &module).map_err(|e| {
-            SandboxError::ExecutionFailed(format!("Failed to instantiate Wasm module: {}", e))
-        })?;
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| SandboxError::new(format!("Failed to instantiate Wasm module: {}", e)))?;
 
         // 9. 调用 _start 函数（WASI Command 模式）
         // WASI Command 通过 _start 进入，正常退出时调用 proc_exit(code)，
@@ -1095,8 +1222,8 @@ impl Sandbox for WasmSandbox {
                         }
                     },
                     Err(_) => {
-                        return Err(SandboxError::ExecutionFailed(
-                            "Wasm module has no _start or main export function".into(),
+                        return Err(SandboxError::new(
+                            "Wasm module has no _start or main export function",
                         ));
                     }
                 }

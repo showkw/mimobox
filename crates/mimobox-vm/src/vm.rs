@@ -353,12 +353,10 @@ impl From<MicrovmError> for SandboxError {
             | MicrovmError::Backend(message)
             | MicrovmError::AssetIntegrity(message)
             | MicrovmError::HttpProxy(crate::http_proxy::HttpProxyError::Internal(message))
-            | MicrovmError::SnapshotFormat(message) => SandboxError::ExecutionFailed(message),
-            MicrovmError::Lifecycle(error) => SandboxError::ExecutionFailed(error.to_string()),
-            error @ MicrovmError::GuestFile { .. } => {
-                SandboxError::ExecutionFailed(error.to_string())
-            }
-            MicrovmError::HttpProxy(error) => SandboxError::ExecutionFailed(error.to_string()),
+            | MicrovmError::SnapshotFormat(message) => SandboxError::new(message),
+            MicrovmError::Lifecycle(error) => SandboxError::new(error.to_string()),
+            error @ MicrovmError::GuestFile { .. } => SandboxError::new(error.to_string()),
+            MicrovmError::HttpProxy(error) => SandboxError::new(error.to_string()),
             MicrovmError::Io(error) => SandboxError::Io(error),
         }
     }

@@ -3,7 +3,9 @@ use std::error::Error;
 use std::io;
 use std::path::PathBuf;
 
-use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile};
+use mimobox_core::{
+    ExecutionFailureKind, SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -132,7 +134,10 @@ fn sandbox_config_cpu_builder_sets_quota_and_period() {
 
 #[test]
 fn sandbox_error_display_and_source_behave_as_expected() {
-    let execution_error = SandboxError::ExecutionFailed("boom".to_string());
+    let execution_error = SandboxError::ExecutionFailed {
+        kind: ExecutionFailureKind::Unknown,
+        message: "boom".to_string(),
+    };
     assert_eq!(
         execution_error.to_string(),
         "command execution failed: boom"
@@ -142,9 +147,13 @@ fn sandbox_error_display_and_source_behave_as_expected() {
     let suggested_error = SandboxError::new("bad config").suggestion("修正配置后重试");
     assert_eq!(suggested_error.suggestion_text(), Some("修正配置后重试"));
     let (base_error, suggestion) = suggested_error.into_base_and_suggestion();
-    assert!(
-        matches!(base_error, SandboxError::ExecutionFailed(message) if message == "bad config")
-    );
+    assert!(matches!(
+        base_error,
+        SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Unknown,
+            message,
+        } if message == "bad config"
+    ));
     assert_eq!(suggestion.as_deref(), Some("修正配置后重试"));
 
     let unsupported_error = SandboxError::Unsupported;

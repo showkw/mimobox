@@ -433,9 +433,7 @@ impl SandboxSnapshot {
     /// Creates a snapshot from raw bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SandboxError> {
         if data.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "snapshot data must not be empty".to_string(),
-            ));
+            return Err(SandboxError::new("snapshot data must not be empty"));
         }
 
         Ok(Self {
@@ -446,9 +444,7 @@ impl SandboxSnapshot {
     /// Creates a snapshot from owned bytes without an extra copy.
     pub fn from_owned_bytes(data: Vec<u8>) -> Result<Self, SandboxError> {
         if data.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "snapshot data must not be empty".to_string(),
-            ));
+            return Err(SandboxError::new("snapshot data must not be empty"));
         }
 
         Ok(Self {
@@ -595,6 +591,22 @@ pub trait PtySession {
     fn wait(&mut self) -> Result<i32, SandboxError>;
 }
 
+/// 执行失败的结构化分类。
+///
+/// 底层后端直接传递失败类型，避免 SDK 层靠字符串猜测。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionFailureKind {
+    /// 未知/未分类的执行失败。
+    Unknown,
+    /// 内存超限（OOM killer、cgroups memory.limit、Wasm memory grow 失败）。
+    Oom,
+    /// CPU 配额耗尽（cgroups cpu throttle、Wasm fuel 耗尽）。
+    CpuLimit,
+    /// 进程被信号终止（SIGKILL/SIGTERM 等，非超时也非资源限制）。
+    Killed,
+}
+
 /// Sandbox error type.
 ///
 /// Low-level backend errors. The SDK maps these to `mimobox_sdk::SdkError`
@@ -631,8 +643,13 @@ pub enum SandboxError {
     SeccompFailed(String),
 
     /// Command execution or protocol handling fails.
-    #[error("command execution failed: {0}")]
-    ExecutionFailed(String),
+    #[error("command execution failed: {message}")]
+    ExecutionFailed {
+        /// 结构化失败分类。
+        kind: ExecutionFailureKind,
+        /// 人类可读的错误描述。
+        message: String,
+    },
 
     /// The snapshot content or access mode is invalid.
     #[error("invalid sandbox snapshot")]
@@ -669,7 +686,10 @@ pub enum SandboxError {
 impl SandboxError {
     /// Constructs a command execution error with no suggestion.
     pub fn new(message: impl Into<String>) -> Self {
-        Self::ExecutionFailed(message.into())
+        Self::ExecutionFailed {
+            kind: ExecutionFailureKind::Unknown,
+            message: message.into(),
+        }
     }
 
     /// Attaches a remediation suggestion while preserving the original error kind.
@@ -775,8 +795,8 @@ pub trait Sandbox {
     /// Reads file content from inside the sandbox.
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
-        Err(SandboxError::ExecutionFailed(
-            "file reading not supported by current backend".into(),
+        Err(SandboxError::new(
+            "file reading not supported by current backend",
         ))
     }
 
@@ -784,16 +804,16 @@ pub trait Sandbox {
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         let _ = path;
         let _ = data;
-        Err(SandboxError::ExecutionFailed(
-            "file writing not supported by current backend".into(),
+        Err(SandboxError::new(
+            "file writing not supported by current backend",
         ))
     }
 
     /// 列出指定路径下的目录条目。
     fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
         let _ = path;
-        Err(SandboxError::ExecutionFailed(
-            "list_dir not supported by current backend".into(),
+        Err(SandboxError::new(
+            "list_dir not supported by current backend",
         ))
     }
 
@@ -906,7 +926,7 @@ mod tests {
         );
         let (error, _) = error.into_base_and_suggestion();
         assert!(
-            matches!(error, SandboxError::ExecutionFailed(message) if message.contains("memory_limit_mb"))
+            matches!(error, SandboxError::ExecutionFailed { message, .. } if message.contains("memory_limit_mb"))
         );
     }
 

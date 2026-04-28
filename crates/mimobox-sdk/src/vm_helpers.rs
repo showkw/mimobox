@@ -128,7 +128,7 @@ pub(crate) fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> Sdk
                     .to_string(),
             ),
         ),
-        mimobox_core::SandboxError::ExecutionFailed(message) => SdkError::sandbox(
+        mimobox_core::SandboxError::ExecutionFailed { message, .. } => SdkError::sandbox(
             ErrorCode::InvalidConfig,
             message,
             Some(

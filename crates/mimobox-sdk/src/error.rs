@@ -113,21 +113,27 @@ impl SdkError {
                 suggestion: core_suggestion
                     .or_else(|| Some("increase Config.timeout or per-command timeout".into())),
             },
-            mimobox_core::SandboxError::ExecutionFailed(msg) => {
-                let msg_lower = msg.to_lowercase();
-                let code = if msg_lower.contains("oom")
-                    || msg_lower.contains("memory")
-                    || msg_lower.contains("memory_limit")
-                    || msg_lower.contains("out of memory")
-                {
-                    ErrorCode::MemoryLimitExceeded
-                } else if msg_lower.contains("cpu")
-                    || msg_lower.contains("cpu_quota")
-                    || msg_lower.contains("cpu_limit")
-                {
-                    ErrorCode::CpuLimitExceeded
-                } else {
-                    ErrorCode::CommandKilled
+            mimobox_core::SandboxError::ExecutionFailed { kind, message } => {
+                let code = match kind {
+                    mimobox_core::ExecutionFailureKind::Oom => ErrorCode::MemoryLimitExceeded,
+                    mimobox_core::ExecutionFailureKind::CpuLimit => ErrorCode::CpuLimitExceeded,
+                    _ => {
+                        let msg_lower = message.to_lowercase();
+                        if msg_lower.contains("oom")
+                            || msg_lower.contains("memory")
+                            || msg_lower.contains("memory_limit")
+                            || msg_lower.contains("out of memory")
+                        {
+                            ErrorCode::MemoryLimitExceeded
+                        } else if msg_lower.contains("cpu")
+                            || msg_lower.contains("cpu_quota")
+                            || msg_lower.contains("cpu_limit")
+                        {
+                            ErrorCode::CpuLimitExceeded
+                        } else {
+                            ErrorCode::CommandKilled
+                        }
+                    }
                 };
                 let suggestion = match &code {
                     ErrorCode::MemoryLimitExceeded => "Increase Config.memory_limit_mb or optimize the command's memory usage.".to_string(),
@@ -136,7 +142,7 @@ impl SdkError {
                 };
                 Self::Sandbox {
                     code,
-                    message: msg,
+                    message,
                     suggestion: core_suggestion.or(Some(suggestion)),
                 }
             }
@@ -220,13 +226,14 @@ impl From<mimobox_core::SandboxError> for SdkError {
 #[cfg(test)]
 mod tests {
     use super::SdkError;
-    use mimobox_core::{ErrorCode, SandboxError};
+    use mimobox_core::{ErrorCode, ExecutionFailureKind, SandboxError};
 
     #[test]
     fn execution_failed_maps_to_command_killed_and_preserves_message() {
-        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
-            "process killed by seccomp".to_string(),
-        ));
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Unknown,
+            message: "process killed by seccomp".to_string(),
+        });
 
         match error {
             SdkError::Sandbox {
@@ -247,9 +254,10 @@ mod tests {
 
     #[test]
     fn execution_failed_with_oom_maps_to_memory_limit_exceeded() {
-        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
-            "process killed by OOM killer".to_string(),
-        ));
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Unknown,
+            message: "process killed by OOM killer".to_string(),
+        });
         match error {
             SdkError::Sandbox { code, .. } => {
                 assert_eq!(code, ErrorCode::MemoryLimitExceeded);
@@ -260,9 +268,40 @@ mod tests {
 
     #[test]
     fn execution_failed_with_cpu_maps_to_cpu_limit_exceeded() {
-        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed(
-            "cpu_quota exceeded".to_string(),
-        ));
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Unknown,
+            message: "cpu_quota exceeded".to_string(),
+        });
+        match error {
+            SdkError::Sandbox { code, .. } => {
+                assert_eq!(code, ErrorCode::CpuLimitExceeded);
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_failed_with_structured_oom_maps_to_memory_limit_exceeded() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Oom,
+            message: "process killed".to_string(),
+        });
+
+        match error {
+            SdkError::Sandbox { code, .. } => {
+                assert_eq!(code, ErrorCode::MemoryLimitExceeded);
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_failed_with_structured_cpu_maps_to_cpu_limit_exceeded() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::CpuLimit,
+            message: "process stopped".to_string(),
+        });
+
         match error {
             SdkError::Sandbox { code, .. } => {
                 assert_eq!(code, ErrorCode::CpuLimitExceeded);
