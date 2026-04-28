@@ -180,7 +180,7 @@ mod linux_backend_tests {
         let entries = match sandbox.list_dir(&temp_dir.path().to_string_lossy()) {
             Ok(entries) => entries,
             Err(error) => {
-                if error.to_string().contains("UnsupportedOperation") {
+                if error.to_string().contains("operation not supported") {
                     eprintln!("skipping: OS-level sandbox does not support list_dir");
                     return Ok(());
                 }
@@ -239,7 +239,7 @@ mod linux_backend_tests {
         let entries = match sandbox.list_dir(&temp_dir.path().to_string_lossy()) {
             Ok(entries) => entries,
             Err(error) => {
-                if error.to_string().contains("UnsupportedOperation") {
+                if error.to_string().contains("operation not supported") {
                     eprintln!("skipping: OS-level sandbox does not support list_dir");
                     return Ok(());
                 }
