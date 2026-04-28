@@ -893,11 +893,21 @@ impl MimoboxServer {
         {
             let sandboxes = self.sandboxes.lock().await;
             let persistent = sandboxes.len();
-            let ephemeral = self.ephemeral_count.load(Ordering::Relaxed);
-            if persistent + ephemeral >= MAX_SANDBOXES {
-                return Err(sandbox_quota_exceeded());
+            loop {
+                let current = self.ephemeral_count.load(Ordering::Acquire);
+                if persistent + current >= MAX_SANDBOXES {
+                    return Err(sandbox_quota_exceeded());
+                }
+                match self.ephemeral_count.compare_exchange(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(_) => continue,
+                }
             }
-            self.ephemeral_count.fetch_add(1, Ordering::Relaxed);
         }
 
         let command = command.to_string();
@@ -911,7 +921,7 @@ impl MimoboxServer {
         })
         .await;
 
-        self.ephemeral_count.fetch_sub(1, Ordering::Relaxed);
+        self.ephemeral_count.fetch_sub(1, Ordering::Release);
 
         result.map_err(format_join_error)?.map_err(format_sdk_error)
     }
@@ -935,11 +945,21 @@ impl MimoboxServer {
         {
             let sandboxes = self.sandboxes.lock().await;
             let persistent = sandboxes.len();
-            let ephemeral = self.ephemeral_count.load(Ordering::Relaxed);
-            if persistent + ephemeral >= MAX_SANDBOXES {
-                return Err(sandbox_quota_exceeded());
+            loop {
+                let current = self.ephemeral_count.load(Ordering::Acquire);
+                if persistent + current >= MAX_SANDBOXES {
+                    return Err(sandbox_quota_exceeded());
+                }
+                match self.ephemeral_count.compare_exchange(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(_) => continue,
+                }
             }
-            self.ephemeral_count.fetch_add(1, Ordering::Relaxed);
         }
 
         let argv = argv.to_vec();
@@ -953,7 +973,7 @@ impl MimoboxServer {
         })
         .await;
 
-        self.ephemeral_count.fetch_sub(1, Ordering::Relaxed);
+        self.ephemeral_count.fetch_sub(1, Ordering::Release);
 
         result.map_err(format_join_error)?.map_err(format_sdk_error)
     }
