@@ -612,13 +612,21 @@ impl PyStreamIterator {
     }
 
     /// Returns the next `StreamEvent`, or `None` when the stream is exhausted.
-    fn __next__(&mut self) -> PyResult<Option<PyStreamEvent>> {
-        let Some(receiver) = self.receiver.as_ref() else {
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyStreamEvent>> {
+        let Some(receiver) = self.receiver.take() else {
             return Ok(None);
         };
 
-        match receiver.recv() {
-            Ok(event) => Ok(Some(event.into())),
+        let (receiver, item) = py.allow_threads(move || {
+            let item = receiver.recv();
+            (receiver, item)
+        });
+
+        match item {
+            Ok(event) => {
+                self.receiver = Some(receiver);
+                Ok(Some(event.into()))
+            }
             Err(_) => {
                 self.receiver = None;
                 Ok(None)
@@ -975,8 +983,11 @@ impl PySandbox {
         cls: &Bound<'_, PyType>,
         snapshot: PyRef<'_, PySnapshot>,
     ) -> PyResult<Py<Self>> {
-        let sandbox = RustSandbox::from_snapshot(&snapshot.inner).map_err(map_sdk_error)?;
         let py = cls.py();
+        let inner = snapshot.inner.clone();
+        let sandbox = py
+            .allow_threads(|| RustSandbox::from_snapshot(&inner))
+            .map_err(map_sdk_error)?;
         let sandbox = Py::new(
             py,
             Self {
