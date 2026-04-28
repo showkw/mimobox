@@ -331,18 +331,27 @@ fn cache_file_mtime(path: &Path) -> Option<u64> {
 
 #[derive(Debug)]
 struct CacheRecord {
-    hash: String,
+    source_hash: String,
+    cache_hash: String,
     mtime_nanos: u64,
 }
 
+fn is_sha256_hex(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn parse_cache_record(contents: &str) -> Option<CacheRecord> {
-    let (hash, mtime_nanos) = contents.trim().split_once(':')?;
-    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let mut parts = contents.trim().split(':');
+    let source_hash = parts.next()?;
+    let cache_hash = parts.next()?;
+    let mtime_nanos = parts.next()?;
+    if parts.next().is_some() || !is_sha256_hex(source_hash) || !is_sha256_hex(cache_hash) {
         return None;
     }
 
     Some(CacheRecord {
-        hash: hash.to_string(),
+        source_hash: source_hash.to_string(),
+        cache_hash: cache_hash.to_string(),
         mtime_nanos: mtime_nanos.parse().ok()?,
     })
 }
@@ -372,8 +381,17 @@ fn read_cache_record(path: &Path) -> Option<CacheRecord> {
     }
 }
 
-fn cache_metadata_path(cache_path: &Path) -> PathBuf {
-    cache_path.with_extension("cwasm.meta")
+fn source_cache_record_path(cache_dir: &Path, source_hash: &str) -> PathBuf {
+    cache_dir.join(format!("{}.wasm.meta", source_hash))
+}
+
+fn expected_cache_hash_from_path(path: &Path) -> Option<&str> {
+    if path.extension()?.to_str()? != "cwasm" {
+        return None;
+    }
+
+    let hash = path.file_stem()?.to_str()?;
+    is_sha256_hex(hash).then_some(hash)
 }
 
 fn private_tmp_path(path: &Path) -> PathBuf {
@@ -419,31 +437,40 @@ fn write_private_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     result
 }
 
-fn write_cache_record(path: &Path, hash: &str, cache_mtime_nanos: u64) {
-    let record = format!("{}:{}", hash, cache_mtime_nanos);
+fn write_cache_record(path: &Path, source_hash: &str, cache_hash: &str, cache_mtime_nanos: u64) {
+    let record = format!("{}:{}:{}", source_hash, cache_hash, cache_mtime_nanos);
     if let Err(e) = write_private_file_atomic(path, record.as_bytes()) {
         warn!("Failed to write cache record {:?}: {}", path, e);
     }
 }
 
 fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<u8>> {
+    let expected_hash = match expected_cache_hash_from_path(path) {
+        Some(hash) => hash,
+        None => {
+            warn!("Invalid cache file name, missing SHA256 hash: {:?}", path);
+            remove_file_if_exists(path);
+            return None;
+        }
+    };
+
     if !validate_cache_file_security(path) {
         remove_file_if_exists(path);
         return None;
     }
 
-    let before_mtime = match cache_file_mtime(path) {
+    let current_mtime = match cache_file_mtime(path) {
         Some(mtime) => mtime,
         None => {
-            warn!("Failed to read cache file mtime before read: {:?}", path);
+            warn!("Failed to read cache file mtime: {:?}", path);
             remove_file_if_exists(path);
             return None;
         }
     };
-    if before_mtime != expected_mtime_nanos {
+    if current_mtime != expected_mtime_nanos {
         warn!(
-            "Cache file mtime mismatch before read: path={:?}, expected={}, actual={}",
-            path, expected_mtime_nanos, before_mtime
+            "Cache file mtime mismatch, treating as stale: path={:?}, expected={}, actual={}",
+            path, expected_mtime_nanos, current_mtime
         );
         remove_file_if_exists(path);
         return None;
@@ -463,18 +490,11 @@ fn read_secure_cache_file(path: &Path, expected_mtime_nanos: u64) -> Option<Vec<
         return None;
     }
 
-    let after_mtime = match cache_file_mtime(path) {
-        Some(mtime) => mtime,
-        None => {
-            warn!("Failed to read cache file mtime after read: {:?}", path);
-            remove_file_if_exists(path);
-            return None;
-        }
-    };
-    if after_mtime != before_mtime || after_mtime != expected_mtime_nanos {
+    let actual_hash = content_hash(&cached);
+    if actual_hash != expected_hash {
         warn!(
-            "Cache file changed during read: path={:?}, expected={}, before={}, after={}",
-            path, expected_mtime_nanos, before_mtime, after_mtime
+            "Cache file content hash mismatch: path={:?}, expected={}, actual={}",
+            path, expected_hash, actual_hash
         );
         remove_file_if_exists(path);
         return None;
@@ -503,7 +523,8 @@ fn load_cached_module(
 
     // SAFETY: 只在私有缓存目录通过 owner=当前 euid、mode=0700 校验后进入此路径；
     // 缓存文件和记录文件也必须为 owner=当前 euid、mode=0600。
-    // 读取前后均校验缓存文件 mtime 与记录值一致，若文件被替换或修改会删除并重新编译。
+    // 读取缓存字节后会校验其 SHA256 必须与缓存文件名中的 hash 一致；
+    // mtime 只用于跳过明显过期的记录，不作为安全依据。
     // 因此传入 bytes 只来自本程序在同一缓存命名空间中此前 Module::serialize() 写入的受控缓存。
     match unsafe { Module::deserialize(engine, &cached) } {
         Ok(module) => {
@@ -513,7 +534,6 @@ fn load_cached_module(
         Err(e) => {
             warn!("Cache deserialization failed, recompiling: {}", e);
             remove_file_if_exists(cache_path);
-            remove_file_if_exists(&cache_metadata_path(cache_path));
             if let Some(record_path) = record_path {
                 remove_file_if_exists(record_path);
             }
@@ -541,8 +561,9 @@ fn compile_module_from_bytes(
 ///
 /// Uses a hybrid cache strategy:
 /// 1. First looks up the cache mapping file using the lightweight metadata fingerprint (size plus modification time).
-/// 2. When the cache mapping hits, verifies the already-read bytes match the cached SHA256 key.
-/// 3. When the cache mapping misses, calculates the file content SHA256 and updates the cache.
+/// 2. When the cache mapping hits, verifies the already-read bytes match the source SHA256 key.
+/// 3. Reads cached serialized bytes only after validating their SHA256 against the cache filename.
+/// 4. When the cache mapping misses, calculates the file content SHA256 and updates the cache.
 ///
 /// The caller provides bytes read from the same fd used for validation, avoiding path-based TOCTOU.
 fn get_cached_module(
@@ -569,16 +590,16 @@ fn get_cached_module(
         None => return compile_module_from_bytes(engine, wasm_path, file_data),
     };
 
-    // 缓存映射文件：记录 "fingerprint -> sha256_hash:cache_mtime_nanos" 的映射
+    // 缓存映射文件：记录 "fingerprint -> source_hash:cache_hash:cache_mtime_nanos" 的映射
     // 文件名格式: {size}_{mtime_nanos}.map
     let map_file = cache_dir.join(format!("{}_{}.map", fingerprint.0, fingerprint.1));
 
-    let hash = content_hash(file_data);
+    let source_hash = content_hash(file_data);
 
     // 尝试通过映射文件找到对应的缓存
     if let Some(record) = read_cache_record(&map_file) {
-        if record.hash == hash {
-            let cache_path = cache_dir.join(format!("{}.cwasm", record.hash));
+        if record.source_hash == source_hash {
+            let cache_path = cache_dir.join(format!("{}.cwasm", record.cache_hash));
             if let Some(module) = load_cached_module(
                 engine,
                 wasm_path,
@@ -592,36 +613,41 @@ fn get_cached_module(
         } else {
             warn!(
                 "Cache fingerprint hash mismatch: path={:?}, expected={}, actual={}",
-                map_file, hash, record.hash
+                map_file, source_hash, record.source_hash
             );
             remove_file_if_exists(&map_file);
         }
     }
 
     // 缓存未命中：复用已读取内容的 SHA256。
-    let cache_path = cache_dir.join(format!("{}.cwasm", hash));
-    let cache_metadata_file = cache_metadata_path(&cache_path);
+    let source_record_file = source_cache_record_path(cache_dir, &source_hash);
 
     // 检查是否已有相同内容的缓存（文件内容相同但元数据不同）
-    if let Some(record) = read_cache_record(&cache_metadata_file) {
-        if record.hash == hash {
+    if let Some(record) = read_cache_record(&source_record_file) {
+        if record.source_hash == source_hash {
+            let cache_path = cache_dir.join(format!("{}.cwasm", record.cache_hash));
             if let Some(module) = load_cached_module(
                 engine,
                 wasm_path,
                 &cache_path,
                 record.mtime_nanos,
-                Some(&cache_metadata_file),
+                Some(&source_record_file),
                 "content match",
             ) {
-                write_cache_record(&map_file, &hash, record.mtime_nanos);
+                write_cache_record(
+                    &map_file,
+                    &source_hash,
+                    &record.cache_hash,
+                    record.mtime_nanos,
+                );
                 return Ok(module);
             }
         } else {
             warn!(
                 "Cache metadata hash mismatch: path={:?}, expected={}, actual={}",
-                cache_metadata_file, hash, record.hash
+                source_record_file, source_hash, record.source_hash
             );
-            remove_file_if_exists(&cache_metadata_file);
+            remove_file_if_exists(&source_record_file);
         }
     }
 
@@ -630,15 +656,23 @@ fn get_cached_module(
 
     // 序列化到缓存目录（原子写入：先写临时文件再 rename，避免并发读到不完整数据）
     if let Ok(serialized) = module.serialize() {
+        let cache_hash = content_hash(&serialized);
+        let cache_path = cache_dir.join(format!("{}.cwasm", cache_hash));
+
         match write_private_file_atomic(&cache_path, &serialized) {
             Ok(()) => {
                 if let Some(cache_mtime_nanos) = cache_file_mtime(&cache_path) {
-                    write_cache_record(&map_file, &hash, cache_mtime_nanos);
-                    write_cache_record(&cache_metadata_file, &hash, cache_mtime_nanos);
+                    write_cache_record(&map_file, &source_hash, &cache_hash, cache_mtime_nanos);
+                    write_cache_record(
+                        &source_record_file,
+                        &source_hash,
+                        &cache_hash,
+                        cache_mtime_nanos,
+                    );
                 } else {
                     warn!("Failed to record cache file mtime: {:?}", cache_path);
                     remove_file_if_exists(&cache_path);
-                    remove_file_if_exists(&cache_metadata_file);
+                    remove_file_if_exists(&source_record_file);
                     remove_file_if_exists(&map_file);
                 }
             }
@@ -1337,6 +1371,36 @@ mod tests {
             !is_path_cache_ancestor(&sibling_dir, &cache_dir),
             "普通兄弟路径不能因字符串前缀相同被误判为缓存目录祖先或后代"
         );
+    }
+
+    #[test]
+    fn test_read_secure_cache_file_accepts_matching_content_hash() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let cached = b"serialized module bytes";
+        let cache_hash = content_hash(cached);
+        let cache_path = temp_dir.path().join(format!("{}.cwasm", cache_hash));
+
+        write_private_file_atomic(&cache_path, cached).expect("Failed to write cache file");
+        let cache_mtime = cache_file_mtime(&cache_path).expect("Failed to read cache mtime");
+
+        assert_eq!(
+            read_secure_cache_file(&cache_path, cache_mtime),
+            Some(cached.to_vec())
+        );
+    }
+
+    #[test]
+    fn test_read_secure_cache_file_rejects_content_hash_mismatch() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let expected_hash = content_hash(b"trusted serialized module bytes");
+        let cache_path = temp_dir.path().join(format!("{}.cwasm", expected_hash));
+
+        write_private_file_atomic(&cache_path, b"tampered bytes")
+            .expect("Failed to write cache file");
+        let cache_mtime = cache_file_mtime(&cache_path).expect("Failed to read cache mtime");
+
+        assert_eq!(read_secure_cache_file(&cache_path, cache_mtime), None);
+        assert!(!cache_path.exists(), "hash 不匹配的缓存文件必须被删除");
     }
 
     #[test]
