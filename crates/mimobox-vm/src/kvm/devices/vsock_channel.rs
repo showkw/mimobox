@@ -293,10 +293,11 @@ impl VsockCommandChannel {
         }
 
         loop {
-            // SAFETY: listener fd is valid. The peer address is not needed here, so null
-            // pointers are acceptable.
-            let stream_fd =
-                unsafe { libc::accept(self.listener.raw_fd(), ptr::null_mut(), ptr::null_mut()) };
+            let stream_fd = {
+                // SAFETY: listener fd is valid. The peer address is not needed here, so null
+                // pointers are acceptable.
+                unsafe { libc::accept(self.listener.raw_fd(), ptr::null_mut(), ptr::null_mut()) }
+            };
             if stream_fd >= 0 {
                 let stream = VsockStream::new(stream_fd);
                 stream.set_recv_timeout(Duration::from_secs(STREAM_RECV_TIMEOUT_SECS))?;

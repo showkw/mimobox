@@ -250,6 +250,7 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn remount_proc_for_pid_namespace() -> Result<(), String> {
     // 新 mount namespace 默认可能继承 shared propagation，先私有化避免挂载传播到宿主。
+    // SAFETY: 参数均为合法的 mount(2) 入参；当前调用只修改 fork 后子进程的 mount namespace。
     let propagation_ret = unsafe {
         libc::mount(
             std::ptr::null(),
@@ -267,6 +268,7 @@ fn remount_proc_for_pid_namespace() -> Result<(), String> {
     }
 
     let proc_flags = (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong;
+    // SAFETY: source、target、fstype 均为有效的 NUL 结尾 C 字符串，flags 与 data 参数合法。
     let mount_ret = unsafe {
         libc::mount(
             c"proc".as_ptr(),

@@ -326,9 +326,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .get(HeaderName::from_static("authorization"))?
         .to_str()
         .ok()?;
-    let mut parts = authorization.splitn(2, ' ');
-    let scheme = parts.next()?;
-    let token = parts.next()?;
+    let (scheme, token) = authorization.split_once(' ')?;
 
     if scheme == "Bearer" {
         Some(token)

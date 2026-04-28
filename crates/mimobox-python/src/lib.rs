@@ -664,6 +664,7 @@ impl PySandbox {
         trust_level=None,
         network=None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         isolation: Option<&str>,
