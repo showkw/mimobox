@@ -3,7 +3,7 @@ mod landlock_enforcement_tests {
     use std::error::Error;
     use std::path::Path;
 
-    use mimobox_core::{Sandbox, SandboxConfig};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig};
     use mimobox_os::LinuxSandbox;
     use tempfile::TempDir;
 
@@ -13,6 +13,7 @@ mod landlock_enforcement_tests {
         config.allow_fork = true;
         // 保留默认只读路径（/usr, /lib, /bin 等），确保 /bin/sh 可执行。
         config.fs_readwrite = Vec::new();
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 

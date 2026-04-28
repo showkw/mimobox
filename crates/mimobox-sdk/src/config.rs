@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::SdkError;
-use mimobox_core::{SandboxConfig, SeccompProfile};
+use mimobox_core::{NamespaceDegradation, SandboxConfig, SeccompProfile};
 
 const MAX_TIMEOUT: Duration = Duration::from_secs(86_400);
 
@@ -146,6 +146,8 @@ pub struct Config {
     pub allowed_http_domains: Vec<String>,
     /// Whether to allow child process creation (fork/clone) inside the sandbox.
     pub allow_fork: bool,
+    /// Namespace 降级行为控制。默认 FailClosed。
+    pub namespace_degradation: NamespaceDegradation,
     /// microVM vCPU count. Only affects the microVM backend.
     pub vm_vcpu_count: u8,
     /// microVM guest memory size in MiB. Capped by `memory_limit_mb` if set.
@@ -179,6 +181,7 @@ impl Default for Config {
             fs_readwrite: vec!["/tmp".into()],
             allowed_http_domains: Vec::new(),
             allow_fork: false,
+            namespace_degradation: NamespaceDegradation::FailClosed,
             vm_vcpu_count: 1,
             vm_memory_mb: 256,
             kernel_path: None,
@@ -268,6 +271,7 @@ impl Config {
         config.seccomp_profile = resolve_seccomp_profile(deny_network, self.allow_fork);
         config.allow_fork = self.allow_fork;
         config.allowed_http_domains = resolve_allowed_http_domains(self);
+        config.namespace_degradation = self.namespace_degradation;
         config
     }
 
@@ -579,6 +583,14 @@ impl ConfigBuilder {
     /// ```
     pub fn allow_fork(mut self, allow: bool) -> Self {
         self.inner.allow_fork = allow;
+        self
+    }
+
+    /// Set Linux namespace 降级行为。
+    ///
+    /// 默认 `FailClosed`，任何 namespace 创建失败都会拒绝继续执行。
+    pub fn namespace_degradation(mut self, policy: NamespaceDegradation) -> Self {
+        self.inner.namespace_degradation = policy;
         self
     }
 

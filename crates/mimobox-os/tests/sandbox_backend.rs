@@ -3,12 +3,13 @@ mod linux_backend_tests {
     use std::error::Error;
     use std::path::PathBuf;
 
-    use mimobox_core::{Sandbox, SandboxConfig, SeccompProfile};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig, SeccompProfile};
     use mimobox_os::LinuxSandbox;
     use tempfile::TempDir;
 
     fn linux_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config.timeout_secs = Some(5);
         config.memory_limit_mb = Some(128);
         config
@@ -259,7 +260,7 @@ mod macos_backend_tests {
     use std::path::Path;
     use std::sync::OnceLock;
 
-    use mimobox_core::{Sandbox, SandboxConfig, SandboxError};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig, SandboxError};
     use mimobox_os::MacOsSandbox;
     use tempfile::TempDir;
 
@@ -267,6 +268,7 @@ mod macos_backend_tests {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(5);
         config.memory_limit_mb = None;
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 

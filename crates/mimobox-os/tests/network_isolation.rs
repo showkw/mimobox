@@ -3,12 +3,13 @@ mod network_isolation_tests {
     use std::error::Error;
     use std::path::PathBuf;
 
-    use mimobox_core::{Sandbox, SandboxConfig, SeccompProfile};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig, SeccompProfile};
     use mimobox_os::LinuxSandbox;
 
     fn network_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.deny_network = true;
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config.timeout_secs = Some(10);
         config.fs_readonly = vec![
             PathBuf::from("/usr"),

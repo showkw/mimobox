@@ -15,7 +15,8 @@ use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{
-    DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult, SeccompProfile,
+    DirEntry, FileStat, NamespaceDegradation, Sandbox, SandboxConfig, SandboxError, SandboxResult,
+    SeccompProfile,
 };
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
@@ -78,6 +79,7 @@ fn command_log_summary(cmd: &[String]) -> String {
 }
 
 const NAMESPACE_FALLBACK_MARKER: &str = "unshare(full_flags) failed";
+const NAMESPACE_FAIL_CLOSED_EXIT_CODE: i32 = 128;
 
 /// 检测 stderr 中是否包含 namespace 降级标记
 fn namespace_fallback_detected(stderr_buf: &[u8]) -> bool {
@@ -458,7 +460,11 @@ fn append_output_truncation_marker(
 /// 5. Fork once after `CLONE_NEWPID`, then remount `/proc` inside the PID namespace.
 /// 6. Apply Seccomp-bpf system call filtering as the final step before `exec`.
 /// 7. Execute the command with `execvp`.
-fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> ! {
+fn apply_security_policies_and_exec(
+    cmd: &[String],
+    config: &SandboxConfig,
+    allow_ns_degradation: bool,
+) -> ! {
     // 1. 设置内存限制（最早应用，防止后续操作消耗过多内存）
     if let Some(limit_mb) = config.memory_limit_mb
         && let Err(e) = set_memory_limit(limit_mb)
@@ -550,6 +556,14 @@ fn apply_security_policies_and_exec(cmd: &[String], config: &SandboxConfig) -> !
     let has_new_pid_namespace = match nix::sched::unshare(full_flags) {
         Ok(()) => true,
         Err(e) => {
+            if !allow_ns_degradation {
+                // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                unsafe {
+                    write_error(2, &format!("namespace creation failed (fail-closed): {e}"));
+                    libc::_exit(NAMESPACE_FAIL_CLOSED_EXIT_CODE);
+                }
+            }
+
             let msg = format!("unshare(full_flags) failed: {e}, retrying without user/pid ns");
             // SAFETY: This is the forked child; write_error writes directly to stderr without unwinding.
             unsafe {
@@ -737,7 +751,11 @@ impl LinuxSandbox {
             libc::close(stderr_fd);
         }
 
-        apply_security_policies_and_exec(cmd, config);
+        let allow_degradation = matches!(
+            config.namespace_degradation,
+            NamespaceDegradation::AllowDegradation
+        );
+        apply_security_policies_and_exec(cmd, config, allow_degradation);
     }
 
     fn pty_child_main(
@@ -773,7 +791,11 @@ impl LinuxSandbox {
             }
         }
 
-        apply_security_policies_and_exec(cmd, sandbox_config);
+        let allow_degradation = matches!(
+            sandbox_config.namespace_degradation,
+            NamespaceDegradation::AllowDegradation
+        );
+        apply_security_policies_and_exec(cmd, sandbox_config, allow_degradation);
     }
 }
 
@@ -918,6 +940,13 @@ impl Sandbox for LinuxSandbox {
 
                 match wait_result {
                     WaitStatus::Exited(_, code) => {
+                        if code == NAMESPACE_FAIL_CLOSED_EXIT_CODE {
+                            return Err(SandboxError::NamespaceFailed(
+                                "namespace 创建失败 (fail-closed)：user/pid namespace 不可用，拒绝降级执行"
+                                    .to_string(),
+                            ));
+                        }
+
                         log_namespace_fallback_from_stderr(&stderr_buf);
                         apply_namespace_fallback_to_report(
                             &mut self.last_isolation_report,
@@ -1155,6 +1184,7 @@ mod tests {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
         config.memory_limit_mb = Some(256);
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 
@@ -1327,6 +1357,7 @@ mod tests {
         // 添加 /proc 到 readonly 以便读取 /proc/net/dev
         let mut config = SandboxConfig::default();
         config.deny_network = true;
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config.fs_readonly = vec![
             "/usr".into(),
             "/lib".into(),

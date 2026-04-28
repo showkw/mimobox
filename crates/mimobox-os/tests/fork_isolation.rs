@@ -3,7 +3,7 @@ mod fork_isolation_tests {
     use std::error::Error;
     use std::path::{Path, PathBuf};
 
-    use mimobox_core::{Sandbox, SandboxConfig, SeccompProfile};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig, SeccompProfile};
     use mimobox_os::LinuxSandbox;
     use tempfile::TempDir;
 
@@ -14,6 +14,7 @@ mod fork_isolation_tests {
         config.timeout_secs = Some(10);
         config.seccomp_profile = SeccompProfile::Essential;
         config.allow_fork = true;
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 

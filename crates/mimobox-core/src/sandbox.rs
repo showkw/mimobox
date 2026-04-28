@@ -191,6 +191,19 @@ impl FileStat {
     }
 }
 
+/// Namespace 降级行为控制策略。
+///
+/// 当 Linux namespace 创建失败时（如缺少 CAP_SYS_ADMIN），决定如何处理。
+/// 默认为 [`NamespaceDegradation::FailClosed`]，确保安全边界不被静默削弱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum NamespaceDegradation {
+    /// 任何 namespace 创建失败都返回错误（默认，生产环境推荐）。
+    #[default]
+    FailClosed,
+    /// 失败时 warn 但继续执行（仅用于开发/CI 环境中 namespace 支持不完整的场景）。
+    AllowDegradation,
+}
+
 /// Sandbox configuration shared across all backends.
 ///
 /// This struct describes the minimum capability set used by all sandbox
@@ -240,6 +253,9 @@ pub struct SandboxConfig {
     /// HTTP proxy domain allowlist, including wildcards such as `*.openai.com`.
     /// These domains remain reachable through the controlled proxy even when `deny_network = true`.
     pub allowed_http_domains: Vec<String>,
+    /// Namespace 降级行为控制。默认 FailClosed（任何 namespace 创建失败都返回错误）。
+    #[serde(default)]
+    pub namespace_degradation: NamespaceDegradation,
 }
 
 impl Default for SandboxConfig {
@@ -255,6 +271,7 @@ impl Default for SandboxConfig {
             seccomp_profile: SeccompProfile::Essential,
             allow_fork: false,
             allowed_http_domains: Vec::new(),
+            namespace_degradation: NamespaceDegradation::FailClosed,
         }
     }
 }

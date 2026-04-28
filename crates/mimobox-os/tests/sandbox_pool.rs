@@ -5,7 +5,7 @@ mod pool_tests {
     use std::thread;
     use std::time::Duration;
 
-    use mimobox_core::SandboxConfig;
+    use mimobox_core::{NamespaceDegradation, SandboxConfig};
     #[cfg(target_os = "macos")]
     use mimobox_core::{Sandbox, SandboxError};
     #[cfg(target_os = "macos")]
@@ -27,6 +27,7 @@ mod pool_tests {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(5);
         config.memory_limit_mb = Some(128);
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 

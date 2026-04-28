@@ -3,7 +3,7 @@ pub mod seccomp_rejection_tests {
     use std::error::Error;
     use std::path::{Path, PathBuf};
 
-    use mimobox_core::{Sandbox, SandboxConfig, SeccompProfile};
+    use mimobox_core::{NamespaceDegradation, Sandbox, SandboxConfig, SeccompProfile};
     use mimobox_os::LinuxSandbox;
     use tempfile::TempDir;
 
@@ -12,6 +12,7 @@ pub mod seccomp_rejection_tests {
         config.timeout_secs = Some(10);
         config.seccomp_profile = SeccompProfile::Essential;
         config.allow_fork = false;
+        config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
     }
 
