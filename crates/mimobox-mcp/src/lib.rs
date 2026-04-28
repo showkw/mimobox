@@ -549,7 +549,11 @@ impl MimoboxServer {
             // 优先使用 argv
             (Some(argv), _) if !argv.is_empty() => argv,
             // 兼容旧 command 字段：用 shlex 解析
-            (_, Some(command)) => shlex::split(&command).unwrap_or_else(|| vec![command.clone()]),
+            (_, Some(command)) => shlex::split(&command).ok_or_else(|| {
+                to_error(format!(
+                    "命令解析失败，包含不匹配的引号：'{command}'。提示：请使用 argv 字段直接传递参数数组"
+                ))
+            })?,
             // 两者都不存在
             (None, None) => {
                 return Err(to_error(
