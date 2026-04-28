@@ -314,6 +314,11 @@ impl std::fmt::Debug for PtySession {
 
 impl PtySession {
     /// Constructs an SDK PTY wrapper from a backend PTY session.
+    #[cfg(any(
+        feature = "wasm",
+        all(feature = "os", any(target_os = "linux", target_os = "macos")),
+        all(feature = "vm", target_os = "linux")
+    ))]
     pub(crate) fn from_inner(inner: Box<dyn mimobox_core::PtySession>) -> Self {
         Self { inner }
     }

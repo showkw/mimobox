@@ -14,14 +14,27 @@ use crate::router::resolve_isolation;
 use crate::types::SandboxSnapshot;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::{RestorePool, RestorePoolConfig};
+use crate::vm_helpers::destroy_backend_inner;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::map_microvm_error;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::map_restore_pool_error;
-use crate::vm_helpers::{destroy_backend_inner, parse_command};
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+use crate::vm_helpers::parse_command;
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
-use mimobox_core::{ErrorCode, Sandbox as CoreSandbox, SandboxError};
+use mimobox_core::ErrorCode;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use mimobox_core::Sandbox as CoreSandbox;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
+use mimobox_core::SandboxError;
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
@@ -181,6 +194,7 @@ impl SdkExecOptions {
     }
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn build_fallback_command_args(
     command: &str,
     options: &SdkExecOptions,
@@ -217,6 +231,7 @@ fn build_fallback_command_args(
     Ok(prefixed)
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn build_shell_env_prefix(env: &HashMap<String, String>) -> Result<String, SdkError> {
     if env.is_empty() {
         return Ok(String::new());
@@ -237,6 +252,7 @@ fn build_shell_env_prefix(env: &HashMap<String, String>) -> Result<String, SdkEr
     Ok(parts.join(" "))
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn build_env_assignments(env: &HashMap<String, String>) -> Result<Vec<String>, SdkError> {
     let mut assignments = Vec::with_capacity(env.len());
     for (key, value) in env {
@@ -251,6 +267,7 @@ fn build_env_assignments(env: &HashMap<String, String>) -> Result<Vec<String>, S
     Ok(assignments)
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn validate_env_key(key: &str) -> Result<(), SdkError> {
     if key.is_empty() || key.contains('=') || key.contains('\0') {
         return Err(SdkError::Config(format!(
@@ -286,6 +303,10 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
 
 // ── 文件错误映射辅助函数 ──
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
 pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     match error {
         SandboxError::Io(io_err) => SdkError::Io(io_err),
@@ -293,6 +314,10 @@ pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     }
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
 pub(crate) fn read_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
@@ -300,6 +325,10 @@ pub(crate) fn read_file_via_core(
     CoreSandbox::read_file(sandbox, path)
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
 pub(crate) fn write_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
@@ -308,6 +337,7 @@ pub(crate) fn write_file_via_core(
     CoreSandbox::write_file(sandbox, path, data)
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> SdkError {
     SdkError::sandbox(
         ErrorCode::UnsupportedPlatform,
@@ -318,6 +348,7 @@ pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'stati
     )
 }
 
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn map_os_core_file_error(
     operation: &str,
     unsupported_message: &str,
@@ -694,6 +725,11 @@ impl Sandbox {
     }
 
     fn create_inner(&self, isolation: IsolationLevel) -> Result<SandboxInner, SdkError> {
+        #[cfg(any(
+            feature = "wasm",
+            all(feature = "os", any(target_os = "linux", target_os = "macos")),
+            all(feature = "vm", target_os = "linux")
+        ))]
         let sandbox_config = self.config.to_sandbox_config();
 
         match isolation {

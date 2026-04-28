@@ -1,3 +1,8 @@
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 use crate::dispatch::{ExecuteForSdk, StreamExecuteForSdk};
 use crate::error::SdkError;
 use crate::types::{ExecuteResult, StreamEvent};
@@ -7,8 +12,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::debug;
 
-use super::{Sandbox, SandboxInner, SdkExecOptions};
-use super::{build_fallback_command_args, validate_cwd};
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use super::SandboxInner;
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+use super::build_fallback_command_args;
+use super::{Sandbox, SdkExecOptions, validate_cwd};
 
 macro_rules! dispatch_execute {
     ($inner:expr, $binding:ident, $expr:expr, $ctx:literal) => {{
@@ -26,6 +38,8 @@ macro_rules! dispatch_execute {
             SandboxInner::RestoredPooledMicroVm($binding) => $expr,
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm($binding) => $expr,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched for dispatch_execute"),
         }
     }};
 }
@@ -47,6 +61,7 @@ impl Sandbox {
     /// ```
     pub fn execute(&mut self, command: &str) -> Result<ExecuteResult, SdkError> {
         let args = parse_command(command)?;
+        let _ = &args;
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
         dispatch_execute!(inner, s, s.execute_for_sdk(&args), "execute")
@@ -171,6 +186,7 @@ impl Sandbox {
         if let Some(cwd) = options.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+        let _ = (&options.env, options.timeout);
 
         self.ensure_backend(command)?;
         let inner = self.require_inner()?;
@@ -236,6 +252,8 @@ impl Sandbox {
                 let args = parse_command(command)?;
                 sandbox.execute_for_sdk(&args)
             }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 }

@@ -3,16 +3,26 @@ use mimobox_core::FileStat;
 #[cfg(feature = "wasm")]
 use mimobox_core::{Sandbox as CoreSandbox, SandboxError};
 
+use super::Sandbox;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use super::SandboxInner;
 #[cfg(feature = "wasm")]
 use super::map_core_file_error;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use super::map_microvm_error;
-use super::{Sandbox, SandboxInner, os_file_operation_unsupported};
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+use super::map_os_core_file_error;
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+use super::os_file_operation_unsupported;
 #[cfg(any(
     feature = "wasm",
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
-use super::{map_os_core_file_error, read_file_via_core, write_file_via_core};
+use super::{read_file_via_core, write_file_via_core};
 
 impl Sandbox {
     /// Lists directory entries under the specified path.
@@ -44,6 +54,8 @@ impl Sandbox {
                 SandboxError::Io(io_err) => SdkError::Io(io_err),
                 other => SdkError::from_sandbox_execute_error(other),
             }),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
@@ -76,6 +88,8 @@ impl Sandbox {
                 SandboxError::Io(io_err) => SdkError::Io(io_err),
                 other => SdkError::from_sandbox_execute_error(other),
             }),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
@@ -108,6 +122,8 @@ impl Sandbox {
                 SandboxError::Io(io_err) => SdkError::Io(io_err),
                 other => SdkError::from_sandbox_execute_error(other),
             }),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
@@ -140,6 +156,8 @@ impl Sandbox {
                 SandboxError::Io(io_err) => SdkError::Io(io_err),
                 other => SdkError::from_sandbox_execute_error(other),
             }),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
@@ -170,11 +188,14 @@ impl Sandbox {
                 SandboxError::Io(io_err) => SdkError::Io(io_err),
                 other => SdkError::from_sandbox_execute_error(other),
             }),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
     /// Reads file contents from the active sandbox backend.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SdkError> {
+        let _ = path;
         self.ensure_backend("/bin/cat")?;
         let inner = self.require_inner()?;
 
@@ -203,11 +224,14 @@ impl Sandbox {
             SandboxInner::RestoredPooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(s) => read_file_via_core(s, path).map_err(map_core_file_error),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 
     /// Writes file contents into the active sandbox backend.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SdkError> {
+        let _ = (path, data);
         self.ensure_backend("/bin/sh")?;
         let inner = self.require_inner()?;
 
@@ -240,6 +264,8 @@ impl Sandbox {
             SandboxInner::Wasm(s) => {
                 write_file_via_core(s, path, data).map_err(map_core_file_error)
             }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
         }
     }
 }

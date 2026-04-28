@@ -1,3 +1,4 @@
+#[cfg(feature = "vm")]
 use crate::error::SdkError;
 #[cfg(feature = "vm")]
 use crate::types::HttpResponse;

@@ -1,9 +1,27 @@
 use crate::error::SdkError;
 use crate::types::PtySession;
-use crate::vm_helpers::{map_pty_create_error, parse_command};
-use mimobox_core::{PtyConfig, PtySize, Sandbox as CoreSandbox};
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use crate::vm_helpers::map_pty_create_error;
+use crate::vm_helpers::parse_command;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use mimobox_core::Sandbox as CoreSandbox;
+use mimobox_core::{PtyConfig, PtySize};
 
-use super::{Sandbox, SandboxInner, validate_cwd};
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use super::SandboxInner;
+use super::{Sandbox, validate_cwd};
 
 impl Sandbox {
     /// Creates an interactive terminal session.
@@ -50,43 +68,59 @@ impl Sandbox {
         }
 
         self.ensure_backend_for_pty()?;
-        let inner = self.require_inner()?;
 
-        let session = match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) => {
-                return Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "PTY sessions currently only support OS-level backend, microVM pool not supported yet",
-                    Some("set isolation to `Os` or use default Auto".to_string()),
-                ));
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(_) => {
-                return Err(SdkError::sandbox(
-                    mimobox_core::ErrorCode::UnsupportedPlatform,
-                    "PTY sessions currently only support OS-level backend, restored microVM pool not supported yet",
-                    Some("set isolation to `Os` or use default Auto".to_string()),
-                ));
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
-            }
-        };
+        #[cfg(not(any(
+            feature = "wasm",
+            all(feature = "os", any(target_os = "linux", target_os = "macos")),
+            all(feature = "vm", target_os = "linux")
+        )))]
+        {
+            return Err(SdkError::unsupported_backend("pty"));
+        }
 
-        Ok(PtySession::from_inner(session))
+        #[cfg(any(
+            feature = "wasm",
+            all(feature = "os", any(target_os = "linux", target_os = "macos")),
+            all(feature = "vm", target_os = "linux")
+        ))]
+        {
+            let inner = self.require_inner()?;
+
+            let session = match inner {
+                #[cfg(all(feature = "os", target_os = "linux"))]
+                SandboxInner::Os(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "os", target_os = "macos"))]
+                SandboxInner::OsMac(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::MicroVm(sandbox) => CoreSandbox::create_pty(sandbox, config.clone())
+                    .map_err(map_pty_create_error)?,
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::PooledMicroVm(_) => {
+                    return Err(SdkError::sandbox(
+                        mimobox_core::ErrorCode::UnsupportedPlatform,
+                        "PTY sessions currently only support OS-level backend, microVM pool not supported yet",
+                        Some("set isolation to `Os` or use default Auto".to_string()),
+                    ));
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::RestoredPooledMicroVm(_) => {
+                    return Err(SdkError::sandbox(
+                        mimobox_core::ErrorCode::UnsupportedPlatform,
+                        "PTY sessions currently only support OS-level backend, restored microVM pool not supported yet",
+                        Some("set isolation to `Os` or use default Auto".to_string()),
+                    ));
+                }
+                #[cfg(feature = "wasm")]
+                SandboxInner::Wasm(sandbox) => {
+                    CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
+                }
+                #[allow(unreachable_patterns)]
+                _ => unreachable!("no backend variant matched"),
+            };
+
+            Ok(PtySession::from_inner(session))
+        }
     }
 }

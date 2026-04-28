@@ -6,7 +6,13 @@ use crate::router::resolve_isolation;
 use crate::sandbox::SandboxInner;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::StreamEvent;
-use mimobox_core::{ErrorCode, Sandbox as CoreSandbox};
+use mimobox_core::ErrorCode;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
+use mimobox_core::Sandbox as CoreSandbox;
 #[cfg(feature = "vm")]
 use mimobox_vm::GuestFileErrorKind;
 #[cfg(feature = "vm")]
@@ -72,6 +78,11 @@ pub(crate) fn build_code_command(language: &str, code: &str) -> Result<String, S
     }
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(

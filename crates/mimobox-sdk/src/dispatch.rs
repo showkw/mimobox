@@ -1,16 +1,46 @@
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 use crate::error::SdkError;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::HttpResponse;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 use crate::types::{ExecuteResult, StreamEvent};
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::{bridge_vm_stream, map_http_proxy_error, map_microvm_error};
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 use mimobox_core::Sandbox as CoreSandbox;
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 use std::sync::mpsc;
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 pub(crate) trait ExecuteForSdk {
     fn execute_for_sdk(&mut self, args: &[String]) -> Result<ExecuteResult, SdkError>;
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos")),
+    all(feature = "vm", target_os = "linux")
+))]
 pub(crate) trait StreamExecuteForSdk {
     fn stream_execute_for_sdk(
         &mut self,
@@ -58,6 +88,10 @@ impl ExecuteForSdk for mimobox_wasm::WasmSandbox {
     }
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
 fn stream_from_execute_result(result: ExecuteResult) -> mpsc::Receiver<StreamEvent> {
     let (sender, receiver) = mpsc::sync_channel(32);
 
@@ -76,6 +110,10 @@ fn stream_from_execute_result(result: ExecuteResult) -> mpsc::Receiver<StreamEve
     receiver
 }
 
+#[cfg(any(
+    feature = "wasm",
+    all(feature = "os", any(target_os = "linux", target_os = "macos"))
+))]
 macro_rules! impl_stream_execute_for_core_backend {
     ($ty:ty) => {
         impl StreamExecuteForSdk for $ty {
