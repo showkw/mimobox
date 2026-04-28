@@ -91,7 +91,9 @@ mod pool_tests {
             let result = sandbox.execute(&true_command())?;
 
             if result.exit_code == Some(125) {
-                eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+                eprintln!(
+                    "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+                );
                 return Ok(());
             }
             assert_eq!(result.exit_code, Some(0));

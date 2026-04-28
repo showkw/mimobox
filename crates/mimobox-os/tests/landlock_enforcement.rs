@@ -120,7 +120,9 @@ mod landlock_enforcement_tests {
         let stdout = String::from_utf8_lossy(&result.stdout);
 
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return Ok(());
         }
         assert_eq!(result.exit_code, Some(0));
@@ -148,7 +150,9 @@ mod landlock_enforcement_tests {
         let stdout = String::from_utf8_lossy(&result.stdout);
 
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return Ok(());
         }
         assert_eq!(result.exit_code, Some(0));
