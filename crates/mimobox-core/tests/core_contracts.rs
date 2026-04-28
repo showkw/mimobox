@@ -21,6 +21,7 @@ struct SandboxConfigJson {
     fs_readwrite: Vec<PathBuf>,
     deny_network: bool,
     memory_limit_mb: Option<u64>,
+    max_processes: Option<u32>,
     cpu_quota_us: Option<u64>,
     cpu_period_us: u64,
     timeout_secs: Option<u64>,
@@ -37,6 +38,7 @@ impl From<&SandboxConfig> for SandboxConfigJson {
             fs_readwrite: config.fs_readwrite.clone(),
             deny_network: config.deny_network,
             memory_limit_mb: config.memory_limit_mb,
+            max_processes: config.max_processes,
             cpu_quota_us: config.cpu_quota_us,
             cpu_period_us: config.cpu_period_us,
             timeout_secs: config.timeout_secs,
@@ -54,6 +56,7 @@ impl From<SandboxConfigJson> for SandboxConfig {
         config.fs_readwrite = json.fs_readwrite;
         config.deny_network = json.deny_network;
         config.memory_limit_mb = json.memory_limit_mb;
+        config.max_processes = json.max_processes;
         config.cpu_quota_us = json.cpu_quota_us;
         config.cpu_period_us = json.cpu_period_us;
         config.timeout_secs = json.timeout_secs;
@@ -83,6 +86,7 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     config.fs_readwrite = vec![PathBuf::from("/tmp/workdir"), PathBuf::from("/srv/output")];
     config.deny_network = false;
     config.memory_limit_mb = Some(256);
+    config.max_processes = Some(32);
     config.cpu_quota_us = Some(50_000);
     config.cpu_period_us = 100_000;
     config.timeout_secs = Some(9);
@@ -97,6 +101,7 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     assert_eq!(decoded.fs_readwrite, config.fs_readwrite);
     assert_eq!(decoded.deny_network, config.deny_network);
     assert_eq!(decoded.memory_limit_mb, config.memory_limit_mb);
+    assert_eq!(decoded.max_processes, config.max_processes);
     assert_eq!(decoded.cpu_quota_us, config.cpu_quota_us);
     assert_eq!(decoded.cpu_period_us, config.cpu_period_us);
     assert_eq!(decoded.timeout_secs, config.timeout_secs);
@@ -109,6 +114,7 @@ fn sandbox_config_round_trips_through_json() -> Result<(), Box<dyn Error>> {
     assert!(json.contains("\"deny_network\": false"));
     assert!(json.contains("\"allow_fork\": true"));
     assert!(json.contains("\"allowed_http_domains\""));
+    assert!(json.contains("\"max_processes\": 32"));
     assert!(json.contains("\"cpu_quota_us\": 50000"));
 
     Ok(())

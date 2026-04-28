@@ -234,6 +234,11 @@ pub struct SandboxConfig {
     pub deny_network: bool,
     /// Memory limit in MB, enforced through cgroups v2 or `setrlimit`.
     pub memory_limit_mb: Option<u64>,
+    /// Maximum process count inside one sandbox.
+    ///
+    /// `None` lets the Linux backend use its secure default.
+    #[serde(default)]
+    pub max_processes: Option<u32>,
     /// CPU 时间配额（微秒），配合 `cpu_period_us` 使用。
     ///
     /// 例如 quota=50000, period=100000 表示最多使用 50% CPU。
@@ -265,6 +270,7 @@ impl Default for SandboxConfig {
             fs_readwrite: Vec::new(),
             deny_network: true,
             memory_limit_mb: Some(512),
+            max_processes: None,
             cpu_quota_us: None,
             cpu_period_us: default_cpu_period_us(),
             timeout_secs: Some(30),
@@ -298,6 +304,12 @@ impl SandboxConfig {
         if self.memory_limit_mb == Some(0) {
             return Err(SandboxError::ExecutionFailed(
                 "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
+            ));
+        }
+
+        if self.max_processes == Some(0) {
+            return Err(SandboxError::ExecutionFailed(
+                "max_processes=0 无效，请设为正整数或 None".to_string(),
             ));
         }
 

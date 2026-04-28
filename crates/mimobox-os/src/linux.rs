@@ -24,6 +24,8 @@ use crate::seccomp;
 
 #[cfg(target_os = "linux")]
 const CGROUP_V2_ROOT: &str = "/sys/fs/cgroup";
+#[cfg(target_os = "linux")]
+const DEFAULT_MAX_PROCESSES: u32 = 64;
 const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
 
@@ -188,24 +190,24 @@ unsafe fn write_msg(fd: RawFd, msg: &[u8]) {
     }
 }
 
-/// SIGSYS handler 说明（已移除）
-///
-/// seccomp 使用 TRAP 模式（SECCOMP_RET_TRAP）时，被阻止的 syscall 会触发 SIGSYS 信号。
-/// 曾在此处注册 sigsys_handler 以记录审计信息，但该 handler 在沙箱实际运行中不会生效：
-///
-/// - handler 在 child process 中注册（exec 之前）
-/// - execve() 系统调用总是将所有信号处理器重置为 SIG_DFL（POSIX 规定）
-/// - 只有 SIG_IGN 和 SIG_DFL 可以跨 exec 保留，自定义 handler 一定会被丢弃
-/// - 因此 exec 后的进程（如 /bin/sh）不会有我们的 SIGSYS handler
-///
-/// TRAP 模式的实际价值：
-/// - 进程以 SIGSYS 终止，退出码为 159 (128+SIGSYS=31)
-/// - 内核审计日志（auditd）可记录 SIGSYS 信号及触发 syscall 信息
-/// - 父进程通过 waitpid 检测到 WaitStatus::Signaled(SIGSYS)，可识别为 seccomp 违规
-///
-/// 如需自定义审计日志（如记录被阻止的 syscall 号、参数等），需要使用：
-/// - seccomp-unotify (SECCOMP_RET_USER_NOTIF)：内核将违规通知转发到用户空间
-/// - ptrace + PTRACE_O_TRACESECCOMP：通过 ptrace 拦截 seccomp 事件
+// SIGSYS handler 说明（已移除）
+//
+// seccomp 使用 TRAP 模式（SECCOMP_RET_TRAP）时，被阻止的 syscall 会触发 SIGSYS 信号。
+// 曾在此处注册 sigsys_handler 以记录审计信息，但该 handler 在沙箱实际运行中不会生效：
+//
+// - handler 在 child process 中注册（exec 之前）
+// - execve() 系统调用总是将所有信号处理器重置为 SIG_DFL（POSIX 规定）
+// - 只有 SIG_IGN 和 SIG_DFL 可以跨 exec 保留，自定义 handler 一定会被丢弃
+// - 因此 exec 后的进程（如 /bin/sh）不会有我们的 SIGSYS handler
+//
+// TRAP 模式的实际价值：
+// - 进程以 SIGSYS 终止，退出码为 159 (128+SIGSYS=31)
+// - 内核审计日志（auditd）可记录 SIGSYS 信号及触发 syscall 信息
+// - 父进程通过 waitpid 检测到 WaitStatus::Signaled(SIGSYS)，可识别为 seccomp 违规
+//
+// 如需自定义审计日志（如记录被阻止的 syscall 号、参数等），需要使用：
+// - seccomp-unotify (SECCOMP_RET_USER_NOTIF)：内核将违规通知转发到用户空间
+// - ptrace + PTRACE_O_TRACESECCOMP：通过 ptrace 拦截 seccomp 事件
 
 /// Writes a formatted error message in the child process.
 ///
@@ -302,19 +304,84 @@ fn format_cpu_max(config: &SandboxConfig) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_cpu_cgroup(
+fn effective_max_processes(config: &SandboxConfig) -> u32 {
+    config.max_processes.unwrap_or(DEFAULT_MAX_PROCESSES)
+}
+
+#[cfg(target_os = "linux")]
+fn format_pids_max(config: &SandboxConfig) -> String {
+    effective_max_processes(config).to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_available(root: &Path) -> bool {
+    root.join("cgroup.controllers").is_file()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_sandbox_cgroup(
     root: &Path,
     pid: libc::pid_t,
     config: &SandboxConfig,
-) -> Result<PathBuf, SandboxError> {
+) -> Result<Option<PathBuf>, SandboxError> {
+    if !cgroup_v2_available(root) {
+        tracing::warn!(
+            "cgroup v2 不可用，跳过 pids.max 进程数限制: root={}",
+            root.display()
+        );
+        return Ok(None);
+    }
+
     let cgroup_path = sandbox_cgroup_path(root, pid);
-    fs::create_dir_all(&cgroup_path)?;
+    if let Err(error) = fs::create_dir_all(&cgroup_path) {
+        tracing::warn!(
+            "创建 cgroup 失败，跳过 pids.max 进程数限制: path={}, error={error}",
+            cgroup_path.display()
+        );
+        if config.cpu_quota_us.is_some() {
+            return Err(error.into());
+        }
+        return Ok(None);
+    }
 
-    // 写入 cpu.max，格式为 "quota period"；"max period" 表示不限制。
-    fs::write(cgroup_path.join("cpu.max"), format_cpu_max(config))?;
-    fs::write(cgroup_path.join("cgroup.procs"), pid.to_string())?;
+    let pids_configured = match fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                "写入 cgroup pids.max 失败，跳过进程数限制: path={}, max_processes={}, error={error}",
+                cgroup_path.display(),
+                effective_max_processes(config)
+            );
+            false
+        }
+    };
 
-    Ok(cgroup_path)
+    if config.cpu_quota_us.is_some() {
+        // 写入 cpu.max，格式为 "quota period"；"max period" 表示不限制。
+        if let Err(error) = fs::write(cgroup_path.join("cpu.max"), format_cpu_max(config)) {
+            cleanup_cgroup(&cgroup_path);
+            return Err(error.into());
+        }
+    }
+
+    if !pids_configured && config.cpu_quota_us.is_none() {
+        cleanup_cgroup(&cgroup_path);
+        return Ok(None);
+    }
+
+    if let Err(error) = fs::write(cgroup_path.join("cgroup.procs"), pid.to_string()) {
+        cleanup_cgroup(&cgroup_path);
+        tracing::warn!(
+            "写入 cgroup.procs 失败，跳过 pids.max 进程数限制: path={}, pid={pid}, error={error}",
+            cgroup_path.display()
+        );
+        if config.cpu_quota_us.is_some() {
+            return Err(error.into());
+        }
+        return Ok(None);
+    }
+
+    Ok(Some(cgroup_path))
 }
 
 #[cfg(target_os = "linux")]
@@ -324,8 +391,68 @@ fn cleanup_cgroup(path: &Path) {
     }
 }
 
+fn signal_child_start(fd: RawFd) -> Result<(), SandboxError> {
+    let signal = [1_u8];
+    // SAFETY: fd 是父进程持有的管道写端，buffer 指针和长度有效。
+    let written = unsafe { libc::write(fd, signal.as_ptr().cast::<libc::c_void>(), signal.len()) };
+    // SAFETY: fd 已完成单次通知，父进程不再需要写端。
+    unsafe {
+        libc::close(fd);
+    }
+
+    if written == signal.len() as isize {
+        Ok(())
+    } else {
+        Err(SandboxError::PipeError(
+            "failed to signal child startup gate".to_string(),
+        ))
+    }
+}
+
+fn cancel_child_start(fd: RawFd) {
+    // SAFETY: fd 是父进程持有的管道写端；关闭后子进程会在 gate 上失败退出。
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+fn wait_for_parent_start_signal(fd: RawFd) -> Result<(), ()> {
+    let mut signal = [0_u8; 1];
+    loop {
+        // SAFETY: fd 是子进程持有的管道读端，buffer 指针和长度有效。
+        let read = unsafe { libc::read(fd, signal.as_mut_ptr().cast::<libc::c_void>(), 1) };
+        if read == 1 {
+            // SAFETY: 子进程已经收到启动信号，不再需要读端。
+            unsafe {
+                libc::close(fd);
+            }
+            return Ok(());
+        }
+        if read == 0 {
+            // SAFETY: 父进程未发出成功信号，关闭读端后失败退出。
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(());
+        }
+        // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
+        let errno = unsafe { *libc::__errno_location() };
+        if errno != libc::EINTR {
+            // SAFETY: 读取失败且不是 EINTR，关闭读端后失败退出。
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(());
+        }
+    }
+}
+
 fn kill_process_group(pid: libc::pid_t, signal: Signal) {
     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal);
+}
+
+fn kill_process(pid: libc::pid_t, signal: Signal) {
+    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal);
 }
 
 fn read_limited_output<R, F>(reader: &mut R, label: &'static str, mut on_limit: F) -> OutputCapture
@@ -476,15 +603,13 @@ fn apply_security_policies_and_exec(
         }
     }
 
-    // 1.5 进程数限制：防止 fork bomb
-    // 当 allow_fork 为 true 时，通过 setrlimit(RLIMIT_NPROC) 限制子进程可创建的最大进程数。
-    // 注意：RLIMIT_NPROC 在 user namespace 中行为可能不同，
-    // 如果后续接入 per-sandbox cgroup 生命周期，应改用 cgroup pids.max 以获得更可靠的限制。
+    // 1.5 进程数限制兜底：pids.max 已由父进程在 cgroup 中设置。
+    // RLIMIT_NPROC 作为旧内核或 cgroup 不可用时的 best-effort fallback。
     if config.allow_fork {
-        const MAX_NPROC: libc::rlim_t = 256;
+        let max_nproc = libc::rlim_t::from(effective_max_processes(config));
         let rlim = libc::rlimit {
-            rlim_cur: MAX_NPROC,
-            rlim_max: MAX_NPROC,
+            rlim_cur: max_nproc,
+            rlim_max: max_nproc,
         };
         // SAFETY: setrlimit 只修改当前进程的 rlimit，参数合法。
         let ret = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
@@ -492,8 +617,9 @@ fn apply_security_policies_and_exec(
             // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
             let errno = unsafe { *libc::__errno_location() };
             tracing::warn!(
-                "setrlimit(RLIMIT_NPROC, 256) 失败: errno={}，fork bomb 防护未生效",
-                errno
+                "setrlimit(RLIMIT_NPROC, {}) 失败: errno={}，fork bomb 兜底防护未生效",
+                effective_max_processes(config),
+                errno,
             );
         }
     }
@@ -835,6 +961,7 @@ impl Sandbox for LinuxSandbox {
         // 重要 #10 修复：使用 pipe2 + O_CLOEXEC 创建管道
         let (stdout_read_fd, stdout_write_fd) = create_pipe_cloexec()?;
         let (stderr_read_fd, stderr_write_fd) = create_pipe_cloexec()?;
+        let (start_read_fd, start_write_fd) = create_pipe_cloexec()?;
 
         // 解析 seccomp profile（结合 allow_fork 配置）
         let effective_profile = match self.config.seccomp_profile {
@@ -862,6 +989,10 @@ impl Sandbox for LinuxSandbox {
         // SAFETY: The parent immediately manages both branches and the child only runs fork-safe setup.
         match unsafe { fork() }.map_err(|e| SandboxError::Syscall(e.to_string()))? {
             ForkResult::Parent { child } => {
+                // SAFETY: 父进程只负责发启动信号，不读取 gate。
+                unsafe {
+                    libc::close(start_read_fd);
+                }
                 // 重要 #7 修复：父进程关闭写端（O_CLOEXEC 已在 pipe2 时设置）
                 // SAFETY: fd 有效，父进程不再需要写端
                 unsafe {
@@ -884,27 +1015,38 @@ impl Sandbox for LinuxSandbox {
                 );
 
                 #[cfg(target_os = "linux")]
-                let cgroup_path = if self.config.cpu_quota_us.is_some() {
-                    match configure_cpu_cgroup(
+                let cgroup_path = {
+                    match configure_sandbox_cgroup(
                         Path::new(CGROUP_V2_ROOT),
                         child.as_raw(),
                         &self.config,
                     ) {
                         Ok(path) => {
-                            self.last_cgroup_path = Some(path.clone());
-                            Some(path)
+                            self.last_cgroup_path = path.clone();
+                            path
                         }
                         Err(error) => {
-                            kill_process_group(child.as_raw(), Signal::SIGKILL);
+                            cancel_child_start(start_write_fd);
+                            kill_process(child.as_raw(), Signal::SIGKILL);
                             let _ = waitpid(child, None);
                             let _ = receive_output_capture(stdout_rx, "stdout");
                             let _ = receive_output_capture(stderr_rx, "stderr");
                             return Err(error);
                         }
                     }
-                } else {
-                    None
                 };
+
+                if let Err(error) = signal_child_start(start_write_fd) {
+                    kill_process(child.as_raw(), Signal::SIGKILL);
+                    let _ = waitpid(child, None);
+                    let _ = receive_output_capture(stdout_rx, "stdout");
+                    let _ = receive_output_capture(stderr_rx, "stderr");
+                    #[cfg(target_os = "linux")]
+                    if cgroup_path.is_some() {
+                        self.cleanup_last_cgroup();
+                    }
+                    return Err(error);
+                }
 
                 // 使用 WNOHANG 轮询实现超时
                 let (wait_result, timed_out) = if let Some(dur) = timeout {
@@ -1009,6 +1151,16 @@ impl Sandbox for LinuxSandbox {
                 }
             }
             ForkResult::Child => {
+                // SAFETY: 子进程只读取启动 gate，不写入。
+                unsafe {
+                    libc::close(start_write_fd);
+                }
+                if wait_for_parent_start_signal(start_read_fd).is_err() {
+                    // SAFETY: 父进程未完成 cgroup 设置，子进程必须 fail-closed。
+                    unsafe {
+                        libc::_exit(118);
+                    }
+                }
                 // FATAL-02 修复：setpgid 和 close 已移入 child_main，使用裸 libc 调用
                 Self::child_main(
                     cmd,
@@ -1036,8 +1188,12 @@ impl Sandbox for LinuxSandbox {
             command_log_summary(&config.command)
         );
 
+        #[cfg(target_os = "linux")]
+        self.cleanup_last_cgroup();
+
         let allocated = allocate_pty(config.size)?;
         let slave_path = allocated.slave_path.clone();
+        let (start_read_fd, start_write_fd) = create_pipe_cloexec()?;
 
         let mut child_config = self.config.clone();
         child_config.seccomp_profile = match child_config.seccomp_profile {
@@ -1061,9 +1217,48 @@ impl Sandbox for LinuxSandbox {
         // SAFETY: The parent manages the child process while the child only performs fork-safe PTY setup.
         match unsafe { fork() }.map_err(|error| SandboxError::Syscall(error.to_string()))? {
             ForkResult::Parent { child } => {
+                // SAFETY: 父进程只负责发启动信号，不读取 gate。
+                unsafe {
+                    libc::close(start_read_fd);
+                }
+                #[cfg(target_os = "linux")]
+                match configure_sandbox_cgroup(
+                    Path::new(CGROUP_V2_ROOT),
+                    child.as_raw(),
+                    &self.config,
+                ) {
+                    Ok(path) => {
+                        self.last_cgroup_path = path;
+                    }
+                    Err(error) => {
+                        cancel_child_start(start_write_fd);
+                        kill_process(child.as_raw(), Signal::SIGKILL);
+                        let _ = waitpid(child, None);
+                        return Err(error);
+                    }
+                }
+
+                if let Err(error) = signal_child_start(start_write_fd) {
+                    kill_process(child.as_raw(), Signal::SIGKILL);
+                    let _ = waitpid(child, None);
+                    #[cfg(target_os = "linux")]
+                    self.cleanup_last_cgroup();
+                    return Err(error);
+                }
+
                 Ok(build_session(allocated, child.as_raw(), config.timeout))
             }
             ForkResult::Child => {
+                // SAFETY: 子进程只读取启动 gate，不写入。
+                unsafe {
+                    libc::close(start_write_fd);
+                }
+                if wait_for_parent_start_signal(start_read_fd).is_err() {
+                    // SAFETY: 父进程未完成 cgroup 设置，子进程必须 fail-closed。
+                    unsafe {
+                        libc::_exit(118);
+                    }
+                }
                 Self::pty_child_main(&config.command, &child_config, &config, &slave_path);
             }
         }
@@ -1300,11 +1495,15 @@ mod tests {
             .cpu_quota(50_000)
             .cpu_period(100_000);
         let unlimited = SandboxConfig::default().cpu_period(100_000);
+        let mut custom_process_limit = SandboxConfig::default();
+        custom_process_limit.max_processes = Some(32);
         let path = sandbox_cgroup_path(Path::new("/sys/fs/cgroup"), 42);
 
         assert_eq!(path, PathBuf::from("/sys/fs/cgroup/mimobox/sandbox-42"));
         assert_eq!(format_cpu_max(&limited), "50000 100000");
         assert_eq!(format_cpu_max(&unlimited), "max 100000");
+        assert_eq!(format_pids_max(&unlimited), "64");
+        assert_eq!(format_pids_max(&custom_process_limit), "32");
     }
 
     #[test]

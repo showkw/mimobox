@@ -106,6 +106,8 @@ pub enum NetworkPolicy {
 ///
 /// - **Memory**: For the microVM backend, effective guest memory is
 ///   `min(memory_limit_mb, vm_memory_mb)`.
+/// - **Processes**: Linux OS backend maps `max_processes` to cgroup v2
+///   `pids.max`; `None` uses the backend default.
 /// - **Timeout**: Internally rounded up to whole seconds. For example,
 ///   `1500ms` becomes `2s`.
 /// - **HTTP domains**: The `allowed_http_domains` list supports glob patterns
@@ -132,6 +134,8 @@ pub struct Config {
     pub timeout: Option<Duration>,
     /// Memory limit in MiB. Applied via cgroups v2 or setrlimit.
     pub memory_limit_mb: Option<u64>,
+    /// Maximum process count inside one sandbox. `None` uses the backend default.
+    pub max_processes: Option<u32>,
     /// CPU time quota in microseconds. `None` means unlimited.
     pub cpu_quota_us: Option<u64>,
     /// CPU period in microseconds. Defaults to 100000 (100ms).
@@ -164,6 +168,7 @@ impl Default for Config {
             network: NetworkPolicy::default(),
             timeout: Some(Duration::from_secs(30)),
             memory_limit_mb: Some(512),
+            max_processes: None,
             cpu_quota_us: None,
             cpu_period_us: 100_000,
             fs_readonly: vec![
@@ -249,6 +254,7 @@ impl Config {
         config.fs_readwrite = self.fs_readwrite.clone();
         config.deny_network = deny_network;
         config.memory_limit_mb = self.memory_limit_mb;
+        config.max_processes = self.max_processes;
         config.cpu_quota_us = self.cpu_quota_us;
         config.cpu_period_us = self.cpu_period_us;
         config.timeout_secs = self.timeout.map(round_up_timeout_secs);
@@ -491,6 +497,15 @@ impl ConfigBuilder {
     /// ```
     pub fn memory_limit_mb(mut self, mb: u64) -> Self {
         self.inner.memory_limit_mb = Some(mb);
+        self
+    }
+
+    /// Set the maximum process count inside one sandbox.
+    ///
+    /// Linux OS backend maps this to cgroup v2 `pids.max`. `Config::default()`
+    /// leaves it unset so the backend can apply its secure default.
+    pub fn max_processes(mut self, processes: u32) -> Self {
+        self.inner.max_processes = Some(processes);
         self
     }
 
@@ -853,6 +868,23 @@ mod tests {
     #[test]
     fn builder_rejects_zero_memory_limit() {
         let result = Config::builder().memory_limit_mb(0).build();
+
+        assert!(matches!(result, Err(SdkError::Config(_))));
+    }
+
+    #[test]
+    fn max_processes_is_forwarded_to_sandbox_config() {
+        let config = Config::builder()
+            .max_processes(32)
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(config.to_sandbox_config().max_processes, Some(32));
+    }
+
+    #[test]
+    fn builder_rejects_zero_max_processes() {
+        let result = Config::builder().max_processes(0).build();
 
         assert!(matches!(result, Err(SdkError::Config(_))));
     }
