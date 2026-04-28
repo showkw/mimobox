@@ -13,7 +13,7 @@
 //! | Network access | Deny by default | Denies all network operations with `(deny network*)`. |
 //! | Process execution | Path-restricted | Allows system and Homebrew executables while denying writable execution locations. |
 //! | Process fork | Allowed | Shells and similar commands need to fork child processes. |
-//! | Memory limits | Unsupported | `RLIMIT_AS` cannot be reduced from an unlimited value on macOS; a warning is logged instead. |
+//! | Memory limits | Watchdog (proc_pidrusage RSS sampling) | Samples child process physical footprint and terminates the process group when over limit. |
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -25,6 +25,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use mimobox_core::{DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult};
@@ -33,16 +34,57 @@ use crate::pty::{allocate_pty, build_child_env, build_session};
 
 #[cfg(target_os = "macos")]
 // SAFETY: This block declares external C linkage functions from the macOS system library.
-// These are standard macOS sandbox API functions (sandbox_init) whose signatures
-// match the system headers. The functions are called only within pre_exec closures
-// in forked child processes with validated CString pointers, not in multi-threaded contexts.
+// sandbox_init and proc_pid_rusage signatures match the system headers. sandbox_init
+// is called only within pre_exec closures with validated CString pointers; proc_pid_rusage
+// is called with a valid child pid and caller-owned rusage buffer.
 unsafe extern "C" {
     fn sandbox_init(
         profile: *const libc::c_char,
         flags: u64,
         errorbuf: *mut *mut libc::c_char,
     ) -> libc::c_int;
+
+    #[link_name = "proc_pid_rusage"]
+    fn proc_pidrusage(
+        pid: libc::pid_t,
+        flavor: libc::c_int,
+        buffer: *mut libc::rusage_info_t,
+    ) -> libc::c_int;
 }
+
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[repr(C)]
+struct RUsageInfoV2 {
+    ri_uuid: [u8; 16],
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_sched_int: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_user_time_continued: u64,
+    ri_system_time_continued: u64,
+    ri_minflt: u64,
+    ri_majflt: u64,
+    ri_cstime: u64,
+    ri_cutime: u64,
+    ri_messages_sent: u64,
+    ri_messages_received: u64,
+    ri_syscalls_mach: u64,
+    ri_syscalls_bsd: u64,
+    ri_csw: u64,
+    ri_threadnum: u64,
+    ri_numrunning: u64,
+    ri_priority: u32,
+}
+
+#[cfg(target_os = "macos")]
+const RUSAGE_INFO_V2: i32 = 2;
 
 const SANDBOX_LITERAL_PROFILE: u64 = 0;
 const SANDBOX_INIT_FAILURE_EXIT_CODE: i32 = 71;
@@ -83,7 +125,7 @@ fn build_safe_child_env() -> HashMap<String, String> {
 /// # Platform Limitations
 ///
 /// - File reads are allowed globally because macOS dyld and frameworks depend on many implicit system paths; all /Users directory content reads are denied to protect user data comprehensively.
-/// - Memory limits cannot be enforced with `setrlimit(RLIMIT_AS)` because macOS does not support reducing this limit.
+/// - Memory limits are enforced by sampling child process physical footprint with `proc_pidrusage`.
 pub struct MacOsSandbox {
     config: SandboxConfig,
 }
@@ -123,6 +165,63 @@ fn waitpid_raw(pid: libc::pid_t) -> std::io::Result<i32> {
     } else {
         Ok(status)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_memory_watchdog(
+    pid: libc::pid_t,
+    memory_limit_bytes: u64,
+    child_running: Arc<AtomicBool>,
+    oom_killed: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(200));
+
+            if !child_running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // SAFETY: RUsageInfoV2 是 repr(C) 且字段均为整数/字节数组，零初始化有效；
+            // proc_pidrusage 会按 RUSAGE_INFO_V2 布局写入调用方提供的缓冲区。
+            let mut rui: RUsageInfoV2 = unsafe { std::mem::zeroed() };
+            // SAFETY: pid 来自刚刚 spawn 的子进程；rui 指向当前线程栈上的有效缓冲区，
+            // 按 Darwin API 要求转换为 rusage_info_t 指针输出槽。
+            let ret = unsafe {
+                proc_pidrusage(
+                    pid,
+                    RUSAGE_INFO_V2 as i32,
+                    &mut rui as *mut _ as *mut libc::rusage_info_t,
+                )
+            };
+            if ret != 0 {
+                continue;
+            }
+
+            let footprint = rui.ri_phys_footprint;
+            if footprint <= memory_limit_bytes {
+                continue;
+            }
+
+            tracing::warn!(
+                "子进程内存超限 (物理占用: {} bytes, 限制: {} bytes)，发送 SIGTERM",
+                footprint,
+                memory_limit_bytes
+            );
+            oom_killed.store(true, Ordering::SeqCst);
+            // SAFETY: 负 pid 表示 pre_exec 中为子进程创建的进程组。
+            let _ = unsafe { libc::kill(-pid, libc::SIGTERM) };
+
+            thread::sleep(Duration::from_secs(1));
+
+            if child_running.load(Ordering::SeqCst) {
+                // SAFETY: 负 pid 表示 pre_exec 中为子进程创建的进程组。
+                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
+
+            break;
+        }
+    });
 }
 
 fn policy_to_cstring(policy: String) -> Result<CString, SandboxError> {
@@ -520,9 +619,8 @@ impl Sandbox for MacOsSandbox {
             config.memory_limit_mb,
         );
 
-        // macOS 上 RLIMIT_AS 无法从无限值缩小，记录告警
         if config.memory_limit_mb.is_some() {
-            tracing::warn!("macOS 不支持通过 setrlimit(RLIMIT_AS) 缩小内存限制，内存限制将不生效");
+            tracing::info!("macOS 内存限制将通过 watchdog 采样强制执行");
         }
 
         Ok(Self { config })
@@ -571,6 +669,25 @@ impl Sandbox for MacOsSandbox {
         })?;
         let pid = child.id() as libc::pid_t;
 
+        let child_running = Arc::new(AtomicBool::new(true));
+        let oom_killed = Arc::new(AtomicBool::new(false));
+        if let Some(memory_limit_mb) = self.config.memory_limit_mb {
+            let memory_limit_bytes = memory_limit_mb
+                .checked_mul(1024)
+                .and_then(|value| value.checked_mul(1024))
+                .ok_or_else(|| {
+                    SandboxError::ExecutionFailed(format!(
+                        "memory_limit_mb={memory_limit_mb} 转换为字节时溢出"
+                    ))
+                })?;
+            spawn_memory_watchdog(
+                pid,
+                memory_limit_bytes,
+                Arc::clone(&child_running),
+                Arc::clone(&oom_killed),
+            );
+        }
+
         let output_limit_triggered = Arc::new(AtomicBool::new(false));
         let stdout_rx = child.stdout.take().map(|stdout| {
             spawn_output_reader("stdout", stdout, pid, Arc::clone(&output_limit_triggered))
@@ -579,17 +696,18 @@ impl Sandbox for MacOsSandbox {
             spawn_output_reader("stderr", stderr, pid, Arc::clone(&output_limit_triggered))
         });
 
-        let (exit_status, timed_out) =
-            if let Some(dur) = timeout {
-                wait_child_with_timeout(pid, dur)?
-            } else {
-                (
-                    std::process::ExitStatus::from_raw(waitpid_raw(pid).map_err(|e| {
-                        SandboxError::ExecutionFailed(format!("waitpid failed: {e}"))
-                    })?),
-                    false,
-                )
-            };
+        let wait_result = if let Some(dur) = timeout {
+            wait_child_with_timeout(pid, dur)
+        } else {
+            waitpid_raw(pid)
+                .map(|status| (std::process::ExitStatus::from_raw(status), false))
+                .map_err(|e| SandboxError::ExecutionFailed(format!("waitpid failed: {e}")))
+        };
+        child_running.store(false, Ordering::SeqCst);
+        let (exit_status, mut timed_out) = wait_result?;
+        if oom_killed.load(Ordering::SeqCst) {
+            timed_out = true;
+        }
 
         let elapsed = start.elapsed();
 
@@ -733,7 +851,7 @@ mod tests {
     use mimobox_core::{Sandbox, SandboxConfig};
     use tempfile::TempDir;
 
-    /// Creates the default macOS test configuration without memory limits, which macOS does not support.
+    /// Creates the default macOS test configuration without memory limits to keep tests focused on Seatbelt behavior.
     fn test_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
