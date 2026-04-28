@@ -4,6 +4,8 @@ use crate::error::SdkError;
 use crate::types::HttpResponse;
 
 use super::Sandbox;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+use super::SandboxInner;
 #[cfg(feature = "vm")]
 use super::dispatch_vm;
 

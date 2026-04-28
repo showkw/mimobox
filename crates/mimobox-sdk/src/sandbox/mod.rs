@@ -365,11 +365,6 @@ pub(crate) fn map_os_core_file_error(
     }
 }
 
-/// Re-export of `map_microvm_error` for sub-modules.
-#[cfg(all(feature = "vm", target_os = "linux"))]
-pub(crate) fn map_microvm_error(e: mimobox_vm::MicrovmError) -> SdkError {
-    crate::vm_helpers::map_microvm_error(e)
-}
 // ── Sandbox 生命周期方法 ──
 
 impl Sandbox {
