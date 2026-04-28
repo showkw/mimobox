@@ -852,7 +852,7 @@ fn build_wasi_ctx(
     cache_dir: Option<&Path>,
     stdout_pipe: MemoryOutputPipe,
     stderr_pipe: MemoryOutputPipe,
-) -> WasiP1Ctx {
+) -> Result<WasiP1Ctx, SandboxError> {
     let mut builder = WasiCtxBuilder::new();
 
     // 设置命令行参数
@@ -918,15 +918,15 @@ fn build_wasi_ctx(
     if config.deny_network {
         info!("WASI network denied by SandboxConfig; no sockets are preopened");
     } else {
-        warn!(
-            "SandboxConfig allows network, but WASI backend cannot enable network access; keeping network denied"
-        );
+        return Err(SandboxError::ExecutionFailed(
+            "Wasm backend does not support network access. Tip: use 'os' or 'microvm' isolation for network support, or set NetworkPolicy::DenyAll".to_string(),
+        ));
     }
 
     // 时钟能力：WasiCtxBuilder 仅暴露 wall_clock/monotonic_clock 替换点，
     // 没有 WASI Preview 1 clocks 的禁用/白名单 API；执行时限由 fuel、epoch 和 timeout 控制。
 
-    builder.build_p1()
+    Ok(builder.build_p1())
 }
 
 impl Sandbox for WasmSandbox {
@@ -993,7 +993,7 @@ impl Sandbox for WasmSandbox {
             self.cache_dir.as_deref(),
             stdout_pipe,
             stderr_pipe,
-        );
+        )?;
 
         // 4. 创建 Linker 并注册 WASI Preview 1
         // 注意：Linker 的类型参数必须与 Store data type 一致
@@ -1328,6 +1328,30 @@ mod tests {
     fn test_wasm_sandbox_create() {
         let sb = WasmSandbox::new(test_config());
         assert!(sb.is_ok(), "Failed to create Wasm sandbox: {:?}", sb.err());
+    }
+
+    #[test]
+    fn test_build_wasi_ctx_rejects_network_access() {
+        let mut config = test_config();
+        config.deny_network = false;
+        let args = vec!["module.wasm".to_string()];
+
+        let err = match build_wasi_ctx(
+            &config,
+            &args,
+            None,
+            MemoryOutputPipe::new(OUTPUT_MAX_CAPACITY),
+            MemoryOutputPipe::new(OUTPUT_MAX_CAPACITY),
+        ) {
+            Ok(_) => panic!("Wasm backend 不支持网络访问时必须返回错误"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("Wasm backend does not support network access"),
+            "错误信息必须明确说明 Wasm 后端不支持网络访问: {err}"
+        );
     }
 
     #[test]
