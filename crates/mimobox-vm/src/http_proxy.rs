@@ -24,6 +24,29 @@ const MAX_HEADER_SIZE: usize = 8 * 1024;
 const MAX_TOTAL_HEADERS_SIZE: usize = 64 * 1024;
 /// 最大 header 数量 64，防止 guest 构造大量小 header 绕过总量限制。
 const MAX_HEADER_COUNT: usize = 64;
+/// 允许的 HTTP method 白名单。CONNECT 可用于代理穿透，TRACE 可导致 XST 攻击，因此被禁止。
+/// 保留 PUT/PATCH/DELETE 以支持常见 REST API 调用。
+const ALLOWED_METHODS: &[&[u8]] = &[b"GET", b"HEAD", b"POST", b"PUT", b"PATCH", b"DELETE"];
+/// hop-by-hop 和敏感 header blocklist：这些 header 在转发前会被过滤，防止代理穿透和信息泄露。
+/// - Host: 强制使用 URL 中的 host，防止 Host header 注入
+/// - Connection/Keep-Alive/TE/Trailers/Upgrade: hop-by-hop headers，不应被代理转发
+/// - Proxy-Authorization/Proxy-Connection: 代理认证相关，防止凭证泄露
+/// - Transfer-Encoding: 让 reqwest 自行管理 chunked 编码
+const BLOCKED_HEADERS: &[&str] = &[
+    "host",
+    "connection",
+    "keep-alive",
+    "te",
+    "trailers",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-connection",
+    "transfer-encoding",
+];
+/// HTTP 响应体的绝对上限（100MB），guest 传入的 max_response_bytes 不能超过此值。
+const MAX_RESPONSE_BYTES_HARD_LIMIT: usize = 100 * 1024 * 1024;
+/// HTTP 请求超时的绝对上限（5分钟），guest 传入的 timeout_ms 不能超过此值。
+const MAX_TIMEOUT_MS_HARD_LIMIT: u64 = 300_000;
 
 /// Raw JSON payload accepted by the guest-to-host HTTP proxy protocol.
 ///
@@ -182,10 +205,14 @@ impl TryFrom<HttpProxyRequestPayload> for HttpRequest {
             url: value.url,
             headers: value.headers,
             body,
-            timeout_ms: value.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: value
+                .timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS_HARD_LIMIT),
             max_response_bytes: value
                 .max_response_bytes
-                .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
+                .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES)
+                .min(MAX_RESPONSE_BYTES_HARD_LIMIT),
         })
     }
 }
@@ -234,8 +261,12 @@ impl HttpRequest {
             url: url.into(),
             headers,
             body,
-            timeout_ms: timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
-            max_response_bytes: max_response_bytes.unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
+            timeout_ms: timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS_HARD_LIMIT),
+            max_response_bytes: max_response_bytes
+                .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES)
+                .min(MAX_RESPONSE_BYTES_HARD_LIMIT),
         })
     }
 
@@ -274,6 +305,12 @@ pub fn execute_http_request(
 
     let method = Method::from_bytes(request.method.as_bytes())
         .map_err(|err| HttpProxyError::InvalidUrl(format!("invalid HTTP method: {err}")))?;
+    if !ALLOWED_METHODS.contains(&request.method.as_bytes()) {
+        return Err(HttpProxyError::InvalidUrl(format!(
+            "HTTP method not allowed: {} (blocked for security: CONNECT/TRACE are forbidden)",
+            request.method
+        )));
+    }
     let timeout = Duration::from_millis(request.timeout_ms.max(1));
     let client = Client::builder()
         .timeout(timeout)
@@ -284,6 +321,10 @@ pub fn execute_http_request(
 
     let mut builder = client.request(method, url);
     for (key, value) in &request.headers {
+        // 过滤 hop-by-hop 和敏感 header，防止 Host 注入和代理穿透
+        if BLOCKED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
+            continue;
+        }
         builder = builder.header(key, value);
     }
     if let Some(body) = &request.body {
