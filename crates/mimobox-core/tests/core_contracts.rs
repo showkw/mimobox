@@ -139,6 +139,14 @@ fn sandbox_error_display_and_source_behave_as_expected() {
     );
     assert!(execution_error.source().is_none());
 
+    let suggested_error = SandboxError::new("bad config").suggestion("修正配置后重试");
+    assert_eq!(suggested_error.suggestion_text(), Some("修正配置后重试"));
+    let (base_error, suggestion) = suggested_error.into_base_and_suggestion();
+    assert!(
+        matches!(base_error, SandboxError::ExecutionFailed(message) if message == "bad config")
+    );
+    assert_eq!(suggestion.as_deref(), Some("修正配置后重试"));
+
     let unsupported_error = SandboxError::Unsupported;
     assert_eq!(
         unsupported_error.to_string(),

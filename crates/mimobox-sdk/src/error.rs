@@ -4,7 +4,7 @@ use mimobox_core::ErrorCode;
 ///
 /// All errors produced by the mimobox SDK fall into one of four categories:
 ///
-/// - **`Sandbox`**: Structured errors from the sandbox backend with a stable
+/// - **`Sandbox`**: Structured errors from validation or the sandbox backend with a stable
 ///   [`ErrorCode`], human-readable message, and optional suggestion.
 /// - **`BackendUnavailable`**: The required backend feature (e.g., `vm`, `wasm`)
 ///   is not enabled in the current build.
@@ -86,18 +86,32 @@ impl SdkError {
         }
     }
 
+    /// Constructs a structured invalid configuration error with an optional suggestion.
+    pub fn invalid_config(message: impl Into<String>, suggestion: Option<String>) -> Self {
+        Self::sandbox(ErrorCode::InvalidConfig, message, suggestion)
+    }
+
+    /// Maps a core configuration error to a structured SDK invalid-config error.
+    pub fn from_core_config_error(err: mimobox_core::SandboxError) -> Self {
+        let (err, suggestion) = err.into_base_and_suggestion();
+        Self::sandbox(ErrorCode::InvalidConfig, err.to_string(), suggestion)
+    }
+
     /// Maps an execution-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_execute_error(err: mimobox_core::SandboxError) -> Self {
+        let (err, core_suggestion) = err.into_base_and_suggestion();
         match err {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
-                suggestion: Some("set isolation to `Os` or use default Auto".into()),
+                suggestion: core_suggestion
+                    .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
             },
             mimobox_core::SandboxError::Timeout => Self::Sandbox {
                 code: ErrorCode::CommandTimeout,
                 message: "command execution timed out".into(),
-                suggestion: Some("increase Config.timeout or per-command timeout".into()),
+                suggestion: core_suggestion
+                    .or_else(|| Some("increase Config.timeout or per-command timeout".into())),
             },
             mimobox_core::SandboxError::ExecutionFailed(msg) => {
                 let msg_lower = msg.to_lowercase();
@@ -123,47 +137,57 @@ impl SdkError {
                 Self::Sandbox {
                     code,
                     message: msg,
-                    suggestion: Some(suggestion),
+                    suggestion: core_suggestion.or(Some(suggestion)),
                 }
             }
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
-                suggestion: Some(
-                    "For microVM: verify /dev/kvm exists. Use isolation='os' as fallback."
-                        .to_string(),
-                ),
+                suggestion: core_suggestion.or_else(|| {
+                    Some(
+                        "For microVM: verify /dev/kvm exists. Use isolation='os' as fallback."
+                            .to_string(),
+                    )
+                }),
             },
         }
     }
 
     /// Maps a creation-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_create_error(err: mimobox_core::SandboxError) -> Self {
+        let (err, core_suggestion) = err.into_base_and_suggestion();
         match err {
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
-                suggestion: Some("set isolation to `Os` or use default Auto".into()),
+                suggestion: core_suggestion
+                    .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
             },
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
-                suggestion: Some(
-                    "verify KVM is available (Linux) or choose a different isolation level".into(),
-                ),
+                suggestion: core_suggestion.or_else(|| {
+                    Some(
+                        "verify KVM is available (Linux) or choose a different isolation level"
+                            .into(),
+                    )
+                }),
             },
         }
     }
 
     /// Maps a destroy-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_destroy_error(err: mimobox_core::SandboxError) -> Self {
+        let (err, core_suggestion) = err.into_base_and_suggestion();
         Self::Sandbox {
             code: ErrorCode::SandboxDestroyed,
             message: err.to_string(),
-            suggestion: Some(
+            suggestion: core_suggestion.or_else(|| {
+                Some(
                 "Create a new sandbox instance. Sandbox objects cannot be reused after close()."
                     .to_string(),
-            ),
+            )
+            }),
         }
     }
 

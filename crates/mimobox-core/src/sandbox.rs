@@ -308,31 +308,43 @@ impl SandboxConfig {
 
         // memory_limit_mb=Some(0) 无意义。
         if self.memory_limit_mb == Some(0) {
-            return Err(SandboxError::ExecutionFailed(
-                "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
-            ));
+            return Err(
+                SandboxError::new("memory_limit_mb=0 无效，请设为正整数或 None")
+                    .suggestion("memory_limit_mb 最小值为 1"),
+            );
         }
         if let Some(memory_limit_mb) = self.memory_limit_mb
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
-            return Err(SandboxError::ExecutionFailed(format!(
+            return Err(SandboxError::new(format!(
                 "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+            ))
+            .suggestion(format!(
+                "memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}"
             )));
         }
 
         if self.max_processes == Some(0) {
-            return Err(SandboxError::ExecutionFailed(
-                "max_processes=0 无效，请设为正整数或 None".to_string(),
-            ));
+            return Err(
+                SandboxError::new("max_processes=0 无效，请设为正整数或 None")
+                    .suggestion("max_processes 最小值为 1，或设置为 None 使用后端默认值"),
+            );
         }
 
         // timeout_secs 允许关闭，但显式设置时不能超过 24 小时。
         if let Some(timeout_secs) = self.timeout_secs {
             const MAX_TIMEOUT_SECS: u64 = 86_400;
+            if timeout_secs == 0 {
+                return Err(
+                    SandboxError::new("timeout_secs=0 无效，请设为正整数或 None")
+                        .suggestion("timeout 不能为 0，推荐 30 秒"),
+                );
+            }
             if timeout_secs > MAX_TIMEOUT_SECS {
-                return Err(SandboxError::ExecutionFailed(format!(
+                return Err(SandboxError::new(format!(
                     "timeout_secs={timeout_secs} 超过最大值 86400（24小时），请设为合理值"
-                )));
+                ))
+                .suggestion("timeout_secs 最大值为 86400（24小时）"));
             }
         }
 
@@ -344,16 +356,18 @@ impl SandboxConfig {
                 || has_invalid_domain_wildcard(domain)
                 || is_plain_ip_domain(domain)
             {
-                return Err(SandboxError::ExecutionFailed(format!(
+                return Err(SandboxError::new(format!(
                     "allowed_http_domains 包含无效域名: {domain}"
-                )));
+                ))
+                .suggestion(
+                    "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+                ));
             }
         }
 
         if self.cpu_period_us == 0 {
-            return Err(SandboxError::ExecutionFailed(
-                "cpu_period_us=0 无效，请设为正整数或 None".to_string(),
-            ));
+            return Err(SandboxError::new("cpu_period_us=0 无效，请设为正整数")
+                .suggestion("cpu_period_us 最小值为 1，推荐 100000"));
         }
 
         Ok(())
@@ -639,6 +653,55 @@ pub enum SandboxError {
     /// A standard library I/O error occurs.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Adds a remediation suggestion to an existing sandbox error without
+    /// changing the original error kind.
+    #[error("{error}")]
+    WithSuggestion {
+        /// Original sandbox error.
+        #[source]
+        error: Box<SandboxError>,
+        /// Suggested action the caller can take to resolve the error.
+        suggestion: Option<String>,
+    },
+}
+
+impl SandboxError {
+    /// Constructs a command execution error with no suggestion.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self::ExecutionFailed(message.into())
+    }
+
+    /// Attaches a remediation suggestion while preserving the original error kind.
+    pub fn suggestion(self, suggestion: impl Into<String>) -> Self {
+        Self::WithSuggestion {
+            error: Box::new(self),
+            suggestion: Some(suggestion.into()),
+        }
+    }
+
+    /// Returns the remediation suggestion attached to this error, if any.
+    pub fn suggestion_text(&self) -> Option<&str> {
+        match self {
+            Self::WithSuggestion {
+                error, suggestion, ..
+            } => suggestion.as_deref().or_else(|| error.suggestion_text()),
+            _ => None,
+        }
+    }
+
+    /// Splits a suggested error into its base error and suggestion.
+    pub fn into_base_and_suggestion(self) -> (Self, Option<String>) {
+        match self {
+            Self::WithSuggestion {
+                error, suggestion, ..
+            } => {
+                let (error, nested_suggestion) = error.into_base_and_suggestion();
+                (error, suggestion.or(nested_suggestion))
+            }
+            error => (error, None),
+        }
+    }
 }
 
 /// Sandbox lifecycle trait.
@@ -837,6 +900,11 @@ mod tests {
             .validate()
             .expect_err("超过全局上限的 memory_limit_mb 必须被拒绝");
 
+        assert_eq!(
+            error.suggestion_text(),
+            Some("memory_limit_mb 最大值为 32768")
+        );
+        let (error, _) = error.into_base_and_suggestion();
         assert!(
             matches!(error, SandboxError::ExecutionFailed(message) if message.contains("memory_limit_mb"))
         );

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::SdkError;
@@ -224,27 +224,62 @@ impl Config {
     /// 校验 SDK 配置，避免非法配置进入后端。
     pub(crate) fn validate(&self) -> Result<(), SdkError> {
         if self.vm_vcpu_count == 0 {
-            return Err(SdkError::Config(
-                "vm_vcpu_count=0 无效。提示：请设为正整数，推荐值为 1-4".to_string(),
+            return Err(invalid_config(
+                "vm_vcpu_count=0 无效",
+                "vcpu_count 最小值为 1",
             ));
         }
 
         if self.vm_memory_mb == 0 {
-            return Err(SdkError::Config(
-                "vm_memory_mb=0 无效。提示：请设为正整数，推荐值为 256-4096".to_string(),
+            return Err(invalid_config(
+                "vm_memory_mb=0 无效",
+                "vm_memory_mb 最小值为 1，推荐 256 MB",
             ));
         }
+
+        if let Some(timeout) = self.timeout
+            && timeout.is_zero()
+        {
+            return Err(invalid_config(
+                "timeout=0 无效",
+                "timeout 不能为 0，推荐 30 秒",
+            ));
+        }
+
+        if self.memory_limit_mb == Some(0) {
+            return Err(invalid_config(
+                "memory_limit_mb=0 无效",
+                "memory_limit_mb 最小值为 1",
+            ));
+        }
+
         if let Some(memory_limit_mb) = self.memory_limit_mb
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
-            return Err(SdkError::Config(format!(
-                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB。提示：请设为合理值，推荐 256-512 MB"
-            )));
+            return Err(invalid_config(
+                format!("memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB"),
+                format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
+            ));
+        }
+
+        if self.max_processes == Some(0) {
+            return Err(invalid_config(
+                "max_processes=0 无效",
+                "max_processes 最小值为 1，或设置为 None 使用后端默认值",
+            ));
+        }
+
+        if self.cpu_period_us == 0 {
+            return Err(invalid_config(
+                "cpu_period_us=0 无效",
+                "cpu_period_us 最小值为 1，推荐 100000",
+            ));
         }
 
         if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
-            return Err(SdkError::Config(
-                "network=DenyAll 但 allowed_http_domains 非空，配置冲突。提示：使用 NetworkPolicy::AllowDomains 或清空 allowed_http_domains".to_string(),
+            return Err(invalid_config(
+                "network=DenyAll 但 allowed_http_domains 非空，配置冲突",
+                "使用 NetworkPolicy::AllowDomains 或清空 allowed_http_domains",
             ));
         }
 
@@ -252,9 +287,11 @@ impl Config {
             validate_http_domain(&domain)?;
         }
 
+        validate_microvm_artifact_paths(self)?;
+
         self.to_sandbox_config()
             .validate()
-            .map_err(|error| SdkError::Config(error.to_string()))?;
+            .map_err(SdkError::from_core_config_error)?;
 
         Ok(())
     }
@@ -345,12 +382,44 @@ fn validate_http_domain(domain: &str) -> Result<(), SdkError> {
         || has_invalid_domain_wildcard(domain)
         || is_plain_ip_domain(domain)
     {
-        return Err(SdkError::Config(format!(
-            "allowed_http_domains 包含无效域名 '{domain}'。提示：请使用标准域名格式，如 'example.com' 或 '*.example.com'，不支持 IP 地址"
-        )));
+        return Err(invalid_config(
+            format!("allowed_http_domains 包含无效域名 '{domain}'"),
+            "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+        ));
     }
 
     Ok(())
+}
+
+fn validate_microvm_artifact_paths(config: &Config) -> Result<(), SdkError> {
+    if config.isolation != IsolationLevel::MicroVm {
+        return Ok(());
+    }
+
+    validate_optional_path_exists("kernel_path", config.kernel_path.as_deref())?;
+    validate_optional_path_exists("rootfs_path", config.rootfs_path.as_deref())
+}
+
+fn validate_optional_path_exists(label: &str, path: Option<&Path>) -> Result<(), SdkError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+
+    match path.try_exists() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(invalid_config(
+            format!("{label} 路径不存在: {}", path.display()),
+            "请确保路径存在",
+        )),
+        Err(error) => Err(invalid_config(
+            format!("{label} 路径无法访问: {} ({error})", path.display()),
+            "请检查路径权限并确保路径存在",
+        )),
+    }
+}
+
+fn invalid_config(message: impl Into<String>, suggestion: impl Into<String>) -> SdkError {
+    SdkError::invalid_config(message, Some(suggestion.into()))
 }
 
 fn has_invalid_domain_wildcard(domain: &str) -> bool {
@@ -378,9 +447,10 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
     };
 
     u32::try_from(effective_memory_mb).map_err(|_| {
-        SdkError::Config(format!(
-            "microVM guest 内存超出 u32 范围: {effective_memory_mb} MB。提示：请减小 vm_memory_mb 或 memory_limit_mb"
-        ))
+        invalid_config(
+            format!("microVM guest 内存超出 u32 范围: {effective_memory_mb} MB"),
+            "请减小 vm_memory_mb 或 memory_limit_mb",
+        )
     })
 }
 
@@ -782,6 +852,23 @@ impl ConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mimobox_core::ErrorCode;
+
+    fn assert_invalid_config_suggestion(
+        result: Result<Config, SdkError>,
+        expected_suggestion: &str,
+    ) {
+        match result {
+            Err(SdkError::Sandbox {
+                code, suggestion, ..
+            }) => {
+                assert_eq!(code, ErrorCode::InvalidConfig);
+                assert_eq!(suggestion.as_deref(), Some(expected_suggestion));
+            }
+            Err(other) => panic!("期望 InvalidConfig 错误，实际为: {other}"),
+            Ok(_) => panic!("非法配置不应构建成功"),
+        }
+    }
 
     #[test]
     fn default_config_keeps_microvm_artifact_paths_unset() {
@@ -908,7 +995,21 @@ mod tests {
     fn builder_rejects_zero_memory_limit() {
         let result = Config::builder().memory_limit_mb(0).build();
 
-        assert!(matches!(result, Err(SdkError::Config(_))));
+        assert_invalid_config_suggestion(result, "memory_limit_mb 最小值为 1");
+    }
+
+    #[test]
+    fn builder_rejects_zero_timeout() {
+        let result = Config::builder().timeout(Duration::ZERO).build();
+
+        assert_invalid_config_suggestion(result, "timeout 不能为 0，推荐 30 秒");
+    }
+
+    #[test]
+    fn builder_rejects_zero_vcpu_count() {
+        let result = Config::builder().vm_vcpu_count(0).build();
+
+        assert_invalid_config_suggestion(result, "vcpu_count 最小值为 1");
     }
 
     #[test]
@@ -917,8 +1018,9 @@ mod tests {
             .memory_limit_mb(MAX_MEMORY_LIMIT_MB + 1)
             .build();
 
-        assert!(
-            matches!(result, Err(SdkError::Config(message)) if message.contains("memory_limit_mb"))
+        assert_invalid_config_suggestion(
+            result,
+            &format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
         );
     }
 
@@ -936,7 +1038,10 @@ mod tests {
     fn builder_rejects_zero_max_processes() {
         let result = Config::builder().max_processes(0).build();
 
-        assert!(matches!(result, Err(SdkError::Config(_))));
+        assert_invalid_config_suggestion(
+            result,
+            "max_processes 最小值为 1，或设置为 None 使用后端默认值",
+        );
     }
 
     #[test]
@@ -945,7 +1050,22 @@ mod tests {
             .allowed_http_domains(["127.0.0.1"])
             .build();
 
-        assert!(matches!(result, Err(SdkError::Config(_))));
+        assert_invalid_config_suggestion(
+            result,
+            "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+        );
+    }
+
+    #[test]
+    fn builder_rejects_missing_explicit_microvm_artifact_path() {
+        let missing_path =
+            std::env::temp_dir().join(format!("mimobox-missing-kernel-{}", std::process::id()));
+        let result = Config::builder()
+            .isolation(IsolationLevel::MicroVm)
+            .kernel_path(missing_path)
+            .build();
+
+        assert_invalid_config_suggestion(result, "请确保路径存在");
     }
 
     #[test]
@@ -1024,8 +1144,9 @@ mod tests {
             .memory_limit_mb(u64::MAX)
             .build();
 
-        assert!(
-            matches!(result, Err(SdkError::Config(message)) if message.contains("memory_limit_mb"))
+        assert_invalid_config_suggestion(
+            result,
+            &format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
         );
     }
 }
