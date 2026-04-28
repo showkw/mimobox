@@ -56,11 +56,20 @@ const MAX_OUTPUT_SIZE: usize = 4 * 1024 * 1024;
 /// Maximum Wasm module file size: 100 MB.
 const MAX_WASM_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
+/// Number of bytes in one MiB.
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
 /// Default memory limit: 64 MB, used when the config does not specify one.
 const DEFAULT_MEMORY_LIMIT_MB: u64 = 64;
 
 /// Epoch tick interval: 10 ms.
 const EPOCH_TICK_INTERVAL_MS: u64 = 10;
+
+/// Epoch ticks per second.
+const EPOCH_TICKS_PER_SECOND: u64 = 1000 / EPOCH_TICK_INTERVAL_MS;
+
+/// Default epoch deadline when no timeout is configured, equivalent to 30 seconds.
+const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 30 * EPOCH_TICKS_PER_SECOND;
 
 /// Wasmtime serialized module cache namespace.
 ///
@@ -77,10 +86,42 @@ const ENGINE_CONFIG_CACHE_KEY: &str = "opt-speed-fuel-epoch-stack512k-parallel";
 /// Fuel is consumed only while executing pure Wasm instructions; wait time during WASI I/O does
 /// not count. Therefore, fuel is an approximate timeout mechanism paired with epoch interruption
 /// to enforce wall-clock timeout.
-fn fuel_from_timeout(timeout_secs: Option<u64>) -> u64 {
+fn fuel_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
     match timeout_secs {
-        Some(secs) => secs.saturating_mul(FUEL_PER_SECOND),
-        None => DEFAULT_FUEL_LIMIT,
+        Some(secs) => secs.checked_mul(FUEL_PER_SECOND).ok_or_else(|| {
+            SandboxError::ExecutionFailed(format!(
+                "timeout_secs={secs} is too large; converting to fuel would overflow"
+            ))
+        }),
+        None => Ok(DEFAULT_FUEL_LIMIT),
+    }
+}
+
+/// Converts `memory_limit_mb` into bytes for Wasmtime's resource limiter.
+fn memory_limit_bytes(memory_limit_mb: Option<u64>) -> Result<usize, SandboxError> {
+    let mb = memory_limit_mb.unwrap_or(DEFAULT_MEMORY_LIMIT_MB);
+    let bytes = mb.checked_mul(BYTES_PER_MIB).ok_or_else(|| {
+        SandboxError::ExecutionFailed(format!(
+            "memory_limit_mb={mb} is too large; converting to bytes would overflow"
+        ))
+    })?;
+
+    usize::try_from(bytes).map_err(|_| {
+        SandboxError::ExecutionFailed(format!(
+            "memory_limit_mb={mb} is too large for this platform"
+        ))
+    })
+}
+
+/// Converts timeout seconds into Wasmtime epoch deadline ticks.
+fn epoch_deadline_ticks_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
+    match timeout_secs {
+        Some(secs) => secs.checked_mul(EPOCH_TICKS_PER_SECOND).ok_or_else(|| {
+            SandboxError::ExecutionFailed(format!(
+                "timeout_secs={secs} is too large; converting to epoch ticks would overflow"
+            ))
+        }),
+        None => Ok(DEFAULT_EPOCH_DEADLINE_TICKS),
     }
 }
 
@@ -961,13 +1002,7 @@ impl Sandbox for WasmSandbox {
 
         // 5. [FATAL-01 修复] 创建带资源限制的 Store
         // 将 memory_limit_mb 通过 StoreLimitsBuilder 实际应用到 Wasm 运行时
-        let memory_limit_bytes: usize = self
-            .config
-            .memory_limit_mb
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(DEFAULT_MEMORY_LIMIT_MB * 1024 * 1024)
-            .try_into()
-            .unwrap_or(usize::MAX);
+        let memory_limit_bytes = memory_limit_bytes(self.config.memory_limit_mb)?;
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(memory_limit_bytes)
@@ -985,7 +1020,7 @@ impl Sandbox for WasmSandbox {
         store.limiter(|data| &mut data.limits);
 
         // 6. [IMPORTANT-01 修复] 根据 timeout_secs 动态设置 fuel 上限
-        let fuel_limit = fuel_from_timeout(self.config.timeout_secs);
+        let fuel_limit = fuel_from_timeout(self.config.timeout_secs)?;
         store
             .set_fuel(fuel_limit)
             .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to set fuel: {}", e)))?;
@@ -994,11 +1029,7 @@ impl Sandbox for WasmSandbox {
         // epoch_interruption 可中断包括 WASI I/O 阻塞在内的执行，
         // 弥补 fuel 仅在纯 Wasm 指令执行时消耗的不足。
         store.epoch_deadline_trap();
-        let epoch_deadline_ticks = self
-            .config
-            .timeout_secs
-            .map(|s| s.saturating_mul(100)) // 每 10ms 一个 epoch tick
-            .unwrap_or(3000); // 默认 30s
+        let epoch_deadline_ticks = epoch_deadline_ticks_from_timeout(self.config.timeout_secs)?;
         store.set_epoch_deadline(epoch_deadline_ticks);
 
         // 8. 实例化模块
@@ -1319,6 +1350,39 @@ mod tests {
             result.is_ok(),
             "Failed to destroy sandbox: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_memory_limit_bytes_rejects_overflow() {
+        let err =
+            memory_limit_bytes(Some(u64::MAX)).expect_err("memory_limit_mb 溢出时必须返回错误");
+
+        assert!(
+            err.to_string().contains("memory_limit_mb"),
+            "错误信息必须指向 memory_limit_mb: {err}"
+        );
+    }
+
+    #[test]
+    fn test_fuel_from_timeout_rejects_overflow() {
+        let err =
+            fuel_from_timeout(Some(u64::MAX)).expect_err("timeout_secs 转 fuel 溢出时必须返回错误");
+
+        assert!(
+            err.to_string().contains("fuel"),
+            "错误信息必须指向 fuel: {err}"
+        );
+    }
+
+    #[test]
+    fn test_epoch_deadline_ticks_from_timeout_rejects_overflow() {
+        let err = epoch_deadline_ticks_from_timeout(Some(u64::MAX))
+            .expect_err("timeout_secs 转 epoch ticks 溢出时必须返回错误");
+
+        assert!(
+            err.to_string().contains("epoch"),
+            "错误信息必须指向 epoch ticks: {err}"
         );
     }
 
