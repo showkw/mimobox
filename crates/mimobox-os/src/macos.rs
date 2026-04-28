@@ -223,7 +223,7 @@ fn spawn_memory_watchdog(
             let ret = unsafe {
                 proc_pidrusage(
                     pid,
-                    RUSAGE_INFO_V2 as i32,
+                    RUSAGE_INFO_V2,
                     &mut rui as *mut _ as *mut libc::rusage_info_t,
                 )
             };

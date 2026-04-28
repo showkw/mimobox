@@ -102,8 +102,11 @@ pub struct ExecuteCodeRequest {
 pub struct ExecuteCommandRequest {
     /// If not provided, a temporary sandbox is created and destroyed after execution.
     sandbox_id: Option<u64>,
-    /// Shell command to execute.
-    command: String,
+    /// Shell command to execute. Ignored when argv is provided.
+    command: Option<String>,
+    /// Argument vector for direct execution without shell parsing (recommended).
+    /// When provided, takes priority over command. Example: ["/bin/echo", "hello", "world"]
+    argv: Option<Vec<String>>,
     /// Execution timeout in milliseconds. Only applies to temporary sandboxes.
     timeout_ms: Option<u64>,
 }
@@ -521,13 +524,35 @@ impl MimoboxServer {
         Ok(Json(format_execute_result(result)))
     }
 
-    #[tool(description = "Execute a shell command in a mimobox sandbox")]
+    #[tool(
+        description = "Execute a shell command in a mimobox sandbox. Prefer argv over command for safe argument passing without shell interpretation."
+    )]
     async fn execute_command(
         &self,
         Parameters(request): Parameters<ExecuteCommandRequest>,
     ) -> Result<Json<ExecuteResponse>, Json<ErrorResponse>> {
+        let argv = match (request.argv, request.command) {
+            // 优先使用 argv
+            (Some(argv), _) if !argv.is_empty() => argv,
+            // 兼容旧 command 字段：用 shlex 解析
+            (_, Some(command)) => shlex::split(&command).unwrap_or_else(|| vec![command.clone()]),
+            // 两者都不存在
+            (None, None) => {
+                return Err(to_error(
+                    "必须提供 argv 或 command 参数。提示：推荐使用 argv 直接传递参数列表"
+                        .to_string(),
+                ));
+            }
+            (Some(_), None) => {
+                return Err(to_error(
+                    "argv 不能为空数组。提示：argv 第一个元素为可执行文件路径，如 [\"/bin/echo\", \"hello\"]"
+                        .to_string(),
+                ));
+            }
+        };
+
         let result = self
-            .execute_with_optional_sandbox(request.sandbox_id, &request.command, request.timeout_ms)
+            .execute_with_optional_sandbox_argv(request.sandbox_id, &argv, request.timeout_ms)
             .await
             .map_err(to_error)?;
 
@@ -855,6 +880,48 @@ impl MimoboxServer {
         let result = tokio::task::spawn_blocking(move || {
             let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
             let result = sandbox.execute(&command);
+            if let Err(err) = sandbox.destroy() {
+                error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
+            }
+            result
+        })
+        .await;
+
+        self.ephemeral_count.fetch_sub(1, Ordering::Relaxed);
+
+        result.map_err(format_join_error)?.map_err(format_sdk_error)
+    }
+
+    /// 与 execute_with_optional_sandbox 类似，但接受 argv 向量直接传给 SDK exec()。
+    async fn execute_with_optional_sandbox_argv(
+        &self,
+        sandbox_id: Option<u64>,
+        argv: &[String],
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecuteResult, String> {
+        validate_timeout_ms(timeout_ms)?;
+
+        if let Some(sandbox_id) = sandbox_id {
+            let argv = argv.to_vec();
+            return self
+                .with_managed_sandbox(sandbox_id, move |sandbox| sandbox.exec(&argv))
+                .await;
+        }
+
+        {
+            let sandboxes = self.sandboxes.lock().await;
+            let persistent = sandboxes.len();
+            let ephemeral = self.ephemeral_count.load(Ordering::Relaxed);
+            if persistent + ephemeral >= MAX_SANDBOXES {
+                return Err(sandbox_quota_exceeded());
+            }
+            self.ephemeral_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let argv = argv.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
+            let result = sandbox.exec(&argv);
             if let Err(err) = sandbox.destroy() {
                 error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
             }
