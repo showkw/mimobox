@@ -5,8 +5,9 @@
 //! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
-    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, NetworkPolicy,
-    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent, TrustLevel,
+    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
+    MAX_MEMORY_LIMIT_MB, NetworkPolicy, Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot,
+    SdkError, StreamEvent, TrustLevel,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -277,8 +278,8 @@ impl PySnapshot {
     #[classmethod]
     fn from_file(_cls: &Bound<'_, PyType>, path: &str) -> PyResult<Self> {
         let py = _cls.py();
-        let snapshot =
-            RustSnapshot::from_file(std::path::PathBuf::from(path)).map_err(|e| map_sdk_error(e, py))?;
+        let snapshot = RustSnapshot::from_file(std::path::PathBuf::from(path))
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(Self { inner: snapshot })
     }
 
@@ -1075,7 +1076,9 @@ impl PySandbox {
     /// * `SandboxError` - If forking fails.
     fn fork(&mut self, py: Python<'_>) -> PyResult<Py<Self>> {
         let sandbox = self.inner_mut()?;
-        let forked = py.allow_threads(|| sandbox.fork()).map_err(|e| map_sdk_error(e, py))?;
+        let forked = py
+            .allow_threads(|| sandbox.fork())
+            .map_err(|e| map_sdk_error(e, py))?;
         let forked = Py::new(
             py,
             Self {
@@ -1505,9 +1508,7 @@ fn make_exception_with_attrs(
     code: Option<&str>,
     suggestion: Option<&str>,
 ) -> PyErr {
-    let instance = err_type
-        .call1((message,))
-        .expect("构造异常实例失败");
+    let instance = err_type.call1((message,)).expect("构造异常实例失败");
     if let Some(c) = code {
         instance.setattr("code", c).ok();
     }
@@ -1541,14 +1542,12 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
             let suggestion_str = suggestion.as_deref();
 
             match code {
-                ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => {
-                    make_exception_with_attrs(
-                        &py.get_type::<SandboxTimeoutError>(),
-                        message,
-                        Some(code_str),
-                        suggestion_str,
-                    )
-                }
+                ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => make_exception_with_attrs(
+                    &py.get_type::<SandboxTimeoutError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::MemoryLimitExceeded => make_exception_with_attrs(
                     &py.get_type::<SandboxMemoryError>(),
                     message,
@@ -1585,14 +1584,12 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
                     Some(code_str),
                     suggestion_str,
                 ),
-                ErrorCode::HttpConnectFail | ErrorCode::HttpTlsFail => {
-                    make_exception_with_attrs(
-                        &py.get_type::<PyConnectionError>(),
-                        message,
-                        Some(code_str),
-                        suggestion_str,
-                    )
-                }
+                ErrorCode::HttpConnectFail | ErrorCode::HttpTlsFail => make_exception_with_attrs(
+                    &py.get_type::<PyConnectionError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::InvalidConfig => make_exception_with_attrs(
                     &py.get_type::<PyValueError>(),
                     message,
@@ -1605,14 +1602,12 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
                     Some(code_str),
                     suggestion_str,
                 ),
-                ErrorCode::CommandExit(_) | ErrorCode::CommandKilled => {
-                    make_exception_with_attrs(
-                        &py.get_type::<SandboxProcessError>(),
-                        message,
-                        Some(code_str),
-                        suggestion_str,
-                    )
-                }
+                ErrorCode::CommandExit(_) | ErrorCode::CommandKilled => make_exception_with_attrs(
+                    &py.get_type::<SandboxProcessError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::HttpDeniedHost
                 | ErrorCode::HttpBodyTooLarge
                 | ErrorCode::HttpInvalidUrl => make_exception_with_attrs(
