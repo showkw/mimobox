@@ -859,6 +859,11 @@ impl Sandbox for WasmSandbox {
                 "Wasm file path must not be a symlink".into(),
             ));
         }
+        if wasm_meta.nlink() > 1 {
+            return Err(SandboxError::ExecutionFailed(
+                "Wasm file must not be a hard link (nlink > 1)".into(),
+            ));
+        }
         if !wasm_meta.file_type().is_file() {
             return Err(SandboxError::ExecutionFailed(
                 "Wasm path is not a regular file".into(),

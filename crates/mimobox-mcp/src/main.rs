@@ -35,6 +35,16 @@ async fn main() -> AppResult<()> {
         .init();
 
     let cli = Cli::parse();
+    let bind_ip: std::net::IpAddr = cli.bind_addr.parse().map_err(|error| {
+        Box::<dyn std::error::Error + Send + Sync>::from(format!("无效的 bind_addr: {error}"))
+    })?;
+    if !bind_ip.is_loopback() {
+        tracing::warn!(
+            "⚠ MCP server 绑定到非 loopback 地址 {}，任何网络客户端都能连接并执行代码。建议仅绑定 127.0.0.1。",
+            bind_ip
+        );
+    }
+
     let port = std::env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())

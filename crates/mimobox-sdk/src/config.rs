@@ -4,8 +4,6 @@ use std::time::Duration;
 use crate::error::SdkError;
 use mimobox_core::{NamespaceDegradation, SandboxConfig, SeccompProfile};
 
-const MAX_TIMEOUT: Duration = Duration::from_secs(86_400);
-
 /// Isolation level selection strategy.
 ///
 /// Controls which sandboxing backend is used. `Auto` enables smart routing
@@ -213,24 +211,6 @@ impl Config {
 
     /// 校验 SDK 配置，避免非法配置进入后端。
     pub(crate) fn validate(&self) -> Result<(), SdkError> {
-        if self.memory_limit_mb == Some(0) {
-            return Err(SdkError::Config(
-                "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
-            ));
-        }
-
-        if self.cpu_period_us == 0 {
-            return Err(SdkError::Config(
-                "cpu_period_us=0 无效，请设为正整数".to_string(),
-            ));
-        }
-
-        if self.timeout.is_some_and(|timeout| timeout > MAX_TIMEOUT) {
-            return Err(SdkError::Config(
-                "timeout 超过最大值 86400 秒（24小时）".to_string(),
-            ));
-        }
-
         if self.vm_vcpu_count == 0 {
             return Err(SdkError::Config(
                 "vm_vcpu_count=0 无效，请设为正整数".to_string(),
@@ -252,6 +232,10 @@ impl Config {
         for domain in resolve_allowed_http_domains(self) {
             validate_http_domain(&domain)?;
         }
+
+        self.to_sandbox_config()
+            .validate()
+            .map_err(|error| SdkError::Config(error.to_string()))?;
 
         Ok(())
     }
