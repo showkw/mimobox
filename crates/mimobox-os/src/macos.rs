@@ -8,14 +8,14 @@
 //!
 //! | Dimension | Policy | Description |
 //! |------|------|------|
-//! | File reads | Allow system + deny user data | macOS process startup depends on many implicit paths; entire /Users directory content reads are denied to protect all user data (credentials, keys, history, etc.). |
-//! | File writes | Allowlist | Allows only paths configured in `fs_readwrite` (defaults to `/tmp`). |
-//! | Network access | Deny by default | Denies all network operations with `(deny network*)`. |
-//! | Process execution | Path-restricted | Allows system and Homebrew executables while denying writable execution locations. |
-//! | Process fork | Allowed | Shells and similar commands need to fork child processes. |
+//! | File reads | Deny-default + allowlist | Allows minimal system paths, temporary directories, and user-configured `fs_readonly` / `fs_readwrite` paths. |
+//! | File writes | Deny-default + allowlist | Allows configured `fs_readwrite` paths, or `/private/tmp` when no write path is configured. |
+//! | Network access | Deny by default | Allows network operations only when `deny_network = false`. |
+//! | Process execution | Path-restricted | Allows system and developer toolchain paths while denying writable execution locations. |
+//! | Process fork | Config-controlled | Controlled by `allow_fork` config; denied by default. |
 //! | Memory limits | Watchdog (proc_pidrusage RSS sampling) | Samples child process physical footprint and terminates the process group when over limit. |
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
@@ -92,6 +92,38 @@ const SANDBOX_INIT_FAILURE_MESSAGE: &[u8] =
     b"sandbox-exec: sandbox_apply: Operation not permitted\n";
 const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
+const SYSTEM_READ_PATHS: &[&str] = &[
+    "/usr/lib/",
+    "/System/Library/",
+    "/Library/Apple/System/Library/",
+    "/bin/",
+    "/sbin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/usr/libexec/",
+    "/usr/share/",
+    "/private/etc/",
+    "/private/var/db/timezone",
+    "/private/var/select/",
+    "/dev/",
+    "/etc/",
+];
+const SYSTEM_EXEC_PATHS: &[&str] = &[
+    "/bin/",
+    "/usr/bin/",
+    "/sbin/",
+    "/usr/sbin/",
+    "/usr/local/bin/",
+    "/opt/homebrew/bin/",
+];
+const ALLOWED_MACH_SERVICES: &[&str] = &[
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+    "com.apple.logd",
+    "com.apple.bsd.dirhelper",
+];
 
 #[derive(Debug)]
 struct OutputCapture {
@@ -124,7 +156,7 @@ fn build_safe_child_env() -> HashMap<String, String> {
 ///
 /// # Platform Limitations
 ///
-/// - File reads are allowed globally because macOS dyld and frameworks depend on many implicit system paths; all /Users directory content reads are denied to protect user data comprehensively.
+/// - File access uses deny-default Seatbelt rules with explicit read/write allowlists.
 /// - Memory limits are enforced by sampling child process physical footprint with `proc_pidrusage`.
 pub struct MacOsSandbox {
     config: SandboxConfig,
@@ -309,7 +341,7 @@ fn wait_child_with_timeout(
         }
         Err(RecvTimeoutError::Timeout) => {
             tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
-            // SECURITY: Seatbelt 允许 process-fork，超时必须回收整个进程组，
+            // SECURITY: 配置允许 process-fork 时，超时必须回收整个进程组，
             // 否则其派生进程会在 supervisor 返回后继续存活。
             // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
@@ -471,6 +503,16 @@ fn append_output_truncation_marker(
     stderr_buf.extend_from_slice(marker);
 }
 
+fn normalize_sbpl_path(path: &str) -> String {
+    let p = path.trim_end_matches('/');
+    match p {
+        "/tmp" => "/private/tmp".to_string(),
+        "/etc" => "/private/etc".to_string(),
+        "/var" => "/private/var".to_string(),
+        _ => p.to_string(),
+    }
+}
+
 /// 验证路径可以安全嵌入 SBPL 字符串字面量。
 ///
 /// 采用白名单策略：只允许 ASCII 字母数字、路径分隔符 `/`
@@ -501,108 +543,126 @@ fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
     Ok(())
 }
 
+fn push_sbpl_subpath(paths: &mut Vec<String>, path: &str) {
+    if validate_sbpl_path(path).is_ok() {
+        paths.push(format!("(subpath \"{}\")", path));
+    }
+}
+
+fn push_normalized_sbpl_subpath(paths: &mut Vec<String>, path: &str) {
+    let raw = path.trim_end_matches('/');
+    let normalized = normalize_sbpl_path(path);
+    push_sbpl_subpath(paths, &normalized);
+    if raw != normalized {
+        push_sbpl_subpath(paths, raw);
+    }
+    if let Some(suffix) = raw.strip_prefix("/tmp/") {
+        push_sbpl_subpath(paths, &format!("/private/tmp/{suffix}"));
+    }
+    if let Some(suffix) = raw.strip_prefix("/var/") {
+        push_sbpl_subpath(paths, &format!("/private/var/{suffix}"));
+    }
+    if let Some(suffix) = raw.strip_prefix("/etc/") {
+        push_sbpl_subpath(paths, &format!("/private/etc/{suffix}"));
+    }
+}
+
 impl MacOsSandbox {
-    fn push_subpath_rule<I, P>(rules: &mut Vec<String>, operation: &str, paths: I)
-    where
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        let mut seen = HashSet::new();
-        let mut subpaths = Vec::new();
-
-        for path in paths {
-            Self::push_subpath(&mut subpaths, &mut seen, path.as_ref());
-        }
-
-        if !subpaths.is_empty() {
-            rules.push(format!("(allow {operation} {})", subpaths.join(" ")));
-        }
-    }
-
-    fn push_subpath(subpaths: &mut Vec<String>, seen: &mut HashSet<String>, path: &Path) {
-        let raw = path.to_string_lossy().to_string();
-        if validate_sbpl_path(&raw).is_ok() {
-            if seen.insert(raw.clone()) {
-                subpaths.push(format!("(subpath \"{raw}\")"));
-            }
-        } else {
-            tracing::warn!(path = ?raw, "SBPL 路径验证失败，跳过");
-            return;
-        }
-
-        if let Ok(real) = std::fs::canonicalize(path) {
-            let resolved = real.to_string_lossy().to_string();
-            if validate_sbpl_path(&resolved).is_ok() {
-                if seen.insert(resolved.clone()) {
-                    subpaths.push(format!("(subpath \"{resolved}\")"));
-                }
-            } else {
-                tracing::warn!(path = ?resolved, "SBPL canonicalize 路径验证失败，跳过");
-            }
-        }
-    }
-
     /// Generates a Seatbelt policy string from `SandboxConfig`.
     ///
     /// Policy structure using Seatbelt Scheme compiled format version 1:
     /// 1. `(deny default)` — denies all operations by default.
-    /// 2. `(allow file-read*)` — 允许所有文件读取（macOS dyld/Frameworks 启动依赖大量隐式路径，无法用 subpath 白名单）。
-    /// 3. `(deny file-read-data (subpath "/Users"))` — 拒绝读取 /Users 下所有用户数据内容，统一保护凭据、密钥、历史记录等。
-    /// 4. `(allow file-write* (subpath ...))` — 仅允许写入配置路径。
-    /// 5. `(allow process-exec (subpath ...))` — restricts executable paths.
-    /// 6. `(deny process-exec (subpath ...))` — denies execution from writable locations.
-    /// 7. `(allow process-fork)` — allows fork for shell commands.
-    /// 8. `(deny network*)` — denies network access.
+    /// 2. `(allow file-read* (subpath ...))` — 仅允许系统最小路径、临时目录、`fs_readonly` 和 `fs_readwrite` 路径读取。
+    /// 3. `(allow file-write* (subpath ...))` — 仅允许 `fs_readwrite` 路径；未配置时默认允许 `/private/tmp` 写入。
+    /// 4. `(allow process-exec (subpath ...))` — restricts executable paths.
+    /// 5. `(deny process-exec (subpath ...))` — denies execution from writable locations.
+    /// 6. `(allow process-fork)` — emitted only when `allow_fork = true`.
+    /// 7. `(allow network*)` — emitted only when `deny_network = false`.
+    /// 8. `(allow mach-lookup (global-name ...))` — permits only required Mach services.
     fn generate_policy(&self) -> String {
-        let mut rules = vec!["(version 1)".to_string(), "(deny default)".to_string()];
+        let mut rules = Vec::new();
 
-        // 文件读取：全局允许（macOS dyld/Frameworks 启动依赖大量系统路径）
-        rules.push("(allow file-read*)".to_string());
+        rules.push("(version 1)".to_string());
+        rules.push("(deny default)".to_string());
 
-        // 用户数据保护：拒绝 /Users 目录下所有文件内容读取
-        // 统一保护用户凭据（.ssh/.aws/.gnupg 等）、密钥链、浏览器数据等，
-        // 比逐条黑名单更安全——覆盖所有用户数据，包括未知敏感路径。
-        rules.push("(deny file-read-data (subpath \"/Users\"))".to_string());
+        // 仅允许根目录和 /var 符号链接本身，避免为路径遍历而放开整棵目录树。
+        let mut read_paths: Vec<String> = vec![
+            "(literal \"/\")".to_string(),
+            "(literal \"/var\")".to_string(),
+        ];
+        read_paths.extend(
+            SYSTEM_READ_PATHS
+                .iter()
+                .map(|s| format!("(subpath \"{}\")", s.trim_end_matches('/'))),
+        );
+        push_sbpl_subpath(&mut read_paths, "/private/tmp");
+        push_sbpl_subpath(&mut read_paths, "/tmp");
 
-        // 文件写入：仅允许配置的路径（默认 /tmp）
-        // macOS 上 /tmp -> /private/tmp，/var -> /private/var 等符号链接
-        // Seatbelt 在解析 subpath 规则时使用实际路径，因此需要 canonicalize
-        Self::push_subpath_rule(&mut rules, "file-write*", self.config.fs_readwrite.iter());
+        for path in &self.config.fs_readonly {
+            push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
+        }
+
+        for path in &self.config.fs_readwrite {
+            push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
+        }
+
+        rules.push(format!("(allow file-read* {})", read_paths.join(" ")));
+
+        let mut write_paths: Vec<String> = Vec::new();
+        for path in &self.config.fs_readwrite {
+            push_normalized_sbpl_subpath(&mut write_paths, path.to_string_lossy().as_ref());
+        }
+        // 仅当用户未配置任何自定义写入路径时，使用 /private/tmp 作为默认工作目录。
+        if write_paths.is_empty() {
+            push_sbpl_subpath(&mut write_paths, "/private/tmp");
+            push_sbpl_subpath(&mut write_paths, "/tmp");
+        }
+        rules.push(format!("(allow file-write* {})", write_paths.join(" ")));
 
         // 进程执行：限制为系统与 Homebrew 路径
-        rules.push(
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/sbin\") (subpath \"/usr/sbin\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\"))"
-                .to_string(),
-        );
-        rules.push(
-            "(allow process-exec (subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\"))"
-                .to_string(),
-        );
-        rules.push(
-            "(allow process-exec (subpath \"/Library/Developer/CommandLineTools/usr/bin\"))"
-                .to_string(),
-        );
+        let mut exec_paths: Vec<String> = SYSTEM_EXEC_PATHS
+            .iter()
+            .map(|s| format!("(subpath \"{}\")", s.trim_end_matches('/')))
+            .collect();
+        exec_paths
+            .push("(subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\")".to_string());
+        exec_paths.push("(subpath \"/Library/Developer/CommandLineTools/usr/bin\")".to_string());
+        rules.push(format!("(allow process-exec {})", exec_paths.join(" ")));
 
         // 可写目录禁止执行，防止下载/写入后二进制直接落地执行。
         rules.push("(deny process-exec (subpath \"/private/tmp\"))".to_string());
-        rules.push("(deny process-exec (subpath \"~/Library/Caches\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/bin/osascript\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/bin/pbcopy\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/bin/pbpaste\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/sbin/screencapture\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/bin/open\"))".to_string());
 
-        // 进程 fork：允许（shell 等命令需要）
-        rules.push("(allow process-fork)".to_string());
-
-        // 网络访问：默认拒绝
-        if self.config.deny_network {
-            rules.push("(deny network*)".to_string());
+        if self.config.allow_fork {
+            rules.push("(allow process-fork)".to_string());
         }
 
-        // Mach IPC：默认拒绝 lookup/register，减少宿主服务访问面。
-        rules.push("(deny mach-lookup)".to_string());
-        rules.push("(deny mach-register)".to_string());
+        if !self.config.deny_network {
+            rules.push("(allow network*)".to_string());
+        }
+
+        let mach_rules: Vec<String> = ALLOWED_MACH_SERVICES
+            .iter()
+            .map(|s| format!("(global-name \"{}\")", s))
+            .collect();
+        rules.push(format!("(allow mach-lookup {})", mach_rules.join(" ")));
+
+        rules.push("(allow pseudo-tty)".to_string());
+        rules.push("(allow file-read* file-write* (literal \"/dev/ptmx\"))".to_string());
+
+        rules.push("(allow ipc-posix-sem)".to_string());
+        rules.push(
+            "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))".to_string(),
+        );
+
+        rules.push(
+            "(allow file-write-data (require-all (path \"/dev/null\") (vnode-type CHARACTER-DEVICE)))"
+                .to_string(),
+        );
 
         rules.join("\n")
     }
@@ -657,6 +717,7 @@ impl Sandbox for MacOsSandbox {
                 .stderr(Stdio::piped())
                 .env_clear()
                 .envs(build_safe_child_env())
+                .current_dir("/private/tmp")
                 .pre_exec(move || {
                     create_child_process_group()?;
                     apply_seatbelt_policy_or_exit(policy.as_ptr());
@@ -790,9 +851,7 @@ impl Sandbox for MacOsSandbox {
             .stdout(Stdio::from(stdout_slave))
             .stderr(Stdio::from(slave_file));
 
-        if let Some(cwd) = config.cwd.as_deref() {
-            command.current_dir(cwd);
-        }
+        command.current_dir(config.cwd.as_deref().unwrap_or("/private/tmp"));
 
         // SAFETY: pre_exec 在子进程 exec 前接管 PTY 并应用 Seatbelt 策略；
         // 闭包捕获的 CString 在 sandbox_init 调用期间有效。
@@ -856,6 +915,7 @@ mod tests {
         let mut config = SandboxConfig::default();
         config.timeout_secs = Some(10);
         config.memory_limit_mb = None;
+        config.allow_fork = true;
         config
     }
 
@@ -882,6 +942,20 @@ mod tests {
 
     fn shell_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', r#"'\''"#))
+    }
+
+    fn system_file_read_rule() -> String {
+        let mut read_paths = vec![
+            "(literal \"/\")".to_string(),
+            "(literal \"/var\")".to_string(),
+        ];
+        read_paths.extend(
+            SYSTEM_READ_PATHS
+                .iter()
+                .map(|path| format!("(subpath \"{}\")", path.trim_end_matches('/'))),
+        );
+        let read_paths = read_paths.join(" ");
+        format!("(allow file-read* {read_paths})")
     }
 
     fn write_file_command(path: &std::path::Path, content: &str) -> Vec<String> {
@@ -1175,18 +1249,26 @@ mod tests {
 
     #[test]
     fn test_policy_generation_allows_network_when_deny_network_false() {
-        let mut config = test_config();
+        let mut config = SandboxConfig::default();
         config.deny_network = false;
         let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
         let policy = sb.generate_policy();
 
         assert!(
+            policy.contains("(allow network*)"),
+            "deny_network=false 时策略应显式允许网络"
+        );
+        assert!(
             !policy.contains("(deny network*)"),
             "deny_network=false 时策略不应显式拒绝网络"
         );
+
+        let default_policy = MacOsSandbox::new(SandboxConfig::default())
+            .expect("创建默认沙箱失败")
+            .generate_policy();
         assert!(
-            policy.contains("(allow process-exec"),
-            "策略仍应保留进程执行限制"
+            !default_policy.contains("(allow network*)"),
+            "deny_network=true 默认配置不应允许网络"
         );
     }
 
@@ -1359,13 +1441,12 @@ mod tests {
         fs::create_dir_all(&test_dir).expect("创建测试目录失败");
         fs::write(&secret_file, "super-secret").expect("写入敏感文件失败");
 
-        let policy = [
-            "(version 1)",
-            "(deny default)",
-            "(allow file-read*)",
-            "(deny file-read-data (subpath \"/Users\"))",
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
-            "(allow process-fork)",
+        let policy = vec![
+            "(version 1)".to_string(),
+            "(deny default)".to_string(),
+            system_file_read_rule(),
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))".to_string(),
+            "(allow process-fork)".to_string(),
         ]
         .join("\n");
         let output = Command::new("sandbox-exec")
@@ -1394,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sensitive_path_stat_allowed_via_seatbelt() {
+    fn test_sensitive_path_stat_denied_via_seatbelt() {
         if should_skip_runtime_tests() {
             return;
         }
@@ -1406,17 +1487,15 @@ mod tests {
         fs::create_dir_all(&test_dir).expect("创建测试目录失败");
         fs::write(&secret_file, "super-secret").expect("写入敏感文件失败");
 
-        let policy = [
-            "(version 1)",
-            "(deny default)",
-            "(allow file-read*)",
-            "(deny file-read-data (subpath \"/Users\"))",
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
-            "(allow process-fork)",
+        let policy = vec![
+            "(version 1)".to_string(),
+            "(deny default)".to_string(),
+            system_file_read_rule(),
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))".to_string(),
+            "(allow process-fork)".to_string(),
         ]
         .join("\n");
-        // file-read-metadata 未被 deny，所以 stat(ls -ld) 应该成功。
-        // 普通 ls 会枚举目录内容，在 Seatbelt 中属于 file-read-data。
+        // deny-default 模式下，未加入 allowlist 的用户路径元数据也应被拒绝。
         let sensitive_path = test_dir.clone();
         let list_output = Command::new("sandbox-exec")
             .args([
@@ -1431,8 +1510,8 @@ mod tests {
             .expect("执行 sandbox-exec ls 失败");
 
         assert!(
-            list_output.status.success(),
-            "Seatbelt 应允许读取目录元数据，stdout: {}, stderr: {}",
+            !list_output.status.success(),
+            "Seatbelt 应拒绝读取未白名单目录元数据，stdout: {}, stderr: {}",
             String::from_utf8_lossy(&list_output.stdout),
             String::from_utf8_lossy(&list_output.stderr)
         );
@@ -1479,13 +1558,13 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script_path, permissions).expect("设置测试脚本可执行权限失败");
 
-        let policy = [
-            "(version 1)",
-            "(deny default)",
-            "(allow file-read*)",
-            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))",
-            "(deny process-exec (subpath \"/private/tmp\"))",
-            "(allow process-fork)",
+        let policy = vec![
+            "(version 1)".to_string(),
+            "(deny default)".to_string(),
+            system_file_read_rule(),
+            "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\"))".to_string(),
+            "(deny process-exec (subpath \"/private/tmp\"))".to_string(),
+            "(allow process-fork)".to_string(),
         ]
         .join("\n");
         let script = path_to_string(&script_path);
@@ -1512,13 +1591,25 @@ mod tests {
             return;
         }
 
-        let dir_one = TempDir::new().expect("创建第一个临时目录失败");
-        let dir_two = TempDir::new().expect("创建第二个临时目录失败");
+        let dir_one = TempDir::new_in("/tmp").expect("创建第一个临时目录失败");
+        let dir_two = TempDir::new_in("/tmp").expect("创建第二个临时目录失败");
 
         let mut config_one = test_config();
-        config_one.fs_readwrite = vec![dir_one.path().into()];
+        config_one.fs_readwrite = vec![
+            dir_one
+                .path()
+                .canonicalize()
+                .expect("canonicalize 失败")
+                .into(),
+        ];
         let mut config_two = test_config();
-        config_two.fs_readwrite = vec![dir_two.path().into()];
+        config_two.fs_readwrite = vec![
+            dir_two
+                .path()
+                .canonicalize()
+                .expect("canonicalize 失败")
+                .into(),
+        ];
 
         let mut sb_one = MacOsSandbox::new(config_one).expect("创建第一个沙箱失败");
         let mut sb_two = MacOsSandbox::new(config_two).expect("创建第二个沙箱失败");
@@ -1627,46 +1718,51 @@ mod tests {
 
     #[test]
     fn test_policy_generation() {
-        let sb = MacOsSandbox::new(test_config()).expect("创建沙箱失败");
+        let sb = MacOsSandbox::new(SandboxConfig::default()).expect("创建沙箱失败");
         let policy = sb.generate_policy();
 
         assert!(policy.contains("(version 1)"), "策略应包含 version 1");
         assert!(policy.contains("(deny default)"), "策略应包含 deny default");
         assert!(
-            policy.contains("(allow file-read*)"),
-            "策略应全局允许文件读取（macOS 进程启动需要）"
+            policy.contains("(subpath \"/usr/lib\")"),
+            "策略应包含系统读取最小白名单"
         );
         assert!(
-            policy.contains("(deny file-read-data (subpath \"/Users\"))"),
-            "策略应拒绝读取 /Users 目录内容"
+            !policy.contains("(allow file-read*)"),
+            "策略不应包含全局 file-read* 放行"
         );
         assert!(
-            policy.contains("(deny network*)"),
-            "策略应包含 deny network"
+            !policy.contains("(deny file-read-data (subpath \"/Users\"))"),
+            "默认拒绝模式不需要额外拒绝 /Users 内容读取"
         );
         assert!(
-            policy.contains("(deny mach-lookup)"),
-            "策略应拒绝 mach-lookup"
+            !policy.contains("(allow network*)"),
+            "默认 deny_network=true 时不应允许网络"
         );
         assert!(
-            policy.contains("(deny mach-register)"),
-            "策略应拒绝 mach-register"
+            policy.contains("(global-name \"com.apple.logd\")"),
+            "策略应包含 Mach 服务白名单"
         );
         assert!(
             policy.contains("(allow process-exec"),
             "策略应包含进程执行限制"
         );
         assert!(
-            policy.contains("(allow process-fork)"),
-            "策略应允许进程 fork"
+            !policy.contains("(allow process-fork)"),
+            "默认 allow_fork=false 时不应允许进程 fork"
         );
         assert!(
             policy.contains("(deny process-exec (subpath \"/private/tmp\"))"),
             "策略应拒绝从 /private/tmp 执行"
         );
+        assert!(policy.contains("(allow pseudo-tty)"), "策略应包含 PTY 支持");
         assert!(
-            policy.contains("(deny process-exec (subpath \"~/Library/Caches\"))"),
-            "策略应拒绝从 ~/Library/Caches 执行"
+            policy.contains("(allow file-read* file-write* (literal \"/dev/ptmx\"))"),
+            "策略应允许 /dev/ptmx 读写"
+        );
+        assert!(
+            policy.contains("(allow ipc-posix-sem)"),
+            "策略应包含 POSIX semaphore IPC 支持"
         );
         for blocked_tool in [
             "/usr/bin/osascript",
@@ -1689,32 +1785,123 @@ mod tests {
             "策略应允许 Apple Silicon Homebrew bin 路径执行"
         );
         assert!(
-            policy.contains(
-                "(allow process-exec (subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\"))"
-            ),
+            policy.contains("(subpath \"/Applications/Xcode.app/Contents/Developer/usr/bin\")"),
             "策略应允许 Xcode Developer 工具链路径执行"
         );
         assert!(
-            policy.contains(
-                "(allow process-exec (subpath \"/Library/Developer/CommandLineTools/usr/bin\"))"
-            ),
+            policy.contains("(subpath \"/Library/Developer/CommandLineTools/usr/bin\")"),
             "策略应允许 CommandLineTools 工具链路径执行"
         );
-        assert!(policy.contains("/tmp"), "策略应允许 /tmp 读写");
+        assert!(
+            policy.contains("(subpath \"/private/tmp\")"),
+            "策略应允许 /private/tmp 写入"
+        );
     }
 
     #[test]
-    fn test_policy_generation_uses_explicit_readonly_allowlist() {
+    fn test_policy_generation_uses_explicit_readwrite_allowlist() {
         let mut config = SandboxConfig::default();
         config.fs_readwrite = vec!["/tmp/mimobox-rw".into()];
         config.memory_limit_mb = None;
         config.timeout_secs = Some(10);
         let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
         let policy = sb.generate_policy();
+        let read_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-read*") && !line.contains("file-write*"))
+            .expect("应生成 file-read allow 规则");
+        let write_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-write*"))
+            .expect("应生成 file-write allow 规则");
 
         assert!(
-            policy.contains("(subpath \"/tmp/mimobox-rw\")"),
-            "读写白名单应写入 Seatbelt 策略"
+            read_line.contains("(subpath \"/tmp/mimobox-rw\")"),
+            "读写白名单应写入 file-read allow 规则"
+        );
+        assert!(
+            write_line.contains("(subpath \"/tmp/mimobox-rw\")"),
+            "读写白名单应写入 file-write allow 规则"
+        );
+    }
+
+    #[test]
+    fn test_policy_generation_fs_readonly_in_read_allowlist() {
+        let mut config = SandboxConfig::default();
+        config.fs_readonly = vec!["/tmp/readonly-data".into()];
+        let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
+        let policy = sb.generate_policy();
+        let read_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-read*") && !line.contains("file-write*"))
+            .expect("应生成 file-read allow 规则");
+        let write_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-write*"))
+            .expect("应生成 file-write allow 规则");
+
+        assert!(
+            policy.contains("(subpath \"/tmp/readonly-data\")"),
+            "只读路径应写入 Seatbelt 策略"
+        );
+        assert!(
+            read_line.contains("(subpath \"/tmp/readonly-data\")"),
+            "只读路径应只出现在 file-read allow 规则中"
+        );
+        assert!(
+            !write_line.contains("(subpath \"/tmp/readonly-data\")"),
+            "只读路径不应出现在 file-write allow 规则中"
+        );
+    }
+
+    #[test]
+    fn test_policy_generation_deny_fork_when_config_false() {
+        let sb = MacOsSandbox::new(SandboxConfig::default()).expect("创建沙箱失败");
+        let policy = sb.generate_policy();
+
+        assert!(
+            !policy.contains("(allow process-fork)"),
+            "allow_fork=false 时不应生成 process-fork 放行"
+        );
+    }
+
+    #[test]
+    fn test_policy_generation_allow_fork_when_config_true() {
+        let mut config = SandboxConfig::default();
+        config.allow_fork = true;
+        let sb = MacOsSandbox::new(config).expect("创建沙箱失败");
+        let policy = sb.generate_policy();
+
+        assert!(
+            policy.contains("(allow process-fork)"),
+            "allow_fork=true 时应生成 process-fork 放行"
+        );
+    }
+
+    #[test]
+    fn test_policy_generation_no_global_file_read() {
+        let sb = MacOsSandbox::new(SandboxConfig::default()).expect("创建沙箱失败");
+        let policy = sb.generate_policy();
+        let general_file_read_rules = policy
+            .lines()
+            .filter(|line| line.starts_with("(allow file-read*") && !line.contains("file-write*"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            !policy
+                .lines()
+                .any(|line| line.trim() == "(allow file-read*)"),
+            "策略不应包含裸 file-read* 全局放行"
+        );
+        assert!(
+            !general_file_read_rules.is_empty(),
+            "策略应生成精确 file-read allow 规则"
+        );
+        assert!(
+            general_file_read_rules
+                .iter()
+                .all(|line| line.contains("(subpath ")),
+            "file-read allow 规则必须包含至少一个 subpath"
         );
     }
 
