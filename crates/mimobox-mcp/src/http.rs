@@ -14,12 +14,13 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use mimobox_mcp::MimoboxServer;
 use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
 use tokio::signal::unix::{SignalKind, signal};
+
+use crate::MimoboxServer;
 
 type HttpResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
@@ -359,6 +360,18 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_run_http_server_rejects_non_loopback_without_token() {
+        let err = run_http_server("0.0.0.0", 0, None, None)
+            .await
+            .expect_err("非 loopback 地址且无 token 时必须拒绝启动");
+        let io_err = err
+            .downcast_ref::<std::io::Error>()
+            .expect("拒绝启动必须返回 I/O 权限错误");
+
+        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn test_parse_allowed_origins_wildcard_requires_exact_segment() {

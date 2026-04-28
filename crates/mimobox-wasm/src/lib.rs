@@ -931,6 +931,8 @@ fn build_wasi_ctx(
 
 impl Sandbox for WasmSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
+        config.validate()?;
+
         let engine = global_engine()?;
 
         // [IMPORTANT-02 修复] 使用用户和 Wasmtime 版本专属缓存目录，避免跨用户和跨版本缓存污染。
@@ -1304,7 +1306,7 @@ pub fn run_wasm_benchmark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mimobox_core::Sandbox;
+    use mimobox_core::{MAX_MEMORY_LIMIT_MB, Sandbox};
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use wasmtime::{Instance, Store};
@@ -1326,6 +1328,22 @@ mod tests {
     fn test_wasm_sandbox_create() {
         let sb = WasmSandbox::new(test_config());
         assert!(sb.is_ok(), "Failed to create Wasm sandbox: {:?}", sb.err());
+    }
+
+    #[test]
+    fn test_wasm_sandbox_new_rejects_memory_limit_above_max() {
+        let mut config = test_config();
+        config.memory_limit_mb = Some(MAX_MEMORY_LIMIT_MB + 1);
+
+        let err = match WasmSandbox::new(config) {
+            Ok(_) => panic!("memory_limit_mb 超过最大值时必须拒绝创建 Wasm sandbox"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("memory_limit_mb"),
+            "错误信息必须指向 memory_limit_mb: {err}"
+        );
     }
 
     #[test]

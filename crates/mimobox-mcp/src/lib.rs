@@ -41,6 +41,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinError;
 use tracing::error;
 
+pub mod http;
+
 /// MCP 文件读写单次最大 10MB，避免 base64 请求或响应耗尽内存。
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;

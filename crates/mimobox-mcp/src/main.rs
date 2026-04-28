@@ -1,9 +1,7 @@
 use clap::Parser;
-use mimobox_mcp::MimoboxServer;
+use mimobox_mcp::{MimoboxServer, http};
 use rmcp::ServiceExt;
 use tokio::signal::unix::{SignalKind, signal};
-
-mod http;
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 

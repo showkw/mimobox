@@ -46,3 +46,11 @@ id_ed25519
 
 # 日志文件
 *.log
+
+.venv/
+.mimobox/
+*.db
+*.sqlite
+*.kubeconfig
+vmlinux
+rootfs.cpio.gz
