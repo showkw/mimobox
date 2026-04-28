@@ -96,6 +96,10 @@ pub(crate) const CMDLINE_ADDR: u64 = 0x20_000;
 const ROOTFS_METADATA_ADDR: u64 = 0x30_000;
 const BOOT_READY_TIMEOUT_SECS: u64 = 30;
 const READINESS_PROBE_TIMEOUT_SECS: u64 = 5;
+const POOL_CLEAN_TIMEOUT_SECS: u64 = 5;
+const CLEAN_COMMAND_PAYLOAD: &[u8] = b"CLEAN\n";
+const CLEANED_ACK_LINE: &[u8] = b"CLEANED\n";
+const CLEAN_FAILED_LINE: &[u8] = b"CLEAN_FAILED\n";
 const VSOCK_ACCEPT_TIMEOUT_SECS: u64 = 10;
 const VSOCK_PROBE_TIMEOUT_MILLIS: u64 = 500;
 /// The `guest-vsock` feature is disabled by default. When disabled, the host does
@@ -733,13 +737,59 @@ impl KvmBackend {
         })
     }
 
-    /// Clears host-side state that must not leak into the next pooled checkout.
-    pub fn clear_pool_artifacts(&mut self) {
+    /// Clears guest `/sandbox` contents through the serial `CLEAN\n` protocol.
+    pub(crate) fn send_clean_command(&mut self) -> Result<Duration, MicrovmError> {
+        let span = tracing::info_span!("vm_pool_clean");
+        let _entered = span.enter();
+
+        self.ensure_guest_ready()?;
+        if self.lifecycle != KvmLifecycle::Ready {
+            return Err(MicrovmError::Lifecycle(LifecycleError::InvalidState {
+                expected: "Ready".into(),
+                current: "not Ready".into(),
+                message: "KVM backend is not in Ready state".into(),
+            }));
+        }
+
+        let started_at = Instant::now();
+        let serial_start = self.serial_buffer.len();
+        self.serial_device.queue_input(CLEAN_COMMAND_PAYLOAD);
+        self.last_command_payload = CLEAN_COMMAND_PAYLOAD.to_vec();
+        self.transport = KvmTransport::Serial;
+        self.lifecycle = KvmLifecycle::Running;
+
+        let result =
+            self.run_until_cleaned(Duration::from_secs(POOL_CLEAN_TIMEOUT_SECS), serial_start);
+        if self.lifecycle != KvmLifecycle::Destroyed {
+            self.lifecycle = KvmLifecycle::Ready;
+        }
+
+        result.map(|()| {
+            let duration = started_at.elapsed();
+            info!(elapsed = ?duration, "guest /sandbox 清理完成");
+            duration
+        })
+    }
+
+    /// Clears guest and host-side state that must not leak into the next pooled checkout.
+    pub fn clear_pool_artifacts(&mut self) -> bool {
+        let guest_cleaned = match self.send_clean_command() {
+            Ok(_) => true,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "guest /sandbox 清理失败，继续清理 host 端回收状态"
+                );
+                self.guest_ready = false;
+                false
+            }
+        };
         self.serial_buffer.clear();
         self.last_command_payload.clear();
         self.last_exit_reason = None;
         self.last_io_detail = None;
         self.recent_io_details.clear();
+        guest_cleaned
     }
 
     fn drop_vsock_channel(&mut self) {
@@ -1845,6 +1895,52 @@ impl KvmBackend {
         }
     }
 
+    fn run_until_cleaned(
+        &mut self,
+        timeout: Duration,
+        serial_start: usize,
+    ) -> Result<(), MicrovmError> {
+        let mut line_buffer = Vec::new();
+        let watchdog = self.start_watchdog(timeout)?;
+
+        loop {
+            if serial_output_contains_line(&self.serial_buffer, serial_start, CLEANED_ACK_LINE) {
+                return Ok(());
+            }
+            if serial_output_contains_line(&self.serial_buffer, serial_start, CLEAN_FAILED_LINE) {
+                return Err(MicrovmError::Backend(format!(
+                    "guest CLEAN command failed: serial={}",
+                    preview_serial_output(&self.serial_buffer),
+                )));
+            }
+
+            match self.run_vcpu_step(&mut line_buffer, None, &watchdog) {
+                Ok(RunLoopOutcome::ResponseDone(SerialProtocolResult::HttpRequest(frame))) => {
+                    self.run_http_proxy_request(frame.id, frame.request)?;
+                }
+                Ok(RunLoopOutcome::ResponseDone(result)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "unexpected protocol frame during guest cleanup: {result:?}"
+                    )));
+                }
+                Ok(RunLoopOutcome::Exit(KvmExitReason::Io | KvmExitReason::Hlt)) => {}
+                Ok(RunLoopOutcome::Exit(exit_reason)) => {
+                    return Err(MicrovmError::Backend(format!(
+                        "guest exited unexpectedly before returning CLEANED: {exit_reason:?}"
+                    )));
+                }
+                Err(err) if watchdog.timed_out() => {
+                    self.guest_ready = false;
+                    return Err(MicrovmError::Backend(format!(
+                        "guest cleanup timed out: {err}; serial={}",
+                        preview_serial_output(&self.serial_buffer),
+                    )));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     fn run_until_command_stream(
         &mut self,
         stream_tx: mpsc::Sender<StreamEvent>,
@@ -2440,6 +2536,12 @@ fn fs_result_to_error(status: u8, path: &str) -> MicrovmError {
         kind,
         path: path.to_string(),
     }
+}
+
+fn serial_output_contains_line(serial: &[u8], start: usize, line: &[u8]) -> bool {
+    serial
+        .get(start..)
+        .is_some_and(|output| output.windows(line.len()).any(|window| window == line))
 }
 
 fn encode_streaming_command_payload(command: &str) -> Vec<u8> {

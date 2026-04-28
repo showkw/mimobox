@@ -291,7 +291,14 @@ impl VmPoolInner {
             }
         }
 
-        clear_backend_artifacts(&mut backend);
+        let guest_cleaned = clear_backend_artifacts(&mut backend);
+        if !guest_cleaned || !backend_is_reusable(&backend) {
+            self.mark_evict();
+            destroy_backend(backend, "VM guest 清理失败，无法安全复用");
+            self.replenish_if_needed();
+            return;
+        }
+
         let evicted = self.push_idle_after_release(backend);
         if let Some(entry) = evicted {
             destroy_idle_entry(entry, "LRU 容量淘汰");
@@ -673,7 +680,11 @@ fn create_backend(
             "预热 VM 后 guest 未进入 READY 状态: {exit_reason:?}"
         )));
     }
-    backend.clear_pool_artifacts();
+    if !backend.clear_pool_artifacts() {
+        return Err(MicrovmError::Backend(
+            "预热 VM guest 清理失败，无法安全放入池".into(),
+        ));
+    }
     Ok(backend)
 }
 
@@ -817,9 +828,11 @@ fn backend_is_reusable(_backend: &Backend) -> bool {
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-fn clear_backend_artifacts(backend: &mut Backend) {
-    backend.clear_pool_artifacts();
+fn clear_backend_artifacts(backend: &mut Backend) -> bool {
+    backend.clear_pool_artifacts()
 }
 
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
-fn clear_backend_artifacts(_backend: &mut Backend) {}
+fn clear_backend_artifacts(_backend: &mut Backend) -> bool {
+    false
+}

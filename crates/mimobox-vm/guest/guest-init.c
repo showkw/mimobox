@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -92,6 +93,8 @@ struct sockaddr_vm {
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const READY_LINE = "READY\n";
 static const char *const PONG_LINE = "PONG\n";
+static const char *const CLEANED_LINE = "CLEANED\n";
+static const char *const CLEAN_FAILED_LINE = "CLEAN_FAILED\n";
 static const char *const INIT_OK_LINE = "mimobox-kvm: init OK\n";
 /* BOOT_PROFILE 由构建脚本通过 -DBOOT_PROFILE 显式启用，默认不定义。 */
 #ifdef BOOT_PROFILE
@@ -253,6 +256,7 @@ static bool is_supported_command_prefix(const char *prefix) {
     return strcmp(prefix, "EXEC:") == 0 ||
            strcmp(prefix, "EXECS:") == 0 ||
            strcmp(prefix, "PING") == 0 ||
+           strcmp(prefix, "CLEAN") == 0 ||
            strcmp(prefix, "SIGNAL:KILL:") == 0 ||
            strcmp(prefix, "HTTP:REQUEST:") == 0 ||
            strcmp(prefix, "FS:READ:") == 0 ||
@@ -286,6 +290,9 @@ static int read_command_frame(char *buffer, size_t capacity) {
         }
         if (value == '\n' && strcmp(prefix, "PING") == 0) {
             return -4;
+        }
+        if (value == '\n' && strcmp(prefix, "CLEAN") == 0) {
+            return -5;
         }
         if (value == '\n' || value == '\r') {
             return -3;
@@ -472,6 +479,111 @@ static int read_command_frame(char *buffer, size_t capacity) {
 
     buffer[total_prefix_len + payload_len] = '\0';
     return 0;
+}
+
+static bool is_dot_or_dotdot(const char *name) {
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
+}
+
+static int recursive_delete_contents_at(int dir_fd) {
+    int result = 0;
+    int scan_fd = dup(dir_fd);
+    if (scan_fd < 0) {
+        return -1;
+    }
+
+    DIR *dir = fdopendir(scan_fd);
+    if (dir == NULL) {
+        close(scan_fd);
+        return -1;
+    }
+
+    errno = 0;
+    for (;;) {
+        struct dirent *entry = readdir(dir);
+        if (entry == NULL) {
+            if (errno != 0) {
+                result = -1;
+            }
+            break;
+        }
+        if (is_dot_or_dotdot(entry->d_name)) {
+            errno = 0;
+            continue;
+        }
+
+        struct stat st;
+        if (fstatat(dir_fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
+            result = -1;
+            errno = 0;
+            continue;
+        }
+
+        if (S_ISDIR(st.st_mode)) {
+            int child_fd = openat(
+                dir_fd,
+                entry->d_name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            );
+            if (child_fd < 0) {
+                result = -1;
+                errno = 0;
+                continue;
+            }
+
+            if (recursive_delete_contents_at(child_fd) < 0) {
+                result = -1;
+            }
+            if (close(child_fd) < 0) {
+                result = -1;
+            }
+
+            if (unlinkat(dir_fd, entry->d_name, AT_REMOVEDIR) < 0) {
+                result = -1;
+            }
+        } else if (unlinkat(dir_fd, entry->d_name, 0) < 0) {
+            result = -1;
+        }
+
+        errno = 0;
+    }
+
+    if (closedir(dir) < 0) {
+        result = -1;
+    }
+    return result;
+}
+
+static int ensure_sandbox_root_directory(const char *dir_path) {
+    if (mkdir(dir_path, 0755) == 0 || errno == EEXIST) {
+        return 0;
+    }
+    return -1;
+}
+
+static int recursive_delete_contents(const char *dir_path) {
+    int dir_fd = open(dir_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir_fd < 0) {
+        int open_errno = errno;
+        if (open_errno == ENOENT) {
+            return ensure_sandbox_root_directory(dir_path);
+        }
+
+        /* /sandbox 被租户替换成文件或符号链接时，先移除再重建目录。 */
+        if (open_errno == ENOTDIR || open_errno == ELOOP) {
+            if (unlink(dir_path) < 0 && errno != ENOENT) {
+                return -1;
+            }
+            return ensure_sandbox_root_directory(dir_path);
+        }
+        return -1;
+    }
+
+    int result = recursive_delete_contents_at(dir_fd);
+    if (close(dir_fd) < 0) {
+        result = -1;
+    }
+    return result;
 }
 
 static int expect_serial_newline(void) {
@@ -2087,6 +2199,14 @@ static void serial_command_loop(void) {
         }
         if (line_status == -4) {
             write_console_line(PONG_LINE);
+            continue;
+        }
+        if (line_status == -5) {
+            if (recursive_delete_contents(SANDBOX_ROOT_PATH) == 0) {
+                write_console_line(CLEANED_LINE);
+            } else {
+                write_console_line(CLEAN_FAILED_LINE);
+            }
             continue;
         }
         if (line_status < 0) {
