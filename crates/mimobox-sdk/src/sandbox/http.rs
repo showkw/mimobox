@@ -8,6 +8,8 @@ use super::Sandbox;
 use super::SandboxInner;
 #[cfg(feature = "vm")]
 use super::dispatch_vm;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+use crate::dispatch::HttpRequestForSdk;
 
 impl Sandbox {
     #[cfg(feature = "vm")]
