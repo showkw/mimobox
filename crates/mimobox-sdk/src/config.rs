@@ -240,6 +240,12 @@ impl Config {
             ));
         }
 
+        if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
+            return Err(SdkError::Config(
+                "network=DenyAll 但 allowed_http_domains 非空，请使用 allowed_http_domains() builder 或 NetworkPolicy::AllowDomains".to_string(),
+            ));
+        }
+
         for domain in resolve_allowed_http_domains(self) {
             validate_http_domain(&domain)?;
         }
@@ -598,6 +604,9 @@ impl ConfigBuilder {
         domains: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.inner.allowed_http_domains = domains.into_iter().map(Into::into).collect();
+        if matches!(self.inner.network, NetworkPolicy::DenyAll) {
+            self.inner.network = NetworkPolicy::AllowDomains(Vec::new());
+        }
         self
     }
 

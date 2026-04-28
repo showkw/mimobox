@@ -274,10 +274,10 @@ impl SandboxConfig {
 
     /// 校验配置合法性，返回不合理项的描述。
     pub fn validate(&self) -> Result<(), SandboxError> {
-        // 网络拒绝时白名单不应有内容。
+        // Core 层没有 SDK NetworkPolicy 语义，DenyAll 场景不能携带代理白名单。
         if self.deny_network && !self.allowed_http_domains.is_empty() {
             return Err(SandboxError::ExecutionFailed(
-                "deny_network=true 但 allowed_http_domains 非空，请将 deny_network 设为 false 或清空 allowed_http_domains".to_string(),
+                "deny_network=true 但 allowed_http_domains 非空，DenyAll 网络策略不允许打开 HTTP 白名单".to_string(),
             ));
         }
 

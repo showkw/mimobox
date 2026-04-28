@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use base64::Engine;
@@ -412,16 +412,35 @@ fn select_verified_ip(
 
 fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local() || ipv4.is_unspecified()
-        }
+        IpAddr::V4(ipv4) => is_non_public_ipv4(ipv4),
         IpAddr::V6(ipv6) => {
+            if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+                return is_non_public_ipv4(ipv4);
+            }
+
             ipv6.is_loopback()
                 || ipv6.is_unspecified()
                 || ipv6.is_unique_local()
                 || ipv6.is_unicast_link_local()
         }
     }
+}
+
+fn is_non_public_ipv4(ipv4: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ipv4.octets();
+
+    ipv4.is_private()
+        || ipv4.is_loopback()
+        || ipv4.is_link_local()
+        || ipv4.is_unspecified()
+        || (a == 100 && (64..=127).contains(&b))
+        || ipv4.is_multicast()
+        || a >= 240
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || (a == 198 && matches!(b, 18 | 19))
+        || (a == 192 && b == 0 && c == 0)
 }
 
 fn read_response_body(
