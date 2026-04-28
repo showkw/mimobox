@@ -506,6 +506,15 @@ impl KvmBackend {
         #[cfg(any(debug_assertions, feature = "boot-profile"))]
         boot_profile.mark_vm_create();
 
+        // SAFETY: PR_SET_DUMPABLE 设置为 0 禁止其他进程通过 /proc/pid/mem
+        // 和 /proc/pid/maps 读取本进程内存映射（包含 guest 内存）。
+        // 参数正确（PR_SET_DUMPABLE=4, arg2=0），返回值被忽略（best-effort）。
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+        crate::host_seccomp::apply_host_seccomp()
+            .map_err(|e| MicrovmError::Backend(format!("host seccomp 应用失败: {e}")))?;
+
         let vm_arch_setup_started_at = Instant::now();
         #[cfg(target_arch = "x86_64")]
         {

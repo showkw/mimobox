@@ -31,6 +31,8 @@ mod snapshot;
 mod vm;
 mod vm_assets;
 
+#[cfg(target_os = "linux")]
+mod host_seccomp;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 mod kvm;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
