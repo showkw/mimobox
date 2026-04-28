@@ -161,6 +161,7 @@ pub struct Config {
     /// VM 安全配置策略，控制 guest kernel 是否启用 Spectre/Meltdown 缓解和 KASLR。
     /// 默认 `Secure`（保留安全缓解）。设为 `Performance` 可关闭缓解以获得最佳性能，
     /// 但仅在完全可信环境中使用。
+    #[cfg(feature = "vm")]
     pub vm_security_profile: mimobox_vm::VmSecurityProfile,
 }
 
@@ -193,6 +194,7 @@ impl Default for Config {
             vm_memory_mb: 256,
             kernel_path: None,
             rootfs_path: None,
+            #[cfg(feature = "vm")]
             vm_security_profile: mimobox_vm::VmSecurityProfile::default(),
         }
     }
@@ -223,26 +225,26 @@ impl Config {
     pub(crate) fn validate(&self) -> Result<(), SdkError> {
         if self.vm_vcpu_count == 0 {
             return Err(SdkError::Config(
-                "vm_vcpu_count=0 无效，请设为正整数".to_string(),
+                "vm_vcpu_count=0 无效。提示：请设为正整数，推荐值为 1-4".to_string(),
             ));
         }
 
         if self.vm_memory_mb == 0 {
             return Err(SdkError::Config(
-                "vm_memory_mb=0 无效，请设为正整数".to_string(),
+                "vm_memory_mb=0 无效。提示：请设为正整数，推荐值为 256-4096".to_string(),
             ));
         }
         if let Some(memory_limit_mb) = self.memory_limit_mb
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
             return Err(SdkError::Config(format!(
-                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB。提示：请设为合理值，推荐 256-512 MB"
             )));
         }
 
         if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
             return Err(SdkError::Config(
-                "network=DenyAll 但 allowed_http_domains 非空，请使用 allowed_http_domains() builder 或 NetworkPolicy::AllowDomains".to_string(),
+                "network=DenyAll 但 allowed_http_domains 非空，配置冲突。提示：使用 NetworkPolicy::AllowDomains 或清空 allowed_http_domains".to_string(),
             ));
         }
 
@@ -344,7 +346,7 @@ fn validate_http_domain(domain: &str) -> Result<(), SdkError> {
         || is_plain_ip_domain(domain)
     {
         return Err(SdkError::Config(format!(
-            "allowed_http_domains 包含无效域名: {domain}"
+            "allowed_http_domains 包含无效域名 '{domain}'。提示：请使用标准域名格式，如 'example.com' 或 '*.example.com'，不支持 IP 地址"
         )));
     }
 
@@ -377,7 +379,7 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
 
     u32::try_from(effective_memory_mb).map_err(|_| {
         SdkError::Config(format!(
-            "microVM guest memory 超出 u32 范围: {effective_memory_mb} MB"
+            "microVM guest 内存超出 u32 范围: {effective_memory_mb} MB。提示：请减小 vm_memory_mb 或 memory_limit_mb"
         ))
     })
 }
@@ -718,6 +720,7 @@ impl ConfigBuilder {
         self
     }
 
+    #[cfg(feature = "vm")]
     /// Set the VM security profile, controlling kernel mitigations and KASLR.
     ///
     /// Default is `VmSecurityProfile::Secure` (all mitigations enabled).

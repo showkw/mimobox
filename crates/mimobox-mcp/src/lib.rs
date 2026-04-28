@@ -546,7 +546,7 @@ impl MimoboxServer {
                 .map_err(to_error)?;
             if content.len() > MAX_FILE_SIZE {
                 return Err(to_error(format!(
-                    "file too large: {} bytes exceeds {} byte limit",
+                    "文件过大：{} 字节，超过 {} 字节限制。提示：请读取较小的文件",
                     content.len(),
                     MAX_FILE_SIZE
                 )));
@@ -579,10 +579,10 @@ impl MimoboxServer {
         {
             let data = STANDARD
                 .decode(&request.content)
-                .map_err(|err| to_error(format!("content is not valid base64: {err}")))?;
+                .map_err(|err| to_error(format!("内容不是有效的 base64 编码：{err}。提示：请确保内容为标准 base64 编码字符串")))?;
             if data.len() > MAX_FILE_SIZE {
                 return Err(to_error(format!(
-                    "content too large: {} bytes exceeds {} byte limit",
+                    "内容过大：{} 字节，超过 {} 字节限制。提示：请写入较小的内容或拆分为多次写入",
                     data.len(),
                     MAX_FILE_SIZE
                 )));
@@ -740,7 +740,7 @@ impl MimoboxServer {
         {
             let method = request.method.to_ascii_uppercase();
             if !matches!(method.as_str(), "GET" | "POST") {
-                return Err(to_error("method only supports GET and POST".to_string()));
+                return Err(to_error("HTTP 方法仅支持 GET 和 POST。提示：请使用 GET 或 POST".to_string()));
             }
 
             let url = request.url;
@@ -796,7 +796,7 @@ impl MimoboxServer {
                     .map_err(to_error)?;
                 if result.exit_code != Some(0) {
                     return Err(to_error(format!(
-                        "list_dir failed for {path}: {}",
+                        "list_dir 执行失败，路径 {path}: {}。提示：请确认路径存在且为目录",
                         String::from_utf8_lossy(&result.stderr)
                     )));
                 }
@@ -898,7 +898,7 @@ fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<
         && memory_limit_mb > MAX_MEMORY_LIMIT_MB
     {
         return Err(SdkError::Config(format!(
-            "create_sandbox memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+            "create_sandbox memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB。提示：请设为合理值，推荐 256-512 MB"
         )));
     }
 
@@ -910,7 +910,7 @@ fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
         let timeout_secs = timeout_ms / 1000;
         if timeout_secs > MAX_SANDBOX_TIMEOUT_SECS {
             return Err(format!(
-                "timeout_ms={timeout_ms} 超过最大值 {} 毫秒（{MAX_SANDBOX_TIMEOUT_SECS} 秒），请设为合理值",
+                "timeout_ms={timeout_ms} 超过最大值 {} 毫秒（{MAX_SANDBOX_TIMEOUT_SECS} 秒）。提示：请减小超时时间，推荐 30000 毫秒（30 秒）",
                 MAX_SANDBOX_TIMEOUT_SECS * 1000
             ));
         }
@@ -926,7 +926,7 @@ fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> 
         "wasm" => Ok(IsolationLevel::Wasm),
         "microvm" | "micro_vm" | "micro-vm" | "vm" => Ok(IsolationLevel::MicroVm),
         other => Err(format!(
-            "unsupported isolation_level={other}, valid values: auto, os, wasm, microvm"
+            "不支持的隔离级别 '{other}'。提示：可选值为 auto、os、wasm、microvm；推荐使用 auto 自动选择最优后端"
         )),
     }
 }
@@ -941,12 +941,12 @@ fn format_isolation_level(level: IsolationLevel) -> &'static str {
 }
 
 fn sandbox_not_found(sandbox_id: u64) -> String {
-    format!("sandbox instance not found for sandbox_id={sandbox_id}")
+    format!("sandbox {sandbox_id} 不存在。提示：使用 list_sandboxes 查看活跃的 sandbox 列表")
 }
 
 fn sandbox_quota_exceeded() -> String {
     format!(
-        "sandbox quota exceeded: maximum {} sandboxes allowed",
+        "sandbox 配额已满：最多允许 {} 个实例。提示：先使用 destroy_sandbox 释放不需要的实例",
         MAX_SANDBOXES
     )
 }
@@ -954,7 +954,7 @@ fn sandbox_quota_exceeded() -> String {
 #[cfg(not(feature = "vm"))]
 fn vm_feature_required(operation: &str) -> String {
     format!(
-        "{operation} requires microVM backend; enable vm feature and use MicroVm isolation level"
+        "{operation} 需要 microVM 后端。提示：启用 vm feature 并使用 microvm 隔离级别，或改用 auto 自动选择最优后端"
     )
 }
 
@@ -966,7 +966,7 @@ fn build_code_command(language: Option<&str>, code: &str) -> Result<String, Stri
         "bash" => Ok(format!("bash -c {escaped_code}")),
         "sh" | "shell" => Ok(format!("sh -c {escaped_code}")),
         other => Err(format!(
-            "unsupported language={other}, valid values: python, node, bash, sh"
+            "不支持的语言 '{other}'。提示：可选值为 python、node、bash、sh"
         )),
     }
 }
@@ -1213,16 +1213,13 @@ mod tests {
         let result =
             create_sandbox_with_options(IsolationLevel::Auto, Some(excessive_timeout_ms), None);
 
-        assert!(
-            matches!(result, Err(SdkError::Config(message)) if message.contains("timeout_ms"))
-        );
+        assert!(matches!(result, Err(SdkError::Config(message)) if message.contains("timeout_ms")));
     }
 
     #[test]
     fn test_create_sandbox_accepts_timeout_at_max() {
         let max_timeout_ms = MAX_SANDBOX_TIMEOUT_SECS * 1000;
-        let result =
-            create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None);
+        let result = create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None);
 
         // 可能因后端不可用失败，但不应因 timeout 校验失败
         if let Err(SdkError::Config(message)) = &result {
