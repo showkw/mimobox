@@ -170,7 +170,7 @@ class FileSystem:
 class Process:
     def run(
         self,
-        command: str,
+        command: Union[str, List[str]],
         env: Optional[Dict[str, str]] = ...,
         timeout: Optional[float] = ...,
         cwd: Optional[str] = ...,
@@ -274,6 +274,34 @@ class Sandbox:
         Raises:
             SandboxError: If the sandbox is destroyed or execution fails.
             SandboxProcessError: If the command exits non-zero or is killed.
+        """
+        ...
+
+    def exec(
+        self,
+        argv: List[str],
+        env: Optional[Dict[str, str]] = ...,
+        timeout: Optional[float] = ...,
+        cwd: Optional[str] = ...,
+    ) -> ExecuteResult:
+        """Execute a command with explicit argv (no shell parsing).
+
+        Arguments are passed directly to execve-style execution and are not
+        interpreted by a shell, so shell metacharacters remain ordinary bytes.
+
+        Args:
+            argv: Command and arguments list. Must be non-empty.
+            env: Optional environment variables to set for the command.
+            timeout: Optional timeout in seconds (float). Must be > 0 and finite.
+            cwd: Optional working directory for the command.
+
+        Returns:
+            An ExecuteResult with stdout, stderr, exit_code, and timed_out.
+
+        Raises:
+            SandboxError: If the sandbox is destroyed or execution fails.
+            SandboxProcessError: If the command exits non-zero or is killed.
+            ValueError: If argv is empty.
         """
         ...
 

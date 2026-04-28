@@ -491,20 +491,31 @@ struct PyProcess {
 
 #[pymethods]
 impl PyProcess {
-    /// 执行 shell 命令。
+    /// 执行 shell 命令或 argv 命令。
     #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
     fn run(
         &self,
         py: Python<'_>,
-        command: &str,
+        command: &Bound<'_, PyAny>,
         env: Option<std::collections::HashMap<String, String>>,
         timeout: Option<f64>,
         cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
-        let result = self
-            .sandbox
-            .call_method1(py, "execute", (command, env, timeout, cwd))?;
-        result.extract(py)
+        if let Ok(command) = command.extract::<String>() {
+            let result = self
+                .sandbox
+                .call_method1(py, "execute", (command, env, timeout, cwd))?;
+            result.extract(py)
+        } else if let Ok(argv) = command.extract::<Vec<String>>() {
+            let result = self
+                .sandbox
+                .call_method1(py, "exec", (argv, env, timeout, cwd))?;
+            result.extract(py)
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "command must be str or list[str]",
+            ))
+        }
     }
 
     /// 执行代码片段。
@@ -779,6 +790,45 @@ impl PySandbox {
                 (None, Some(timeout)) => sandbox.execute_with_timeout(&effective_command, timeout),
                 (None, None) => sandbox.execute(&effective_command),
             })
+            .map_err(map_sdk_error)?;
+        Ok(result.into())
+    }
+
+    /// Execute a command with explicit argv inside the sandbox.
+    ///
+    /// Arguments are passed directly to argv-style execution without shell parsing.
+    #[pyo3(signature = (argv, env=None, timeout=None, cwd=None))]
+    fn exec(
+        &mut self,
+        py: Python<'_>,
+        argv: Vec<String>,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+        cwd: Option<&str>,
+    ) -> PyResult<PyExecuteResult> {
+        if argv.is_empty() {
+            return Err(PyValueError::new_err("argv must not be empty"));
+        }
+
+        let sandbox = self.inner_mut()?;
+        let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
+
+        let effective_cwd = match cwd {
+            Some(dir) => {
+                validate_python_cwd(dir)?;
+                Some(dir.to_string())
+            }
+            None => None,
+        };
+
+        let options = mimobox_sdk::SdkExecOptions {
+            env: env.unwrap_or_default(),
+            timeout: parsed_timeout,
+            cwd: effective_cwd,
+        };
+
+        let result = py
+            .allow_threads(|| sandbox.exec_with_options(&argv, options))
             .map_err(map_sdk_error)?;
         Ok(result.into())
     }
