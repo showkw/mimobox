@@ -221,9 +221,9 @@ Note: This tool requires the `vm` feature.
 If you have `mimobox` CLI installed:
 
 ```bash
-mimobox mcp init claude    # Configure Claude Desktop
-mimobox mcp init cursor    # Configure Cursor IDE
-mimobox mcp init windsurf  # Configure Windsurf
+mimobox mcp-init claude    # Configure Claude Desktop
+mimobox mcp-init cursor    # Configure Cursor IDE
+mimobox mcp-init windsurf  # Configure Windsurf
 ```
 
 This automatically detects your MCP client and writes the correct configuration.
@@ -266,7 +266,49 @@ Start the MCP server with stdio transport:
 mimobox-mcp
 ```
 
-## 6. Feature Gates
+## 6. Authentication (HTTP mode)
+
+When running with `--transport http`, the MCP server supports Bearer token authentication to restrict access.
+
+### Configuration
+
+- **CLI flag**: `--auth-token <secret>`
+- **Environment variable**: `MIMOBOX_AUTH_TOKEN`
+
+Either method sets the token. When both are present, the CLI flag takes precedence.
+
+### Behavior
+
+- **Loopback addresses** (e.g., `127.0.0.1`): Token is optional. The server logs a warning if no token is configured.
+- **Non-loopback addresses** (e.g., `0.0.0.0`): Token is **required**. The server refuses to start without one (fail-closed).
+- When a token is configured, all HTTP requests must include an `Authorization: Bearer <token>` header. Requests without a valid token receive `401 Unauthorized`.
+
+### Example
+
+```bash
+# Start with authentication
+mimobox-mcp --transport http --bind-addr 0.0.0.0 --port 8080 --auth-token my-secret-token
+
+# Or via environment variable
+MIMOBOX_AUTH_TOKEN=my-secret-token mimobox-mcp --transport http --bind-addr 0.0.0.0 --port 8080
+```
+
+```json
+{
+  "mcpServers": {
+    "mimobox": {
+      "command": "mimobox-mcp",
+      "args": ["--transport", "http", "--port", "8080"],
+      "env": {
+        "RUST_LOG": "info",
+        "MIMOBOX_AUTH_TOKEN": "my-secret-token"
+      }
+    }
+  }
+}
+```
+
+## 7. Feature Gates
 
 Feature gate semantics for `mimobox-mcp`:
 
@@ -275,7 +317,7 @@ Feature gate semantics for `mimobox-mcp`:
 
 When `vm` is not enabled, microVM-specific tools return explicit errors instead of silently degrading.
 
-## 7. Temporary Sandboxes
+## 8. Temporary Sandboxes
 
 `execute_code` and `execute_command` support omitting `sandbox_id`.
 

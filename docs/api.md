@@ -30,6 +30,7 @@ mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 - [IsolationLevel](#isolationlevel)
 - [TrustLevel](#trustlevel)
 - [NetworkPolicy](#networkpolicy)
+- [NamespaceDegradation](#namespacedegradation)
 - [ExecuteResult](#executeresult)
 - [FileType / DirEntry](#filetype--direntry)
 - [StreamEvent](#streamevent)
@@ -651,6 +652,8 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 | `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write mount paths |
 | `allowed_http_domains` | `Vec<String>` | `[]` | HTTP proxy domain whitelist |
 | `allow_fork` | `bool` | `false` | Allow child process creation |
+| `max_processes` | `Option<u32>` | `None` | Maximum process count per sandbox (cgroup v2 pids.max). `None` uses backend default |
+| `namespace_degradation` | `NamespaceDegradation` | `FailClosed` | Namespace degradation policy: `FailClosed` (fail on any namespace error) or `AllowDegradation` (warn and continue) |
 | `vm_vcpu_count` | `u8` | `1` | microVM vCPU count |
 | `vm_memory_mb` | `u32` | `256` | microVM guest memory in MiB |
 | `kernel_path` | `Option<PathBuf>` | `None` | Custom microVM kernel path |
@@ -699,6 +702,8 @@ Fluent builder for constructing `Config` instances.
 | `fs_readonly(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-only mount paths |
 | `fs_readwrite(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-write mount paths |
 | `allow_fork(allow)` | `bool` | Allow child process creation |
+| `max_processes(processes)` | `u32` | Set maximum process count per sandbox |
+| `namespace_degradation(policy)` | `NamespaceDegradation` | Set namespace degradation policy |
 | `allowed_http_domains(domains)` | `impl IntoIterator<Item = impl Into<String>>` | Set HTTP proxy domain whitelist |
 | `vm_vcpu_count(count)` | `u8` | Set microVM vCPU count |
 | `vm_memory_mb(mb)` | `u32` | Set microVM guest memory in MiB |
@@ -795,6 +800,26 @@ pub enum NetworkPolicy {
 | `AllowDomains(domains)` | Keep direct sandbox network blocked, but allow HTTP requests via the host proxy to the specified domains. |
 | `AllowAll` | Allow unrestricted network access. Uses a permissive Seccomp profile. |
 
+
+---
+
+## NamespaceDegradation
+
+*(re-exported from `mimobox-core`)*
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NamespaceDegradation {
+    #[default]
+    FailClosed,
+    AllowDegradation,
+}
+```
+
+| Variant | Description |
+|---------|-------------|
+| `FailClosed` | Any namespace creation failure returns an error. Default, recommended for production. |
+| `AllowDegradation` | Warn on namespace failure and continue execution. Only for development/CI where namespace support may be incomplete. |
 ---
 
 ## ExecuteResult
@@ -1259,6 +1284,8 @@ pub struct SandboxConfig {
     pub timeout_secs: Option<u64>,
     pub seccomp_profile: SeccompProfile,
     pub allow_fork: bool,
+    pub max_processes: Option<u32>,
+    pub namespace_degradation: NamespaceDegradation,
     pub allowed_http_domains: Vec<String>,
 }
 ```

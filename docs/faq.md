@@ -111,8 +111,8 @@ cargo build --release -p mimobox-mcp --features vm
 Use the CLI helper after installing `mimobox` and `mimobox-mcp`. These commands write the client-specific MCP configuration.
 
 ```bash
-mimobox mcp init cursor
-mimobox mcp init windsurf
+mimobox mcp-init cursor
+mimobox mcp-init windsurf
 ```
 
 ### Q: Can I run the MCP server on macOS?

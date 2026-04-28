@@ -62,13 +62,18 @@ Notes:
 Constructor:
 
 ```python
-Sandbox(*, isolation=None, allowed_http_domains=None)
+Sandbox(*, isolation=None, allowed_http_domains=None, memory_limit_mb=None, timeout_secs=None, max_processes=None, trust_level=None, network=None)
 ```
 
 Parameters:
 
 - `isolation`: Isolation level. The default `None` is equivalent to `"auto"`.
 - `allowed_http_domains`: List of domains allowed by the HTTP proxy. Wildcard patterns are supported.
+- `memory_limit_mb`: Memory limit in MiB. Defaults to 512.
+- `timeout_secs`: Sandbox command timeout in seconds. Defaults to 30.
+- `max_processes`: Maximum process count. Defaults to backend default (unlimited).
+- `trust_level`: Trust level: `"trusted"`, `"semi_trusted"`, or `"untrusted"`. Defaults to `"semi_trusted"`.
+- `network`: Network policy: `"deny_all"`, `"allow_domains"`, or `"allow_all"`. Defaults to `"deny_all"`.
 
 Public methods:
 
