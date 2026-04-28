@@ -833,6 +833,8 @@ mod tests {
     use crate::types::StreamEvent;
     #[cfg(feature = "vm")]
     use crate::vm_helpers::should_prepare_vm_pool;
+    #[cfg(feature = "vm")]
+    use mimobox_core::{PtyConfig, PtySize};
 
     fn inner_is_initialized(sandbox: &Sandbox) -> bool {
         sandbox.inner.is_some()

@@ -32,6 +32,7 @@ fn snapshot_round_trip_restores_same_bytes() {
             cpu_quota_us: Some(50_000),
             kernel_path: PathBuf::from("/opt/mimobox/vmlinux"),
             rootfs_path: PathBuf::from("/opt/mimobox/rootfs.ext4"),
+            security_profile: Default::default(),
         },
         vec![1, 2, 3, 4],
         vec![5, 6, 7, 8],
@@ -67,6 +68,7 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
             cpu_quota_us: None,
             kernel_path: PathBuf::from("/nonexistent/vmlinux"),
             rootfs_path: PathBuf::from("/nonexistent/rootfs.cpio.gz"),
+            security_profile: Default::default(),
         };
         let result = MicrovmSandbox::new(bad_config);
         assert!(result.is_err(), "invalid config (vcpu_count=0) must fail");
