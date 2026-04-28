@@ -370,6 +370,13 @@ impl MimoboxServer {
             parse_isolation_level(request.isolation_level.as_deref()).map_err(to_error)?;
         let timeout_ms = request.timeout_ms;
         let memory_limit_mb = request.memory_limit_mb;
+        {
+            let sandboxes = self.sandboxes.lock().await;
+            if sandboxes.len() >= MAX_SANDBOXES {
+                return Err(to_error(sandbox_quota_exceeded()));
+            }
+        }
+
         let sandbox = tokio::task::spawn_blocking(move || {
             create_sandbox_with_options(isolation, timeout_ms, memory_limit_mb)
         })
@@ -911,8 +918,14 @@ fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<
 
 fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
     if let Some(timeout_ms) = timeout_ms {
-        let timeout_secs = timeout_ms / 1000;
-        if timeout_secs > MAX_SANDBOX_TIMEOUT_SECS {
+        if timeout_ms == 0 {
+            return Err(
+                "timeout_ms=0 is not valid, must be positive。提示：请设置为正整数毫秒值，推荐 30000 毫秒（30 秒）"
+                    .to_string(),
+            );
+        }
+
+        if timeout_ms > MAX_SANDBOX_TIMEOUT_SECS * 1000 {
             return Err(format!(
                 "timeout_ms={timeout_ms} 超过最大值 {} 毫秒（{MAX_SANDBOX_TIMEOUT_SECS} 秒）。提示：请减小超时时间，推荐 30000 毫秒（30 秒）",
                 MAX_SANDBOX_TIMEOUT_SECS * 1000
@@ -1245,8 +1258,27 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_timeout_ms_rejects_zero() {
+        let result = validate_timeout_ms(Some(0));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("timeout_ms=0 is not valid, must be positive")
+        );
+    }
+
+    #[test]
     fn test_validate_timeout_ms_rejects_above_max() {
         let excessive = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
+        let result = validate_timeout_ms(Some(excessive));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timeout_ms"));
+    }
+
+    #[test]
+    fn test_validate_timeout_ms_rejects_non_multiple_above_max() {
+        let excessive = MAX_SANDBOX_TIMEOUT_SECS * 1000 + 999;
         let result = validate_timeout_ms(Some(excessive));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("timeout_ms"));

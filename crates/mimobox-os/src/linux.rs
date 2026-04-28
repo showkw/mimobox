@@ -734,10 +734,12 @@ fn apply_security_policies_and_exec(
             Ok(ForkResult::Child) => {
                 // 孙进程：PID namespace 已生效，先刷新 /proc 视图，再继续应用 seccomp。
                 if let Err(e) = remount_proc_for_pid_namespace() {
-                    // SAFETY: write_error only writes a warning to stderr. Containerized
-                    // environments may deny remounting /proc, so this failure is non-fatal.
+                    // 必须 fail-closed：如果 /proc 保留宿主 PID namespace 视图，
+                    // 会泄露宿主进程信息，违反沙箱隔离承诺。
+                    // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
                     unsafe {
-                        write_error(2, &format!("warning: remount /proc failed: {e}"));
+                        write_error(2, &format!("remount /proc failed (fatal): {e}"));
+                        libc::_exit(124);
                     }
                 }
             }
