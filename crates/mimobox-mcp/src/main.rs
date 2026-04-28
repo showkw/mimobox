@@ -25,6 +25,10 @@ struct Cli {
     /// CORS 允许的 origin 列表，逗号分隔，如 'http://localhost:3000,http://localhost:8080'。默认限制为 localhost。
     #[arg(long)]
     allowed_origins: Option<String>,
+
+    /// HTTP Bearer token 认证密钥，可通过 MIMOBOX_AUTH_TOKEN 环境变量设置
+    #[arg(long = "auth-token", env = "MIMOBOX_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -52,7 +56,9 @@ async fn main() -> AppResult<()> {
 
     match cli.transport.as_str() {
         "stdio" => run_stdio().await,
-        "http" => http::run_http_server(&cli.bind_addr, port, cli.allowed_origins).await,
+        "http" => {
+            http::run_http_server(&cli.bind_addr, port, cli.allowed_origins, cli.auth_token).await
+        }
         _ => {
             tracing::error!("不支持的传输模式: {}，请使用 stdio 或 http", cli.transport);
             std::process::exit(1);

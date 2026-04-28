@@ -25,6 +25,7 @@ type HttpResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
 type AllowedOrigins = Arc<Vec<String>>;
+type AuthToken = Arc<Option<String>>;
 
 /// HTTP stateful session 最多保留 100 个 server handle，限制 registry 内存增长。
 const MAX_CONCURRENT_SESSIONS: usize = 100;
@@ -36,8 +37,13 @@ pub async fn run_http_server(
     bind_addr: &str,
     port: u16,
     allowed_origins: Option<String>,
+    auth_token: Option<String>,
 ) -> HttpResult<()> {
-    tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
+    if auth_token.is_some() {
+        tracing::info!("HTTP 模式已启用 Bearer token 认证");
+    } else {
+        tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
+    }
     if !is_local_bind_addr(bind_addr) {
         tracing::warn!(
             bind_addr,
@@ -46,15 +52,19 @@ pub async fn run_http_server(
     }
 
     let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
+    let auth_token = Arc::new(auth_token);
     let server_registry = Arc::new(Mutex::new(Vec::new()));
     let service = create_mcp_service(server_registry.clone(), bind_addr);
-    let app =
-        Router::new()
-            .route_service("/mcp", service)
-            .layer(axum::middleware::from_fn_with_state(
-                allowed_origins,
-                cors_middleware,
-            ));
+    let app = Router::new()
+        .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_token,
+            auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            allowed_origins,
+            cors_middleware,
+        ));
 
     let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
     let local_addr = listener.local_addr()?;
@@ -276,13 +286,68 @@ fn apply_cors_headers(headers: &mut HeaderMap, allowed_origin: Option<&HeaderVal
     headers.insert(
         HeaderName::from_static("access-control-allow-headers"),
         HeaderValue::from_static(
-            "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID",
+            "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID",
         ),
     );
     headers.insert(
         HeaderName::from_static("access-control-expose-headers"),
         HeaderValue::from_static("Mcp-Session-Id, Mcp-Protocol-Version"),
     );
+}
+
+async fn auth_middleware(
+    State(auth_token): State<AuthToken>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(expected_token) = auth_token.as_ref().as_deref() else {
+        return next.run(req).await;
+    };
+
+    if bearer_token(req.headers())
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
+    {
+        return next.run(req).await;
+    }
+
+    unauthorized_response()
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let authorization = headers
+        .get(HeaderName::from_static("authorization"))?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = authorization.split_once(' ')?;
+
+    if scheme.eq_ignore_ascii_case("Bearer") {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+fn unauthorized_response() -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    response.headers_mut().insert(
+        HeaderName::from_static("www-authenticate"),
+        HeaderValue::from_static("Bearer"),
+    );
+    response
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    let max_len = a.len().max(b.len());
+
+    for index in 0..max_len {
+        let a_byte = a.get(index).copied().unwrap_or(0);
+        let b_byte = b.get(index).copied().unwrap_or(0);
+        diff |= usize::from(a_byte ^ b_byte);
+    }
+
+    diff == 0
 }
 
 #[cfg(test)]
@@ -301,5 +366,20 @@ mod tests {
         let origins = parse_allowed_origins(Some("http://localhost:3000, *".to_string()));
 
         assert_eq!(origins, vec![WILDCARD_ORIGIN.to_string()]);
+    }
+
+    #[test]
+    fn test_constant_time_eq_matches_equal_bytes() {
+        assert!(constant_time_eq(b"token", b"token"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_rejects_different_bytes() {
+        assert!(!constant_time_eq(b"token", b"t0ken"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_rejects_different_lengths() {
+        assert!(!constant_time_eq(b"token", b"token-extra"));
     }
 }
