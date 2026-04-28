@@ -1,4 +1,8 @@
-"""MimoBox — Local Sandbox Runtime for AI Agents. Run AI-generated code safely, locally, and instantly."""
+"""MimoBox — Local Sandbox Runtime for AI Agents.
+
+Run AI-generated code safely, locally, and instantly.
+No API keys. No Docker. No cloud.
+"""
 
 from typing import Dict, Iterator, List, Literal, Optional, Union
 

@@ -1,5 +1,6 @@
-> MimoBox — Local Sandbox Runtime for AI Agents.
-> Multi-layer isolation: OS (Landlock+Seccomp), Wasm (Wasmtime), microVM (KVM).
+> MimoBox — Local Sandbox Runtime for AI Agents
+> Run AI-generated code safely, locally, and instantly.
+> No API keys. No Docker. No cloud.
 
 ## Documentation
 
