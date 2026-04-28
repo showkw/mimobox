@@ -1,30 +1,32 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
+
+mod execute;
+mod files;
+mod http;
+mod pty;
+mod snapshot;
+
 use crate::config::{Config, IsolationLevel, TrustLevel};
-#[cfg(all(feature = "vm", target_os = "linux"))]
-use crate::dispatch::HttpRequestForSdk;
-use crate::dispatch::{ExecuteForSdk, StreamExecuteForSdk};
 use crate::error::SdkError;
 use crate::router::resolve_isolation;
-#[cfg(feature = "vm")]
-use crate::types::HttpResponse;
-use crate::types::{ExecuteResult, PtySession, SandboxSnapshot, StreamEvent};
+#[cfg(all(feature = "vm", target_os = "linux"))]
+use crate::types::SandboxSnapshot;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::{RestorePool, RestorePoolConfig};
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::map_microvm_error;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::vm_helpers::map_restore_pool_error;
-use crate::vm_helpers::{
-    build_code_command, destroy_backend_inner, map_pty_create_error, parse_command,
-};
+use crate::vm_helpers::{destroy_backend_inner, parse_command};
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
-use mimobox_core::{ErrorCode, FileStat, PtyConfig, PtySize, Sandbox as CoreSandbox, SandboxError};
+use mimobox_core::{ErrorCode, Sandbox as CoreSandbox, SandboxError};
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
-use std::sync::mpsc;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Internal backend instance enum.
 ///
@@ -72,12 +74,14 @@ pub(crate) enum SandboxInner {
 /// # }
 /// ```
 pub struct Sandbox {
-    config: Config,
-    inner: Option<SandboxInner>,
-    active_isolation: Option<IsolationLevel>,
+    pub(crate) config: Config,
+    pub(crate) inner: Option<SandboxInner>,
+    pub(crate) active_isolation: Option<IsolationLevel>,
     #[cfg(feature = "vm")]
-    vm_pool: Option<Arc<mimobox_vm::VmPool>>,
+    pub(crate) vm_pool: Option<Arc<mimobox_vm::VmPool>>,
 }
+
+// ── RestorePool ──
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl RestorePool {
@@ -127,26 +131,6 @@ impl RestorePool {
     }
 }
 
-macro_rules! dispatch_execute {
-    ($inner:expr, $binding:ident, $expr:expr, $ctx:literal) => {{
-        debug!(context = $ctx, "dispatching execute");
-        match $inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os($binding) => $expr,
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm($binding) => $expr,
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm($binding) => $expr,
-        }
-    }};
-}
-
 /// Dispatch macro for the three VM-only variants (`MicroVm`, `PooledMicroVm`,
 /// `RestoredPooledMicroVm`). Non-VM variants uniformly use the fallback expression.
 #[cfg(feature = "vm")]
@@ -163,12 +147,16 @@ macro_rules! dispatch_vm {
         }
     };
 }
+#[cfg(feature = "vm")]
+pub(crate) use dispatch_vm;
+
+// ── SdkExecOptions + 辅助函数 ──
 
 #[derive(Debug, Clone, Default)]
-struct SdkExecOptions {
-    env: HashMap<String, String>,
-    timeout: Option<Duration>,
-    cwd: Option<String>,
+pub(crate) struct SdkExecOptions {
+    pub(crate) env: HashMap<String, String>,
+    pub(crate) timeout: Option<Duration>,
+    pub(crate) cwd: Option<String>,
 }
 
 #[cfg(feature = "vm")]
@@ -184,7 +172,7 @@ impl From<mimobox_vm::GuestExecOptions> for SdkExecOptions {
 
 impl SdkExecOptions {
     #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn to_guest_exec_options(&self) -> mimobox_vm::GuestExecOptions {
+    pub(crate) fn to_guest_exec_options(&self) -> mimobox_vm::GuestExecOptions {
         mimobox_vm::GuestExecOptions {
             env: self.env.clone(),
             timeout: self.timeout,
@@ -272,7 +260,7 @@ fn validate_env_key(key: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
-fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
+pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
     use std::path::Component;
     if std::path::Path::new(cwd)
         .components()
@@ -296,26 +284,31 @@ fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
-fn map_core_file_error(error: mimobox_core::SandboxError) -> SdkError {
+// ── 文件错误映射辅助函数 ──
+
+pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     match error {
-        mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
+        SandboxError::Io(io_err) => SdkError::Io(io_err),
         other => SdkError::from_sandbox_execute_error(other),
     }
 }
 
-fn read_file_via_core(sandbox: &mut impl CoreSandbox, path: &str) -> Result<Vec<u8>, SandboxError> {
-    mimobox_core::Sandbox::read_file(sandbox, path)
+pub(crate) fn read_file_via_core(
+    sandbox: &mut impl CoreSandbox,
+    path: &str,
+) -> Result<Vec<u8>, SandboxError> {
+    CoreSandbox::read_file(sandbox, path)
 }
 
-fn write_file_via_core(
+pub(crate) fn write_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
     data: &[u8],
 ) -> Result<(), SandboxError> {
-    mimobox_core::Sandbox::write_file(sandbox, path, data)
+    CoreSandbox::write_file(sandbox, path, data)
 }
 
-fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> SdkError {
+pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> SdkError {
     SdkError::sandbox(
         ErrorCode::UnsupportedPlatform,
         format!(
@@ -325,7 +318,7 @@ fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> S
     )
 }
 
-fn map_os_core_file_error(
+pub(crate) fn map_os_core_file_error(
     operation: &str,
     unsupported_message: &str,
     error: SandboxError,
@@ -340,6 +333,13 @@ fn map_os_core_file_error(
         other => map_core_file_error(other),
     }
 }
+
+/// Re-export of `map_microvm_error` for sub-modules.
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub(crate) fn map_microvm_error(e: mimobox_vm::MicrovmError) -> SdkError {
+    crate::vm_helpers::map_microvm_error(e)
+}
+// ── Sandbox 生命周期方法 ──
 
 impl Sandbox {
     /// Creates a sandbox with default configuration.
@@ -430,594 +430,6 @@ impl Sandbox {
             .map_err(map_pool_error)?;
         sandbox.vm_pool = Some(Arc::new(pool));
         Ok(sandbox)
-    }
-
-    /// Takes a snapshot of the current sandbox.
-    ///
-    /// This capability is currently only available on `Linux + vm feature + MicroVm` backends.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mimobox_sdk::{Config, IsolationLevel, Sandbox};
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = Config::builder()
-    ///     .isolation(IsolationLevel::MicroVm)
-    ///     .build()?;
-    /// let mut sandbox = Sandbox::with_config(config)?;
-    /// let snapshot = sandbox.snapshot()?;
-    /// assert!(snapshot.size() > 0);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn snapshot(&mut self) -> Result<SandboxSnapshot, SdkError> {
-        #[cfg(all(feature = "vm", target_os = "linux"))]
-        {
-            self.ensure_backend_for_snapshot()?;
-            let inner = self.require_inner()?;
-
-            let snapshot = match inner {
-                SandboxInner::MicroVm(sandbox) => sandbox.snapshot().map_err(map_microvm_error),
-                SandboxInner::PooledMicroVm(sandbox) => {
-                    sandbox.snapshot().map_err(map_microvm_error)
-                }
-                SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                    sandbox.snapshot().map_err(map_microvm_error)
-                }
-                _ => Err(SdkError::sandbox(
-                    ErrorCode::UnsupportedPlatform,
-                    "current backend does not support snapshot",
-                    Some(
-                        "set isolation to `MicroVm` and run on Linux with vm feature enabled"
-                            .to_string(),
-                    ),
-                )),
-            }?;
-
-            Ok(SandboxSnapshot::from_core(snapshot))
-        }
-
-        #[cfg(not(all(feature = "vm", target_os = "linux")))]
-        {
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "snapshot not supported in current build",
-                Some("use snapshot on Linux with vm feature enabled".to_string()),
-            ))
-        }
-    }
-
-    /// Restores a new sandbox from a snapshot.
-    pub fn from_snapshot(snapshot: &SandboxSnapshot) -> Result<Self, SdkError> {
-        #[cfg(all(feature = "vm", target_os = "linux"))]
-        {
-            let sandbox =
-                mimobox_vm::MicrovmSandbox::restore(&snapshot.inner).map_err(map_microvm_error)?;
-            Ok(Self::from_initialized_inner(
-                SandboxInner::MicroVm(sandbox),
-                Config::builder()
-                    .isolation(IsolationLevel::MicroVm)
-                    .build()?,
-            ))
-        }
-
-        #[cfg(not(all(feature = "vm", target_os = "linux")))]
-        {
-            let _ = snapshot;
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "snapshot restore not supported in current build",
-                Some("use snapshot restore on Linux with vm feature enabled".to_string()),
-            ))
-        }
-    }
-
-    /// Forks the current sandbox into an independent copy.
-    ///
-    /// Only the microVM backend supports this. The forked sandbox shares
-    /// unmodified memory pages with the original sandbox (CoW), and each keeps
-    /// private copies after writes.
-    #[cfg(all(feature = "vm", target_os = "linux"))]
-    pub fn fork(&mut self) -> Result<Self, SdkError> {
-        self.ensure_backend_for_snapshot()?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            SandboxInner::MicroVm(sandbox) => {
-                let forked = sandbox.fork().map_err(map_microvm_error)?;
-                Ok(Self::from_initialized_inner(
-                    SandboxInner::MicroVm(forked),
-                    self.config.clone(),
-                ))
-            }
-            _ => Err(SdkError::unsupported_backend("fork")),
-        }
-    }
-
-    /// Fork stub for platforms without microVM support. Always returns `BackendUnavailable`.
-    #[cfg(not(all(feature = "vm", target_os = "linux")))]
-    pub fn fork(&mut self) -> Result<Self, SdkError> {
-        Err(SdkError::unsupported_backend("fork"))
-    }
-
-    /// Executes a command inside the sandbox.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mimobox_sdk::Sandbox;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut sandbox = Sandbox::new()?;
-    /// let result = sandbox.execute("/bin/echo hello")?;
-    /// assert_eq!(result.exit_code, Some(0));
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn execute(&mut self, command: &str) -> Result<ExecuteResult, SdkError> {
-        let args = parse_command(command)?;
-        self.ensure_backend(command)?;
-        let inner = self.require_inner()?;
-        dispatch_execute!(inner, s, s.execute_for_sdk(&args), "execute")
-    }
-
-    /// Execute code in the given language inside the sandbox.
-    ///
-    /// # Supported languages
-    ///
-    /// - "bash" -> bash -c <code>
-    /// - "sh" / "shell" -> sh -c <code>
-    /// - "python" / "python3" / "py" -> python3 -c <code>
-    /// - "javascript" / "js" / "node" / "nodejs" -> node -e <code>
-    pub fn execute_code(&mut self, language: &str, code: &str) -> Result<ExecuteResult, SdkError> {
-        let command = build_code_command(language, code)?;
-        self.execute(&command)
-    }
-
-    /// Lists directory entries under the specified path.
-    ///
-    /// Returns each entry's name, type, size, and symlink flag.
-    pub fn list_dir(&mut self, _path: &str) -> Result<Vec<mimobox_core::DirEntry>, SdkError> {
-        self.ensure_backend("/bin/ls")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
-                "list_dir",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
-                "list_dir",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.list_dir(_path).map_err(map_microvm_error),
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::list_dir(s, _path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
-        }
-    }
-
-    /// 检查指定路径的文件是否存在。
-    pub fn file_exists(&mut self, _path: &str) -> Result<bool, SdkError> {
-        self.ensure_backend("/bin/test")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
-                "file_exists",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
-                "file_exists",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.file_exists(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.file_exists(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => {
-                s.file_exists(_path).map_err(map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::file_exists(s, _path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
-        }
-    }
-
-    /// 删除指定路径的文件或空目录。
-    pub fn remove_file(&mut self, _path: &str) -> Result<(), SdkError> {
-        self.ensure_backend("/bin/test")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
-                "remove_file",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
-                "remove_file",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.remove_file(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.remove_file(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => {
-                s.remove_file(_path).map_err(map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::remove_file(s, _path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
-        }
-    }
-
-    /// 重命名/移动文件。
-    pub fn rename(&mut self, _from: &str, _to: &str) -> Result<(), SdkError> {
-        self.ensure_backend("/bin/test")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
-                "rename",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
-                "rename",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.rename(_from, _to).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.rename(_from, _to).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => {
-                s.rename(_from, _to).map_err(map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::rename(s, _from, _to).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
-        }
-    }
-
-    /// 返回文件元信息。
-    pub fn stat(&mut self, _path: &str) -> Result<FileStat, SdkError> {
-        self.ensure_backend("/bin/test")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
-                "stat",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
-                "stat",
-                "Use microVM backend for isolated file operations",
-            )),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.stat(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.stat(_path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.stat(_path).map_err(map_microvm_error),
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                mimobox_core::Sandbox::stat(s, _path).map_err(|err| match err {
-                    mimobox_core::SandboxError::Io(io_err) => SdkError::Io(io_err),
-                    other => SdkError::from_sandbox_execute_error(other),
-                })
-            }
-        }
-    }
-
-    /// Creates an interactive terminal session.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mimobox_sdk::Sandbox;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut sandbox = Sandbox::new()?;
-    /// let mut pty = sandbox.create_pty("/bin/sh")?;
-    /// pty.send_input(b"echo hello\n")?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn create_pty(&mut self, command: &str) -> Result<PtySession, SdkError> {
-        let args = parse_command(command)?;
-        if args.is_empty() {
-            return Err(SdkError::Config(
-                "PTY command must not be empty".to_string(),
-            ));
-        }
-
-        self.create_pty_with_config(PtyConfig {
-            command: args,
-            size: PtySize::default(),
-            env: std::collections::HashMap::new(),
-            cwd: None,
-            timeout: self.config.timeout,
-        })
-    }
-
-    /// Creates an interactive terminal session with a complete `PtyConfig`.
-    pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
-        if config.command.is_empty() {
-            return Err(SdkError::Config(
-                "PTY command must not be empty".to_string(),
-            ));
-        }
-
-        if let Some(cwd) = config.cwd.as_deref() {
-            validate_cwd(cwd)?;
-        }
-
-        self.ensure_backend_for_pty()?;
-        let inner = self.require_inner()?;
-
-        let session = match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config.clone()).map_err(map_pty_create_error)?
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(_) => {
-                return Err(SdkError::sandbox(
-                    ErrorCode::UnsupportedPlatform,
-                    "PTY sessions currently only support OS-level backend, microVM pool not supported yet",
-                    Some("set isolation to `Os` or use default Auto".to_string()),
-                ));
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(_) => {
-                return Err(SdkError::sandbox(
-                    ErrorCode::UnsupportedPlatform,
-                    "PTY sessions currently only support OS-level backend, restored microVM pool not supported yet",
-                    Some("set isolation to `Os` or use default Auto".to_string()),
-                ));
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(sandbox) => {
-                CoreSandbox::create_pty(sandbox, config).map_err(map_pty_create_error)?
-            }
-        };
-
-        Ok(PtySession::from_inner(session))
-    }
-
-    /// Executes a command with additional environment variables for this call.
-    pub fn execute_with_env(
-        &mut self,
-        command: &str,
-        env: HashMap<String, String>,
-    ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_sdk_options(
-            command,
-            SdkExecOptions {
-                env,
-                timeout: None,
-                cwd: None,
-            },
-        )
-    }
-
-    /// Executes a command with a timeout override where the backend supports it.
-    pub fn execute_with_timeout(
-        &mut self,
-        command: &str,
-        timeout: Duration,
-    ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_sdk_options(
-            command,
-            SdkExecOptions {
-                env: HashMap::new(),
-                timeout: Some(timeout),
-                cwd: None,
-            },
-        )
-    }
-
-    /// Executes a command with additional environment variables and a timeout override.
-    pub fn execute_with_env_and_timeout(
-        &mut self,
-        command: &str,
-        env: HashMap<String, String>,
-        timeout: Duration,
-    ) -> Result<ExecuteResult, SdkError> {
-        self.execute_with_sdk_options(
-            command,
-            SdkExecOptions {
-                env,
-                timeout: Some(timeout),
-                cwd: None,
-            },
-        )
-    }
-
-    /// Executes a command with a working directory override where the backend supports it.
-    pub fn execute_with_cwd(
-        &mut self,
-        command: &str,
-        cwd: &str,
-    ) -> Result<ExecuteResult, SdkError> {
-        validate_cwd(cwd)?;
-
-        self.execute_with_sdk_options(
-            command,
-            SdkExecOptions {
-                cwd: Some(cwd.to_string()),
-                ..Default::default()
-            },
-        )
-    }
-
-    #[cfg(feature = "vm")]
-    /// Executes a command in the microVM backend with full per-command execution options.
-    pub fn execute_with_vm_options_full(
-        &mut self,
-        command: &str,
-        options: mimobox_vm::GuestExecOptions,
-    ) -> Result<ExecuteResult, SdkError> {
-        if let Some(cwd) = options.cwd.as_deref() {
-            validate_cwd(cwd)?;
-        }
-
-        self.execute_with_sdk_options(command, options.into())
-    }
-
-    /// Executes a command as a stream of events.
-    pub fn stream_execute(
-        &mut self,
-        command: &str,
-    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
-        let args = parse_command(command)?;
-        let _ = &args;
-        self.ensure_backend(command)?;
-        let inner = self.require_inner()?;
-
-        dispatch_execute!(
-            inner,
-            sandbox,
-            sandbox.stream_execute_for_sdk(&args),
-            "stream_execute"
-        )
-    }
-
-    /// Reads file contents from the active sandbox backend.
-    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SdkError> {
-        self.ensure_backend("/bin/cat")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => read_file_via_core(s, path).map_err(|err| {
-                map_os_core_file_error(
-                    "read_file",
-                    "file reading not supported by current backend",
-                    err,
-                )
-            }),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => read_file_via_core(s, path).map_err(|err| {
-                map_os_core_file_error(
-                    "read_file",
-                    "file reading not supported by current backend",
-                    err,
-                )
-            }),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.read_file(path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => s.read_file(path).map_err(map_microvm_error),
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => read_file_via_core(s, path).map_err(map_core_file_error),
-        }
-    }
-
-    /// Writes file contents into the active sandbox backend.
-    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SdkError> {
-        self.ensure_backend("/bin/sh")?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => write_file_via_core(s, path, data).map_err(|err| {
-                map_os_core_file_error(
-                    "write_file",
-                    "file writing not supported by current backend",
-                    err,
-                )
-            }),
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => write_file_via_core(s, path, data).map_err(|err| {
-                map_os_core_file_error(
-                    "write_file",
-                    "file writing not supported by current backend",
-                    err,
-                )
-            }),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(s) => {
-                s.write_file(path, data).map_err(map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(s) => {
-                write_file_via_core(s, path, data).map_err(map_core_file_error)
-            }
-        }
-    }
-
-    #[cfg(feature = "vm")]
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    /// Sends a request through the controlled HTTP proxy.
-    pub fn http_request(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: std::collections::HashMap<String, String>,
-        body: Option<&[u8]>,
-    ) -> Result<HttpResponse, SdkError> {
-        self.ensure_backend_for_file_ops()?;
-        let inner = self.require_inner()?;
-
-        dispatch_vm!(
-            inner,
-            sandbox,
-            sandbox.http_request_for_sdk(method, url, headers, body),
-            Err(SdkError::sandbox(
-                ErrorCode::UnsupportedPlatform,
-                "HTTP proxy only supports microVM backend",
-                Some("set isolation to `MicroVm` and configure allowed_http_domains".to_string()),
-            ))
-        )
     }
 
     /// Returns the isolation level of the currently active backend.
@@ -1118,7 +530,7 @@ impl Sandbox {
     // ── 私有辅助方法 ──
 
     /// Returns the initialized backend instance, or a unified error if it is missing.
-    fn require_inner(&mut self) -> Result<&mut SandboxInner, SdkError> {
+    pub(crate) fn require_inner(&mut self) -> Result<&mut SandboxInner, SdkError> {
         self.inner.as_mut().ok_or_else(|| {
             SdkError::sandbox(
                 ErrorCode::SandboxCreateFailed,
@@ -1128,7 +540,7 @@ impl Sandbox {
         })
     }
 
-    fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
+    pub(crate) fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
         let isolation = resolve_isolation(&self.config, command)?;
 
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
@@ -1165,84 +577,8 @@ impl Sandbox {
         }
     }
 
-    fn execute_with_sdk_options(
-        &mut self,
-        command: &str,
-        options: SdkExecOptions,
-    ) -> Result<ExecuteResult, SdkError> {
-        if let Some(cwd) = options.cwd.as_deref() {
-            validate_cwd(cwd)?;
-        }
-
-        self.ensure_backend(command)?;
-        let inner = self.require_inner()?;
-
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(sandbox) => {
-                let args = build_fallback_command_args(command, &options)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(sandbox) => {
-                let args = build_fallback_command_args(command, &options)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(sandbox) => {
-                let args = parse_command(command)?;
-                sandbox.execute_for_sdk(&args)
-            }
-        }
-    }
-
     #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
+    pub(crate) fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto | IsolationLevel::MicroVm => IsolationLevel::MicroVm,
             IsolationLevel::Os | IsolationLevel::Wasm => {
@@ -1268,7 +604,7 @@ impl Sandbox {
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn ensure_backend_for_snapshot(&mut self) -> Result<(), SdkError> {
+    pub(crate) fn ensure_backend_for_snapshot(&mut self) -> Result<(), SdkError> {
         if self.inner.is_some() {
             return match self.active_isolation {
                 Some(IsolationLevel::MicroVm) => Ok(()),
@@ -1302,11 +638,11 @@ impl Sandbox {
     }
 
     #[cfg(all(feature = "vm", not(target_os = "linux")))]
-    fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
+    pub(crate) fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
         Err(SdkError::unsupported_backend("microvm"))
     }
 
-    fn ensure_backend_for_pty(&mut self) -> Result<(), SdkError> {
+    pub(crate) fn ensure_backend_for_pty(&mut self) -> Result<(), SdkError> {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto => {
                 if self.config.trust_level == TrustLevel::Untrusted {
@@ -1346,8 +682,8 @@ impl Sandbox {
         }
     }
 
-    #[cfg(all(feature = "vm", target_os = "linux"))]
-    fn from_initialized_inner(inner: SandboxInner, config: Config) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn from_initialized_inner(inner: SandboxInner, config: Config) -> Self {
         Self {
             config,
             inner: Some(inner),
@@ -1429,6 +765,7 @@ impl Sandbox {
         }
     }
 }
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
         const MAX_ATTEMPTS: u32 = 3;
@@ -1462,6 +799,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "vm")]
     use crate::TrustLevel;
+    use crate::types::StreamEvent;
     #[cfg(feature = "vm")]
     use crate::vm_helpers::should_prepare_vm_pool;
 
