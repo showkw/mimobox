@@ -5,7 +5,7 @@
 //! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
-    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel, NetworkPolicy,
+    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, NetworkPolicy,
     Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent, TrustLevel,
 };
 use pyo3::create_exception;
@@ -98,6 +98,16 @@ impl From<ExecuteResult> for PyExecuteResult {
                 Some(result.elapsed.as_secs_f64())
             },
         }
+    }
+}
+
+#[pymethods]
+impl PyExecuteResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "ExecuteResult(exit_code={}, timed_out={})",
+            self.exit_code, self.timed_out
+        )
     }
 }
 
@@ -242,7 +252,8 @@ impl PySnapshot {
     /// A restored `Snapshot` instance.
     #[classmethod]
     fn from_bytes(_cls: &Bound<'_, PyType>, data: &[u8]) -> PyResult<Self> {
-        let snapshot = RustSnapshot::from_bytes(data).map_err(map_sdk_error)?;
+        let py = _cls.py();
+        let snapshot = RustSnapshot::from_bytes(data).map_err(|e| map_sdk_error(e, py))?;
         Ok(Self { inner: snapshot })
     }
 
@@ -265,8 +276,9 @@ impl PySnapshot {
     /// * `SandboxError` - If the snapshot file is invalid.
     #[classmethod]
     fn from_file(_cls: &Bound<'_, PyType>, path: &str) -> PyResult<Self> {
+        let py = _cls.py();
         let snapshot =
-            RustSnapshot::from_file(std::path::PathBuf::from(path)).map_err(map_sdk_error)?;
+            RustSnapshot::from_file(std::path::PathBuf::from(path)).map_err(|e| map_sdk_error(e, py))?;
         Ok(Self { inner: snapshot })
     }
 
@@ -276,7 +288,7 @@ impl PySnapshot {
     ///
     /// The snapshot data as a bytes object.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = self.inner.to_bytes().map_err(map_sdk_error)?;
+        let bytes = self.inner.to_bytes().map_err(|e| map_sdk_error(e, py))?;
         Ok(PyBytes::new(py, bytes.as_slice()))
     }
 
@@ -706,7 +718,7 @@ impl PySandbox {
             network,
         })
         .map_err(PyValueError::new_err)?;
-        let sandbox = RustSandbox::with_config(config).map_err(map_sdk_error)?;
+        let sandbox = RustSandbox::with_config(config).map_err(|e| map_sdk_error(e, py))?;
         let sandbox = Py::new(
             py,
             Self {
@@ -792,7 +804,7 @@ impl PySandbox {
                 (None, Some(timeout)) => sandbox.execute_with_timeout(&effective_command, timeout),
                 (None, None) => sandbox.execute(&effective_command),
             })
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(result.into())
     }
 
@@ -831,7 +843,7 @@ impl PySandbox {
 
         let result = py
             .allow_threads(|| sandbox.exec_with_options(&argv, options))
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(result.into())
     }
 
@@ -883,7 +895,7 @@ impl PySandbox {
         let command = command.to_string();
         let receiver = py
             .allow_threads(|| sandbox.stream_execute(&command))
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(PyStreamIterator {
             receiver: Some(receiver),
         })
@@ -895,7 +907,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let timeout = parse_python_timeout(timeout_secs.unwrap_or(30.0))?;
         py.allow_threads(|| sandbox.wait_ready(timeout))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// Return whether the sandbox is currently ready.
@@ -921,7 +933,7 @@ impl PySandbox {
         let path = path.to_string();
         let entries = py
             .allow_threads(|| sandbox.list_dir(&path))
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(entries.into_iter().map(PyDirEntry::from).collect())
     }
 
@@ -930,7 +942,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
         py.allow_threads(|| sandbox.file_exists(&path))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// 删除指定路径的文件或空目录。
@@ -938,7 +950,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
         py.allow_threads(|| sandbox.remove_file(&path))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// 重命名/移动文件。
@@ -947,7 +959,7 @@ impl PySandbox {
         let from = from.to_string();
         let to = to.to_string();
         py.allow_threads(|| sandbox.rename(&from, &to))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// 返回文件元信息。
@@ -956,7 +968,7 @@ impl PySandbox {
         let path = path.to_string();
         py.allow_threads(|| sandbox.stat(&path))
             .map(PyFileStat::from)
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// Read a file from inside the sandbox.
@@ -978,7 +990,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
         py.allow_threads(|| sandbox.read_file(&path))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// Write bytes to a file inside the sandbox.
@@ -996,7 +1008,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
         py.allow_threads(|| sandbox.write_file(&path, &bytes))
-            .map_err(map_sdk_error)
+            .map_err(|e| map_sdk_error(e, py))
     }
 
     /// Capture a snapshot of the current sandbox state.
@@ -1013,7 +1025,7 @@ impl PySandbox {
         let sandbox = self.inner_mut()?;
         let snapshot = py
             .allow_threads(|| sandbox.snapshot())
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(PySnapshot { inner: snapshot })
     }
 
@@ -1039,7 +1051,7 @@ impl PySandbox {
         let inner = snapshot.inner.clone();
         let sandbox = py
             .allow_threads(|| RustSandbox::from_snapshot(&inner))
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         let sandbox = Py::new(
             py,
             Self {
@@ -1063,7 +1075,7 @@ impl PySandbox {
     /// * `SandboxError` - If forking fails.
     fn fork(&mut self, py: Python<'_>) -> PyResult<Py<Self>> {
         let sandbox = self.inner_mut()?;
-        let forked = py.allow_threads(|| sandbox.fork()).map_err(map_sdk_error)?;
+        let forked = py.allow_threads(|| sandbox.fork()).map_err(|e| map_sdk_error(e, py))?;
         let forked = Py::new(
             py,
             Self {
@@ -1106,7 +1118,7 @@ impl PySandbox {
         let headers = headers.unwrap_or_default();
         let response = py
             .allow_threads(|| sandbox.http_request(method, url, headers, body.as_deref()))
-            .map_err(map_sdk_error)?;
+            .map_err(|e| map_sdk_error(e, py))?;
         Ok(response.into())
     }
 
@@ -1117,10 +1129,17 @@ impl PySandbox {
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(sandbox) = self.inner.take() {
             py.allow_threads(|| sandbox.destroy())
-                .map_err(map_sdk_error)?;
+                .map_err(|e| map_sdk_error(e, py))?;
         }
 
         Ok(())
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            Some(_) => "Sandbox(active)".to_string(),
+            None => "Sandbox(closed)".to_string(),
+        }
     }
 
     /// Support `with Sandbox() as sandbox:` usage. Returns self.
@@ -1336,6 +1355,15 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
     }
 
     if let Some(memory_limit_mb) = options.memory_limit_mb {
+        if memory_limit_mb == 0 {
+            return Err("memory_limit_mb must be greater than 0".to_string());
+        }
+        if memory_limit_mb > MAX_MEMORY_LIMIT_MB {
+            return Err(format!(
+                "memory_limit_mb must not exceed {} MB",
+                MAX_MEMORY_LIMIT_MB
+            ));
+        }
         builder = builder.memory_limit_mb(memory_limit_mb);
     }
 
@@ -1468,7 +1496,28 @@ fn parse_config_timeout_secs(timeout_secs: f64) -> Result<Duration, String> {
         .map_err(|_| "timeout_secs 超出支持的范围。提示：请使用 0 到 86400 之间的值".to_string())
 }
 
-fn map_sdk_error(error: SdkError) -> PyErr {
+/// 构造带 code 和 suggestion 属性的 PyO3 异常。
+///
+/// 在异常实例上设置 `code` 和 `suggestion` 属性，便于 Python 侧程序化访问错误详情。
+fn make_exception_with_attrs(
+    err_type: &Bound<'_, PyType>,
+    message: String,
+    code: Option<&str>,
+    suggestion: Option<&str>,
+) -> PyErr {
+    let instance = err_type
+        .call1((message,))
+        .expect("构造异常实例失败");
+    if let Some(c) = code {
+        instance.setattr("code", c).ok();
+    }
+    if let Some(s) = suggestion {
+        instance.setattr("suggestion", s).ok();
+    }
+    PyErr::from_value(instance.into_any())
+}
+
+fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
     match error {
         SdkError::Config(message) => PyValueError::new_err(message),
         SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
@@ -1488,38 +1537,106 @@ fn map_sdk_error(error: SdkError) -> PyErr {
             message,
             suggestion,
         } => {
-            let detail = match suggestion {
-                Some(suggestion) => format!("{message}. Suggestion: {suggestion}"),
-                None => message,
-            };
+            let code_str = code.as_str();
+            let suggestion_str = suggestion.as_deref();
 
             match code {
                 ErrorCode::CommandTimeout | ErrorCode::HttpTimeout => {
-                    SandboxTimeoutError::new_err(detail)
+                    make_exception_with_attrs(
+                        &py.get_type::<SandboxTimeoutError>(),
+                        message,
+                        Some(code_str),
+                        suggestion_str,
+                    )
                 }
-                ErrorCode::MemoryLimitExceeded => SandboxMemoryError::new_err(detail),
-                ErrorCode::CpuLimitExceeded => SandboxCpuLimitError::new_err(detail),
-                ErrorCode::FileNotFound => PyFileNotFoundError::new_err(detail),
-                ErrorCode::FilePermissionDenied => PyPermissionError::new_err(detail),
-                ErrorCode::FileTooLarge => SandboxError::new_err(detail),
-                ErrorCode::NotDirectory => SandboxError::new_err(detail),
+                ErrorCode::MemoryLimitExceeded => make_exception_with_attrs(
+                    &py.get_type::<SandboxMemoryError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::CpuLimitExceeded => make_exception_with_attrs(
+                    &py.get_type::<SandboxCpuLimitError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::FileNotFound => make_exception_with_attrs(
+                    &py.get_type::<PyFileNotFoundError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::FilePermissionDenied => make_exception_with_attrs(
+                    &py.get_type::<PyPermissionError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::FileTooLarge => make_exception_with_attrs(
+                    &py.get_type::<SandboxError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::NotDirectory => make_exception_with_attrs(
+                    &py.get_type::<SandboxError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::HttpConnectFail | ErrorCode::HttpTlsFail => {
-                    PyConnectionError::new_err(detail)
+                    make_exception_with_attrs(
+                        &py.get_type::<PyConnectionError>(),
+                        message,
+                        Some(code_str),
+                        suggestion_str,
+                    )
                 }
-                ErrorCode::InvalidConfig => PyValueError::new_err(detail),
-                ErrorCode::UnsupportedPlatform => PyNotImplementedError::new_err(detail),
+                ErrorCode::InvalidConfig => make_exception_with_attrs(
+                    &py.get_type::<PyValueError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
+                ErrorCode::UnsupportedPlatform => make_exception_with_attrs(
+                    &py.get_type::<PyNotImplementedError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::CommandExit(_) | ErrorCode::CommandKilled => {
-                    SandboxProcessError::new_err(detail)
+                    make_exception_with_attrs(
+                        &py.get_type::<SandboxProcessError>(),
+                        message,
+                        Some(code_str),
+                        suggestion_str,
+                    )
                 }
                 ErrorCode::HttpDeniedHost
                 | ErrorCode::HttpBodyTooLarge
-                | ErrorCode::HttpInvalidUrl => SandboxHttpError::new_err(detail),
+                | ErrorCode::HttpInvalidUrl => make_exception_with_attrs(
+                    &py.get_type::<SandboxHttpError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 ErrorCode::SandboxNotReady
                 | ErrorCode::SandboxDestroyed
-                | ErrorCode::SandboxCreateFailed => SandboxLifecycleError::new_err(detail),
+                | ErrorCode::SandboxCreateFailed => make_exception_with_attrs(
+                    &py.get_type::<SandboxLifecycleError>(),
+                    message,
+                    Some(code_str),
+                    suggestion_str,
+                ),
                 _ => {
                     tracing::warn!("未识别的 ErrorCode 变体，降级为 SandboxError", code = ?code);
-                    SandboxError::new_err(detail)
+                    make_exception_with_attrs(
+                        &py.get_type::<SandboxError>(),
+                        message,
+                        Some(code_str),
+                        suggestion_str,
+                    )
                 }
             }
         }
@@ -1560,18 +1677,18 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyProcess>()?;
     module.add_class::<PySnapshotOps>()?;
     module.add_class::<PyNetwork>()?;
-    module.add("SandboxError", py.get_type::<SandboxError>())?;
-    module.add("SandboxTimeoutError", py.get_type::<SandboxTimeoutError>())?;
-    module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
-    module.add("SandboxMemoryError", py.get_type::<SandboxMemoryError>())?;
+    module.add("SandboxError", &py.get_type::<SandboxError>())?;
+    module.add("SandboxTimeoutError", &py.get_type::<SandboxTimeoutError>())?;
+    module.add("SandboxProcessError", &py.get_type::<SandboxProcessError>())?;
+    module.add("SandboxMemoryError", &py.get_type::<SandboxMemoryError>())?;
     module.add(
         "SandboxCpuLimitError",
-        py.get_type::<SandboxCpuLimitError>(),
+        &py.get_type::<SandboxCpuLimitError>(),
     )?;
-    module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
+    module.add("SandboxHttpError", &py.get_type::<SandboxHttpError>())?;
     module.add(
         "SandboxLifecycleError",
-        py.get_type::<SandboxLifecycleError>(),
+        &py.get_type::<SandboxLifecycleError>(),
     )?;
     register_atexit_handler(module)?;
     Ok(())

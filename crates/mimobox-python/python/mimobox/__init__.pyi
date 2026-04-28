@@ -26,6 +26,8 @@ class ExecuteResult:
     timed_out: bool
     elapsed: Optional[float]
 
+    def __repr__(self) -> str: ...
+
 
 class DirEntry:
     """A single directory entry returned by ``Sandbox.list_dir()``.
@@ -520,8 +522,15 @@ class SandboxError(Exception):
     - ValueError: invalid configuration (ErrorCode::InvalidConfig)
     - NotImplementedError: unsupported platform (ErrorCode::UnsupportedPlatform)
     - ConnectionError: HTTP connection/TLS failure (ErrorCode::HttpConnectFail, HttpTlsFail)
+
+    Attributes:
+        code: Stable error code string (e.g., ``"command_timeout"``), or ``None``
+            if not applicable. Only set for errors originating from the sandbox backend.
+        suggestion: Human-readable suggestion for resolving the error, or ``None``
+            if not applicable.
     """
-    ...
+    code: Optional[str]
+    suggestion: Optional[str]
 
 
 class SandboxProcessError(SandboxError):
