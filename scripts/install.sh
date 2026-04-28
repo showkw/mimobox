@@ -148,10 +148,15 @@ download() {
   checksum_url="$DOWNLOAD_URL.sha256"
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fSL "$DOWNLOAD_URL" -o "$TMP_FILE" || die "Download failed: $DOWNLOAD_URL"
+    http_code=$(curl -fSL -w '%{http_code}' -o "$TMP_FILE" "$DOWNLOAD_URL" 2>/dev/null) || true
+    if [ "$http_code" = "404" ] || [ "$http_code" = "000" ]; then
+      die "No binary available for $TARGET. Pre-built binaries may not be available for this platform. See: https://github.com/$REPO/releases"
+    fi
     curl -fSL "$checksum_url" -o "$TMP_CHECKSUM" || die "Download failed: $checksum_url"
   elif command -v wget >/dev/null 2>&1; then
-    wget -O "$TMP_FILE" "$DOWNLOAD_URL" || die "Download failed: $DOWNLOAD_URL"
+    if ! wget -O "$TMP_FILE" "$DOWNLOAD_URL" 2>/dev/null; then
+      die "No binary available for $TARGET. Pre-built binaries may not be available for this platform. See: https://github.com/$REPO/releases"
+    fi
     wget -O "$TMP_CHECKSUM" "$checksum_url" || die "Download failed: $checksum_url"
   else
     die "curl or wget is required to download mimobox CLI"

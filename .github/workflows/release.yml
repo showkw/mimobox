@@ -30,6 +30,10 @@ jobs:
             os: macos-latest
             cli_features: wasm
             build_mcp: false
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cli_features: wasm
+            build_mcp: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
