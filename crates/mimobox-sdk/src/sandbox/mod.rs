@@ -165,11 +165,15 @@ pub(crate) use dispatch_vm;
 
 // ── SdkExecOptions + 辅助函数 ──
 
+/// Per-command execution options for SDK execute APIs.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct SdkExecOptions {
-    pub(crate) env: HashMap<String, String>,
-    pub(crate) timeout: Option<Duration>,
-    pub(crate) cwd: Option<String>,
+pub struct SdkExecOptions {
+    /// Environment variables scoped to this command.
+    pub env: HashMap<String, String>,
+    /// Optional command-level timeout override where the backend supports it.
+    pub timeout: Option<Duration>,
+    /// Optional working directory for this command.
+    pub cwd: Option<String>,
 }
 
 #[cfg(feature = "vm")]
@@ -228,6 +232,43 @@ fn build_fallback_command_args(
     prefixed.push("/usr/bin/env".to_string());
     prefixed.extend(build_env_assignments(&options.env)?);
     prefixed.extend(args);
+    Ok(prefixed)
+}
+
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+fn build_fallback_argv_args(
+    args: &[String],
+    options: &SdkExecOptions,
+) -> Result<Vec<String>, SdkError> {
+    // OS/Wasm 后端的超时来自 SandboxConfig；per-command timeout 仅 VM 后端支持。
+    if options.timeout.is_some() {
+        tracing::warn!(
+            "per-command timeout is not supported by OS/Wasm backends;              using sandbox config timeout instead"
+        );
+    }
+    let _ = options.timeout;
+
+    let mut command_args = if let Some(cwd) = options.cwd.as_deref() {
+        let mut wrapped = Vec::with_capacity(args.len() + 5);
+        wrapped.push("/bin/sh".to_string());
+        wrapped.push("-c".to_string());
+        wrapped.push(r#"cd "$1" && shift && exec "$@""#.to_string());
+        wrapped.push("mimobox-cwd".to_string());
+        wrapped.push(cwd.to_string());
+        wrapped.extend(args.iter().cloned());
+        wrapped
+    } else {
+        args.to_vec()
+    };
+
+    if options.env.is_empty() {
+        return Ok(command_args);
+    }
+
+    let mut prefixed = Vec::with_capacity(command_args.len() + options.env.len() + 1);
+    prefixed.push("/usr/bin/env".to_string());
+    prefixed.extend(build_env_assignments(&options.env)?);
+    prefixed.append(&mut command_args);
     Ok(prefixed)
 }
 
@@ -842,6 +883,53 @@ mod tests {
 
     fn active_isolation(sandbox: &Sandbox) -> Option<IsolationLevel> {
         sandbox.active_isolation
+    }
+
+    #[test]
+    fn test_sdk_exec_rejects_empty_argv() {
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let empty: [&str; 0] = [];
+
+        match sandbox.exec(&empty) {
+            Err(SdkError::Config(message)) => {
+                assert_eq!(message, "argv must not be empty");
+            }
+            Err(other) => panic!("期望 Config 错误，实际为: {other}"),
+            Ok(_) => panic!("空 argv 不应执行成功"),
+        }
+
+        match sandbox.stream_exec(&empty) {
+            Err(SdkError::Config(message)) => {
+                assert_eq!(message, "argv must not be empty");
+            }
+            Err(other) => panic!("期望 Config 错误，实际为: {other}"),
+            Ok(_) => panic!("空 argv 不应流式执行成功"),
+        }
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_build_fallback_argv_args_with_cwd_uses_safe_shell_wrapper() {
+        let args = vec!["/bin/echo".to_string(), "hello; rm -rf /".to_string()];
+        let options = SdkExecOptions {
+            cwd: Some("/tmp/mimobox safe".to_string()),
+            ..Default::default()
+        };
+
+        let wrapped = build_fallback_argv_args(&args, &options).expect("构造 argv fallback 失败");
+
+        assert_eq!(
+            wrapped,
+            vec![
+                "/bin/sh",
+                "-c",
+                r#"cd "$1" && shift && exec "$@""#,
+                "mimobox-cwd",
+                "/tmp/mimobox safe",
+                "/bin/echo",
+                "hello; rm -rf /",
+            ]
+        );
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1464,6 +1552,54 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Exit(0))),
             "stream_execute 应返回 Exit(0) 事件: {events:?}"
+        );
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_exec_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let result = sandbox
+            .exec(&["/bin/echo", "hello", "world"])
+            .expect("exec 应成功");
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("hello world"));
+        sandbox.destroy().expect("销毁沙箱失败");
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_sdk_stream_exec_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
+        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+
+        let receiver = sandbox
+            .stream_exec(&["/bin/echo", "hello"])
+            .expect("stream_exec 应成功");
+        let events: Vec<_> = receiver.iter().collect();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Stdout(data) if String::from_utf8_lossy(data).contains("hello")
+            )),
+            "stream_exec 应返回 stdout 事件: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Exit(0))),
+            "stream_exec 应返回 Exit(0) 事件: {events:?}"
         );
         sandbox.destroy().expect("销毁沙箱失败");
     }

@@ -18,9 +18,9 @@ use tracing::debug;
     all(feature = "vm", target_os = "linux")
 ))]
 use super::SandboxInner;
-#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-use super::build_fallback_command_args;
 use super::{Sandbox, SdkExecOptions, validate_cwd};
+#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+use super::{build_fallback_argv_args, build_fallback_command_args};
 
 macro_rules! dispatch_execute {
     ($inner:expr, $binding:ident, $expr:expr, $ctx:literal) => {{
@@ -47,6 +47,8 @@ macro_rules! dispatch_execute {
 impl Sandbox {
     /// Executes a command inside the sandbox.
     ///
+    /// Prefer [`exec()`](Sandbox::exec) for user-controlled input to avoid shell injection.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -67,6 +69,33 @@ impl Sandbox {
         dispatch_execute!(inner, s, s.execute_for_sdk(&args), "execute")
     }
 
+    /// Executes an argv vector inside the sandbox without shell parsing.
+    ///
+    /// This is the recommended safe execution API. Arguments are passed directly
+    /// to the backend `execve`-style execution path and are not interpreted by a
+    /// shell, so user-controlled input cannot change command structure through
+    /// shell metacharacters.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::Sandbox;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let result = sandbox.exec(&["/bin/echo", "hello", "world"])?;
+    /// assert_eq!(result.exit_code, Some(0));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn exec<A: AsRef<str>>(&mut self, argv: &[A]) -> Result<ExecuteResult, SdkError> {
+        let args = argv_to_strings(argv)?;
+        let command = args.join(" ");
+        self.ensure_backend(&command)?;
+        let inner = self.require_inner()?;
+        dispatch_execute!(inner, s, s.execute_for_sdk(&args), "exec")
+    }
+
     /// Execute code in the given language inside the sandbox.
     ///
     /// # Supported languages
@@ -81,6 +110,8 @@ impl Sandbox {
     }
 
     /// Executes a command as a stream of events.
+    ///
+    /// Prefer [`stream_exec()`](Sandbox::stream_exec) for user-controlled input to avoid shell injection.
     pub fn stream_execute(
         &mut self,
         command: &str,
@@ -95,6 +126,42 @@ impl Sandbox {
             sandbox,
             sandbox.stream_execute_for_sdk(&args),
             "stream_execute"
+        )
+    }
+
+    /// Executes an argv vector as a stream of events without shell parsing.
+    ///
+    /// This is the recommended safe streaming API for user-controlled input.
+    /// Arguments are passed directly to the backend `execve`-style execution path
+    /// and are not interpreted by a shell, so shell metacharacters remain ordinary
+    /// argument bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::{Sandbox, StreamEvent};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let receiver = sandbox.stream_exec(&["/bin/echo", "hello"])?;
+    /// assert!(receiver.iter().any(|event| matches!(event, StreamEvent::Exit(0))));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream_exec<A: AsRef<str>>(
+        &mut self,
+        argv: &[A],
+    ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
+        let args = argv_to_strings(argv)?;
+        let command = args.join(" ");
+        self.ensure_backend(&command)?;
+        let inner = self.require_inner()?;
+
+        dispatch_execute!(
+            inner,
+            sandbox,
+            sandbox.stream_execute_for_sdk(&args),
+            "stream_exec"
         )
     }
 
@@ -256,4 +323,123 @@ impl Sandbox {
             _ => unreachable!("no backend variant matched"),
         }
     }
+
+    /// Executes an argv vector with per-call execution options.
+    ///
+    /// This argv-first variant is safe for user-controlled input because command
+    /// arguments are never parsed by a shell. Environment variables, working
+    /// directory and timeout are scoped to this single execution where the active
+    /// backend supports them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mimobox_sdk::{Sandbox, SdkExecOptions};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox = Sandbox::new()?;
+    /// let result = sandbox.exec_with_options(
+    ///     &["/bin/echo", "hello"],
+    ///     SdkExecOptions::default(),
+    /// )?;
+    /// assert_eq!(result.exit_code, Some(0));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn exec_with_options<A: AsRef<str>>(
+        &mut self,
+        argv: &[A],
+        options: SdkExecOptions,
+    ) -> Result<ExecuteResult, SdkError> {
+        let args = argv_to_strings(argv)?;
+        if let Some(cwd) = options.cwd.as_deref() {
+            validate_cwd(cwd)?;
+        }
+        let _ = (&options.env, options.timeout);
+
+        let command = args.join(" ");
+        self.ensure_backend(&command)?;
+        let inner = self.require_inner()?;
+
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => {
+                let args = build_fallback_argv_args(&args, &options)?;
+                sandbox.execute_for_sdk(&args)
+            }
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => {
+                let args = build_fallback_argv_args(&args, &options)?;
+                sandbox.execute_for_sdk(&args)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => {
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options.to_guest_exec_options())
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(super::map_microvm_error)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => {
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options.to_guest_exec_options())
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(super::map_microvm_error)
+            }
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(sandbox) => {
+                let start = std::time::Instant::now();
+                sandbox
+                    .execute_with_options(&args, options.to_guest_exec_options())
+                    .map(|result| ExecuteResult {
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        exit_code: result.exit_code,
+                        timed_out: result.timed_out,
+                        elapsed: start.elapsed(),
+                    })
+                    .map_err(super::map_microvm_error)
+            }
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => {
+                #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+                {
+                    let args = build_fallback_argv_args(&args, &options)?;
+                    sandbox.execute_for_sdk(&args)
+                }
+
+                #[cfg(not(all(feature = "os", any(target_os = "linux", target_os = "macos"))))]
+                {
+                    sandbox.execute_for_sdk(&args)
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
+        }
+    }
+}
+
+fn argv_to_strings<A: AsRef<str>>(argv: &[A]) -> Result<Vec<String>, SdkError> {
+    if argv.is_empty() {
+        return Err(SdkError::Config("argv must not be empty".to_string()));
+    }
+
+    Ok(argv
+        .iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>())
 }
