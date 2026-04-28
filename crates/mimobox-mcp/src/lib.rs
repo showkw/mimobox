@@ -50,6 +50,16 @@ const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_LIST_DIR_ENTRIES: usize = 10_000;
 /// MCP 命令 stdout/stderr 单流最大 4MB，与底层 OS 输出保护保持同量级。
 const MAX_EXECUTE_OUTPUT: usize = 4 * 1024 * 1024;
+/// execute_command.command 最大 64KB，防止 shell-style 命令字符串耗尽内存。
+const MAX_EXECUTE_COMMAND_BYTES: usize = 64 * 1024;
+/// execute_command.argv 单个参数最大 32KB，避免异常大参数压垮后端。
+const MAX_EXECUTE_ARG_BYTES: usize = 32 * 1024;
+/// execute_command.argv 总长度最大 64KB，限制单次执行请求体大小。
+const MAX_EXECUTE_ARGV_BYTES: usize = 64 * 1024;
+/// execute_code.code 最大 1MB，避免代码片段在转义和执行前占用过多内存。
+const MAX_EXECUTE_CODE_BYTES: usize = 1024 * 1024;
+/// MCP 文件和目录路径最大 4096 字节，对齐常见系统 PATH_MAX 级别限制。
+const MAX_MCP_PATH_BYTES: usize = 4096;
 /// 单个 MCP server 最多保留 64 个沙箱，防止客户端无限创建实例造成 DoS。
 const MAX_SANDBOXES: usize = 64;
 /// MCP sandbox 和命令执行最大超时 3600 秒（1 小时），防止客户端占用资源过久。
@@ -514,6 +524,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ExecuteCodeRequest>,
     ) -> Result<Json<ExecuteResponse>, Json<ErrorResponse>> {
+        validate_execute_code_size(&request.code).map_err(to_error)?;
         let command =
             build_code_command(request.language.as_deref(), &request.code).map_err(to_error)?;
         let result = self
@@ -531,6 +542,9 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ExecuteCommandRequest>,
     ) -> Result<Json<ExecuteResponse>, Json<ErrorResponse>> {
+        validate_execute_command_size(request.command.as_deref(), request.argv.as_deref())
+            .map_err(to_error)?;
+
         let argv = match (request.argv, request.command) {
             // 优先使用 argv
             (Some(argv), _) if !argv.is_empty() => argv,
@@ -566,6 +580,8 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ReadFileRequest>,
     ) -> Result<Json<ReadFileResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
         #[cfg(feature = "vm")]
         {
             let path = request.path;
@@ -607,6 +623,8 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<WriteFileRequest>,
     ) -> Result<Json<WriteFileResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
         #[cfg(feature = "vm")]
         {
             let data = STANDARD.decode(&request.content).map_err(|err| {
@@ -809,6 +827,8 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ListDirRequest>,
     ) -> Result<Json<ListDirResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
         let path = request.path;
         let sdk_entries = self
             .with_managed_sandbox(request.sandbox_id, {
@@ -998,6 +1018,57 @@ fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
                 MAX_SANDBOX_TIMEOUT_SECS * 1000
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_execute_command_size(
+    command: Option<&str>,
+    argv: Option<&[String]>,
+) -> Result<(), String> {
+    if let Some(command) = command {
+        validate_text_max_bytes("command", command, MAX_EXECUTE_COMMAND_BYTES)?;
+    }
+
+    if let Some(argv) = argv {
+        validate_argv_size(argv)?;
+    }
+
+    Ok(())
+}
+
+fn validate_argv_size(argv: &[String]) -> Result<(), String> {
+    let mut total_bytes = 0usize;
+
+    for (index, arg) in argv.iter().enumerate() {
+        validate_text_max_bytes(&format!("argv[{index}]"), arg, MAX_EXECUTE_ARG_BYTES)?;
+        total_bytes = total_bytes.saturating_add(arg.len());
+    }
+
+    if total_bytes > MAX_EXECUTE_ARGV_BYTES {
+        return Err(format!(
+            "argv 总长度过长：{total_bytes} 字节，超过 {MAX_EXECUTE_ARGV_BYTES} 字节限制。提示：请减少参数数量或缩短参数"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_execute_code_size(code: &str) -> Result<(), String> {
+    validate_text_max_bytes("code", code, MAX_EXECUTE_CODE_BYTES)
+}
+
+fn validate_path_size(path: &str) -> Result<(), String> {
+    validate_text_max_bytes("path", path, MAX_MCP_PATH_BYTES)
+}
+
+fn validate_text_max_bytes(field: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    let len = value.len();
+    if len > max_bytes {
+        return Err(format!(
+            "字段 {field} 过长：{len} 字节，超过 {max_bytes} 字节限制。提示：请缩短该字段"
+        ));
     }
 
     Ok(())
@@ -1349,6 +1420,68 @@ mod tests {
         let result = validate_timeout_ms(Some(excessive));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("timeout_ms"));
+    }
+
+    #[test]
+    fn test_validate_execute_command_size_accepts_boundaries() {
+        let command = "a".repeat(MAX_EXECUTE_COMMAND_BYTES);
+        let arg = "b".repeat(MAX_EXECUTE_ARG_BYTES);
+        let argv = vec![arg; MAX_EXECUTE_ARGV_BYTES / MAX_EXECUTE_ARG_BYTES];
+
+        assert!(validate_execute_command_size(Some(&command), Some(&argv)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_execute_command_size_rejects_long_command() {
+        let command = "a".repeat(MAX_EXECUTE_COMMAND_BYTES + 1);
+        let result = validate_execute_command_size(Some(&command), None);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("command"));
+    }
+
+    #[test]
+    fn test_validate_execute_command_size_rejects_long_argv_item() {
+        let argv = vec!["a".repeat(MAX_EXECUTE_ARG_BYTES + 1)];
+        let result = validate_execute_command_size(None, Some(&argv));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("argv[0]"));
+    }
+
+    #[test]
+    fn test_validate_execute_command_size_rejects_long_argv_total() {
+        let argv = vec![
+            "a".repeat(MAX_EXECUTE_ARG_BYTES),
+            "b".repeat(MAX_EXECUTE_ARG_BYTES),
+            "c".to_string(),
+        ];
+        let result = validate_execute_command_size(None, Some(&argv));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("argv 总长度过长"));
+    }
+
+    #[test]
+    fn test_validate_execute_code_size_enforces_one_mb() {
+        let max_code = "a".repeat(MAX_EXECUTE_CODE_BYTES);
+        let excessive_code = "a".repeat(MAX_EXECUTE_CODE_BYTES + 1);
+
+        assert!(validate_execute_code_size(&max_code).is_ok());
+        let result = validate_execute_code_size(&excessive_code);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("code"));
+    }
+
+    #[test]
+    fn test_validate_path_size_enforces_limit() {
+        let max_path = "a".repeat(MAX_MCP_PATH_BYTES);
+        let excessive_path = "a".repeat(MAX_MCP_PATH_BYTES + 1);
+
+        assert!(validate_path_size(&max_path).is_ok());
+        let result = validate_path_size(&excessive_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("path"));
     }
 
     #[test]

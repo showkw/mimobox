@@ -292,7 +292,8 @@ mod tests {
         match cli.command {
             CliCommand::Run(args) => {
                 assert_eq!(args.backend, Backend::Wasm);
-                assert_eq!(args.command, "/bin/echo hello");
+                assert_eq!(args.command.as_deref(), Some("/bin/echo hello"));
+                assert!(args.argv.is_empty());
                 assert_eq!(args.memory, Some(128));
                 assert_eq!(args.timeout, Some(5));
                 assert!(args.deny_network);
@@ -318,6 +319,8 @@ mod tests {
         match cli.command {
             CliCommand::Run(args) => {
                 assert_eq!(args.backend, Backend::Os);
+                assert_eq!(args.command.as_deref(), Some("/bin/echo hello"));
+                assert!(args.argv.is_empty());
                 assert_eq!(args.memory, None);
                 assert_eq!(args.timeout, None);
                 assert!(!args.deny_network);
@@ -336,10 +339,46 @@ mod tests {
         match cli.command {
             CliCommand::Run(args) => {
                 assert_eq!(args.backend, Backend::Auto);
-                assert_eq!(args.command, "/bin/echo hello");
+                assert_eq!(args.command.as_deref(), Some("/bin/echo hello"));
+                assert!(args.argv.is_empty());
             }
             _ => panic!("expected run subcommand"),
         }
+    }
+
+    #[test]
+    fn run_subcommand_parses_trailing_argv() {
+        let cli = Cli::try_parse_from([
+            "mimobox",
+            "run",
+            "--backend",
+            "os",
+            "--",
+            "/bin/echo",
+            "-n",
+            "hello world",
+        ])
+        .expect("run 子命令应成功解析 argv");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.backend, Backend::Os);
+                assert_eq!(args.command, None);
+                assert_eq!(args.argv, vec!["/bin/echo", "-n", "hello world"]);
+            }
+            _ => panic!("expected run subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_rejects_missing_command_and_argv() {
+        let error = Cli::try_parse_from(["mimobox", "run"])
+            .expect_err("run 子命令应要求提供 command 或 argv");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
@@ -926,7 +965,8 @@ mod tests {
     fn auto_backend_run_response_reports_resolved_backend() {
         let response = handle_run(RunArgs {
             backend: Backend::Auto,
-            command: "/bin/echo hello".to_string(),
+            command: Some("/bin/echo hello".to_string()),
+            argv: Vec::new(),
             memory: Some(128),
             timeout: Some(5),
             deny_network: true,

@@ -32,6 +32,7 @@ direct crates.io publication.
 
 - `--backend auto|os|wasm|kvm`
 - `--command <cmd>`
+- trailing `argv...` for direct argument execution
 - `--memory <mb>`
 - `--timeout <seconds>`
 - `--deny-network` / `--allow-network`
@@ -44,6 +45,7 @@ direct crates.io publication.
 
 ```sh
 mimobox run --command '/bin/echo hello'
+mimobox run -- /bin/echo hello
 mimobox run --backend kvm --command '/bin/uname -a'
 mimobox shell
 mimobox doctor

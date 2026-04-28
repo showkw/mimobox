@@ -22,6 +22,8 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::Duration;
 
+const MAX_PYTHON_TIMEOUT_SECS: f64 = 86_400.0;
+
 fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     use pyo3::types::PyBytes;
     if data.is_instance_of::<PyBytes>() {
@@ -1456,11 +1458,10 @@ fn parse_config_timeout_secs(timeout_secs: f64) -> Result<Duration, String> {
         );
     }
 
-    if timeout_secs > 86_400.0 {
-        return Err(
-            "timeout_secs 不能超过 86400。提示：最大超时 86400 秒（24小时），请减小该值"
-                .to_string(),
-        );
+    if timeout_secs > MAX_PYTHON_TIMEOUT_SECS {
+        return Err(format!(
+            "timeout_secs 不能超过 {MAX_PYTHON_TIMEOUT_SECS:.0}。提示：最大超时 86400 秒（24小时），请减小该值"
+        ));
     }
 
     Duration::try_from_secs_f64(timeout_secs)
@@ -1531,6 +1532,12 @@ fn parse_python_timeout(timeout: f64) -> PyResult<Duration> {
         return Err(PyValueError::new_err(
             "timeout 必须为有限正数。提示：请传入正数，如 timeout=30.0",
         ));
+    }
+
+    if timeout > MAX_PYTHON_TIMEOUT_SECS {
+        return Err(PyValueError::new_err(format!(
+            "timeout 不能超过 {MAX_PYTHON_TIMEOUT_SECS:.0}。提示：最大超时 86400 秒（24小时），请减小该值"
+        )));
     }
 
     Duration::try_from_secs_f64(timeout).map_err(|_| {
@@ -1638,6 +1645,22 @@ mod tests {
             ..Default::default()
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_python_timeout_accepts_max_value() {
+        let timeout = parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS).expect("最大 timeout 应可接受");
+
+        assert_eq!(timeout, Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn parse_python_timeout_rejects_above_max_value() {
+        let result = parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS + 0.001);
+
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("timeout 不能超过 86400"));
     }
 
     #[test]

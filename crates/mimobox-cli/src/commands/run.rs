@@ -20,6 +20,9 @@ use crate::capture::capture_stderr_bytes;
 
 pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     validate_resource_args(args.memory, args.timeout, args.vcpu_count)?;
+    let run_command = resolve_run_command(args.command.clone(), args.argv.clone())?;
+    let argv = run_command.argv().to_vec();
+    let requested_command = run_command.requested_command();
 
     let deny_network = resolve_run_deny_network(&args);
     info!(
@@ -34,7 +37,6 @@ pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
         "preparing to execute run subcommand"
     );
 
-    let argv = parse_command(&args.command)?;
     let memory_mb = Some(args.memory.unwrap_or(DEFAULT_MEMORY_MB));
     let timeout_secs = normalize_timeout(args.timeout);
     let allow_fork = args.allow_fork;
@@ -42,13 +44,22 @@ pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     let requested_backend = args.backend;
     let (execution, fallback_stderr) =
         capture_stderr_bytes(|| match resolve_run_execution_mode(args.backend) {
-            RunExecutionMode::Sdk => handle_run_via_sdk(
-                &args.command,
-                args.memory,
-                args.timeout,
-                deny_network,
-                args.allow_fork,
-            ),
+            RunExecutionMode::Sdk => match &run_command {
+                RunCommandInput::Command { command, .. } => handle_run_via_sdk(
+                    command,
+                    args.memory,
+                    args.timeout,
+                    deny_network,
+                    args.allow_fork,
+                ),
+                RunCommandInput::Argv(argv) => handle_run_argv_via_sdk(
+                    argv,
+                    args.memory,
+                    args.timeout,
+                    deny_network,
+                    args.allow_fork,
+                ),
+            },
             RunExecutionMode::Direct => {
                 let config =
                     build_sandbox_config(args.memory, args.timeout, deny_network, args.allow_fork);
@@ -76,7 +87,7 @@ pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     Ok(RunResponse {
         backend: execution.backend,
         requested_backend,
-        requested_command: args.command,
+        requested_command,
         argv,
         exit_code: execution.result.exit_code,
         timed_out: execution.result.timed_out,
@@ -113,13 +124,43 @@ pub(crate) fn handle_run_via_sdk(
         "executing command via SDK smart routing"
     );
 
+    handle_run_via_sdk_with(config, |sandbox| sandbox.execute(command))
+}
+
+pub(crate) fn handle_run_argv_via_sdk(
+    argv: &[String],
+    memory: Option<u64>,
+    timeout: Option<u64>,
+    deny_network: bool,
+    allow_fork: bool,
+) -> Result<RunExecution, CliError> {
+    if argv.is_empty() {
+        return Err(CliError::EmptyCommand);
+    }
+
+    let config = build_sdk_config(memory, timeout, deny_network, allow_fork);
+    info!(
+        memory_mb = config.memory_limit_mb,
+        timeout_secs = config.timeout.as_ref().map(Duration::as_secs),
+        deny_network,
+        allow_fork,
+        "executing argv via SDK smart routing"
+    );
+
+    handle_run_via_sdk_with(config, |sandbox| sandbox.exec(argv))
+}
+
+fn handle_run_via_sdk_with<F>(config: SdkConfig, execute: F) -> Result<RunExecution, CliError>
+where
+    F: FnOnce(&mut SdkSandbox) -> Result<SdkExecuteResult, mimobox_sdk::SdkError>,
+{
     let mut sandbox = SdkSandbox::with_config(config).map_err(|error| {
         let cli_error = map_sdk_error(error);
         error!(code = cli_error.code(), message = %cli_error, "SDK sandbox initialization failed");
         cli_error
     })?;
 
-    let execute_result = sandbox.execute(command);
+    let execute_result = execute(&mut sandbox);
 
     match execute_result {
         Ok(result) => {
@@ -127,9 +168,7 @@ pub(crate) fn handle_run_via_sdk(
                 .active_isolation()
                 .and_then(backend_from_sdk_isolation)
                 .ok_or_else(|| {
-                    let error = CliError::Sdk(
-                        "SDK execution succeeded but actual backend not recorded".to_string(),
-                    );
+                    let error = CliError::Sdk("SDK 执行成功但未记录实际后端".to_string());
                     error!(
                         code = error.code(),
                         message = %error,

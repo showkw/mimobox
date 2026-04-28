@@ -73,9 +73,20 @@ pub(crate) struct RunArgs {
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     pub(crate) backend: Backend,
 
-    /// Command to execute (shell-style string, e.g. "/bin/echo hello")
+    /// 要执行的命令字符串（shell-style，例如 "/bin/echo hello"）
     #[arg(long, value_name = "cmd")]
-    pub(crate) command: String,
+    pub(crate) command: Option<String>,
+
+    /// 直接执行的 argv 参数；放在选项之后，必要时使用 `--` 分隔。
+    #[arg(
+        value_name = "argv",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 1..,
+        required_unless_present = "command",
+        conflicts_with = "command"
+    )]
+    pub(crate) argv: Vec<String>,
 
     /// Memory limit in MB
     #[arg(long)]
@@ -392,15 +403,36 @@ pub(crate) enum RunExecutionMode {
     Direct,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunCommandInput {
+    Command { command: String, argv: Vec<String> },
+    Argv(Vec<String>),
+}
+
+impl RunCommandInput {
+    pub(crate) fn requested_command(&self) -> String {
+        match self {
+            Self::Command { command, .. } => command.clone(),
+            Self::Argv(argv) => argv.join(" "),
+        }
+    }
+
+    pub(crate) fn argv(&self) -> &[String] {
+        match self {
+            Self::Command { argv, .. } | Self::Argv(argv) => argv,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
     #[error("argument parsing failed: {0}")]
     Args(String),
 
-    #[error("command string parsing failed: {0}")]
+    #[error("命令字符串解析失败：{0}")]
     CommandParse(String),
 
-    #[error("command must not be empty")]
+    #[error("命令不能为空")]
     EmptyCommand,
 
     #[error("logging initialization failed: {0}")]
@@ -592,13 +624,28 @@ pub(crate) fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> S
 }
 
 pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
-    let argv = shlex::split(command).ok_or_else(|| {
-        CliError::CommandParse("command string contains unclosed quotes".to_string())
-    })?;
+    let argv = shlex::split(command)
+        .ok_or_else(|| CliError::CommandParse("命令字符串包含未闭合的引号".to_string()))?;
     if argv.is_empty() {
         return Err(CliError::EmptyCommand);
     }
     Ok(argv)
+}
+
+pub(crate) fn resolve_run_command(
+    command: Option<String>,
+    argv: Vec<String>,
+) -> Result<RunCommandInput, CliError> {
+    if !argv.is_empty() {
+        return Ok(RunCommandInput::Argv(argv));
+    }
+
+    if let Some(command) = command {
+        let argv = parse_command(&command)?;
+        return Ok(RunCommandInput::Command { command, argv });
+    }
+
+    Err(CliError::EmptyCommand)
 }
 
 pub(crate) fn sdk_result_into_sandbox_result(result: SdkExecuteResult) -> SandboxResult {
@@ -812,5 +859,40 @@ mod tests {
         assert!(zero.to_string().contains("got: 0"));
         assert_eq!(high.code(), "args_error");
         assert!(high.to_string().contains("got: 17"));
+    }
+
+    #[test]
+    fn resolve_run_command_prefers_argv() {
+        let input = resolve_run_command(
+            Some("/bin/echo ignored".to_string()),
+            vec!["/bin/printf".to_string(), "hello world".to_string()],
+        )
+        .expect("argv 模式应解析成功");
+
+        assert_eq!(
+            input,
+            RunCommandInput::Argv(vec!["/bin/printf".to_string(), "hello world".to_string()])
+        );
+        assert_eq!(input.requested_command(), "/bin/printf hello world");
+    }
+
+    #[test]
+    fn resolve_run_command_parses_command_string() {
+        let input = resolve_run_command(Some("/bin/echo 'hello world'".to_string()), Vec::new())
+            .expect("command 模式应解析成功");
+
+        assert_eq!(
+            input.argv(),
+            &["/bin/echo".to_string(), "hello world".to_string()]
+        );
+        assert_eq!(input.requested_command(), "/bin/echo 'hello world'");
+    }
+
+    #[test]
+    fn resolve_run_command_rejects_missing_input() {
+        let error = resolve_run_command(None, Vec::new()).expect_err("缺少命令应返回错误");
+
+        assert_eq!(error.code(), "empty_command");
+        assert!(error.to_string().contains("命令不能为空"));
     }
 }
