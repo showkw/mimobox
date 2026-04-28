@@ -15,6 +15,8 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Mutex;
 use std::sync::mpsc;
 
 fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
@@ -303,6 +305,20 @@ impl PySnapshot {
 struct PySandbox {
     inner: Option<RustSandbox>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SandboxRegistryEntry {
+    object_addr: usize,
+    data_addr: usize,
+}
+
+impl SandboxRegistryEntry {
+    fn object_ptr(self) -> *mut pyo3::ffi::PyObject {
+        self.object_addr as *mut pyo3::ffi::PyObject
+    }
+}
+
+static SANDBOX_REGISTRY: Mutex<Vec<SandboxRegistryEntry>> = Mutex::new(Vec::new());
 
 /// A single event from a streaming sandbox execution.
 ///
@@ -624,13 +640,22 @@ impl PySandbox {
     /// * `SandboxError` - If sandbox creation fails.
     #[new]
     #[pyo3(signature = (*, isolation=None, allowed_http_domains=None))]
-    fn new(isolation: Option<&str>, allowed_http_domains: Option<Vec<String>>) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        isolation: Option<&str>,
+        allowed_http_domains: Option<Vec<String>>,
+    ) -> PyResult<Py<Self>> {
         let config =
             build_python_config(isolation, allowed_http_domains).map_err(PyValueError::new_err)?;
         let sandbox = RustSandbox::with_config(config).map_err(map_sdk_error)?;
-        Ok(Self {
-            inner: Some(sandbox),
-        })
+        let sandbox = Py::new(
+            py,
+            Self {
+                inner: Some(sandbox),
+            },
+        )?;
+        register_sandbox(py, &sandbox)?;
+        Ok(sandbox)
     }
 
     /// 返回文件系统子模块。
@@ -918,11 +943,20 @@ impl PySandbox {
     ///
     /// * `SandboxError` - If restoration fails.
     #[classmethod]
-    fn from_snapshot(_cls: &Bound<'_, PyType>, snapshot: PyRef<'_, PySnapshot>) -> PyResult<Self> {
+    fn from_snapshot(
+        cls: &Bound<'_, PyType>,
+        snapshot: PyRef<'_, PySnapshot>,
+    ) -> PyResult<Py<Self>> {
         let sandbox = RustSandbox::from_snapshot(&snapshot.inner).map_err(map_sdk_error)?;
-        Ok(Self {
-            inner: Some(sandbox),
-        })
+        let py = cls.py();
+        let sandbox = Py::new(
+            py,
+            Self {
+                inner: Some(sandbox),
+            },
+        )?;
+        register_sandbox(py, &sandbox)?;
+        Ok(sandbox)
     }
 
     /// Create an independent sandbox that inherits the current state.
@@ -936,12 +970,17 @@ impl PySandbox {
     /// # Raises
     ///
     /// * `SandboxError` - If forking fails.
-    fn fork(&mut self, py: Python<'_>) -> PyResult<Self> {
+    fn fork(&mut self, py: Python<'_>) -> PyResult<Py<Self>> {
         let sandbox = self.inner_mut()?;
         let forked = py.allow_threads(|| sandbox.fork()).map_err(map_sdk_error)?;
-        Ok(Self {
-            inner: Some(forked),
-        })
+        let forked = Py::new(
+            py,
+            Self {
+                inner: Some(forked),
+            },
+        )?;
+        register_sandbox(py, &forked)?;
+        Ok(forked)
     }
 
     /// Perform an HTTPS request through the host-side proxy.
@@ -974,7 +1013,6 @@ impl PySandbox {
     ) -> PyResult<PyHttpResponse> {
         let sandbox = self.inner_mut()?;
         let headers = headers.unwrap_or_default();
-        let body = body;
         let response = py
             .allow_threads(|| sandbox.http_request(method, url, headers, body.as_deref()))
             .map_err(map_sdk_error)?;
@@ -1017,11 +1055,154 @@ impl PySandbox {
     ///
     /// 不如 close() 可靠（异常可能被吞），但作为最后防线防止 sandbox 泄漏。
     fn __del__(&mut self) {
+        if self.inner.is_none() {
+            return;
+        }
+
+        if !python_interpreter_initialized() {
+            self.skip_destroy_unraisable("__del__", "Python 解释器未初始化或已经关闭");
+            return;
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Python::with_gil(|py| {
+                if python_is_finalizing(py) {
+                    self.skip_destroy_unraisable("__del__", "Python 解释器正在 finalizing");
+                    return;
+                }
+
+                self.destroy_inner_unraisable(py, "__del__");
+            });
+        }));
+
+        if result.is_err() {
+            self.skip_destroy_unraisable("__del__", "无法获取 Python GIL 或清理过程发生 panic");
+        }
+    }
+}
+
+impl Drop for PySandbox {
+    fn drop(&mut self) {
+        unregister_sandbox(self.registry_key());
+    }
+}
+
+fn registry_entries() -> std::sync::MutexGuard<'static, Vec<SandboxRegistryEntry>> {
+    SANDBOX_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn register_sandbox(py: Python<'_>, sandbox: &Py<PySandbox>) -> PyResult<()> {
+    let data_addr = sandbox.try_borrow(py)?.registry_key();
+    let entry = SandboxRegistryEntry {
+        object_addr: sandbox.as_ptr() as usize,
+        data_addr,
+    };
+
+    let mut registry = registry_entries();
+    if !registry
+        .iter()
+        .any(|existing| existing.data_addr == data_addr)
+    {
+        registry.push(entry);
+    }
+
+    Ok(())
+}
+
+fn unregister_sandbox(data_addr: usize) {
+    registry_entries().retain(|entry| entry.data_addr != data_addr);
+}
+
+#[pyfunction]
+fn cleanup_active_sandboxes(py: Python<'_>) {
+    let entries = {
+        let mut registry = registry_entries();
+        std::mem::take(&mut *registry)
+    };
+
+    for entry in entries {
+        cleanup_registered_sandbox(py, entry);
+    }
+}
+
+fn cleanup_registered_sandbox(py: Python<'_>, entry: SandboxRegistryEntry) {
+    // SAFETY: registry 条目会在 PySandbox::drop 中先于 Python 对象释放被移除。
+    // atexit handler 持有 GIL，重建 borrowed reference 时存活对象不会并发释放。
+    let Some(sandbox_any) =
+        (unsafe { Bound::<PyAny>::from_borrowed_ptr_or_opt(py, entry.object_ptr()) })
+    else {
+        log_cleanup_warning("Sandbox atexit cleanup skipped: registry 条目为空");
+        return;
+    };
+
+    let Ok(sandbox_obj) = sandbox_any.downcast_into::<PySandbox>() else {
+        log_cleanup_warning("Sandbox atexit cleanup skipped: registry 条目类型不匹配");
+        return;
+    };
+
+    match sandbox_obj.try_borrow_mut() {
+        Ok(mut sandbox) => sandbox.destroy_inner_unraisable(py, "atexit"),
+        Err(_) => {
+            log_cleanup_warning("Sandbox atexit cleanup skipped: sandbox 当前正在被借用");
+        }
+    }
+}
+
+fn register_atexit_handler(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
+    let atexit = PyModule::import(py, "atexit")?;
+    let cleanup = pyo3::wrap_pyfunction!(cleanup_active_sandboxes, module)?;
+    atexit.call_method1("register", (cleanup,))?;
+    Ok(())
+}
+
+fn python_interpreter_initialized() -> bool {
+    // SAFETY: Py_IsInitialized 是进程级状态查询，不要求持有 GIL。
+    unsafe { pyo3::ffi::Py_IsInitialized() != 0 }
+}
+
+fn python_is_finalizing(py: Python<'_>) -> bool {
+    PyModule::import(py, "sys")
+        .and_then(|sys| sys.call_method0("is_finalizing"))
+        .and_then(|is_finalizing| is_finalizing.extract::<bool>())
+        .unwrap_or(true)
+}
+
+fn log_cleanup_warning(message: &str) {
+    eprintln!("mimobox warning: {message}");
+}
+
+fn destroy_sandbox_unraisable(py: Python<'_>, sandbox: RustSandbox, context: &str) {
+    let result = catch_unwind(AssertUnwindSafe(|| py.allow_threads(|| sandbox.destroy())));
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(_err)) => {
+            log_cleanup_warning(&format!("Sandbox.{context} cleanup failed: 错误详情已抑制"));
+        }
+        Err(_panic) => {
+            log_cleanup_warning(&format!("Sandbox.{context} cleanup panicked: panic 已抑制"));
+        }
+    }
+}
+
+impl PySandbox {
+    fn registry_key(&self) -> usize {
+        self as *const Self as usize
+    }
+
+    fn destroy_inner_unraisable(&mut self, py: Python<'_>, context: &str) {
         if let Some(sandbox) = self.inner.take() {
-            // 不传播错误，__del__ 中不允许 raise。
-            if let Err(_err) = sandbox.destroy() {
-                eprintln!("mimobox: Sandbox.__del__ cleanup failed (details suppressed)");
-            }
+            destroy_sandbox_unraisable(py, sandbox, context);
+        }
+    }
+
+    fn skip_destroy_unraisable(&mut self, context: &str, reason: &str) {
+        if let Some(sandbox) = self.inner.take() {
+            std::mem::forget(sandbox);
+            log_cleanup_warning(&format!("Sandbox.{context} cleanup skipped: {reason}"));
         }
     }
 }
@@ -1170,6 +1351,7 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "SandboxLifecycleError",
         py.get_type::<SandboxLifecycleError>(),
     )?;
+    register_atexit_handler(module)?;
     Ok(())
 }
 
