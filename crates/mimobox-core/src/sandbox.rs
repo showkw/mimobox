@@ -274,12 +274,8 @@ impl SandboxConfig {
 
     /// 校验配置合法性，返回不合理项的描述。
     pub fn validate(&self) -> Result<(), SandboxError> {
-        // Core 层没有 SDK NetworkPolicy 语义，DenyAll 场景不能携带代理白名单。
-        if self.deny_network && !self.allowed_http_domains.is_empty() {
-            return Err(SandboxError::ExecutionFailed(
-                "deny_network=true 但 allowed_http_domains 非空，DenyAll 网络策略不允许打开 HTTP 白名单".to_string(),
-            ));
-        }
+        // deny_network 只表示禁止沙箱内直连网络；allowed_http_domains 表示
+        // host 侧受控 HTTP 代理白名单，两者可以同时存在。
 
         // memory_limit_mb=Some(0) 无意义。
         if self.memory_limit_mb == Some(0) {

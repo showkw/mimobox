@@ -16,6 +16,7 @@
 #include <sys/io.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -58,6 +59,29 @@ struct sockaddr_vm {
 #define FS_RESULT_STATUS_IO_ERROR 2
 #define FS_RESULT_STATUS_PERMISSION_ERROR 3
 #define FS_RESULT_STATUS_NO_SPACE 4
+#define SANDBOX_ROOT_PATH "/sandbox"
+#define SANDBOX_PATH_PREFIX "/sandbox/"
+#define SANDBOX_PATH_PREFIX_LEN (sizeof(SANDBOX_PATH_PREFIX) - 1)
+
+#ifndef RESOLVE_NO_SYMLINKS
+#define RESOLVE_NO_SYMLINKS 0x04
+#endif
+#ifndef RESOLVE_BENEATH
+#define RESOLVE_BENEATH 0x08
+#endif
+#ifndef SYS_openat2
+#ifdef __NR_openat2
+#define SYS_openat2 __NR_openat2
+#endif
+#endif
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
+#ifdef O_PATH
+#define SANDBOX_DIR_OPEN_FLAGS (O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+#else
+#define SANDBOX_DIR_OPEN_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+#endif
 #ifdef USE_VSOCK
 #define VSOCK_HOST_CID 2
 #define VSOCK_HOST_PORT 1024
@@ -77,6 +101,12 @@ static const char *const BOOT_TIME_PREFIX = "BOOT_TIME:";
 static const int OUTPUT_STREAM_STDOUT = STDOUT_FILENO;
 static const int OUTPUT_STREAM_STDERR = STDERR_FILENO;
 static volatile sig_atomic_t current_command_pid = -1;
+
+struct open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
 
 typedef struct {
     char command_line[COMMAND_BUFFER_CAP];
@@ -511,6 +541,8 @@ static int fs_status_from_errno(int errnum) {
     case EISDIR:
     case ENAMETOOLONG:
     case EINVAL:
+    case ELOOP:
+    case EXDEV:
         return FS_RESULT_STATUS_PATH_ERROR;
     case EACCES:
     case EPERM:
@@ -553,7 +585,7 @@ static int validate_sandbox_path(const char *path) {
     if (path == NULL) {
         return FS_RESULT_STATUS_PATH_ERROR;
     }
-    if (strncmp(path, "/sandbox/", 9) != 0) {
+    if (strncmp(path, SANDBOX_PATH_PREFIX, SANDBOX_PATH_PREFIX_LEN) != 0) {
         return FS_RESULT_STATUS_PATH_ERROR;
     }
     if (has_parent_dir_component(path)) {
@@ -561,6 +593,144 @@ static int validate_sandbox_path(const char *path) {
     }
 
     return FS_RESULT_STATUS_OK;
+}
+
+static const char *sandbox_relative_path(const char *path) {
+    const char *relative_path = path + SANDBOX_PATH_PREFIX_LEN;
+
+    while (*relative_path == '/') {
+        relative_path++;
+    }
+
+    if (*relative_path == '\0') {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (path[strlen(path) - 1] == '/') {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    return relative_path;
+}
+
+static int openat2_sandbox_file(int root_fd, const char *relative_path, int flags, mode_t mode) {
+#ifdef SYS_openat2
+    int safe_flags = flags | O_CLOEXEC | O_NOFOLLOW;
+    mode_t effective_mode = (safe_flags & O_CREAT) ? mode : 0;
+    struct open_how how = {
+        .flags = (uint64_t)safe_flags,
+        .mode = (uint64_t)effective_mode,
+        .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+    };
+
+    return (int)syscall(SYS_openat2, root_fd, relative_path, &how, sizeof(how));
+#else
+    (void)root_fd;
+    (void)relative_path;
+    (void)flags;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int copy_path_component(char *component, const char *start, size_t length) {
+    if (length == 0 || length > NAME_MAX) {
+        errno = length == 0 ? EINVAL : ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(component, start, length);
+    component[length] = '\0';
+    return 0;
+}
+
+static int fallback_openat_sandbox_file(
+    int root_fd,
+    const char *relative_path,
+    int flags,
+    mode_t mode
+) {
+    const char *cursor = relative_path;
+    int current_fd = root_fd;
+    int safe_flags = flags | O_CLOEXEC | O_NOFOLLOW;
+    char component[NAME_MAX + 1];
+
+    for (;;) {
+        while (*cursor == '/') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            errno = EINVAL;
+            return -1;
+        }
+
+        const char *component_start = cursor;
+        while (*cursor != '\0' && *cursor != '/') {
+            cursor++;
+        }
+
+        if (copy_path_component(component, component_start, (size_t)(cursor - component_start)) < 0) {
+            if (current_fd != root_fd) {
+                close(current_fd);
+            }
+            return -1;
+        }
+
+        const char *next = cursor;
+        while (*next == '/') {
+            next++;
+        }
+
+        if (*next == '\0') {
+            int opened_fd = openat(current_fd, component, safe_flags, mode);
+            if (current_fd != root_fd) {
+                close(current_fd);
+            }
+            return opened_fd;
+        }
+
+        int next_fd = openat(current_fd, component, SANDBOX_DIR_OPEN_FLAGS);
+        if (current_fd != root_fd) {
+            close(current_fd);
+        }
+        if (next_fd < 0) {
+            return -1;
+        }
+
+        current_fd = next_fd;
+        cursor = next;
+    }
+}
+
+static int safe_open_sandbox_file(const char *path, int flags, mode_t mode) {
+    if (validate_sandbox_path(path) != FS_RESULT_STATUS_OK) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *relative_path = sandbox_relative_path(path);
+    if (relative_path == NULL) {
+        return -1;
+    }
+
+    /* 真实路径约束必须绑定到 /sandbox 目录 fd，避免 symlink 或竞态逃逸。 */
+    int root_fd = open(SANDBOX_ROOT_PATH, SANDBOX_DIR_OPEN_FLAGS);
+    if (root_fd < 0) {
+        return -1;
+    }
+
+    int opened_fd = openat2_sandbox_file(root_fd, relative_path, flags, mode);
+    if (opened_fd < 0 && errno == ENOSYS) {
+        opened_fd = fallback_openat_sandbox_file(root_fd, relative_path, flags, mode);
+    }
+
+    int saved_errno = errno;
+    close(root_fd);
+    errno = saved_errno;
+    return opened_fd;
 }
 
 static void write_fs_write_result(int status) {
@@ -624,7 +794,7 @@ static void handle_fs_read(const char *path) {
         return;
     }
 
-    int fd = open(path, O_RDONLY);
+    int fd = safe_open_sandbox_file(path, O_RDONLY, 0);
     if (fd < 0) {
         write_fs_read_result_status(fs_status_from_errno(errno));
         return;
@@ -690,7 +860,7 @@ static void handle_fs_write(const char *path) {
         return;
     }
 
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = safe_open_sandbox_file(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     int open_status = FS_RESULT_STATUS_OK;
     if (fd < 0) {
         open_status = fs_status_from_errno(errno);
