@@ -35,6 +35,7 @@ use crate::vm::{
     sanitize_path_display,
 };
 use crate::vm::{GuestExecOptions, LifecycleError};
+use crate::vm_assets::{verify_or_initialize_asset_sha256, verify_or_initialize_asset_sha256_hex};
 
 mod boot;
 mod devices;
@@ -124,8 +125,8 @@ const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
 /// every VM creation.
 #[derive(Debug, Default)]
 struct AssetCache {
-    kernel: Option<(PathBuf, u64, Arc<[u8]>)>,
-    rootfs: Option<(PathBuf, u64, Arc<[u8]>)>,
+    kernel: Option<(PathBuf, u64, u64, String, Arc<[u8]>)>,
+    rootfs: Option<(PathBuf, u64, u64, String, Arc<[u8]>)>,
 }
 
 impl AssetCache {
@@ -134,8 +135,9 @@ impl AssetCache {
     }
 
     fn load(
+        asset_kind: &str,
         path: &Path,
-        slot: &mut Option<(PathBuf, u64, Arc<[u8]>)>,
+        slot: &mut Option<(PathBuf, u64, u64, String, Arc<[u8]>)>,
     ) -> Result<Arc<[u8]>, MicrovmError> {
         let metadata = fs::metadata(path).map_err(|err| {
             MicrovmError::Backend(format!(
@@ -149,23 +151,26 @@ impl AssetCache {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
+        let size = metadata.len();
 
-        if let Some((cached_path, cached_mtime, cached_bytes)) = slot
+        if let Some((cached_path, cached_mtime, cached_size, cached_hash, cached_bytes)) = slot
             && cached_path.as_path() == path
             && *cached_mtime == mtime
+            && *cached_size == size
         {
+            verify_or_initialize_asset_sha256_hex(asset_kind, path, cached_hash)?;
             return Ok(Arc::clone(cached_bytes));
         }
 
-        let bytes: Arc<[u8]> = fs::read(path)
-            .map_err(|err| {
-                MicrovmError::Backend(format!(
-                    "failed to read asset file: {}: {err}",
-                    sanitize_path_display(path)
-                ))
-            })?
-            .into();
-        *slot = Some((path.to_path_buf(), mtime, Arc::clone(&bytes)));
+        let raw_bytes = fs::read(path).map_err(|err| {
+            MicrovmError::Backend(format!(
+                "failed to read asset file: {}: {err}",
+                sanitize_path_display(path)
+            ))
+        })?;
+        let sha256 = verify_or_initialize_asset_sha256(asset_kind, path, &raw_bytes)?;
+        let bytes: Arc<[u8]> = raw_bytes.into();
+        *slot = Some((path.to_path_buf(), mtime, size, sha256, Arc::clone(&bytes)));
         Ok(bytes)
     }
 
@@ -174,7 +179,7 @@ impl AssetCache {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::load(path, &mut cache.kernel)
+        Self::load("kernel", path, &mut cache.kernel)
     }
 
     fn get_rootfs(path: &Path) -> Result<Arc<[u8]>, MicrovmError> {
@@ -182,7 +187,7 @@ impl AssetCache {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::load(path, &mut cache.rootfs)
+        Self::load("rootfs", path, &mut cache.rootfs)
     }
 }
 

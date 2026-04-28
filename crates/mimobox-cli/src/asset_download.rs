@@ -103,6 +103,7 @@ fn ensure_asset_ready(
         })?;
 
         if actual_hash.eq_ignore_ascii_case(&asset.sha256) {
+            write_sha256_sidecar_best_effort(&target_path, &actual_hash);
             return Ok(true);
         }
     }
@@ -143,6 +144,7 @@ fn ensure_asset_ready(
         warn!(from = %temporary_path.display(), to = %target_path.display(), %error, "failed to install VM asset");
         format!("asset installation failed: {} ({error})", asset.name)
     })?;
+    write_sha256_sidecar_best_effort(&target_path, &actual_hash);
 
     Ok(true)
 }
@@ -155,6 +157,18 @@ fn target_asset_path(assets_dir: &Path, name: &str) -> Result<PathBuf, String> {
 fn temporary_asset_path(assets_dir: &Path, name: &str) -> Result<PathBuf, String> {
     validate_asset_name(name)?;
     Ok(assets_dir.join(format!(".{name}.tmp")))
+}
+
+fn sha256_sidecar_path(asset_path: &Path) -> Result<PathBuf, String> {
+    let file_name = asset_path
+        .file_name()
+        .ok_or_else(|| format!("asset path has no file name: {}", asset_path.display()))?;
+    let mut sidecar_name = file_name.to_os_string();
+    sidecar_name.push(".sha256");
+
+    let mut sidecar_path = asset_path.to_path_buf();
+    sidecar_path.set_file_name(sidecar_name);
+    Ok(sidecar_path)
 }
 
 fn validate_asset_name(name: &str) -> Result<(), String> {
@@ -225,6 +239,25 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn write_sha256_sidecar_best_effort(asset_path: &Path, hash: &str) {
+    let sidecar_path = match sha256_sidecar_path(asset_path) {
+        Ok(path) => path,
+        Err(error) => {
+            warn!(%error, "failed to derive VM asset SHA256 sidecar path");
+            return;
+        }
+    };
+
+    if let Err(error) = fs::write(&sidecar_path, format!("{hash}\n")) {
+        warn!(
+            asset = %asset_path.display(),
+            sidecar = %sidecar_path.display(),
+            %error,
+            "failed to write VM asset SHA256 sidecar"
+        );
+    }
+}
+
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -239,5 +272,32 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit_index])
     } else {
         format!("{value:.1}{}", UNITS[unit_index])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{sha256_sidecar_path, write_sha256_sidecar_best_effort};
+
+    #[test]
+    fn writes_sha256_sidecar_next_to_asset() {
+        let assets_dir = tempdir().expect("临时目录必须创建成功");
+        let asset_path = assets_dir.path().join("vmlinux");
+
+        write_sha256_sidecar_best_effort(
+            &asset_path,
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        );
+
+        let sidecar_path = sha256_sidecar_path(&asset_path).expect("sidecar 路径必须可生成");
+        let sidecar = fs::read_to_string(sidecar_path).expect("sidecar 必须写入成功");
+        assert_eq!(
+            sidecar.trim(),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
     }
 }

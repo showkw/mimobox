@@ -295,6 +295,11 @@ pub(crate) fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
             message,
             Some("ensure snapshot comes from a compatible mimobox microVM version".to_string()),
         ),
+        MicrovmError::AssetIntegrity(message) => SdkError::sandbox(
+            ErrorCode::SandboxCreateFailed,
+            message,
+            Some("VM kernel/rootfs 资产文件完整性校验失败，可能被篡改".to_string()),
+        ),
         MicrovmError::Io(error) => SdkError::sandbox(
             ErrorCode::SandboxCreateFailed,
             error.to_string(),

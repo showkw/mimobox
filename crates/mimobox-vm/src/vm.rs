@@ -285,6 +285,13 @@ pub enum MicrovmError {
         String,
     ),
 
+    /// Host-side VM asset integrity verification failed.
+    #[error("VM asset integrity error: {0}")]
+    AssetIntegrity(
+        /// Integrity verification failure detail.
+        String,
+    ),
+
     /// Guest-side file operation error.
     #[error("guest file error: {path}: {kind}")]
     GuestFile {
@@ -324,6 +331,7 @@ impl From<MicrovmError> for SandboxError {
             MicrovmError::UnsupportedPlatform => SandboxError::Unsupported,
             MicrovmError::InvalidConfig(message)
             | MicrovmError::Backend(message)
+            | MicrovmError::AssetIntegrity(message)
             | MicrovmError::HttpProxy(crate::http_proxy::HttpProxyError::Internal(message))
             | MicrovmError::SnapshotFormat(message) => SandboxError::ExecutionFailed(message),
             MicrovmError::Lifecycle(error) => SandboxError::ExecutionFailed(error.to_string()),
