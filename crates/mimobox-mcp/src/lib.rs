@@ -17,7 +17,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -51,6 +51,7 @@ const MAX_SANDBOXES: usize = 64;
 #[derive(Clone)]
 pub struct MimoboxServer {
     pub(crate) sandboxes: Arc<Mutex<HashMap<u64, ManagedSandbox>>>,
+    pub(crate) ephemeral_count: Arc<AtomicUsize>,
     pub next_id: Arc<AtomicU64>,
     pub tool_router: ToolRouter<Self>,
 }
@@ -74,7 +75,8 @@ pub struct CreateSandboxRequest {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CreateSandboxResponse {
     sandbox_id: u64,
-    isolation_level: String,
+    requested_isolation_level: String,
+    actual_isolation_level: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -249,6 +251,7 @@ impl MimoboxServer {
     pub fn new() -> Self {
         Self {
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
+            ephemeral_count: Arc::new(AtomicUsize::new(0)),
             next_id: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
         }
@@ -389,6 +392,10 @@ impl MimoboxServer {
         }
 
         let sandbox_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let actual_isolation_level = sandbox
+            .active_isolation()
+            .map(format_isolation_level)
+            .map(str::to_string);
         sandboxes.insert(
             sandbox_id,
             ManagedSandbox {
@@ -400,7 +407,8 @@ impl MimoboxServer {
 
         Ok(Json(CreateSandboxResponse {
             sandbox_id,
-            isolation_level: format_isolation_level(isolation).to_string(),
+            requested_isolation_level: format_isolation_level(isolation).to_string(),
+            actual_isolation_level,
         }))
     }
 
@@ -813,8 +821,18 @@ impl MimoboxServer {
                 .await;
         }
 
+        {
+            let sandboxes = self.sandboxes.lock().await;
+            let persistent = sandboxes.len();
+            let ephemeral = self.ephemeral_count.load(Ordering::Relaxed);
+            if persistent + ephemeral >= MAX_SANDBOXES {
+                return Err(sandbox_quota_exceeded());
+            }
+            self.ephemeral_count.fetch_add(1, Ordering::Relaxed);
+        }
+
         let command = command.to_string();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
             let result = sandbox.execute(&command);
             if let Err(err) = sandbox.destroy() {
@@ -822,9 +840,11 @@ impl MimoboxServer {
             }
             result
         })
-        .await
-        .map_err(format_join_error)?
-        .map_err(format_sdk_error)
+        .await;
+
+        self.ephemeral_count.fetch_sub(1, Ordering::Relaxed);
+
+        result.map_err(format_join_error)?.map_err(format_sdk_error)
     }
 }
 
