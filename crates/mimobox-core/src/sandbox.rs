@@ -768,11 +768,22 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{PtySize, SandboxError, SandboxSnapshot};
+    use super::{PtySize, SandboxConfig, SandboxError, SandboxSnapshot};
 
     #[test]
     fn pty_size_default_is_80x24() {
         assert_eq!(PtySize::default(), PtySize { cols: 80, rows: 24 });
+    }
+
+    #[test]
+    fn sandbox_config_allows_denied_network_with_http_proxy_whitelist() {
+        let mut config = SandboxConfig::default();
+        config.deny_network = true;
+        config.allowed_http_domains = vec!["api.openai.com".to_string()];
+
+        config
+            .validate()
+            .expect("受控 HTTP 代理白名单不应打开沙箱直连网络");
     }
 
     #[test]
