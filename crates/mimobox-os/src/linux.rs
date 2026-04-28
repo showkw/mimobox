@@ -1284,7 +1284,9 @@ mod tests {
         let result = sb.execute(&cmd).expect("执行失败");
 
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return;
         }
         assert!(!result.timed_out, "不应超时");
@@ -1311,7 +1313,9 @@ mod tests {
         let result = sb.execute(&cmd).expect("执行失败");
 
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return;
         }
         assert_eq!(result.exit_code, Some(42), "退出码应为 42");
@@ -1360,7 +1364,9 @@ mod tests {
         ];
         let result = sb.execute(&cmd).expect("执行失败");
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return;
         }
         assert_eq!(
@@ -1453,7 +1459,9 @@ mod tests {
         let result = sb.execute(&cmd).expect("执行失败");
 
         if result.exit_code == Some(125) {
-            eprintln!("skipping: execvp failed, CI environment may lack complete filesystem isolation");
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
             return;
         }
         assert!(result.timed_out, "应超时");
