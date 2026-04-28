@@ -1065,7 +1065,13 @@ mod tests {
 
         let result = Sandbox::with_config(config);
 
-        assert!(matches!(result, Err(SdkError::Config(_))));
+        assert!(matches!(
+            result,
+            Err(SdkError::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                ..
+            })
+        ));
     }
 
     #[cfg(feature = "vm")]
@@ -1078,7 +1084,13 @@ mod tests {
 
         let result = Sandbox::with_pool(config, mimobox_vm::VmPoolConfig::default());
 
-        assert!(matches!(result, Err(SdkError::Config(_))));
+        assert!(matches!(
+            result,
+            Err(SdkError::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                ..
+            })
+        ));
     }
 
     #[cfg(feature = "vm")]
