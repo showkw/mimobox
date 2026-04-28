@@ -82,6 +82,7 @@ fn command_log_summary(cmd: &[String]) -> String {
 
 const NAMESPACE_FALLBACK_MARKER: &str = "unshare(full_flags) failed";
 const NAMESPACE_FAIL_CLOSED_EXIT_CODE: i32 = 128;
+const CONTAINER_MOUNT_UNAVAILABLE_MARKER: &str = "container_mount_unavailable";
 
 /// 检测 stderr 中是否包含 namespace 降级标记
 fn namespace_fallback_detected(stderr_buf: &[u8]) -> bool {
@@ -261,10 +262,17 @@ fn remount_proc_for_pid_namespace() -> Result<(), String> {
         )
     };
     if propagation_ret != 0 {
-        return Err(format!(
-            "mount(/, MS_REC|MS_PRIVATE) failed: {}",
-            std::io::Error::last_os_error()
-        ));
+        let error = std::io::Error::last_os_error();
+        let container_mount_unavailable = matches!(
+            error.raw_os_error(),
+            Some(errno) if errno == libc::EPERM || errno == libc::ENOSYS
+        );
+        if container_mount_unavailable {
+            return Err(format!(
+                "{CONTAINER_MOUNT_UNAVAILABLE_MARKER}: mount(/, MS_REC|MS_PRIVATE) failed: {error}"
+            ));
+        }
+        return Err(format!("mount(/, MS_REC|MS_PRIVATE) failed: {error}"));
     }
 
     let proc_flags = (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong;
@@ -734,12 +742,22 @@ fn apply_security_policies_and_exec(
             Ok(ForkResult::Child) => {
                 // 孙进程：PID namespace 已生效，先刷新 /proc 视图，再继续应用 seccomp。
                 if let Err(e) = remount_proc_for_pid_namespace() {
-                    // 必须 fail-closed：如果 /proc 保留宿主 PID namespace 视图，
-                    // 会泄露宿主进程信息，违反沙箱隔离承诺。
-                    // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
-                    unsafe {
-                        write_error(2, &format!("remount /proc failed (fatal): {e}"));
-                        libc::_exit(124);
+                    if e.contains(CONTAINER_MOUNT_UNAVAILABLE_MARKER) {
+                        // SAFETY: This is the forked child warning path; write_error avoids unwinding.
+                        unsafe {
+                            write_error(
+                                2,
+                                &format!("warning: /proc remount skipped (container): {e}"),
+                            );
+                        }
+                    } else {
+                        // 必须 fail-closed：如果 /proc 保留宿主 PID namespace 视图，
+                        // 会泄露宿主进程信息，违反沙箱隔离承诺。
+                        // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                        unsafe {
+                            write_error(2, &format!("remount /proc failed (fatal): {e}"));
+                            libc::_exit(124);
+                        }
                     }
                 }
             }
