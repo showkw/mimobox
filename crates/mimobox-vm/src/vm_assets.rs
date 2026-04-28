@@ -75,6 +75,7 @@ pub fn microvm_config_from_assets_dir(
         cpu_quota_us: None,
         kernel_path,
         rootfs_path,
+        security_profile: crate::vm::VmSecurityProfile::default(),
     })
 }
 

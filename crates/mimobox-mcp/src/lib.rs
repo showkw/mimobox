@@ -52,6 +52,8 @@ const MAX_LIST_DIR_ENTRIES: usize = 10_000;
 const MAX_EXECUTE_OUTPUT: usize = 4 * 1024 * 1024;
 /// 单个 MCP server 最多保留 64 个沙箱，防止客户端无限创建实例造成 DoS。
 const MAX_SANDBOXES: usize = 64;
+/// MCP sandbox 和命令执行最大超时 3600 秒（1 小时），防止客户端占用资源过久。
+const MAX_SANDBOX_TIMEOUT_SECS: u64 = 3600;
 
 #[derive(Clone)]
 pub struct MimoboxServer {
@@ -819,6 +821,8 @@ impl MimoboxServer {
         command: &str,
         timeout_ms: Option<u64>,
     ) -> Result<ExecuteResult, String> {
+        validate_timeout_ms(timeout_ms)?;
+
         if let Some(sandbox_id) = sandbox_id {
             let command = command.to_string();
             return self
@@ -876,6 +880,7 @@ fn create_sandbox_with_options(
     memory_limit_mb: Option<u64>,
 ) -> Result<Sandbox, SdkError> {
     validate_create_sandbox_memory_limit(memory_limit_mb)?;
+    validate_timeout_ms(timeout_ms).map_err(SdkError::Config)?;
 
     let mut builder = Config::builder().isolation(isolation);
     if let Some(timeout_ms) = timeout_ms {
@@ -895,6 +900,20 @@ fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<
         return Err(SdkError::Config(format!(
             "create_sandbox memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
         )));
+    }
+
+    Ok(())
+}
+
+fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
+    if let Some(timeout_ms) = timeout_ms {
+        let timeout_secs = timeout_ms / 1000;
+        if timeout_secs > MAX_SANDBOX_TIMEOUT_SECS {
+            return Err(format!(
+                "timeout_ms={timeout_ms} 超过最大值 {} 毫秒（{MAX_SANDBOX_TIMEOUT_SECS} 秒），请设为合理值",
+                MAX_SANDBOX_TIMEOUT_SECS * 1000
+            ));
+        }
     }
 
     Ok(())
@@ -1186,6 +1205,50 @@ mod tests {
         assert!(
             matches!(result, Err(SdkError::Config(message)) if message.contains("create_sandbox memory_limit_mb"))
         );
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_timeout_above_max() {
+        let excessive_timeout_ms = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
+        let result =
+            create_sandbox_with_options(IsolationLevel::Auto, Some(excessive_timeout_ms), None);
+
+        assert!(
+            matches!(result, Err(SdkError::Config(message)) if message.contains("timeout_ms"))
+        );
+    }
+
+    #[test]
+    fn test_create_sandbox_accepts_timeout_at_max() {
+        let max_timeout_ms = MAX_SANDBOX_TIMEOUT_SECS * 1000;
+        let result =
+            create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None);
+
+        // 可能因后端不可用失败，但不应因 timeout 校验失败
+        if let Err(SdkError::Config(message)) = &result {
+            assert!(
+                !message.contains("timeout_ms"),
+                "timeout exactly at max should pass validation: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_timeout_ms_accepts_none() {
+        assert!(validate_timeout_ms(None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_timeout_ms_accepts_below_max() {
+        assert!(validate_timeout_ms(Some(30_000)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_timeout_ms_rejects_above_max() {
+        let excessive = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
+        let result = validate_timeout_ms(Some(excessive));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timeout_ms"));
     }
 
     #[test]

@@ -30,6 +30,22 @@ pub(crate) fn sanitize_path_display(path: &Path) -> String {
         .unwrap_or_else(|| "<path>".to_string())
 }
 
+/// VM 安全配置策略，控制 guest kernel 的安全缓解措施。
+///
+/// `Secure`（默认）保留 Spectre/Meltdown 缓解和内核地址随机化，
+/// 适用于所有生产环境。`Performance` 关闭这些缓解以获得最佳性能，
+/// 仅用于可信环境中的基准测试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmSecurityProfile {
+    /// 保留所有内核安全缓解（默认）。
+    #[default]
+    Secure,
+    /// 关闭 mitigations=off 和 nokaslr 以获得最佳性能。
+    /// 仅在完全可信环境中使用。
+    Performance,
+}
+
 /// Configuration for a single microVM instance.
 ///
 /// The configuration describes the guest CPU and memory shape plus the host-side
@@ -48,6 +64,9 @@ pub struct MicrovmConfig {
     pub kernel_path: PathBuf,
     /// Path to the gzip-compressed guest rootfs image on the host.
     pub rootfs_path: PathBuf,
+    /// VM 安全配置策略，控制是否启用内核安全缓解措施。
+    #[serde(default)]
+    pub security_profile: VmSecurityProfile,
 }
 
 impl Default for MicrovmConfig {
@@ -64,6 +83,7 @@ impl Default for MicrovmConfig {
             cpu_quota_us: None,
             kernel_path: assets_dir.join("vmlinux"),
             rootfs_path: assets_dir.join("rootfs.cpio.gz"),
+            security_profile: VmSecurityProfile::default(),
         }
     }
 }

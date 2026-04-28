@@ -10,10 +10,11 @@ use mimobox_core::{SandboxConfig, SandboxError, SandboxSnapshot, SeccompProfile}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::vm::{MicrovmConfig, MicrovmError, sanitize_path_display};
+use crate::vm::{MicrovmConfig, MicrovmError, VmSecurityProfile, sanitize_path_display};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"MMBXVM01";
-const SNAPSHOT_VERSION: u16 = 2;
+const SNAPSHOT_VERSION: u16 = 3;
+const MIN_SUPPORTED_SNAPSHOT_VERSION: u16 = 2;
 /// Version of the sidecar `state.json` file used by file-backed snapshots.
 pub(crate) const FILE_SNAPSHOT_VERSION: u16 = 1;
 const SNAPSHOT_MEMORY_FILE_NAME: &str = "memory.bin";
@@ -94,7 +95,7 @@ impl MicrovmSnapshot {
         }
 
         let version = cursor.read_u16()?;
-        if version != SNAPSHOT_VERSION {
+        if !(MIN_SUPPORTED_SNAPSHOT_VERSION..=SNAPSHOT_VERSION).contains(&version) {
             return Err(MicrovmError::SnapshotFormat(format!(
                 "unsupported snapshot version: {version}"
             )));
@@ -405,6 +406,7 @@ fn encode_microvm_config(out: &mut Vec<u8>, config: &MicrovmConfig) -> Result<()
     out.push(config.vcpu_count);
     out.extend_from_slice(&config.memory_mb.to_le_bytes());
     encode_opt_u64(out, config.cpu_quota_us);
+    out.push(vm_security_profile_to_u8(config.security_profile));
     encode_path(out, &config.kernel_path)?;
     encode_path(out, &config.rootfs_path)?;
     Ok(())
@@ -422,9 +424,31 @@ fn decode_microvm_config(
         } else {
             None
         },
+        security_profile: if version >= 3 {
+            u8_to_vm_security_profile(cursor.read_u8()?)?
+        } else {
+            VmSecurityProfile::Secure
+        },
         kernel_path: decode_path(cursor)?,
         rootfs_path: decode_path(cursor)?,
     })
+}
+
+fn vm_security_profile_to_u8(profile: VmSecurityProfile) -> u8 {
+    match profile {
+        VmSecurityProfile::Secure => 0,
+        VmSecurityProfile::Performance => 1,
+    }
+}
+
+fn u8_to_vm_security_profile(value: u8) -> Result<VmSecurityProfile, MicrovmError> {
+    match value {
+        0 => Ok(VmSecurityProfile::Secure),
+        1 => Ok(VmSecurityProfile::Performance),
+        other => Err(MicrovmError::SnapshotFormat(format!(
+            "invalid VM security profile value: {other}"
+        ))),
+    }
 }
 
 fn encode_paths(out: &mut Vec<u8>, paths: &[PathBuf]) -> Result<(), MicrovmError> {

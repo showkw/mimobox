@@ -32,7 +32,7 @@ use crate::http_proxy::{HttpProxyError, HttpRequest, HttpResponse, execute_http_
 use crate::snapshot::MicrovmSnapshot;
 use crate::vm::{
     GuestCommandResult, GuestFileErrorKind, MicrovmConfig, MicrovmError, StreamEvent,
-    sanitize_path_display,
+    VmSecurityProfile, sanitize_path_display,
 };
 use crate::vm::{GuestExecOptions, LifecycleError};
 use crate::vm_assets::{verify_or_initialize_asset_sha256, verify_or_initialize_asset_sha256_hex};
@@ -110,7 +110,8 @@ const VSOCK_TRANSPORT_ENABLED: bool = true;
 #[cfg(not(feature = "guest-vsock"))]
 const VSOCK_TRANSPORT_ENABLED: bool = false;
 static ASSET_CACHE: OnceLock<Mutex<AssetCache>> = OnceLock::new();
-const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 mitigations=off tsc=reliable nokaslr nomodule reboot=t panic=1 pci=off rdinit=/init";
+const DEFAULT_CMDLINE: &str = "console=ttyS0 8250.nr_uarts=1 i8042.nokbd no_timer_check fastboot quiet rcupdate.rcu_expedited=1 tsc=reliable nomodule reboot=t panic=1 pci=off rdinit=/init";
+const PERFORMANCE_SECURITY_CMDLINE_FRAGMENT: &str = " mitigations=off nokaslr";
 const VSOCK_CMDLINE_FRAGMENT: &str = " virtio_mmio.device=512@0xd0000000:5";
 /// Base address of the vsock MMIO device in the guest physical address space.
 const VSOCK_MMIO_BASE: u64 = 0xd000_0000;
@@ -356,8 +357,11 @@ enum BackendCreateMode {
 }
 
 impl KvmBackend {
-    fn default_cmdline() -> String {
+    fn build_cmdline(security_profile: VmSecurityProfile) -> String {
         let mut cmdline = String::from(DEFAULT_CMDLINE);
+        if matches!(security_profile, VmSecurityProfile::Performance) {
+            cmdline.push_str(PERFORMANCE_SECURITY_CMDLINE_FRAGMENT);
+        }
         if VSOCK_TRANSPORT_ENABLED {
             cmdline.push_str(VSOCK_CMDLINE_FRAGMENT);
         }
@@ -1071,7 +1075,7 @@ impl KvmBackend {
 
     /// Builds the zero page / `boot_params` and writes command line and initrd metadata.
     fn write_boot_params(&mut self) -> Result<(), MicrovmError> {
-        let mut cmdline = Self::default_cmdline().into_bytes();
+        let mut cmdline = Self::build_cmdline(self.config.security_profile).into_bytes();
         cmdline.push(0);
         self.write_guest_bytes(self.cmdline_addr, &cmdline)?;
 
@@ -2679,10 +2683,12 @@ mod tests {
         MSR_IA32_APICBASE, inject_hypervisor_timing_cpuid, tracked_msr_entries_template,
     };
     use super::{
-        DEFAULT_CMDLINE, SerialFrame, SerialProtocolResult, devices::build_guest_exec_payload,
-        encode_command_payload, encode_fs_read_payload, encode_fs_write_payload,
-        encode_ping_payload, parse_serial_line, take_serial_frame,
+        DEFAULT_CMDLINE, KvmBackend, PERFORMANCE_SECURITY_CMDLINE_FRAGMENT, SerialFrame,
+        SerialProtocolResult, devices::build_guest_exec_payload, encode_command_payload,
+        encode_fs_read_payload, encode_fs_write_payload, encode_ping_payload, parse_serial_line,
+        take_serial_frame,
     };
+    use crate::vm::VmSecurityProfile;
     #[cfg(target_arch = "x86_64")]
     use kvm_bindings::kvm_cpuid_entry2;
     use std::collections::HashMap;
@@ -2930,14 +2936,41 @@ mod tests {
             "fastboot",
             "quiet",
             "rcupdate.rcu_expedited=1",
-            "mitigations=off",
             "tsc=reliable",
-            "nokaslr",
             "nomodule",
         ] {
             assert!(
                 DEFAULT_CMDLINE.split_whitespace().any(|item| item == token),
                 "默认 cmdline 必须包含 {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secure_cmdline_does_not_contain_mitigation_disables() {
+        let secure_cmdline = KvmBackend::build_cmdline(VmSecurityProfile::Secure);
+        assert!(
+            !secure_cmdline
+                .split_whitespace()
+                .any(|token| token == "mitigations=off"),
+            "Secure profile 不应包含 mitigations=off"
+        );
+        assert!(
+            !secure_cmdline
+                .split_whitespace()
+                .any(|token| token == "nokaslr"),
+            "Secure profile 不应包含 nokaslr"
+        );
+    }
+
+    #[test]
+    fn test_performance_cmdline_contains_mitigation_disables() {
+        let perf_cmdline = KvmBackend::build_cmdline(VmSecurityProfile::Performance);
+
+        for token in PERFORMANCE_SECURITY_CMDLINE_FRAGMENT.split_whitespace() {
+            assert!(
+                perf_cmdline.split_whitespace().any(|item| item == token),
+                "Performance profile 应包含 {token}"
             );
         }
     }

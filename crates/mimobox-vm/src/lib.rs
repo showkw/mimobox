@@ -41,7 +41,7 @@ pub use pool::{PoolError, PooledVm, VmPool, VmPoolConfig, VmPoolStats};
 pub use snapshot::MicrovmSnapshot;
 pub use vm::{
     GuestCommandResult, GuestExecOptions, GuestFileErrorKind, LifecycleError, MicrovmConfig,
-    MicrovmError, MicrovmSandbox, MicrovmState, StreamEvent,
+    MicrovmError, MicrovmSandbox, MicrovmState, StreamEvent, VmSecurityProfile,
 };
 pub use vm_assets::{
     microvm_config_from_assets_dir, microvm_config_from_vm_assets, resolve_vm_assets_dir,

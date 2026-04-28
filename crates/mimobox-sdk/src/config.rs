@@ -158,6 +158,10 @@ pub struct Config {
     pub kernel_path: Option<PathBuf>,
     /// Custom microVM rootfs path. Falls back to `~/.mimobox/assets/rootfs.cpio.gz` if unset.
     pub rootfs_path: Option<PathBuf>,
+    /// VM 安全配置策略，控制 guest kernel 是否启用 Spectre/Meltdown 缓解和 KASLR。
+    /// 默认 `Secure`（保留安全缓解）。设为 `Performance` 可关闭缓解以获得最佳性能，
+    /// 但仅在完全可信环境中使用。
+    pub vm_security_profile: mimobox_vm::VmSecurityProfile,
 }
 
 impl Default for Config {
@@ -189,6 +193,7 @@ impl Default for Config {
             vm_memory_mb: 256,
             kernel_path: None,
             rootfs_path: None,
+            vm_security_profile: mimobox_vm::VmSecurityProfile::default(),
         }
     }
 }
@@ -290,6 +295,7 @@ impl Config {
                 .rootfs_path
                 .clone()
                 .unwrap_or_else(|| defaults.rootfs_path.clone()),
+            security_profile: self.vm_security_profile,
         })
     }
 }
@@ -709,6 +715,29 @@ impl ConfigBuilder {
     /// ```
     pub fn rootfs_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.inner.rootfs_path = Some(path.into());
+        self
+    }
+
+    /// Set the VM security profile, controlling kernel mitigations and KASLR.
+    ///
+    /// Default is `VmSecurityProfile::Secure` (all mitigations enabled).
+    /// Set to `Performance` only in fully trusted benchmark environments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mimobox_sdk::Config;
+    /// use mimobox_vm::VmSecurityProfile;
+    ///
+    /// let config = Config::builder()
+    ///     .vm_security_profile(VmSecurityProfile::Performance)
+    ///     .build()
+    ///     .expect("配置校验失败");
+    ///
+    /// assert_eq!(config.vm_security_profile, VmSecurityProfile::Performance);
+    /// ```
+    pub fn vm_security_profile(mut self, profile: mimobox_vm::VmSecurityProfile) -> Self {
+        self.inner.vm_security_profile = profile;
         self
     }
 
