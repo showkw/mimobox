@@ -966,14 +966,17 @@ impl PySandbox {
     #[pyo3(signature = (method, url, headers=None, body=None))]
     fn http_request(
         &mut self,
+        py: Python<'_>,
         method: &str,
         url: &str,
         headers: Option<std::collections::HashMap<String, String>>,
         body: Option<Vec<u8>>,
     ) -> PyResult<PyHttpResponse> {
         let sandbox = self.inner_mut()?;
-        let response = sandbox
-            .http_request(method, url, headers.unwrap_or_default(), body.as_deref())
+        let headers = headers.unwrap_or_default();
+        let body = body;
+        let response = py
+            .allow_threads(|| sandbox.http_request(method, url, headers, body.as_deref()))
             .map_err(map_sdk_error)?;
         Ok(response.into())
     }
