@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use base64::Engine;
@@ -47,6 +47,10 @@ const BLOCKED_HEADERS: &[&str] = &[
 const MAX_RESPONSE_BYTES_HARD_LIMIT: usize = 100 * 1024 * 1024;
 /// HTTP 请求超时的绝对上限（5分钟），guest 传入的 timeout_ms 不能超过此值。
 const MAX_TIMEOUT_MS_HARD_LIMIT: u64 = 300_000;
+/// 响应 header 最大数量，防止恶意服务器返回大量 header 消耗 host 内存。
+const MAX_RESPONSE_HEADER_COUNT: usize = 100;
+/// 单个响应 header value 最大 8KB，防止恶意服务器返回超大 header。
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 8192;
 
 /// Raw JSON payload accepted by the guest-to-host HTTP proxy protocol.
 ///
@@ -332,6 +336,18 @@ pub fn execute_http_request(
     }
 
     let mut response = builder.send().map_err(map_reqwest_error)?;
+    // 响应 header 安全限制：防止恶意服务器通过大量/超大 header 耗尽 host 内存
+    if response.headers().len() > MAX_RESPONSE_HEADER_COUNT {
+        return Err(HttpProxyError::Internal("too many response headers".into()));
+    }
+    for value in response.headers().values() {
+        if value.len() > MAX_RESPONSE_HEADER_VALUE_BYTES {
+            return Err(HttpProxyError::Internal(
+                "response header value too large".into(),
+            ));
+        }
+    }
+
     let mut headers = HashMap::new();
     for (name, value) in response.headers() {
         headers.insert(
@@ -463,8 +479,15 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || ipv6.is_unspecified()
                 || ipv6.is_unique_local()
                 || ipv6.is_unicast_link_local()
+                || ipv6.is_multicast()
+                || is_ipv6_documentation(ipv6)
         }
     }
+}
+
+fn is_ipv6_documentation(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    segments[0] == 0x2001 && segments[1] == 0x0db8
 }
 
 fn is_non_public_ipv4(ipv4: Ipv4Addr) -> bool {
@@ -477,11 +500,12 @@ fn is_non_public_ipv4(ipv4: Ipv4Addr) -> bool {
         || (a == 100 && (64..=127).contains(&b))
         || ipv4.is_multicast()
         || a >= 240
+        || (a == 192 && b == 0)
+        || (a == 192 && b == 88 && c == 99)
         || (a == 192 && b == 0 && c == 2)
         || (a == 198 && b == 51 && c == 100)
         || (a == 203 && b == 0 && c == 113)
         || (a == 198 && matches!(b, 18 | 19))
-        || (a == 192 && b == 0 && c == 0)
 }
 
 fn read_response_body(
