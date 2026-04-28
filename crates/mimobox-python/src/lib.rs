@@ -1226,6 +1226,13 @@ impl PySandbox {
         }
     }
 
+    /// 故意泄漏 sandbox 以避免 GIL 死锁。
+    ///
+    /// 当 Python 解释器正在关闭（is_finalizing）或 GIL 不可获取时，
+    /// 正常 Drop 可能触发 Python C API 调用导致死锁。
+    /// mem::forget 会泄漏底层 Rust 资源，但这是两害相权取其轻：
+    /// - 泄漏一个沙箱的内存（~KB 级）优于进程级死锁
+    /// - atexit handler 会在进程退出前尝试清理所有活跃沙箱
     fn skip_destroy_unraisable(&mut self, context: &str, reason: &str) {
         if let Some(sandbox) = self.inner.take() {
             std::mem::forget(sandbox);
