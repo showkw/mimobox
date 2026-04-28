@@ -164,13 +164,10 @@ async fn test_list_dir_with_sandbox() -> Result<()> {
         client.cancel().await?;
         return Ok(());
     }
-    let actual_isolation = create_result
-        .structured_content
-        .as_ref()
-        .and_then(|content| content.get("isolation_level"))
-        .and_then(Value::as_str);
-    if actual_isolation != Some("microvm") {
-        eprintln!("skipping test_list_dir_with_sandbox: expected microvm, got {actual_isolation:?}");
+    // The MCP response reports requested isolation, not actual — SDK may downgrade to OS.
+    // list_dir requires real microVM backend; check /dev/kvm as ground truth.
+    if !std::path::Path::new("/dev/kvm").exists() {
+        eprintln!("skipping test_list_dir_with_sandbox: /dev/kvm not available");
         client.cancel().await?;
         return Ok(());
     }
@@ -221,13 +218,10 @@ async fn test_list_dir_nonexistent_path() -> Result<()> {
         client.cancel().await?;
         return Ok(());
     }
-    let actual_isolation = create_result
-        .structured_content
-        .as_ref()
-        .and_then(|content| content.get("isolation_level"))
-        .and_then(Value::as_str);
-    if actual_isolation != Some("microvm") {
-        eprintln!("skipping test_list_dir_nonexistent_path: expected microvm, got {actual_isolation:?}");
+    // The MCP response reports requested isolation, not actual — SDK may downgrade to OS.
+    // list_dir requires real microVM backend; check /dev/kvm as ground truth.
+    if !std::path::Path::new("/dev/kvm").exists() {
+        eprintln!("skipping test_list_dir_nonexistent_path: /dev/kvm not available");
         client.cancel().await?;
         return Ok(());
     }
