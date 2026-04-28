@@ -38,12 +38,21 @@ pub async fn run_http_server(
     allowed_origins: Option<String>,
     auth_token: Option<String>,
 ) -> HttpResult<()> {
+    let is_local_bind = is_local_bind_addr(bind_addr);
+    if auth_token.is_none() && !is_local_bind {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "MCP HTTP 绑定到非本地地址但没有配置认证。请设置 --auth-token 或 MIMOBOX_AUTH_TOKEN 环境变量",
+        )
+        .into());
+    }
+
     if auth_token.is_some() {
         tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
     } else {
         tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
     }
-    if !is_local_bind_addr(bind_addr) {
+    if !is_local_bind {
         tracing::warn!(
             bind_addr,
             "MCP HTTP 绑定地址不是本地回环地址，可能暴露到不受信网络"
