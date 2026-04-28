@@ -20,6 +20,7 @@ fn sdk_config() -> Config {
         .kernel_path(kernel_path)
         .rootfs_path(rootfs_path)
         .build()
+        .expect("valid vm pool config")
 }
 
 fn pool_config() -> VmPoolConfig {
