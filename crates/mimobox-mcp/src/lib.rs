@@ -577,9 +577,11 @@ impl MimoboxServer {
     ) -> Result<Json<WriteFileResponse>, Json<ErrorResponse>> {
         #[cfg(feature = "vm")]
         {
-            let data = STANDARD
-                .decode(&request.content)
-                .map_err(|err| to_error(format!("内容不是有效的 base64 编码：{err}。提示：请确保内容为标准 base64 编码字符串")))?;
+            let data = STANDARD.decode(&request.content).map_err(|err| {
+                to_error(format!(
+                    "内容不是有效的 base64 编码：{err}。提示：请确保内容为标准 base64 编码字符串"
+                ))
+            })?;
             if data.len() > MAX_FILE_SIZE {
                 return Err(to_error(format!(
                     "内容过大：{} 字节，超过 {} 字节限制。提示：请写入较小的内容或拆分为多次写入",
@@ -740,7 +742,9 @@ impl MimoboxServer {
         {
             let method = request.method.to_ascii_uppercase();
             if !matches!(method.as_str(), "GET" | "POST") {
-                return Err(to_error("HTTP 方法仅支持 GET 和 POST。提示：请使用 GET 或 POST".to_string()));
+                return Err(to_error(
+                    "HTTP 方法仅支持 GET 和 POST。提示：请使用 GET 或 POST".to_string(),
+                ));
             }
 
             let url = request.url;

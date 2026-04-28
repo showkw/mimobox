@@ -1390,11 +1390,16 @@ fn normalize_python_enum_value(value: &str) -> String {
 
 fn parse_config_timeout_secs(timeout_secs: f64) -> Result<Duration, String> {
     if !timeout_secs.is_finite() || timeout_secs <= 0.0 {
-        return Err("timeout_secs 必须为有限正数。提示：请传入正数，如 timeout_secs=30".to_string());
+        return Err(
+            "timeout_secs 必须为有限正数。提示：请传入正数，如 timeout_secs=30".to_string(),
+        );
     }
 
     if timeout_secs > 86_400.0 {
-        return Err("timeout_secs 不能超过 86400。提示：最大超时 86400 秒（24小时），请减小该值".to_string());
+        return Err(
+            "timeout_secs 不能超过 86400。提示：最大超时 86400 秒（24小时），请减小该值"
+                .to_string(),
+        );
     }
 
     Duration::try_from_secs_f64(timeout_secs)
@@ -1406,8 +1411,14 @@ fn map_sdk_error(error: SdkError) -> PyErr {
         SdkError::Config(message) => PyValueError::new_err(message),
         SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
         SdkError::Io(err) => match err.kind() {
-            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(format!("{}. 提示：使用 sandbox.files.list('/') 查看可用文件", err)),
-            std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(format!("{}. 提示：检查文件权限，创建 Sandbox 时通过 fs_readwrite 参数授予写权限", err)),
+            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(format!(
+                "{}. 提示：使用 sandbox.files.list('/') 查看可用文件",
+                err
+            )),
+            std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(format!(
+                "{}. 提示：检查文件权限，创建 Sandbox 时通过 fs_readwrite 参数授予写权限",
+                err
+            )),
             _ => PyRuntimeError::new_err(err.to_string()),
         },
         SdkError::Sandbox {
@@ -1461,8 +1472,9 @@ fn parse_python_timeout(timeout: f64) -> PyResult<Duration> {
         ));
     }
 
-    Duration::try_from_secs_f64(timeout)
-        .map_err(|_| PyValueError::new_err("timeout 超出支持的范围。提示：请使用 0 到 86400 之间的值"))
+    Duration::try_from_secs_f64(timeout).map_err(|_| {
+        PyValueError::new_err("timeout 超出支持的范围。提示：请使用 0 到 86400 之间的值")
+    })
 }
 
 #[pymodule]
