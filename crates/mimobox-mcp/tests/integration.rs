@@ -189,7 +189,10 @@ async fn test_list_dir_with_sandbox() -> Result<()> {
     // list_dir requires real microVM backend; if the SDK downgraded to OS,
     // list_dir returns an error — skip gracefully in that case.
     if result.is_error == Some(true) {
-        eprintln!("skipping test_list_dir_with_sandbox: list_dir not supported (backend may have downgraded from microVM)");
+        eprintln!(
+            "skipping test_list_dir_with_sandbox: list_dir not \
+             supported (backend may have downgraded from microVM)"
+        );
         client.cancel().await?;
         return Ok(());
     }
