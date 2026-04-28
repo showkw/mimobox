@@ -158,9 +158,19 @@ async fn test_list_dir_with_sandbox() -> Result<()> {
     )
     .await?;
 
-    // microVM requires KVM; skip gracefully if unavailable on this runner
+    // microVM requires KVM; skip gracefully if unavailable or downgraded on this runner
     if create_result.is_error == Some(true) {
         eprintln!("skipping test_list_dir_with_sandbox: microVM unavailable");
+        client.cancel().await?;
+        return Ok(());
+    }
+    let actual_isolation = create_result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("isolation_level"))
+        .and_then(Value::as_str);
+    if actual_isolation != Some("microvm") {
+        eprintln!("skipping test_list_dir_with_sandbox: expected microvm, got {actual_isolation:?}");
         client.cancel().await?;
         return Ok(());
     }
@@ -205,9 +215,19 @@ async fn test_list_dir_nonexistent_path() -> Result<()> {
         json!({"isolation_level": "microvm"}),
     )
     .await?;
-    // microVM requires KVM; skip gracefully if unavailable on this runner
+    // microVM requires KVM; skip gracefully if unavailable or downgraded on this runner
     if create_result.is_error == Some(true) {
         eprintln!("skipping test_list_dir_nonexistent_path: microVM unavailable");
+        client.cancel().await?;
+        return Ok(());
+    }
+    let actual_isolation = create_result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("isolation_level"))
+        .and_then(Value::as_str);
+    if actual_isolation != Some("microvm") {
+        eprintln!("skipping test_list_dir_nonexistent_path: expected microvm, got {actual_isolation:?}");
         client.cancel().await?;
         return Ok(());
     }

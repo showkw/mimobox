@@ -96,6 +96,7 @@ fn is_wasm_command(command: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "wasm")]
     #[test]
     fn wasm_file_routes_to_wasm() {
         let result = auto_route(TrustLevel::Trusted, "app.wasm");
