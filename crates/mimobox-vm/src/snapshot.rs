@@ -227,13 +227,12 @@ fn verify_memory_hash(
     actual_hash: &str,
     expected_hash: Option<&str>,
 ) -> Result<(), MicrovmError> {
-    let Some(expected_hash) = expected_hash else {
-        tracing::warn!(
-            "文件快照缺少 memory_hash，跳过 memory.bin 完整性校验: {}",
+    let expected_hash = expected_hash.ok_or_else(|| {
+        MicrovmError::SnapshotFormat(format!(
+            "文件快照缺少 memory_hash，拒绝 restore: {}",
             sanitize_path_display(memory_path)
-        );
-        return Ok(());
-    };
+        ))
+    })?;
 
     if actual_hash.eq_ignore_ascii_case(expected_hash) {
         return Ok(());

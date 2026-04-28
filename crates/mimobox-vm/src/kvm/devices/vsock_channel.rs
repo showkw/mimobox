@@ -15,6 +15,8 @@ const AF_VSOCK: libc::c_int = 40;
 const VMADDR_CID_HOST: u32 = 2;
 /// Fixed host command channel port.
 const COMMAND_PORT: u32 = 1024;
+/// Maximum accepted payload for a single vsock stdout/stderr frame.
+const MAX_VSOCK_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Listener backlog only needs to hold one guest connection.
 const LISTEN_BACKLOG: libc::c_int = 1;
 /// Established vsock streams block for at most 30 seconds; after timeout the upper
@@ -376,6 +378,11 @@ fn read_length_prefixed_bytes(stream: &VsockStream) -> Result<Vec<u8>, MicrovmEr
     let len = usize::try_from(u32::from_be_bytes(len_buf)).map_err(|_| {
         MicrovmError::Backend("vsock frame length cannot be converted to usize".into())
     })?;
+    if len > MAX_VSOCK_FRAME_BYTES {
+        return Err(MicrovmError::Backend(format!(
+            "vsock frame length exceeds limit: len={len}, max={MAX_VSOCK_FRAME_BYTES}"
+        )));
+    }
 
     let mut data = vec![0u8; len];
     if len > 0 {
