@@ -10,8 +10,8 @@
 //! - stdout/stderr captured into in-memory buffers through `MemoryOutputPipe` with a built-in capacity limit.
 //! - Dual execution-time limits with fuel and epoch interruption.
 
-use std::fs::{OpenOptions, Permissions};
-use std::io::Write;
+use std::fs::{Metadata, OpenOptions, Permissions};
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -147,13 +147,53 @@ fn metadata_mtime_nanos(meta: &std::fs::Metadata) -> Option<u64> {
 
 /// Gets a lightweight metadata fingerprint for a file: size plus modification time.
 ///
-/// Used to quickly determine whether a file may have changed, avoiding a full file read and
-/// SHA256 calculation on every `execute` call.
-fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
+/// Used only as an index into the cache map. The content hash is still verified before loading
+/// a cached module so same-size/same-mtime collisions cannot select the wrong cache entry.
+fn file_fingerprint(meta: &Metadata) -> Option<(u64, u64)> {
     let size = meta.len();
-    let mtime = metadata_mtime_nanos(&meta)?;
+    let mtime = metadata_mtime_nanos(meta)?;
     Some((size, mtime))
+}
+
+fn open_and_validate_wasm_file(wasm_path: &Path) -> Result<(Metadata, Vec<u8>), SandboxError> {
+    let mut file = std::fs::File::open(wasm_path)
+        .map_err(|_| SandboxError::ExecutionFailed("Wasm file does not exist".into()))?;
+    let wasm_meta = file
+        .metadata()
+        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to stat Wasm file: {}", e)))?;
+
+    if !wasm_meta.file_type().is_file() {
+        return Err(SandboxError::ExecutionFailed(
+            "Wasm path is not a regular file".into(),
+        ));
+    }
+    if wasm_meta.nlink() > 1 {
+        return Err(SandboxError::ExecutionFailed(
+            "Wasm file must not be a hard link (nlink > 1)".into(),
+        ));
+    }
+    if wasm_meta.len() > MAX_WASM_FILE_SIZE {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Wasm file too large: {} bytes (limit {} bytes)",
+            wasm_meta.len(),
+            MAX_WASM_FILE_SIZE
+        )));
+    }
+
+    let mut file_data = Vec::with_capacity(wasm_meta.len() as usize);
+    let mut bounded_reader = (&mut file).take(MAX_WASM_FILE_SIZE + 1);
+    bounded_reader
+        .read_to_end(&mut file_data)
+        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
+    if file_data.len() as u64 > MAX_WASM_FILE_SIZE {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Wasm file too large: {} bytes (limit {} bytes)",
+            file_data.len(),
+            MAX_WASM_FILE_SIZE
+        )));
+    }
+
+    Ok((wasm_meta, file_data))
 }
 
 fn validate_cache_dir_security(path: &Path) -> bool {
@@ -482,12 +522,6 @@ fn load_cached_module(
     }
 }
 
-fn compile_uncached_module(engine: &Engine, wasm_path: &Path) -> Result<Module, SandboxError> {
-    let file_data = std::fs::read(wasm_path)
-        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
-    compile_module_from_bytes(engine, wasm_path, &file_data)
-}
-
 fn compile_module_from_bytes(
     engine: &Engine,
     wasm_path: &Path,
@@ -507,13 +541,15 @@ fn compile_module_from_bytes(
 ///
 /// Uses a hybrid cache strategy:
 /// 1. First looks up the cache mapping file using the lightweight metadata fingerprint (size plus modification time).
-/// 2. When the cache mapping hits, loads directly with the corresponding SHA256 cache key.
+/// 2. When the cache mapping hits, verifies the already-read bytes match the cached SHA256 key.
 /// 3. When the cache mapping misses, calculates the file content SHA256 and updates the cache.
 ///
-/// This avoids reading the whole file to calculate a hash on the cache-hit hot path.
+/// The caller provides bytes read from the same fd used for validation, avoiding path-based TOCTOU.
 fn get_cached_module(
     engine: &Engine,
     wasm_path: &Path,
+    wasm_meta: &Metadata,
+    file_data: &[u8],
     cache_dir: Option<&Path>,
 ) -> Result<Module, SandboxError> {
     let cache_dir = match cache_dir {
@@ -523,45 +559,46 @@ fn get_cached_module(
                 "Wasm cache directory is insecure; compiling without disk cache: {:?}",
                 cache_dir
             );
-            return compile_uncached_module(engine, wasm_path);
+            return compile_module_from_bytes(engine, wasm_path, file_data);
         }
-        None => return compile_uncached_module(engine, wasm_path),
+        None => return compile_module_from_bytes(engine, wasm_path, file_data),
     };
 
-    let fingerprint = match file_fingerprint(wasm_path) {
+    let fingerprint = match file_fingerprint(wasm_meta) {
         Some(fp) => fp,
-        None => {
-            // 无法获取元数据时也只读取一次文件，避免在读取与编译之间被路径替换。
-            let file_data = std::fs::read(wasm_path).map_err(|e| {
-                SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e))
-            })?;
-            return compile_module_from_bytes(engine, wasm_path, &file_data);
-        }
+        None => return compile_module_from_bytes(engine, wasm_path, file_data),
     };
 
     // 缓存映射文件：记录 "fingerprint -> sha256_hash:cache_mtime_nanos" 的映射
     // 文件名格式: {size}_{mtime_nanos}.map
     let map_file = cache_dir.join(format!("{}_{}.map", fingerprint.0, fingerprint.1));
 
+    let hash = content_hash(file_data);
+
     // 尝试通过映射文件找到对应的缓存
     if let Some(record) = read_cache_record(&map_file) {
-        let cache_path = cache_dir.join(format!("{}.cwasm", record.hash));
-        if let Some(module) = load_cached_module(
-            engine,
-            wasm_path,
-            &cache_path,
-            record.mtime_nanos,
-            Some(&map_file),
-            "fingerprint match",
-        ) {
-            return Ok(module);
+        if record.hash == hash {
+            let cache_path = cache_dir.join(format!("{}.cwasm", record.hash));
+            if let Some(module) = load_cached_module(
+                engine,
+                wasm_path,
+                &cache_path,
+                record.mtime_nanos,
+                Some(&map_file),
+                "fingerprint match",
+            ) {
+                return Ok(module);
+            }
+        } else {
+            warn!(
+                "Cache fingerprint hash mismatch: path={:?}, expected={}, actual={}",
+                map_file, hash, record.hash
+            );
+            remove_file_if_exists(&map_file);
         }
     }
 
-    // 缓存未命中：需要计算文件内容的 SHA256
-    let file_data = std::fs::read(wasm_path)
-        .map_err(|e| SandboxError::ExecutionFailed(format!("Failed to read Wasm file: {}", e)))?;
-    let hash = content_hash(&file_data);
+    // 缓存未命中：复用已读取内容的 SHA256。
     let cache_path = cache_dir.join(format!("{}.cwasm", hash));
     let cache_metadata_file = cache_metadata_path(&cache_path);
 
@@ -589,7 +626,7 @@ fn get_cached_module(
     }
 
     // 编译模块
-    let module = compile_module_from_bytes(engine, wasm_path, &file_data)?;
+    let module = compile_module_from_bytes(engine, wasm_path, file_data)?;
 
     // 序列化到缓存目录（原子写入：先写临时文件再 rename，避免并发读到不完整数据）
     if let Ok(serialized) = module.serialize() {
@@ -852,37 +889,16 @@ impl Sandbox for WasmSandbox {
         }
 
         let wasm_path = Path::new(&cmd[0]);
-        let wasm_meta = std::fs::symlink_metadata(wasm_path)
-            .map_err(|_| SandboxError::ExecutionFailed("Wasm file does not exist".into()))?;
-        if wasm_meta.file_type().is_symlink() {
-            return Err(SandboxError::ExecutionFailed(
-                "Wasm file path must not be a symlink".into(),
-            ));
-        }
-        if wasm_meta.nlink() > 1 {
-            return Err(SandboxError::ExecutionFailed(
-                "Wasm file must not be a hard link (nlink > 1)".into(),
-            ));
-        }
-        if !wasm_meta.file_type().is_file() {
-            return Err(SandboxError::ExecutionFailed(
-                "Wasm path is not a regular file".into(),
-            ));
-        }
-
-        // [MINOR-07] 预检查文件大小，防止超大文件导致编译时 OOM
-        if let Ok(meta) = std::fs::metadata(wasm_path)
-            && meta.len() > MAX_WASM_FILE_SIZE
-        {
-            return Err(SandboxError::ExecutionFailed(format!(
-                "Wasm file too large: {} bytes (limit {} bytes)",
-                meta.len(),
-                MAX_WASM_FILE_SIZE
-            )));
-        }
+        let (wasm_meta, file_data) = open_and_validate_wasm_file(wasm_path)?;
 
         // 1. 获取或编译模块（带缓存）
-        let module = get_cached_module(&self.engine, wasm_path, self.cache_dir.as_deref())?;
+        let module = get_cached_module(
+            &self.engine,
+            wasm_path,
+            &wasm_meta,
+            &file_data,
+            self.cache_dir.as_deref(),
+        )?;
 
         // 2. [IMPORTANT-03 说明] stdout/stderr 缓冲区容量限制
         // MemoryOutputPipe 的 capacity 参数是写入上限而非初始容量，
