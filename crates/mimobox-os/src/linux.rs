@@ -924,6 +924,8 @@ impl LinuxSandbox {
 
 impl Sandbox for LinuxSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
+        config.validate()?;
+
         tracing::info!(
             "创建沙箱, seccomp={:?}, allow_fork={}, timeout={:?}s",
             config.seccomp_profile,

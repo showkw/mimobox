@@ -1092,7 +1092,7 @@ fn format_sdk_error(error: SdkError) -> String {
 }
 
 fn format_join_error(error: JoinError) -> String {
-    format!("blocking task failed: {error}")
+    sanitize_error_message(&format!("blocking task failed: {error}"))
 }
 
 fn to_error(error: impl Into<String>) -> Json<ErrorResponse> {

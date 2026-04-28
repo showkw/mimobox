@@ -511,6 +511,8 @@ impl MacOsSandbox {
 
 impl Sandbox for MacOsSandbox {
     fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
+        config.validate()?;
+
         tracing::info!(
             "创建 macOS Seatbelt 沙箱, deny_network={}, timeout={:?}s, memory={:?}MB",
             config.deny_network,
