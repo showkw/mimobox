@@ -104,14 +104,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # SDK 的完整 VM 集成测试依赖 VM assets 和 /dev/kvm，这里先覆盖编译与基础逻辑。
+      # 使用 --no-default-features 排除 OS 后端测试（CI runner 无 Landlock/Seccomp/NS 支持）。
       - name: Compile mimobox-sdk vm Test Targets
-        run: cargo test --package mimobox-sdk --features vm --no-run
+        run: cargo test --package mimobox-sdk --no-default-features --features vm --no-run
 
       - name: Run mimobox-sdk vm Library Tests
-        run: cargo test --package mimobox-sdk --features vm --lib
+        run: cargo test --package mimobox-sdk --no-default-features --features vm --lib
 
       - name: Build mimobox-sdk Examples
-        run: cargo build --package mimobox-sdk --examples
+        run: cargo build --package mimobox-sdk --examples --no-default-features --features vm
 
   docs-check:
     runs-on: ubuntu-latest
