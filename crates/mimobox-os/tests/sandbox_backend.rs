@@ -269,6 +269,7 @@ mod macos_backend_tests {
         config.timeout_secs = Some(5);
         config.memory_limit_mb = None;
         config.namespace_degradation = NamespaceDegradation::AllowDegradation;
+        config.allow_fork = true;
         config
     }
 

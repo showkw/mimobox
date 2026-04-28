@@ -104,6 +104,7 @@ const SYSTEM_READ_PATHS: &[&str] = &[
     "/usr/share/",
     "/private/etc/",
     "/private/var/db/timezone",
+    "/private/var/folders/",
     "/private/var/select/",
     "/dev/",
     "/etc/",
