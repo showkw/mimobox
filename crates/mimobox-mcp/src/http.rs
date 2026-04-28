@@ -25,7 +25,6 @@ type HttpResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
 type AllowedOrigins = Arc<Vec<String>>;
-type AuthToken = Arc<Option<String>>;
 
 /// HTTP stateful session 最多保留 100 个 server handle，限制 registry 内存增长。
 const MAX_CONCURRENT_SESSIONS: usize = 100;
@@ -40,7 +39,7 @@ pub async fn run_http_server(
     auth_token: Option<String>,
 ) -> HttpResult<()> {
     if auth_token.is_some() {
-        tracing::info!("HTTP 模式已启用 Bearer token 认证");
+        tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
     } else {
         tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
     }
@@ -52,7 +51,7 @@ pub async fn run_http_server(
     }
 
     let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
-    let auth_token = Arc::new(auth_token);
+    let auth_token = auth_token.map(Arc::new);
     let server_registry = Arc::new(Mutex::new(Vec::new()));
     let service = create_mcp_service(server_registry.clone(), bind_addr);
     let app = Router::new()
@@ -296,11 +295,11 @@ fn apply_cors_headers(headers: &mut HeaderMap, allowed_origin: Option<&HeaderVal
 }
 
 async fn auth_middleware(
-    State(auth_token): State<AuthToken>,
+    State(auth_token): State<Option<Arc<String>>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let Some(expected_token) = auth_token.as_ref().as_deref() else {
+    let Some(expected_token) = auth_token else {
         return next.run(req).await;
     };
 
@@ -318,9 +317,11 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .get(HeaderName::from_static("authorization"))?
         .to_str()
         .ok()?;
-    let (scheme, token) = authorization.split_once(' ')?;
+    let mut parts = authorization.splitn(2, ' ');
+    let scheme = parts.next()?;
+    let token = parts.next()?;
 
-    if scheme.eq_ignore_ascii_case("Bearer") {
+    if scheme == "Bearer" {
         Some(token)
     } else {
         None
@@ -328,26 +329,24 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn unauthorized_response() -> Response {
-    let mut response = Response::new(Body::empty());
+    let mut response = Response::new(Body::from(r#"{"error":"unauthorized"}"#));
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     response.headers_mut().insert(
-        HeaderName::from_static("www-authenticate"),
-        HeaderValue::from_static("Bearer"),
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("application/json"),
     );
     response
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = a.len() ^ b.len();
-    let max_len = a.len().max(b.len());
-
-    for index in 0..max_len {
-        let a_byte = a.get(index).copied().unwrap_or(0);
-        let b_byte = b.get(index).copied().unwrap_or(0);
-        diff |= usize::from(a_byte ^ b_byte);
+    if a.len() != b.len() {
+        return false;
     }
-
-    diff == 0
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 #[cfg(test)]
