@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::SdkError;
-use mimobox_core::{NamespaceDegradation, SandboxConfig, SeccompProfile};
+use mimobox_core::{MAX_MEMORY_LIMIT_MB, NamespaceDegradation, SandboxConfig, SeccompProfile};
 
 /// Isolation level selection strategy.
 ///
@@ -226,6 +226,13 @@ impl Config {
             return Err(SdkError::Config(
                 "vm_memory_mb=0 无效，请设为正整数".to_string(),
             ));
+        }
+        if let Some(memory_limit_mb) = self.memory_limit_mb
+            && memory_limit_mb > MAX_MEMORY_LIMIT_MB
+        {
+            return Err(SdkError::Config(format!(
+                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+            )));
         }
 
         if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
@@ -873,6 +880,17 @@ mod tests {
     }
 
     #[test]
+    fn builder_rejects_memory_limit_above_global_max() {
+        let result = Config::builder()
+            .memory_limit_mb(MAX_MEMORY_LIMIT_MB + 1)
+            .build();
+
+        assert!(
+            matches!(result, Err(SdkError::Config(message)) if message.contains("memory_limit_mb"))
+        );
+    }
+
+    #[test]
     fn max_processes_is_forwarded_to_sandbox_config() {
         let config = Config::builder()
             .max_processes(32)
@@ -968,14 +986,14 @@ mod tests {
 
     #[cfg(feature = "vm")]
     #[test]
-    fn microvm_config_ignores_out_of_range_memory_limit_when_vm_memory_is_lower() {
-        let config = Config::builder()
+    fn microvm_config_rejects_out_of_range_memory_limit_even_when_vm_memory_is_lower() {
+        let result = Config::builder()
             .vm_memory_mb(768)
             .memory_limit_mb(u64::MAX)
-            .build()
-            .expect("配置校验失败");
-        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+            .build();
 
-        assert_eq!(microvm_config.memory_mb, 768);
+        assert!(
+            matches!(result, Err(SdkError::Config(message)) if message.contains("memory_limit_mb"))
+        );
     }
 }

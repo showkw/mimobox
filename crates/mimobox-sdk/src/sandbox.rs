@@ -1499,6 +1499,53 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "os", target_os = "linux"))]
+    fn should_skip_os_runtime_tests() -> bool {
+        false
+    }
+
+    #[cfg(all(feature = "os", target_os = "macos"))]
+    fn should_skip_os_runtime_tests() -> bool {
+        let Some(reason) = seatbelt_runtime_skip_reason() else {
+            return false;
+        };
+
+        eprintln!("跳过 SDK macOS Seatbelt 运行时测试: {reason}");
+        true
+    }
+
+    #[cfg(all(feature = "os", target_os = "macos"))]
+    fn seatbelt_runtime_skip_reason() -> Option<&'static str> {
+        static SKIP_REASON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+        SKIP_REASON
+            .get_or_init(|| {
+                let output = match std::process::Command::new("sandbox-exec")
+                    .args(["-p", "(version 1) (allow default)", "/usr/bin/true"])
+                    .output()
+                {
+                    Ok(output) => output,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Some("sandbox-exec not found in current environment".to_string());
+                    }
+                    Err(error) => {
+                        panic!("执行 sandbox-exec 最小探测失败: {error}");
+                    }
+                };
+
+                if output.status.success() {
+                    return None;
+                }
+
+                Some(format!(
+                    "sandbox-exec unavailable: status={:?}, stderr={}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+            })
+            .as_deref()
+    }
+
     #[cfg(feature = "vm")]
     fn vm_pool_is_initialized(sandbox: &Sandbox) -> bool {
         sandbox.vm_pool.is_some()
@@ -1655,6 +1702,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn destroy_then_drop_does_not_panic() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
         // 先执行一次命令，确保后端完成懒初始化。
         sandbox.execute("/bin/echo hello").expect("执行命令失败");
@@ -1670,6 +1721,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn drop_after_partial_initialization_does_not_panic() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let result = std::panic::catch_unwind(|| {
             let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
             sandbox.execute("/bin/echo test").expect("执行命令失败");
@@ -1684,6 +1739,10 @@ mod tests {
     #[test]
     fn concurrent_execute_via_mutex_does_not_panic() {
         use std::sync::{Arc, Mutex};
+
+        if should_skip_os_runtime_tests() {
+            return;
+        }
 
         let sandbox = Arc::new(Mutex::new(
             Sandbox::with_config(Config::default()).expect("创建沙箱失败"),
@@ -1724,6 +1783,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn create_pty_auto_routes_to_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
         let mut session = sandbox
             .create_pty("/bin/echo ready")
@@ -1943,6 +2006,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_execute_with_env_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
         let mut env = HashMap::new();
         env.insert("MIMOBOX_SDK_ENV_TEST".to_string(), "works".to_string());
@@ -1962,6 +2029,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_execute_with_timeout_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
         let result = sandbox
@@ -1976,6 +2047,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_execute_with_cwd_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let temp_dir = tempfile::TempDir::new_in("/tmp").expect("创建临时目录失败");
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
@@ -1994,6 +2069,10 @@ mod tests {
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_stream_execute_on_os_backend() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
         let mut sandbox = Sandbox::new().expect("创建沙箱失败");
 
         let receiver = sandbox

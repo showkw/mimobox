@@ -204,6 +204,12 @@ pub enum NamespaceDegradation {
     AllowDegradation,
 }
 
+/// Sandbox memory limit upper bound in MiB.
+///
+/// 32 GiB is intentionally above normal sandbox workloads while keeping
+/// MiB-to-bytes conversions and backend resource accounting fail-closed.
+pub const MAX_MEMORY_LIMIT_MB: u64 = 32 * 1024;
+
 /// Sandbox configuration shared across all backends.
 ///
 /// This struct describes the minimum capability set used by all sandbox
@@ -305,6 +311,13 @@ impl SandboxConfig {
             return Err(SandboxError::ExecutionFailed(
                 "memory_limit_mb=0 无效，请设为正整数或 None".to_string(),
             ));
+        }
+        if let Some(memory_limit_mb) = self.memory_limit_mb
+            && memory_limit_mb > MAX_MEMORY_LIMIT_MB
+        {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+            )));
         }
 
         if self.max_processes == Some(0) {
@@ -797,7 +810,7 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{PtySize, SandboxConfig, SandboxError, SandboxSnapshot};
+    use super::{MAX_MEMORY_LIMIT_MB, PtySize, SandboxConfig, SandboxError, SandboxSnapshot};
 
     #[test]
     fn pty_size_default_is_80x24() {
@@ -813,6 +826,20 @@ mod tests {
         config
             .validate()
             .expect("受控 HTTP 代理白名单不应打开沙箱直连网络");
+    }
+
+    #[test]
+    fn sandbox_config_rejects_memory_limit_above_global_max() {
+        let mut config = SandboxConfig::default();
+        config.memory_limit_mb = Some(MAX_MEMORY_LIMIT_MB + 1);
+
+        let error = config
+            .validate()
+            .expect_err("超过全局上限的 memory_limit_mb 必须被拒绝");
+
+        assert!(
+            matches!(error, SandboxError::ExecutionFailed(message) if message.contains("memory_limit_mb"))
+        );
     }
 
     #[test]

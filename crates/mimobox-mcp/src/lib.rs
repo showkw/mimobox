@@ -24,7 +24,10 @@ use std::{
 
 #[cfg(feature = "vm")]
 use base64::{Engine, engine::general_purpose::STANDARD};
-use mimobox_sdk::{Config, DirEntry, ExecuteResult, FileType, IsolationLevel, Sandbox, SdkError};
+use mimobox_sdk::{
+    Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, Sandbox,
+    SdkError,
+};
 use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::JsonSchema;
 use rmcp::{
@@ -870,6 +873,8 @@ fn create_sandbox_with_options(
     timeout_ms: Option<u64>,
     memory_limit_mb: Option<u64>,
 ) -> Result<Sandbox, SdkError> {
+    validate_create_sandbox_memory_limit(memory_limit_mb)?;
+
     let mut builder = Config::builder().isolation(isolation);
     if let Some(timeout_ms) = timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout_ms));
@@ -879,6 +884,18 @@ fn create_sandbox_with_options(
     }
 
     Sandbox::with_config(builder.build()?)
+}
+
+fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<(), SdkError> {
+    if let Some(memory_limit_mb) = memory_limit_mb
+        && memory_limit_mb > MAX_MEMORY_LIMIT_MB
+    {
+        return Err(SdkError::Config(format!(
+            "create_sandbox memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+        )));
+    }
+
+    Ok(())
 }
 
 fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> {
@@ -1030,29 +1047,33 @@ fn sanitize_error_message(message: &str) -> String {
         "/private/var/",
     ];
     for prefix in path_prefixes {
-        while let Some(pos) = result.find(prefix) {
-            // 找到路径结束位置（空格、换行、右括号或字符串末尾）
-            let end = result[pos..]
-                .find([' ', '\n', ')'])
-                .map(|i| pos + i)
-                .unwrap_or(result.len());
-            result.replace_range(pos..end, &format!("{prefix}<redacted>"));
-        }
+        redact_path_prefix(&mut result, prefix, &format!("{prefix}<redacted>"));
     }
     // 脱敏 rootfs 相关路径
-    while let Some(pos) = result.find("/rootfs") {
-        let end = result[pos..]
-            .find([' ', '\n', ')'])
-            .map(|i| pos + i)
-            .unwrap_or(result.len());
-        result.replace_range(pos..end, "/rootfs<redacted>");
-    }
+    redact_path_prefix(&mut result, "/rootfs", "/rootfs<redacted>");
     // 脱敏 .snap 文件路径（可能包含宿主路径前缀）
     result
 }
 
+fn redact_path_prefix(result: &mut String, prefix: &str, replacement: &str) {
+    let mut search_start = 0;
+    while search_start < result.len() {
+        let Some(relative_pos) = result[search_start..].find(prefix) else {
+            break;
+        };
+        let pos = search_start + relative_pos;
+        // 找到路径结束位置（空格、换行、右括号或字符串末尾）。
+        let end = result[pos..]
+            .find([' ', '\n', ')'])
+            .map(|index| pos + index)
+            .unwrap_or(result.len());
+        result.replace_range(pos..end, replacement);
+        search_start = pos + replacement.len();
+    }
+}
+
 fn format_sdk_error(error: SdkError) -> String {
-    match error {
+    let message = match error {
         SdkError::Sandbox {
             code,
             message,
@@ -1065,7 +1086,9 @@ fn format_sdk_error(error: SdkError) -> String {
         SdkError::Config(message) => format!("config error: {message}"),
         SdkError::Io(error) => format!("I/O error: {error}"),
         error => format!("SDK error: {error}"),
-    }
+    };
+
+    sanitize_error_message(&message)
 }
 
 fn format_join_error(error: JoinError) -> String {
@@ -1151,6 +1174,16 @@ mod tests {
                 "'{val}' should be invalid"
             );
         }
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_memory_limit_above_global_max() {
+        let result =
+            create_sandbox_with_options(IsolationLevel::Auto, None, Some(MAX_MEMORY_LIMIT_MB + 1));
+
+        assert!(
+            matches!(result, Err(SdkError::Config(message)) if message.contains("create_sandbox memory_limit_mb"))
+        );
     }
 
     #[test]
@@ -1290,6 +1323,19 @@ mod tests {
         let formatted = format_sdk_error(err);
         assert!(formatted.contains("I/O error"));
         assert!(formatted.contains("file not found"));
+    }
+
+    #[test]
+    fn test_format_sdk_error_sanitizes_host_paths() {
+        let err =
+            SdkError::Config("failed to open /Users/alice/dev/mimobox/rootfs/init".to_string());
+        let formatted = format_sdk_error(err);
+
+        assert!(
+            !formatted.contains("/Users/alice/dev/mimobox"),
+            "formatted SDK errors must not expose host paths"
+        );
+        assert!(formatted.contains("/Users/<redacted>"));
     }
 
     // ── format_isolation_level ─────────────────────────────────────────

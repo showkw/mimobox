@@ -5,8 +5,8 @@
 //! OS-level, Wasm, and microVM isolation.
 
 use mimobox_sdk::{
-    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
-    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
+    Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel, NetworkPolicy,
+    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent, TrustLevel,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -15,9 +15,12 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
+use std::borrow::Cow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Component, Path};
 use std::sync::Mutex;
 use std::sync::mpsc;
+use std::time::Duration;
 
 fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     use pyo3::types::PyBytes;
@@ -299,6 +302,11 @@ impl PySnapshot {
 /// # Arguments
 ///
 /// * `isolation` - Isolation level: `"auto"`, `"os"`, `"wasm"`, or `"microvm"`.
+/// * `memory_limit_mb` - Memory limit in MiB. Defaults to Rust SDK default (512).
+/// * `timeout_secs` - Sandbox command timeout in seconds. Defaults to Rust SDK default (30).
+/// * `max_processes` - Maximum process count. Defaults to Rust SDK backend default.
+/// * `trust_level` - Trust level: `"trusted"`, `"semi_trusted"`, or `"untrusted"`.
+/// * `network` - Network policy: `"deny_all"`, `"allow_domains"`, or `"allow_all"`.
 /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
 ///   Supports glob patterns like `"*.openai.com"`.
 #[pyclass(name = "Sandbox")]
@@ -627,6 +635,13 @@ impl PySandbox {
     ///
     /// * `isolation` - Isolation level: `"auto"`, `"os"`, `"wasm"`, or `"microvm"`.
     ///   Defaults to `"auto"` (smart routing) when `None`.
+    /// * `memory_limit_mb` - Memory limit in MiB. Defaults to Rust SDK default (512).
+    /// * `timeout_secs` - Sandbox command timeout in seconds. Defaults to Rust SDK default (30).
+    /// * `max_processes` - Maximum process count. Defaults to Rust SDK backend default.
+    /// * `trust_level` - Trust level: `"trusted"`, `"semi_trusted"`, or `"untrusted"`.
+    ///   Defaults to Rust SDK default (`"semi_trusted"`).
+    /// * `network` - Network policy: `"deny_all"`, `"allow_domains"`, or `"allow_all"`.
+    ///   Defaults to Rust SDK default (`"deny_all"`).
     /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
     ///   Supports glob patterns like `"*.openai.com"`. Defaults to empty when `None`.
     ///
@@ -639,14 +654,36 @@ impl PySandbox {
     /// * `ValueError` - If `isolation` is not a recognized level.
     /// * `SandboxError` - If sandbox creation fails.
     #[new]
-    #[pyo3(signature = (*, isolation=None, allowed_http_domains=None))]
+    #[pyo3(signature = (
+        *,
+        isolation=None,
+        allowed_http_domains=None,
+        memory_limit_mb=None,
+        timeout_secs=None,
+        max_processes=None,
+        trust_level=None,
+        network=None
+    ))]
     fn new(
         py: Python<'_>,
         isolation: Option<&str>,
         allowed_http_domains: Option<Vec<String>>,
+        memory_limit_mb: Option<u64>,
+        timeout_secs: Option<f64>,
+        max_processes: Option<u32>,
+        trust_level: Option<&str>,
+        network: Option<&str>,
     ) -> PyResult<Py<Self>> {
-        let config =
-            build_python_config(isolation, allowed_http_domains).map_err(PyValueError::new_err)?;
+        let config = build_python_config(PythonConfigOptions {
+            isolation,
+            allowed_http_domains,
+            memory_limit_mb,
+            timeout_secs,
+            max_processes,
+            trust_level,
+            network,
+        })
+        .map_err(PyValueError::new_err)?;
         let sandbox = RustSandbox::with_config(config).map_err(map_sdk_error)?;
         let sandbox = Py::new(
             py,
@@ -720,17 +757,7 @@ impl PySandbox {
     ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
         let effective_command = match cwd {
-            Some(dir) => {
-                if dir.contains("..") {
-                    return Err(PyValueError::new_err(
-                        "cwd must not contain '..' path traversal",
-                    ));
-                }
-                let quoted = shlex::try_quote(dir).map_err(|_| {
-                    PyValueError::new_err("cwd contains characters that cannot be shell-escaped")
-                })?;
-                format!("cd {quoted} && {command}")
-            }
+            Some(dir) => build_cwd_command(command, dir)?,
             None => command.to_string(),
         };
         let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
@@ -1215,21 +1242,88 @@ impl PySandbox {
     }
 }
 
-fn build_python_config(
-    isolation: Option<&str>,
+#[derive(Default)]
+struct PythonConfigOptions<'a> {
+    isolation: Option<&'a str>,
     allowed_http_domains: Option<Vec<String>>,
-) -> Result<Config, String> {
+    memory_limit_mb: Option<u64>,
+    timeout_secs: Option<f64>,
+    max_processes: Option<u32>,
+    trust_level: Option<&'a str>,
+    network: Option<&'a str>,
+}
+
+fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, String> {
     let mut builder = Config::builder();
 
-    if let Some(isolation) = isolation {
+    if let Some(isolation) = options.isolation {
         builder = builder.isolation(parse_python_isolation(isolation)?);
     }
 
-    if let Some(domains) = allowed_http_domains {
+    if let Some(trust_level) = options.trust_level {
+        builder = builder.trust_level(parse_python_trust_level(trust_level)?);
+    }
+
+    if let Some(memory_limit_mb) = options.memory_limit_mb {
+        builder = builder.memory_limit_mb(memory_limit_mb);
+    }
+
+    if let Some(timeout_secs) = options.timeout_secs {
+        builder = builder.timeout(parse_config_timeout_secs(timeout_secs)?);
+    }
+
+    if let Some(max_processes) = options.max_processes {
+        builder = builder.max_processes(max_processes);
+    }
+
+    if let Some(domains) = options.allowed_http_domains {
         builder = builder.allowed_http_domains(domains);
     }
 
+    if let Some(network) = options.network {
+        builder = builder.network(parse_python_network_policy(network)?);
+    }
+
     builder.build().map_err(|e| e.to_string())
+}
+
+fn build_cwd_command(command: &str, cwd: &str) -> PyResult<String> {
+    validate_python_cwd(cwd)?;
+    let cwd_for_shell = normalize_cwd_for_cd(cwd);
+    let quoted = shlex::try_quote(&cwd_for_shell).map_err(|_| {
+        PyValueError::new_err("cwd contains characters that cannot be shell-escaped")
+    })?;
+
+    Ok(format!("cd {quoted} && {command}"))
+}
+
+fn validate_python_cwd(cwd: &str) -> PyResult<()> {
+    if cwd.is_empty() {
+        return Err(PyValueError::new_err("cwd must not be empty"));
+    }
+
+    if cwd.as_bytes().contains(&0) {
+        return Err(PyValueError::new_err("cwd must not contain NUL bytes"));
+    }
+
+    if Path::new(cwd)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(PyValueError::new_err(
+            "cwd must not contain parent directory traversal",
+        ));
+    }
+
+    Ok(())
+}
+
+fn normalize_cwd_for_cd(cwd: &str) -> Cow<'_, str> {
+    if !Path::new(cwd).is_absolute() && cwd.starts_with('-') {
+        Cow::Owned(format!("./{cwd}"))
+    } else {
+        Cow::Borrowed(cwd)
+    }
 }
 
 fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {
@@ -1258,6 +1352,45 @@ fn parse_python_isolation(value: &str) -> Result<IsolationLevel, String> {
             "unknown isolation value: {other}. Valid values: auto, os, wasm, microvm"
         )),
     }
+}
+
+fn parse_python_trust_level(value: &str) -> Result<TrustLevel, String> {
+    match normalize_python_enum_value(value).as_str() {
+        "trusted" => Ok(TrustLevel::Trusted),
+        "semi_trusted" | "semitrusted" | "semi" => Ok(TrustLevel::SemiTrusted),
+        "untrusted" => Ok(TrustLevel::Untrusted),
+        other => Err(format!(
+            "unknown trust_level value: {other}. Valid values: trusted, semi_trusted, untrusted"
+        )),
+    }
+}
+
+fn parse_python_network_policy(value: &str) -> Result<NetworkPolicy, String> {
+    match normalize_python_enum_value(value).as_str() {
+        "deny_all" | "denyall" | "deny" => Ok(NetworkPolicy::DenyAll),
+        "allow_domains" | "allowdomains" | "domains" => Ok(NetworkPolicy::AllowDomains(Vec::new())),
+        "allow_all" | "allowall" | "all" => Ok(NetworkPolicy::AllowAll),
+        other => Err(format!(
+            "unknown network value: {other}. Valid values: deny_all, allow_domains, allow_all"
+        )),
+    }
+}
+
+fn normalize_python_enum_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+fn parse_config_timeout_secs(timeout_secs: f64) -> Result<Duration, String> {
+    if !timeout_secs.is_finite() || timeout_secs <= 0.0 {
+        return Err("timeout_secs must be a finite positive float".to_string());
+    }
+
+    if timeout_secs > 86_400.0 {
+        return Err("timeout_secs must be <= 86400".to_string());
+    }
+
+    Duration::try_from_secs_f64(timeout_secs)
+        .map_err(|_| "timeout_secs is outside supported duration range".to_string())
 }
 
 fn map_sdk_error(error: SdkError) -> PyErr {
@@ -1313,14 +1446,15 @@ fn map_sdk_error(error: SdkError) -> PyErr {
     }
 }
 
-fn parse_python_timeout(timeout: f64) -> PyResult<std::time::Duration> {
+fn parse_python_timeout(timeout: f64) -> PyResult<Duration> {
     if !timeout.is_finite() || timeout <= 0.0 {
         return Err(PyValueError::new_err(
             "timeout must be a finite positive float",
         ));
     }
 
-    Ok(std::time::Duration::from_secs_f64(timeout))
+    Duration::try_from_secs_f64(timeout)
+        .map_err(|_| PyValueError::new_err("timeout is outside supported duration range"))
 }
 
 #[pymodule]
@@ -1362,13 +1496,14 @@ mod tests {
 
     #[test]
     fn python_config_builder_accepts_microvm_and_http_domains() {
-        let config = build_python_config(
-            Some("microvm"),
-            Some(vec![
+        let config = build_python_config(PythonConfigOptions {
+            isolation: Some("microvm"),
+            allowed_http_domains: Some(vec![
                 "api.github.com".to_string(),
                 "example.com".to_string(),
             ]),
-        )
+            ..Default::default()
+        })
         .expect("构造 Python 配置失败");
 
         assert_eq!(config.isolation, IsolationLevel::MicroVm);
@@ -1376,6 +1511,70 @@ mod tests {
             config.allowed_http_domains,
             vec!["api.github.com".to_string(), "example.com".to_string()]
         );
+    }
+
+    #[test]
+    fn python_config_builder_accepts_security_options() {
+        let config = build_python_config(PythonConfigOptions {
+            memory_limit_mb: Some(256),
+            timeout_secs: Some(5.5),
+            max_processes: Some(16),
+            trust_level: Some("untrusted"),
+            network: Some("allow_all"),
+            ..Default::default()
+        })
+        .expect("构造 Python 安全配置失败");
+
+        assert_eq!(config.memory_limit_mb, Some(256));
+        assert_eq!(config.timeout, Some(Duration::from_millis(5_500)));
+        assert_eq!(config.max_processes, Some(16));
+        assert_eq!(config.trust_level, TrustLevel::Untrusted);
+        assert!(matches!(config.network, NetworkPolicy::AllowAll));
+    }
+
+    #[test]
+    fn python_config_builder_rejects_invalid_security_options() {
+        let result = build_python_config(PythonConfigOptions {
+            memory_limit_mb: Some(0),
+            ..Default::default()
+        });
+        assert!(result.is_err());
+
+        let result = build_python_config(PythonConfigOptions {
+            timeout_secs: Some(0.0),
+            ..Default::default()
+        });
+        assert!(result.is_err());
+
+        let result = build_python_config(PythonConfigOptions {
+            trust_level: Some("unknown"),
+            ..Default::default()
+        });
+        assert!(result.is_err());
+
+        let result = build_python_config(PythonConfigOptions {
+            network: Some("unknown"),
+            ..Default::default()
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cwd_command_rejects_parent_traversal_without_false_positive() {
+        assert!(build_cwd_command("pwd", "../work").is_err());
+        assert!(build_cwd_command("pwd", "a/../work").is_err());
+
+        let command = build_cwd_command("pwd", "release.../work").expect("合法 cwd 不应被拒绝");
+        assert_eq!(command, "cd release.../work && pwd");
+    }
+
+    #[test]
+    fn cwd_command_shell_quotes_and_handles_leading_dash() {
+        let spaced = build_cwd_command("pwd", "/tmp/work dir").expect("含空格 cwd 应可转义");
+        assert_eq!(spaced, "cd '/tmp/work dir' && pwd");
+
+        let dashed = build_cwd_command("pwd", "-workspace").expect("前导短横线 cwd 应可处理");
+        assert_eq!(dashed, "cd ./-workspace && pwd");
     }
 
     #[test]
@@ -1419,6 +1618,8 @@ mod tests {
 
     #[test]
     fn stream_event_maps_to_python_bytes_and_exit() {
+        pyo3::prepare_freethreaded_python();
+
         let stdout = PyStreamEvent::from(StreamEvent::Stdout(b"out".to_vec()));
         let timed_out = PyStreamEvent::from(StreamEvent::TimedOut);
         let exit = PyStreamEvent::from(StreamEvent::Exit(9));
@@ -1439,7 +1640,7 @@ mod tests {
         pyo3::prepare_freethreaded_python();
 
         Python::with_gil(|_py| {
-            let config = build_python_config(None, None).expect("构建配置失败");
+            let config = build_python_config(PythonConfigOptions::default()).expect("构建配置失败");
             let mut sandbox = RustSandbox::with_config(config).expect("创建 Rust 沙箱失败");
             let result = sandbox
                 .execute("/bin/echo hello_from_python")
@@ -1463,16 +1664,24 @@ mod tests {
     fn python_sandbox_operations_after_close_return_error() {
         pyo3::prepare_freethreaded_python();
 
-        let mut py_sandbox = PySandbox::new(None, None).expect("创建 Python Sandbox 失败");
-        py_sandbox.close().expect("关闭 Sandbox 失败");
+        Python::with_gil(|py| {
+            let config = build_python_config(PythonConfigOptions::default()).expect("构建配置失败");
+            let sandbox = RustSandbox::with_config(config).expect("创建 Rust 沙箱失败");
+            let mut py_sandbox = PySandbox {
+                inner: Some(sandbox),
+            };
+            py_sandbox.close(py).expect("关闭 Sandbox 失败");
 
-        let result = py_sandbox.execute("/bin/echo should_fail", None, None);
+            let result = py_sandbox.execute(py, "/bin/echo should_fail", None, None, None);
 
-        assert!(result.is_err(), "close 后 execute 应返回错误");
+            assert!(result.is_err(), "close 后 execute 应返回错误");
+        });
     }
 
     #[test]
     fn python_snapshot_round_trip_preserves_bytes() {
+        pyo3::prepare_freethreaded_python();
+
         let snapshot =
             RustSnapshot::from_bytes(b"snapshot-bytes").expect("从字节构造 Python 快照必须成功");
         let py_snapshot = PySnapshot { inner: snapshot };

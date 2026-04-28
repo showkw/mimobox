@@ -229,10 +229,7 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
     let limit_bytes = limit_mb
         .checked_mul(1024)
         .and_then(|value| value.checked_mul(1024))
-        .unwrap_or_else(|| {
-            tracing::warn!("memory_limit_mb={limit_mb} 溢出，回退到 u64::MAX");
-            u64::MAX
-        });
+        .ok_or_else(|| format!("memory_limit_mb={limit_mb} 转换为字节时溢出"))?;
     // IMPORTANT-03 修复：rlim_max 设为与 rlim_cur 相同，防止子进程提高内存限制
     let rlim = libc::rlimit {
         rlim_cur: limit_bytes,
@@ -1381,6 +1378,15 @@ mod tests {
         config.memory_limit_mb = Some(256);
         config.namespace_degradation = NamespaceDegradation::AllowDegradation;
         config
+    }
+
+    #[test]
+    fn set_memory_limit_rejects_mib_to_bytes_overflow() {
+        let error = set_memory_limit(u64::MAX)
+            .expect_err("memory_limit_mb 转换为 bytes 溢出时必须返回错误");
+
+        assert!(error.contains("memory_limit_mb"));
+        assert!(error.contains("溢出"));
     }
 
     #[test]

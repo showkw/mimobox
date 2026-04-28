@@ -50,7 +50,8 @@ mod vm_helpers;
 pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLevel};
 pub use error::SdkError;
 pub use mimobox_core::{
-    DirEntry, ErrorCode, FileStat, FileType, NamespaceDegradation, PtyConfig, PtyEvent, PtySize,
+    DirEntry, ErrorCode, FileStat, FileType, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, PtyConfig,
+    PtyEvent, PtySize,
 };
 pub use sandbox::Sandbox;
 pub use types::{ExecuteResult, HttpResponse, PtySession, SandboxSnapshot, StreamEvent};

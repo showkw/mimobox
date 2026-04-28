@@ -1,6 +1,10 @@
 """MimoBox — Local Sandbox Runtime for AI Agents. Run AI-generated code safely, locally, and instantly."""
 
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterator, List, Literal, Optional, Union
+
+_IsolationLevel = Literal["auto", "os", "wasm", "microvm"]
+_TrustLevel = Literal["trusted", "semi_trusted", "untrusted"]
+_NetworkPolicy = Literal["deny_all", "allow_domains", "allow_all"]
 
 
 class ExecuteResult:
@@ -207,6 +211,16 @@ class Sandbox:
     Args:
         isolation: Isolation level. One of ``"auto"``, ``"os"``, ``"wasm"``,
             ``"microvm"``. Defaults to ``"auto"`` (smart routing).
+        memory_limit_mb: Memory limit in MiB. Defaults to the Rust SDK default
+            of ``512``.
+        timeout_secs: Sandbox command timeout in seconds. Defaults to the Rust
+            SDK default of ``30.0``.
+        max_processes: Maximum process count. Defaults to the Rust SDK backend
+            default.
+        trust_level: Trust level. One of ``"trusted"``, ``"semi_trusted"``,
+            or ``"untrusted"``. Defaults to ``"semi_trusted"``.
+        network: Network policy. One of ``"deny_all"``, ``"allow_domains"``,
+            or ``"allow_all"``. Defaults to ``"deny_all"``.
         allowed_http_domains: List of domains allowed for HTTP proxy requests.
             Supports glob patterns like ``"*.openai.com"``.
     """
@@ -214,8 +228,13 @@ class Sandbox:
     def __init__(
         self,
         *,
-        isolation: Optional[str] = ...,
+        isolation: Optional[_IsolationLevel] = ...,
         allowed_http_domains: Optional[List[str]] = ...,
+        memory_limit_mb: Optional[int] = ...,
+        timeout_secs: Optional[float] = ...,
+        max_processes: Optional[int] = ...,
+        trust_level: Optional[_TrustLevel] = ...,
+        network: Optional[_NetworkPolicy] = ...,
     ) -> None: ...
 
     @property
