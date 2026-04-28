@@ -2,8 +2,7 @@
 
 use mimobox_core::SandboxConfig;
 use mimobox_vm::{
-    GuestFileErrorKind, KvmBackend, MicrovmConfig, MicrovmError,
-    microvm_config_from_vm_assets,
+    GuestFileErrorKind, KvmBackend, MicrovmConfig, MicrovmError, microvm_config_from_vm_assets,
 };
 
 fn e2e_config() -> MicrovmConfig {
@@ -17,8 +16,8 @@ fn guest_cmd(args: &[&str]) -> Vec<String> {
 #[test]
 fn test_symlink_escape_to_host_rejected() {
     let config = e2e_config();
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config)
-        .expect("创建 VM 必须成功");
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建 VM 必须成功");
     backend.boot().expect("VM 启动必须成功");
 
     backend
@@ -55,8 +54,8 @@ fn test_symlink_escape_to_host_rejected() {
 #[test]
 fn test_symlink_in_path_components_rejected() {
     let config = e2e_config();
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config)
-        .expect("创建 VM 必须成功");
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建 VM 必须成功");
     backend.boot().expect("VM 启动必须成功");
 
     let mkdir_result = backend
@@ -94,8 +93,8 @@ fn test_symlink_in_path_components_rejected() {
 #[test]
 fn test_dotdot_traversal_rejected() {
     let config = e2e_config();
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config)
-        .expect("创建 VM 必须成功");
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建 VM 必须成功");
     backend.boot().expect("VM 启动必须成功");
 
     let error = backend
@@ -119,8 +118,8 @@ fn test_dotdot_traversal_rejected() {
 #[test]
 fn test_normal_file_operations_succeed() {
     let config = e2e_config();
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config)
-        .expect("创建 VM 必须成功");
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建 VM 必须成功");
     backend.boot().expect("VM 启动必须成功");
 
     backend
@@ -145,8 +144,8 @@ fn test_normal_file_operations_succeed() {
 #[test]
 fn test_symlink_within_sandbox_rejected() {
     let config = e2e_config();
-    let mut backend = KvmBackend::create_vm(SandboxConfig::default(), config)
-        .expect("创建 VM 必须成功");
+    let mut backend =
+        KvmBackend::create_vm(SandboxConfig::default(), config).expect("创建 VM 必须成功");
     backend.boot().expect("VM 启动必须成功");
 
     backend
