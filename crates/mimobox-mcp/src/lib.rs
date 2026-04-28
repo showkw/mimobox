@@ -1483,7 +1483,7 @@ mod tests {
     fn test_sandbox_not_found_contains_id() {
         let msg = sandbox_not_found(42);
         assert!(msg.contains("42"), "should contain sandbox_id");
-        assert!(msg.contains("not found"), "should contain hint");
+        assert!(msg.contains("不存在"), "should contain hint");
     }
 
     // ── unix_timestamp_ms ──────────────────────────────────────────────
