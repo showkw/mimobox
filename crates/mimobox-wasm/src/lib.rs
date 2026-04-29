@@ -17,7 +17,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -55,8 +55,11 @@ const OUTPUT_MAX_CAPACITY: usize = 1024 * 1024;
 /// Maximum returned size for a single output stream: 4 MB; excess data is truncated and logged as a warning.
 const MAX_OUTPUT_SIZE: usize = 4 * 1024 * 1024;
 
-/// Maximum Wasm module file size: 100 MB.
-const MAX_WASM_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Maximum Wasm module file size: 50 MB.
+const MAX_WASM_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Maximum wall-clock time allowed for Wasm module cache load or compilation.
+const COMPILE_TIMEOUT_SECS: u64 = 30;
 
 /// Number of bytes in one MiB.
 const BYTES_PER_MIB: u64 = 1024 * 1024;
@@ -728,6 +731,24 @@ fn compile_module_from_bytes(
     })
 }
 
+fn ensure_compile_timeout_not_exceeded(
+    compile_start: Instant,
+    wasm_path: &Path,
+) -> Result<(), SandboxError> {
+    let elapsed = compile_start.elapsed();
+    if elapsed <= Duration::from_secs(COMPILE_TIMEOUT_SECS) {
+        return Ok(());
+    }
+
+    Err(SandboxError::ExecutionFailed {
+        kind: ExecutionFailureKind::CpuLimit,
+        message: format!(
+            "Wasm module compile/load exceeded {COMPILE_TIMEOUT_SECS}s wall-clock timeout: path={wasm_path:?}, elapsed_ms={}",
+            elapsed.as_millis()
+        ),
+    })
+}
+
 /// Gets or compiles a module with a disk cache.
 ///
 /// Uses a hybrid cache strategy:
@@ -1098,7 +1119,9 @@ impl Sandbox for WasmSandbox {
         let wasm_path = Path::new(&cmd[0]);
         let (wasm_meta, file_data) = open_and_validate_wasm_file(wasm_path)?;
 
-        // 1. 获取或编译模块（带缓存）
+        // 1. 获取或编译模块（带缓存）。编译阶段不受 Wasm fuel/epoch 约束，
+        // 因此单独用墙钟时间做 fail-closed 检查。
+        let compile_start = Instant::now();
         let module = get_cached_module(
             &self.engine,
             wasm_path,
@@ -1106,6 +1129,7 @@ impl Sandbox for WasmSandbox {
             &file_data,
             self.cache_dir.as_deref(),
         )?;
+        ensure_compile_timeout_not_exceeded(compile_start, wasm_path)?;
 
         // 2. [IMPORTANT-03 说明] stdout/stderr 缓冲区容量限制
         // MemoryOutputPipe 的 capacity 参数是写入上限而非初始容量，

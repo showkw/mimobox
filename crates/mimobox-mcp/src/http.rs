@@ -41,24 +41,23 @@ pub async fn run_http_server(
 ) -> HttpResult<()> {
     validate_bind_addr(bind_addr)?;
 
-    if auth_token.is_some() {
-        tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
-    } else {
-        tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
-    }
-
     // SECURITY: 在服务启动时即拒绝空 token 配置，避免配置失误导致认证旁路。
-    if auth_token
-        .as_ref()
-        .is_some_and(|token| token.trim().is_empty())
-    {
+    let Some(auth_token) = auth_token else {
+        let msg = "MCP HTTP 模式必须配置 auth_token，请使用 --auth-token 或 MIMOBOX_AUTH_TOKEN";
+        tracing::error!("{msg}");
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg).into());
+    };
+
+    if auth_token.trim().is_empty() {
         let msg = "auth_token 不能为空字符串或纯空白字符";
         tracing::error!("{msg}");
         return Err(io::Error::new(io::ErrorKind::InvalidInput, msg).into());
     }
 
+    tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
+
     let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
-    let auth_token = auth_token.map(Arc::new);
+    let auth_token = Some(Arc::new(auth_token));
     let server_registry = Arc::new(Mutex::new(Vec::new()));
     let service = create_mcp_service(server_registry.clone(), bind_addr);
     let app = Router::new()
@@ -390,6 +389,18 @@ mod tests {
         let io_err = err
             .downcast_ref::<std::io::Error>()
             .expect("拒绝启动必须返回 I/O 权限错误");
+
+        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_run_http_server_rejects_loopback_without_token() {
+        let err = run_http_server("127.0.0.1", 0, None, None)
+            .await
+            .expect_err("loopback 地址也必须配置 token 才能启动");
+        let io_err = err
+            .downcast_ref::<std::io::Error>()
+            .expect("缺少 token 必须返回 I/O 权限错误");
 
         assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
     }

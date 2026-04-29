@@ -334,16 +334,8 @@ struct PySandbox {
     inner: Option<RustSandbox>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SandboxRegistryEntry {
-    object_addr: usize,
-    data_addr: usize,
-}
-
-impl SandboxRegistryEntry {
-    fn object_ptr(self) -> *mut pyo3::ffi::PyObject {
-        self.object_addr as *mut pyo3::ffi::PyObject
-    }
+    sandbox: Py<PySandbox>,
 }
 
 static SANDBOX_REGISTRY: Mutex<Vec<SandboxRegistryEntry>> = Mutex::new(Vec::new());
@@ -1638,12 +1630,11 @@ impl PySandbox {
     ///
     /// Safe to call multiple times; subsequent calls after the first are no-ops.
     /// Also called automatically by the context manager exit.
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        if let Some(sandbox) = self.inner.take() {
-            py.allow_threads(|| sandbox.destroy())
-                .map_err(|e| map_sdk_error(e, py))?;
-        }
-
+    fn close(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
+        let py = slf.py();
+        let object_addr = slf.as_ptr() as usize;
+        slf.close_inner(py)?;
+        unregister_sandbox(object_addr);
         Ok(())
     }
 
@@ -1663,13 +1654,12 @@ impl PySandbox {
     ///
     /// Does not suppress exceptions (always returns `False`).
     fn __exit__(
-        &mut self,
-        py: Python<'_>,
+        slf: PyRefMut<'_, Self>,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.close(py)?;
+        Self::close(slf)?;
         Ok(false)
     }
 
@@ -1711,7 +1701,9 @@ impl PySandbox {
 
 impl Drop for PySandbox {
     fn drop(&mut self) {
-        unregister_sandbox(self.registry_key());
+        // Registry entries now hold strong `Py<PySandbox>` references and are
+        // removed by `close()` or the atexit drain. Drop may run during Python
+        // finalization, so it must not reconstruct Python references here.
     }
 }
 
@@ -1723,16 +1715,15 @@ fn registry_entries() -> std::sync::MutexGuard<'static, Vec<SandboxRegistryEntry
 }
 
 fn register_sandbox(py: Python<'_>, sandbox: &Py<PySandbox>) -> PyResult<()> {
-    let data_addr = sandbox.try_borrow(py)?.registry_key();
+    let object_addr = sandbox.as_ptr() as usize;
     let entry = SandboxRegistryEntry {
-        object_addr: sandbox.as_ptr() as usize,
-        data_addr,
+        sandbox: sandbox.clone_ref(py),
     };
 
     let mut registry = registry_entries();
     if !registry
         .iter()
-        .any(|existing| existing.data_addr == data_addr)
+        .any(|existing| existing.sandbox.as_ptr() as usize == object_addr)
     {
         registry.push(entry);
     }
@@ -1740,8 +1731,8 @@ fn register_sandbox(py: Python<'_>, sandbox: &Py<PySandbox>) -> PyResult<()> {
     Ok(())
 }
 
-fn unregister_sandbox(data_addr: usize) {
-    registry_entries().retain(|entry| entry.data_addr != data_addr);
+fn unregister_sandbox(object_addr: usize) {
+    registry_entries().retain(|entry| entry.sandbox.as_ptr() as usize != object_addr);
 }
 
 #[pyfunction]
@@ -1757,21 +1748,7 @@ fn cleanup_active_sandboxes(py: Python<'_>) {
 }
 
 fn cleanup_registered_sandbox(py: Python<'_>, entry: SandboxRegistryEntry) {
-    // SAFETY: Registry entries are removed in PySandbox::drop before Python object deallocation.
-    // The atexit handler holds the GIL, so live objects are not concurrently deallocated during borrowed reference reconstruction.
-    let Some(sandbox_any) =
-        (unsafe { Bound::<PyAny>::from_borrowed_ptr_or_opt(py, entry.object_ptr()) })
-    else {
-        log_cleanup_warning("Sandbox atexit cleanup skipped: registry entry is empty");
-        return;
-    };
-
-    let Ok(sandbox_obj) = sandbox_any.downcast_into::<PySandbox>() else {
-        log_cleanup_warning("Sandbox atexit cleanup skipped: registry entry type mismatch");
-        return;
-    };
-
-    match sandbox_obj.try_borrow_mut() {
+    match entry.sandbox.bind(py).try_borrow_mut() {
         Ok(mut sandbox) => sandbox.destroy_inner_unraisable(py, "atexit"),
         Err(_) => {
             log_cleanup_warning("Sandbox atexit cleanup skipped: sandbox is currently borrowed");
@@ -1822,8 +1799,13 @@ fn destroy_sandbox_unraisable(py: Python<'_>, sandbox: RustSandbox, context: &st
 }
 
 impl PySandbox {
-    fn registry_key(&self) -> usize {
-        self as *const Self as usize
+    fn close_inner(&mut self, py: Python<'_>) -> PyResult<()> {
+        if let Some(sandbox) = self.inner.take() {
+            py.allow_threads(|| sandbox.destroy())
+                .map_err(|e| map_sdk_error(e, py))?;
+        }
+
+        Ok(())
     }
 
     fn destroy_inner_unraisable(&mut self, py: Python<'_>, context: &str) {
@@ -2334,7 +2316,7 @@ mod tests {
             memory_limit_mb: Some(256),
             timeout_secs: Some(5.5),
             max_processes: Some(16),
-            trust_level: Some("untrusted"),
+            trust_level: Some("trusted"),
             network: Some("allow_all"),
             ..Default::default()
         })
@@ -2343,7 +2325,7 @@ mod tests {
         assert_eq!(config.memory_limit_mb, Some(256));
         assert_eq!(config.timeout, Some(Duration::from_millis(5_500)));
         assert_eq!(config.max_processes, Some(16));
-        assert_eq!(config.trust_level, TrustLevel::Untrusted);
+        assert_eq!(config.trust_level, TrustLevel::Trusted);
         assert!(matches!(config.network, NetworkPolicy::AllowAll));
     }
 
@@ -2588,7 +2570,7 @@ mod tests {
             let mut py_sandbox = PySandbox {
                 inner: Some(sandbox),
             };
-            py_sandbox.close(py).expect("failed to close Sandbox");
+            py_sandbox.close_inner(py).expect("failed to close Sandbox");
 
             let result = py_sandbox.execute(py, "/bin/echo should_fail", None, None, None);
 

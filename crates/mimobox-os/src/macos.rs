@@ -106,7 +106,10 @@ const SYSTEM_READ_PATHS: &[&str] = &[
     "/usr/share/",
     "/private/etc/",
     "/private/var/db/timezone",
-    "/private/var/folders/",
+    // SECURITY: 不放开整棵 /private/var/folders；该目录包含用户 TMPDIR。
+    // 仅允许系统缓存模板与 com.apple symbols cache 所需路径。
+    "/private/var/folders/zz/",
+    "/private/var/folders/zz/zyxvpxvq6csfx2n00",
     "/private/var/select/",
     "/dev/",
     "/etc/",

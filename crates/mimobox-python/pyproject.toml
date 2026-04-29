@@ -40,6 +40,7 @@ Documentation = "https://mimobox.io"
 
 [tool.maturin]
 bindings = "pyo3"
+features = ["extension-module"]
 module-name = "mimobox"
 manifest-path = "Cargo.toml"
 python-source = "python"

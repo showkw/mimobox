@@ -16,13 +16,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mimobox-sdk = { workspace = true, features = ["os", "vm"] }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3"] }
+pyo3 = { version = "0.24", features = ["abi3"] }
 shlex = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.24"
 
 [features]
+extension-module = ["pyo3/extension-module"]
 os = ["mimobox-sdk/os"]
 vm = ["mimobox-sdk/vm"]
 

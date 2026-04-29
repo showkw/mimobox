@@ -144,6 +144,11 @@ pub struct Config {
     pub fs_readonly: Vec<PathBuf>,
     /// Read-write mount paths inside the sandbox.
     pub fs_readwrite: Vec<PathBuf>,
+    /// Optional sandbox-private temporary directory.
+    ///
+    /// When set, this path is added to the backend read-write allowlist.
+    /// `None` keeps the default write surface empty instead of exposing global `/tmp`.
+    pub sandbox_tmp_dir: Option<PathBuf>,
     /// HTTP proxy domain whitelist (supports glob patterns like `*.openai.com`).
     pub allowed_http_domains: Vec<String>,
     /// Whether to allow child process creation (fork/clone) inside the sandbox.
@@ -189,7 +194,8 @@ impl Default for Config {
                 "/proc".into(),
                 "/etc".into(),
             ],
-            fs_readwrite: vec!["/tmp".into()],
+            fs_readwrite: Vec::new(),
+            sandbox_tmp_dir: None,
             allowed_http_domains: Vec::new(),
             allow_fork: false,
             namespace_degradation: NamespaceDegradation::FailClosed,
@@ -343,6 +349,14 @@ impl Config {
         let mut config = SandboxConfig::default();
         config.fs_readonly = self.fs_readonly.clone();
         config.fs_readwrite = self.fs_readwrite.clone();
+        if let Some(sandbox_tmp_dir) = &self.sandbox_tmp_dir
+            && !config
+                .fs_readwrite
+                .iter()
+                .any(|path| path == sandbox_tmp_dir)
+        {
+            config.fs_readwrite.push(sandbox_tmp_dir.clone());
+        }
         config.deny_network = deny_network;
         config.memory_limit_mb = self.memory_limit_mb;
         config.max_processes = self.max_processes;
@@ -708,6 +722,16 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set a sandbox-private temporary directory.
+    ///
+    /// This is the secure replacement for relying on global `/tmp`: the path is
+    /// explicitly added to the backend read-write allowlist, while the default
+    /// configuration keeps `fs_readwrite` empty.
+    pub fn sandbox_tmp_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner.sandbox_tmp_dir = Some(path.into());
+        self
+    }
+
     /// Set whether child process creation (fork/clone) is allowed inside the sandbox.
     ///
     /// Default is `false`. Set to `true` for shell or interpreter workloads.
@@ -999,6 +1023,9 @@ mod tests {
         assert_eq!(config.vm_memory_mb, 256);
         assert_eq!(config.kernel_path, None);
         assert_eq!(config.rootfs_path, None);
+        assert_eq!(config.sandbox_tmp_dir, None);
+        assert!(config.fs_readwrite.is_empty());
+        assert!(config.to_sandbox_config().fs_readwrite.is_empty());
     }
 
     #[test]
@@ -1198,6 +1225,36 @@ mod tests {
             .expect("配置校验失败");
 
         assert_eq!(config.to_sandbox_config().max_processes, Some(32));
+    }
+
+    #[test]
+    fn sandbox_tmp_dir_is_forwarded_as_explicit_readwrite_path() {
+        let config = Config::builder()
+            .sandbox_tmp_dir("/tmp/mimobox-private")
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(
+            config.to_sandbox_config().fs_readwrite,
+            vec![PathBuf::from("/tmp/mimobox-private")]
+        );
+    }
+
+    #[test]
+    fn explicit_fs_readwrite_is_not_replaced_by_sandbox_tmp_dir() {
+        let config = Config::builder()
+            .fs_readwrite(["/workspace"])
+            .sandbox_tmp_dir("/tmp/mimobox-private")
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(
+            config.to_sandbox_config().fs_readwrite,
+            vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/tmp/mimobox-private")
+            ]
+        );
     }
 
     #[test]

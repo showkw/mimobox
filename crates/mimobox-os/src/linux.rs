@@ -351,17 +351,15 @@ fn configure_sandbox_cgroup(
         return Ok(None);
     }
 
-    let pids_configured = match fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                "写入 cgroup pids.max 失败，跳过进程数限制: path={}, max_processes={}, error={error}",
-                cgroup_path.display(),
-                effective_max_processes(config)
-            );
-            false
-        }
-    };
+    if let Err(error) = fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
+        cleanup_cgroup(&cgroup_path);
+        tracing::error!(
+            "写入 cgroup pids.max 失败，拒绝继续执行: path={}, max_processes={}, error={error}",
+            cgroup_path.display(),
+            effective_max_processes(config)
+        );
+        return Err(error.into());
+    }
 
     if config.cpu_quota_us.is_some() {
         // 写入 cpu.max，格式为 "quota period"；"max period" 表示不限制。
@@ -369,11 +367,6 @@ fn configure_sandbox_cgroup(
             cleanup_cgroup(&cgroup_path);
             return Err(error.into());
         }
-    }
-
-    if !pids_configured && config.cpu_quota_us.is_none() {
-        cleanup_cgroup(&cgroup_path);
-        return Ok(None);
     }
 
     if let Err(error) = fs::write(cgroup_path.join("cgroup.procs"), pid.to_string()) {
@@ -742,7 +735,7 @@ fn apply_security_policies_and_exec(
             Ok(ForkResult::Child) => {
                 // 孙进程：PID namespace 已生效，先刷新 /proc 视图，再继续应用 seccomp。
                 if let Err(e) = remount_proc_for_pid_namespace() {
-                    if e.contains(CONTAINER_MOUNT_UNAVAILABLE_MARKER) {
+                    if e.contains(CONTAINER_MOUNT_UNAVAILABLE_MARKER) && allow_ns_degradation {
                         // SAFETY: This is the forked child warning path; write_error avoids unwinding.
                         unsafe {
                             write_error(
