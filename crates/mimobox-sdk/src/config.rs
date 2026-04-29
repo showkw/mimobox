@@ -280,6 +280,32 @@ impl Config {
             ));
         }
 
+        // SECURITY: Untrusted 代码不允许开放全部网络，必须使用 DenyAll 或 AllowDomains
+        if self.trust_level == TrustLevel::Untrusted
+            && matches!(self.network, NetworkPolicy::AllowAll)
+        {
+            return Err(invalid_config(
+                "Untrusted trust level cannot use NetworkPolicy::AllowAll",
+                "Use DenyAll or AllowDomains for untrusted code",
+            ));
+        }
+
+        // SECURITY: Untrusted 代码必须有超时限制，防止资源耗尽
+        if self.trust_level == TrustLevel::Untrusted && self.timeout.is_none() {
+            return Err(invalid_config(
+                "Untrusted trust level requires a timeout",
+                "Set timeout_secs to a finite value for untrusted code",
+            ));
+        }
+
+        // SECURITY: Untrusted 代码必须有内存限制，防止 OOM 攻击
+        if self.trust_level == TrustLevel::Untrusted && self.memory_limit_mb.is_none() {
+            return Err(invalid_config(
+                "Untrusted trust level requires a memory limit",
+                "Set memory_limit_mb for untrusted code",
+            ));
+        }
+
         if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
             return Err(invalid_config(
                 "network=DenyAll 但 allowed_http_domains 非空，配置冲突",
@@ -1033,6 +1059,51 @@ mod tests {
             sandbox_config.seccomp_profile,
             SeccompProfile::NetworkWithFork
         ));
+    }
+
+    #[test]
+    fn test_untrusted_rejects_allow_all_network() {
+        let result = Config::builder()
+            .trust_level(TrustLevel::Untrusted)
+            .network(NetworkPolicy::AllowAll)
+            .build();
+
+        assert_invalid_config_suggestion(result, "Use DenyAll or AllowDomains for untrusted code");
+    }
+
+    #[test]
+    fn test_untrusted_rejects_no_timeout() {
+        let result = Config::builder()
+            .trust_level(TrustLevel::Untrusted)
+            .no_timeout()
+            .build();
+
+        assert_invalid_config_suggestion(
+            result,
+            "Set timeout_secs to a finite value for untrusted code",
+        );
+    }
+
+    #[test]
+    fn test_untrusted_rejects_no_memory_limit() {
+        let mut config = Config::default();
+        config.trust_level = TrustLevel::Untrusted;
+        config.memory_limit_mb = None;
+
+        let result = config.validate().map(|()| config);
+
+        assert_invalid_config_suggestion(result, "Set memory_limit_mb for untrusted code");
+    }
+
+    #[test]
+    fn test_trusted_allows_allow_all_network() {
+        let config = Config::builder()
+            .trust_level(TrustLevel::Trusted)
+            .network(NetworkPolicy::AllowAll)
+            .build()
+            .expect("Trusted 配置应允许 AllowAll 网络策略");
+
+        assert!(matches!(config.network, NetworkPolicy::AllowAll));
     }
 
     #[test]

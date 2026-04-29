@@ -212,15 +212,25 @@ fn build_fallback_command_args(
     let _ = options.timeout;
 
     if let Some(cwd) = options.cwd.as_deref() {
-        let cwd = shlex::try_quote(cwd).map_err(|_| {
-            SdkError::Config("cwd contains characters that cannot be shell-escaped".to_string())
-        })?;
-        let env_prefix = build_shell_env_prefix(&options.env)?;
-        return Ok(vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            format!("cd {cwd} && exec {env_prefix}{command}"),
-        ]);
+        let parsed_args = parse_command(command)?;
+        let mut wrapped = Vec::with_capacity(parsed_args.len() + options.env.len() + 6);
+        wrapped.push("/bin/sh".to_string());
+        wrapped.push("-c".to_string());
+        // SECURITY: 使用 positional 参数传递 cwd 和命令，避免 shell 注入。
+        wrapped.push(r#"cd "$1" && shift && exec "$@""#.to_string());
+        wrapped.push("mimobox-cwd".to_string());
+        wrapped.push(cwd.to_string());
+        if options.env.is_empty() {
+            wrapped.extend(parsed_args);
+        } else {
+            // SECURITY: env 通过 /usr/bin/env 前缀传递，而非 shell 插值。
+            let mut env_prefixed = Vec::with_capacity(1 + options.env.len() + parsed_args.len());
+            env_prefixed.push("/usr/bin/env".to_string());
+            env_prefixed.extend(build_env_assignments(&options.env)?);
+            env_prefixed.extend(parsed_args);
+            wrapped.extend(env_prefixed);
+        }
+        return Ok(wrapped);
     }
 
     let args = parse_command(command)?;
@@ -270,27 +280,6 @@ fn build_fallback_argv_args(
     prefixed.extend(build_env_assignments(&options.env)?);
     prefixed.append(&mut command_args);
     Ok(prefixed)
-}
-
-#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-fn build_shell_env_prefix(env: &HashMap<String, String>) -> Result<String, SdkError> {
-    if env.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut parts = Vec::with_capacity(env.len() + 1);
-    parts.push("/usr/bin/env".to_string());
-    for assignment in build_env_assignments(env)? {
-        let quoted = shlex::try_quote(&assignment).map_err(|_| {
-            SdkError::Config(
-                "environment assignment contains characters that cannot be shell-escaped"
-                    .to_string(),
-            )
-        })?;
-        parts.push(quoted.into_owned());
-    }
-    parts.push(String::new());
-    Ok(parts.join(" "))
 }
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -926,6 +915,36 @@ mod tests {
                 r#"cd "$1" && shift && exec "$@""#,
                 "mimobox-cwd",
                 "/tmp/mimobox safe",
+                "/bin/echo",
+                "hello; rm -rf /",
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn test_build_fallback_command_args_with_cwd_uses_safe_argv() {
+        let mut options = SdkExecOptions {
+            cwd: Some("/tmp/mimobox; rm -rf /".to_string()),
+            ..Default::default()
+        };
+        options
+            .env
+            .insert("TOKEN".to_string(), "value; $(rm -rf /)".to_string());
+
+        let wrapped = build_fallback_command_args("/bin/echo 'hello; rm -rf /'", &options)
+            .expect("构造 command fallback 失败");
+
+        assert_eq!(
+            wrapped,
+            vec![
+                "/bin/sh",
+                "-c",
+                r#"cd "$1" && shift && exec "$@""#,
+                "mimobox-cwd",
+                "/tmp/mimobox; rm -rf /",
+                "/usr/bin/env",
+                "TOKEN=value; $(rm -rf /)",
                 "/bin/echo",
                 "hello; rm -rf /",
             ]
