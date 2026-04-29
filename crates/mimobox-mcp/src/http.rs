@@ -1,4 +1,4 @@
-//! HTTP 传输模块，提供 MCP Streamable HTTP 端点。
+//! HTTP transport module providing the MCP Streamable HTTP endpoint.
 
 use std::{
     error::Error,
@@ -27,12 +27,12 @@ type McpHttpService = StreamableHttpService<MimoboxServer, LocalSessionManager>;
 type ServerRegistry = Arc<Mutex<Vec<MimoboxServer>>>;
 type AllowedOrigins = Arc<Vec<String>>;
 
-/// HTTP stateful session 最多保留 100 个 server handle，限制 registry 内存增长。
+/// HTTP stateful sessions keep at most 100 server handles to cap registry memory growth.
 const MAX_CONCURRENT_SESSIONS: usize = 100;
-/// CORS 通配符仅允许精确的 "*" 项，避免误把带星号的字符串当成全开放。
+/// The CORS wildcard only allows an exact "*" entry to avoid treating patterns with stars as fully open.
 const WILDCARD_ORIGIN: &str = "*";
 
-/// 启动 MCP HTTP 服务器。
+/// Starts the MCP HTTP server.
 pub async fn run_http_server(
     bind_addr: &str,
     port: u16,
@@ -43,18 +43,18 @@ pub async fn run_http_server(
 
     // SECURITY: 在服务启动时即拒绝空 token 配置，避免配置失误导致认证旁路。
     let Some(auth_token) = auth_token else {
-        let msg = "MCP HTTP 模式必须配置 auth_token，请使用 --auth-token 或 MIMOBOX_AUTH_TOKEN";
+        let msg = "MCP HTTP mode requires auth_token; use --auth-token or MIMOBOX_AUTH_TOKEN";
         tracing::error!("{msg}");
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg).into());
     };
 
     if auth_token.trim().is_empty() {
-        let msg = "auth_token 不能为空字符串或纯空白字符";
+        let msg = "auth_token must not be empty or whitespace-only";
         tracing::error!("{msg}");
         return Err(io::Error::new(io::ErrorKind::InvalidInput, msg).into());
     }
 
-    tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
+    tracing::info!("MCP HTTP mode enabled Bearer token authentication");
 
     let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
     let auth_token = Some(Arc::new(auth_token));
@@ -120,7 +120,7 @@ fn register_server(server_registry: &ServerRegistry, server: MimoboxServer) -> i
     if servers.len() >= MAX_CONCURRENT_SESSIONS {
         tracing::warn!(
             max_sessions = MAX_CONCURRENT_SESSIONS,
-            "MCP HTTP session registry 已达到上限，移除最早的 server handle"
+            "MCP HTTP session registry reached its limit; evicting the oldest server handle"
         );
         let evicted = servers.remove(0);
         tracing::warn!("Evicting oldest MCP session, cleaning up its sandboxes");
@@ -140,14 +140,14 @@ fn validate_bind_addr(bind_addr: &str) -> io::Result<()> {
     if matches!(bind_addr, "0.0.0.0" | "[::]" | "::") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "MCP HTTP 禁止绑定所有网络接口",
+            "MCP HTTP must not bind to all network interfaces",
         ));
     }
 
     if !is_local_bind_addr(bind_addr) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "MCP HTTP 仅允许绑定本地回环地址",
+            "MCP HTTP may only bind to a local loopback address",
         ));
     }
 
@@ -174,7 +174,7 @@ fn parse_allowed_origins(allowed_origins: Option<String>) -> Vec<String> {
                 .map(str::trim)
                 .any(|o| o == WILDCARD_ORIGIN) =>
         {
-            tracing::warn!("CORS 配置为完全开放模式(*)，请勿在生产环境使用");
+            tracing::warn!("CORS is configured as fully open (*); do not use this in production");
             vec![WILDCARD_ORIGIN.to_string()]
         }
         Some(origins) => {
@@ -197,7 +197,10 @@ fn parse_allowed_origins(allowed_origins: Option<String>) -> Vec<String> {
 fn warn_non_local_origins(origins: &[String]) {
     for origin in origins {
         if !is_local_origin(origin) {
-            tracing::warn!(origin, "CORS 允许非本地 origin，请确认仅用于受信客户端");
+            tracing::warn!(
+                origin,
+                "CORS allows a non-local origin; ensure this is only for trusted clients"
+            );
         }
     }
 }
@@ -329,7 +332,7 @@ async fn auth_middleware(
 
     // SECURITY: 拒绝空/纯空白 token，防止配置失误导致认证旁路。
     if expected_token.trim().is_empty() {
-        tracing::error!("auth_token 配置为空字符串，拒绝所有请求");
+        tracing::error!("auth_token is empty; rejecting all requests");
         return unauthorized_response();
     }
 

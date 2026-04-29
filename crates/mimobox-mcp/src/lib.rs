@@ -43,30 +43,30 @@ use tracing::error;
 
 pub mod http;
 
-/// MCP 文件读写单次最大 10MB，避免 base64 请求或响应耗尽内存。
+/// MCP file reads and writes are capped at 10 MB per call to prevent base64 payloads from exhausting memory.
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
-/// MCP 目录列表最多返回 10,000 项，兼顾大型目录排查和响应体大小控制。
+/// MCP directory listings return at most 10,000 entries to support large directories while capping response size.
 const MAX_LIST_DIR_ENTRIES: usize = 10_000;
-/// MCP 命令 stdout/stderr 单流最大 4MB，与底层 OS 输出保护保持同量级。
+/// MCP command stdout/stderr are capped at 4 MB per stream, matching the lower-level OS output guard.
 const MAX_EXECUTE_OUTPUT: usize = 4 * 1024 * 1024;
-/// execute_command.command 最大 64KB，防止 shell-style 命令字符串耗尽内存。
+/// execute_command.command is capped at 64 KB to prevent shell-style command strings from exhausting memory.
 const MAX_EXECUTE_COMMAND_BYTES: usize = 64 * 1024;
-/// execute_command.argv 单个参数最大 32KB，避免异常大参数压垮后端。
+/// Each execute_command.argv argument is capped at 32 KB to prevent oversized arguments from overwhelming the backend.
 const MAX_EXECUTE_ARG_BYTES: usize = 32 * 1024;
-/// execute_command.argv 总长度最大 64KB，限制单次执行请求体大小。
+/// Total execute_command.argv length is capped at 64 KB to limit each execution request size.
 const MAX_EXECUTE_ARGV_BYTES: usize = 64 * 1024;
-/// execute_code.code 最大 1MB，避免代码片段在转义和执行前占用过多内存。
+/// execute_code.code is capped at 1 MB to limit memory used before escaping and execution.
 const MAX_EXECUTE_CODE_BYTES: usize = 1024 * 1024;
-/// MCP 文件和目录路径最大 4096 字节，对齐常见系统 PATH_MAX 级别限制。
+/// MCP file and directory paths are capped at 4096 bytes, aligned with common PATH_MAX limits.
 const MAX_MCP_PATH_BYTES: usize = 4096;
-/// 单个 MCP server 最多保留 64 个沙箱，防止客户端无限创建实例造成 DoS。
+/// A single MCP server keeps at most 64 sandboxes to prevent clients from creating unlimited instances and causing DoS.
 const MAX_SANDBOXES: usize = 64;
-/// MCP sandbox 和命令执行最大超时 3600 秒（1 小时），防止客户端占用资源过久。
+/// MCP sandbox and command execution timeouts are capped at 3600 seconds (1 hour) to limit resource retention.
 const MAX_SANDBOX_TIMEOUT_SECS: u64 = 3600;
-/// 临时 MCP sandbox 默认超时，避免未显式设置时以 Untrusted 模式创建失败。
+/// Default timeout for temporary MCP sandboxes, avoiding Untrusted creation failures when no timeout is provided.
 const DEFAULT_EPHEMERAL_TIMEOUT_MS: u64 = 30_000;
-/// 临时 MCP sandbox 默认内存上限，满足 Untrusted 必须设置内存限制的要求。
+/// Default memory limit for temporary MCP sandboxes, satisfying the Untrusted memory-limit requirement.
 const DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB: u64 = 256;
 
 #[derive(Clone)]
@@ -555,19 +555,19 @@ impl MimoboxServer {
             // 兼容旧 command 字段：用 shlex 解析
             (_, Some(command)) => shlex::split(&command).ok_or_else(|| {
                 to_error(format!(
-                    "命令解析失败，包含不匹配的引号：'{command}'。提示：请使用 argv 字段直接传递参数数组"
+                    "failed to parse command due to unmatched quotes: '{command}'. Tip: use the argv field to pass arguments directly"
                 ))
             })?,
             // 两者都不存在
             (None, None) => {
                 return Err(to_error(
-                    "必须提供 argv 或 command 参数。提示：推荐使用 argv 直接传递参数列表"
+                    "argv or command is required. Tip: prefer argv for direct argument passing"
                         .to_string(),
                 ));
             }
             (Some(_), None) => {
                 return Err(to_error(
-                    "argv 不能为空数组。提示：argv 第一个元素为可执行文件路径，如 [\"/bin/echo\", \"hello\"]"
+                    "argv must not be an empty array. Tip: the first argv element is the executable path, e.g. [\"/bin/echo\", \"hello\"]"
                         .to_string(),
                 ));
             }
@@ -602,7 +602,7 @@ impl MimoboxServer {
                 .map_err(to_error)?;
             if content.len() > MAX_FILE_SIZE {
                 return Err(to_error(format!(
-                    "文件过大：{} 字节，超过 {} 字节限制。提示：请读取较小的文件",
+                    "file is too large: {} bytes, exceeding the {} byte limit. Tip: read a smaller file",
                     content.len(),
                     MAX_FILE_SIZE
                 )));
@@ -637,12 +637,12 @@ impl MimoboxServer {
         {
             let data = STANDARD.decode(&request.content).map_err(|err| {
                 to_error(format!(
-                    "内容不是有效的 base64 编码：{err}。提示：请确保内容为标准 base64 编码字符串"
+                    "content is not valid base64: {err}. Tip: provide a standard base64-encoded string"
                 ))
             })?;
             if data.len() > MAX_FILE_SIZE {
                 return Err(to_error(format!(
-                    "内容过大：{} 字节，超过 {} 字节限制。提示：请写入较小的内容或拆分为多次写入",
+                    "content is too large: {} bytes, exceeding the {} byte limit. Tip: write smaller content or split it into multiple writes",
                     data.len(),
                     MAX_FILE_SIZE
                 )));
@@ -801,7 +801,7 @@ impl MimoboxServer {
             let method = request.method.to_ascii_uppercase();
             if !matches!(method.as_str(), "GET" | "POST") {
                 return Err(to_error(
-                    "HTTP 方法仅支持 GET 和 POST。提示：请使用 GET 或 POST".to_string(),
+                    "HTTP method only supports GET and POST. Tip: use GET or POST".to_string(),
                 ));
             }
 
@@ -860,7 +860,7 @@ impl MimoboxServer {
                     .map_err(to_error)?;
                 if result.exit_code != Some(0) {
                     return Err(to_error(format!(
-                        "list_dir 执行失败，路径 {path}: {}。提示：请确认路径存在且为目录",
+                        "list_dir failed for path {path}: {}. Tip: ensure the path exists and is a directory",
                         String::from_utf8_lossy(&result.stderr)
                     )));
                 }
@@ -935,7 +935,7 @@ impl MimoboxServer {
         result.map_err(format_join_error)?.map_err(format_sdk_error)
     }
 
-    /// 与 execute_with_optional_sandbox 类似，但接受 argv 向量直接传给 SDK exec()。
+    /// Similar to execute_with_optional_sandbox, but accepts an argv vector passed directly to SDK exec().
     async fn execute_with_optional_sandbox_argv(
         &self,
         sandbox_id: Option<u64>,
@@ -1036,7 +1036,7 @@ fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<
         && memory_limit_mb > MAX_MEMORY_LIMIT_MB
     {
         return Err(SdkError::Config(format!(
-            "create_sandbox memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB。提示：请设为合理值，推荐 256-512 MB"
+            "create_sandbox memory_limit_mb={memory_limit_mb} exceeds the maximum {MAX_MEMORY_LIMIT_MB} MB. Tip: use a reasonable value, typically 256-512 MB"
         )));
     }
 
@@ -1047,14 +1047,14 @@ fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
     if let Some(timeout_ms) = timeout_ms {
         if timeout_ms == 0 {
             return Err(
-                "timeout_ms=0 is not valid, must be positive。提示：请设置为正整数毫秒值，推荐 30000 毫秒（30 秒）"
+                "timeout_ms=0 is not valid, must be positive. Tip: use a positive millisecond value, typically 30000 ms (30 seconds)"
                     .to_string(),
             );
         }
 
         if timeout_ms > MAX_SANDBOX_TIMEOUT_SECS * 1000 {
             return Err(format!(
-                "timeout_ms={timeout_ms} 超过最大值 {} 毫秒（{MAX_SANDBOX_TIMEOUT_SECS} 秒）。提示：请减小超时时间，推荐 30000 毫秒（30 秒）",
+                "timeout_ms={timeout_ms} exceeds the maximum {} ms ({MAX_SANDBOX_TIMEOUT_SECS} seconds). Tip: reduce the timeout, typically to 30000 ms (30 seconds)",
                 MAX_SANDBOX_TIMEOUT_SECS * 1000
             ));
         }
@@ -1088,7 +1088,7 @@ fn validate_argv_size(argv: &[String]) -> Result<(), String> {
 
     if total_bytes > MAX_EXECUTE_ARGV_BYTES {
         return Err(format!(
-            "argv 总长度过长：{total_bytes} 字节，超过 {MAX_EXECUTE_ARGV_BYTES} 字节限制。提示：请减少参数数量或缩短参数"
+            "argv total length is too large: {total_bytes} bytes, exceeding the {MAX_EXECUTE_ARGV_BYTES} byte limit. Tip: reduce the number of arguments or shorten them"
         ));
     }
 
@@ -1107,7 +1107,7 @@ fn validate_text_max_bytes(field: &str, value: &str, max_bytes: usize) -> Result
     let len = value.len();
     if len > max_bytes {
         return Err(format!(
-            "字段 {field} 过长：{len} 字节，超过 {max_bytes} 字节限制。提示：请缩短该字段"
+            "field {field} is too long: {len} bytes, exceeding the {max_bytes} byte limit. Tip: shorten this field"
         ));
     }
 
@@ -1121,7 +1121,7 @@ fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> 
         "wasm" => Ok(IsolationLevel::Wasm),
         "microvm" | "micro_vm" | "micro-vm" | "vm" => Ok(IsolationLevel::MicroVm),
         other => Err(format!(
-            "不支持的隔离级别 '{other}'。提示：可选值为 auto、os、wasm、microvm；推荐使用 auto 自动选择最优后端"
+            "unsupported isolation level '{other}'. Tip: valid values are auto, os, wasm, and microvm; use auto to select the best backend automatically"
         )),
     }
 }
@@ -1136,12 +1136,12 @@ fn format_isolation_level(level: IsolationLevel) -> &'static str {
 }
 
 fn sandbox_not_found(sandbox_id: u64) -> String {
-    format!("sandbox {sandbox_id} 不存在。提示：使用 list_sandboxes 查看活跃的 sandbox 列表")
+    format!("sandbox {sandbox_id} does not exist. Tip: use list_sandboxes to view active sandboxes")
 }
 
 fn sandbox_quota_exceeded() -> String {
     format!(
-        "sandbox 配额已满：最多允许 {} 个实例。提示：先使用 destroy_sandbox 释放不需要的实例",
+        "sandbox quota exceeded: at most {} instances are allowed. Tip: use destroy_sandbox to release unused instances first",
         MAX_SANDBOXES
     )
 }
@@ -1149,7 +1149,7 @@ fn sandbox_quota_exceeded() -> String {
 #[cfg(not(feature = "vm"))]
 fn vm_feature_required(operation: &str) -> String {
     format!(
-        "{operation} 需要 microVM 后端。提示：启用 vm feature 并使用 microvm 隔离级别，或改用 auto 自动选择最优后端"
+        "{operation} requires the microVM backend. Tip: enable the vm feature and use microvm isolation, or use auto to select the best backend automatically"
     )
 }
 
@@ -1161,7 +1161,7 @@ fn build_code_command(language: Option<&str>, code: &str) -> Result<String, Stri
         "bash" => Ok(format!("bash -c {escaped_code}")),
         "sh" | "shell" => Ok(format!("sh -c {escaped_code}")),
         other => Err(format!(
-            "不支持的语言 '{other}'。提示：可选值为 python、node、bash、sh"
+            "unsupported language '{other}'. Tip: valid values are python, node, bash, and sh"
         )),
     }
 }
@@ -1246,10 +1246,10 @@ fn format_list_dir_fallback_entries(stdout: &[u8]) -> Vec<ListDirEntry> {
         .collect()
 }
 
-/// 脱敏错误消息中的宿主路径信息。
+/// Redacts host path information from error messages.
 ///
-/// 将常见宿主路径前缀替换为占位符，防止通过 MCP 错误响应泄露
-/// 宿主文件系统布局（如 /Users/alice/...、/home/...、rootfs 路径等）。
+/// Replaces common host path prefixes with placeholders to prevent MCP error responses
+/// from leaking host filesystem layout details such as /Users/alice/..., /home/..., and rootfs paths.
 fn sanitize_error_message(message: &str) -> String {
     let mut result = message.to_string();
     // 替换绝对路径模式：/Users/<name>/..., /home/<name>/..., /tmp/mimobox-..., /var/folders/...
@@ -1499,7 +1499,11 @@ mod tests {
         let result = validate_execute_command_size(None, Some(&argv));
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("argv 总长度过长"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("argv total length is too large")
+        );
     }
 
     #[test]
@@ -1755,7 +1759,7 @@ mod tests {
     fn test_sandbox_not_found_contains_id() {
         let msg = sandbox_not_found(42);
         assert!(msg.contains("42"), "should contain sandbox_id");
-        assert!(msg.contains("不存在"), "should contain hint");
+        assert!(msg.contains("does not exist"), "should contain hint");
     }
 
     // ── unix_timestamp_ms ──────────────────────────────────────────────

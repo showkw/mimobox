@@ -341,10 +341,10 @@ fn validate_cache_file_security(path: &Path) -> bool {
     validate_cache_file_metadata(path, &meta)
 }
 
-/// 校验缓存文件 metadata 的安全属性（owner、mode、文件类型）。
+/// Validates cache file metadata security properties (owner, mode, and file type).
 ///
-/// 从 `validate_cache_file_security` 提取，供已持有文件句柄的调用方复用，
-/// 避免在 flock 保护区间内再做额外的 path-based stat。
+/// Extracted from `validate_cache_file_security` so callers that already hold a file handle can reuse it,
+/// avoiding an extra path-based stat inside the flock-protected section.
 fn validate_cache_file_metadata(path: &Path, meta: &Metadata) -> bool {
     if !meta.file_type().is_file() {
         warn!("Cache path is not a regular file: {:?}", path);
@@ -374,10 +374,10 @@ fn validate_cache_file_metadata(path: &Path, meta: &Metadata) -> bool {
     true
 }
 
-/// 对已打开的缓存文件句柄进行安全校验（owner、mode、文件类型）。
+/// Validates security properties for an already-opened cache file handle (owner, mode, and file type).
 ///
-/// 使用文件句柄自身的 metadata() 而非 path-based stat，确保校验对象
-/// 与 flock 保护的是同一个 inode，消除 TOCTOU。
+/// Uses the file handle's own metadata() instead of a path-based stat to ensure the validated object
+/// is the same inode protected by flock, eliminating TOCTOU.
 fn validate_open_cache_file_security(path: &Path, file: &File) -> bool {
     let meta = match file.metadata() {
         Ok(meta) => meta,
@@ -390,12 +390,12 @@ fn validate_open_cache_file_security(path: &Path, file: &File) -> bool {
     validate_cache_file_metadata(path, &meta)
 }
 
-/// 对已打开的缓存文件描述符获取 flock 共享锁（LOCK_SH）。
+/// Acquires a flock shared lock (LOCK_SH) on an already-opened cache file descriptor.
 ///
-/// 共享锁允许并发读取但阻止排他锁（LOCK_EX），用于在缓存文件校验和反序列化期间
-/// 防止并发写入方替换文件内容，消除 TOCTOU 竞态窗口。
+/// The shared lock allows concurrent readers but blocks exclusive locks (LOCK_EX), preventing
+/// concurrent writers from replacing file contents during cache validation and deserialization.
 ///
-/// 锁在 file drop 时由内核自动释放。
+/// The kernel releases the lock automatically when the file is dropped.
 #[cfg(unix)]
 fn acquire_shared_lock(file: &File) -> Result<(), SandboxError> {
     loop {
@@ -423,9 +423,9 @@ fn acquire_shared_lock(file: &File) -> Result<(), SandboxError> {
     }
 }
 
-/// 打开缓存文件用于安全读取：使用 O_NOFOLLOW 防止符号链接跟随，并获取 flock 共享锁。
+/// Opens a cache file for secure reads using O_NOFOLLOW to prevent symlink traversal and acquiring a flock shared lock.
 ///
-/// 返回的文件句柄在整个读取和校验期间持有共享锁，调用方在完成读取后 drop 文件即可释放锁。
+/// The returned file handle holds the shared lock throughout reading and validation; dropping it releases the lock.
 fn open_cache_file_for_secure_read(path: &Path) -> Result<File, SandboxError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -458,7 +458,7 @@ fn cache_file_mtime(path: &Path) -> Option<u64> {
     metadata_mtime_nanos(&meta)
 }
 
-/// 从已打开的文件句柄获取 mtime，避免额外的 path-based stat。
+/// Gets mtime from an already-opened file handle, avoiding an extra path-based stat.
 fn opened_cache_file_mtime(file: &File) -> Option<u64> {
     let meta = file.metadata().ok()?;
     metadata_mtime_nanos(&meta)
@@ -927,13 +927,13 @@ fn global_engine() -> Result<Arc<Engine>, SandboxError> {
         .map_err(|e| SandboxError::new(e.clone()))
 }
 
-/// 检查路径是否是缓存目录的祖先或后代（基于 canonicalize 的双向检查）。
+/// Checks whether a path is an ancestor or descendant of the cache directory using canonicalize-based bidirectional checks.
 ///
-/// 使用 canonicalize() 解析符号链接和 .. 路径组件，防止攻击者通过符号链接
-/// 将 preopen 路径指向缓存目录的祖先，从而绕过保护。
+/// Uses canonicalize() to resolve symlinks and .. path components, preventing attackers from
+/// pointing a preopen path to an ancestor of the cache directory through symlinks.
 ///
-/// 安全模型：guest 不得获得任何覆盖缓存目录的 preopen（无论是只读还是读写），
-/// 因为 Module::deserialize 是 unsafe 的，要求缓存文件可信。
+/// Security model: the guest must not receive any preopen covering the cache directory,
+/// read-only or read-write, because Module::deserialize is unsafe and requires trusted cache files.
 fn is_path_cache_ancestor(path: &Path, cache_dir: &Path) -> bool {
     let Ok(canonical_path) = path.canonicalize() else {
         // 路径不存在时无法 canonicalize，安全起见保守处理：回退到词法检查。
@@ -948,10 +948,10 @@ fn is_path_cache_ancestor(path: &Path, cache_dir: &Path) -> bool {
         || canonical_cache.starts_with(&canonical_path)
 }
 
-/// 不存在路径的保守回退：词法前缀检查。
+/// Conservative fallback for nonexistent paths: lexical prefix checks.
 ///
-/// 当路径不存在无法 canonicalize 时，退而求其次检查词法前缀关系。
-/// 这种保守策略确保即使路径尚未创建，也不会意外暴露缓存目录。
+/// When a path does not exist and cannot be canonicalized, falls back to checking lexical prefix relationships.
+/// This conservative strategy avoids accidentally exposing the cache directory before paths are created.
 fn is_lexical_ancestor(path: &Path, cache_dir: &Path) -> bool {
     let normalize = |path: &Path| -> PathBuf {
         let mut normalized = PathBuf::new();

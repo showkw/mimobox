@@ -85,7 +85,7 @@ enum CliCommand {
     Version,
 }
 
-/// 返回命令类型名称（不包含命令参数、路径、代码片段等敏感内容）。
+/// Returns the command type name without sensitive arguments, paths, or code snippets.
 fn command_type_name(cmd: &CliCommand) -> &'static str {
     match cmd {
         CliCommand::Run(_) => "run",

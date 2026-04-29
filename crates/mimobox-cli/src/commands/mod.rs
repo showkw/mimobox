@@ -73,11 +73,11 @@ pub(crate) struct RunArgs {
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     pub(crate) backend: Backend,
 
-    /// 要执行的命令字符串（shell-style，例如 "/bin/echo hello"）
+    /// Command string to execute (shell-style, for example "/bin/echo hello")
     #[arg(long, value_name = "cmd")]
     pub(crate) command: Option<String>,
 
-    /// 直接执行的 argv 参数；放在选项之后，必要时使用 `--` 分隔。
+    /// argv arguments to execute directly; place them after options and use `--` when needed.
     #[arg(
         value_name = "argv",
         trailing_var_arg = true,

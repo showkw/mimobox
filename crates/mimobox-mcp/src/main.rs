@@ -8,23 +8,23 @@ type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Parser)]
 #[command(name = "mimobox-mcp", about = "mimobox MCP Server")]
 struct Cli {
-    /// 传输模式：stdio（默认）或 http
+    /// Transport mode: stdio (default) or http
     #[arg(long, default_value = "stdio")]
     transport: String,
 
-    /// HTTP 监听端口（仅 HTTP 模式）
+    /// HTTP listen port (HTTP mode only)
     #[arg(long, default_value_t = 8080)]
     port: u16,
 
-    /// HTTP 绑定地址（仅 HTTP 模式，默认仅允许本地访问）
+    /// HTTP bind address (HTTP mode only, local access by default)
     #[arg(long, default_value = "127.0.0.1")]
     bind_addr: String,
 
-    /// CORS 允许的 origin 列表，逗号分隔，如 'http://localhost:3000,http://localhost:8080'。默认限制为 localhost。
+    /// Comma-separated list of CORS allowed origins, e.g. 'http://localhost:3000,http://localhost:8080'. Defaults to localhost.
     #[arg(long)]
     allowed_origins: Option<String>,
 
-    /// HTTP Bearer token 认证密钥，可通过 MIMOBOX_AUTH_TOKEN 环境变量设置
+    /// HTTP Bearer token for authentication, also configurable via MIMOBOX_AUTH_TOKEN
     #[arg(long = "auth-token", env = "MIMOBOX_AUTH_TOKEN")]
     auth_token: Option<String>,
 }
@@ -38,11 +38,11 @@ async fn main() -> AppResult<()> {
 
     let cli = Cli::parse();
     let bind_ip: std::net::IpAddr = cli.bind_addr.parse().map_err(|error| {
-        Box::<dyn std::error::Error + Send + Sync>::from(format!("无效的 bind_addr: {error}"))
+        Box::<dyn std::error::Error + Send + Sync>::from(format!("invalid bind_addr: {error}"))
     })?;
     if !bind_ip.is_loopback() {
         tracing::warn!(
-            "⚠ MCP server 绑定到非 loopback 地址 {}，任何网络客户端都能连接并执行代码。建议仅绑定 127.0.0.1。",
+            "MCP server is bound to non-loopback address {}; any network client can connect and execute code. Bind to 127.0.0.1 unless this is intentional.",
             bind_ip
         );
     }
@@ -58,7 +58,10 @@ async fn main() -> AppResult<()> {
             http::run_http_server(&cli.bind_addr, port, cli.allowed_origins, cli.auth_token).await
         }
         _ => {
-            tracing::error!("不支持的传输模式: {}，请使用 stdio 或 http", cli.transport);
+            tracing::error!(
+                "unsupported transport mode: {}; use stdio or http",
+                cli.transport
+            );
             std::process::exit(1);
         }
     }

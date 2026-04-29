@@ -3,8 +3,8 @@ use tracing::info;
 
 use super::*;
 
-/// 需要解释器进程的语言：这些语言的运行时会在内部使用 fork/clone 创建线程，
-/// 因此需要自动启用 allow_fork 以避免被 seccomp 杀掉。
+/// Languages that require an interpreter process: these runtimes use fork/clone internally,
+/// so allow_fork must be enabled automatically to avoid being killed by seccomp.
 fn language_needs_fork(language: &str) -> bool {
     matches!(
         language,

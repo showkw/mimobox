@@ -885,9 +885,9 @@ impl PyPtySession {
         }
     }
 
-    /// 自动清理（Python GC 回收时调用）。
+    /// Automatic cleanup called by Python GC.
     ///
-    /// 不如 kill() 或 with 语句可靠（异常可能被吞掉），但作为防止孤儿进程的最后防线。
+    /// Less reliable than kill() or a with statement because exceptions may be swallowed, but serves as a last line of defense against orphaned processes.
     fn __del__(&mut self) {
         if self.inner.is_none() {
             return;
