@@ -475,12 +475,15 @@ fn configure_sandbox_cgroup(
 
     if let Err(error) = fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
         cleanup_cgroup(&cgroup_path);
-        tracing::error!(
-            "Failed to write cgroup pids.max, refusing to continue: path={}, max_processes={}, error={error}",
+        tracing::warn!(
+            "Failed to write cgroup pids.max, skipping pids.max process limit: path={}, max_processes={}, error={error}",
             cgroup_path.display(),
             effective_max_processes(config)
         );
-        return Err(error.into());
+        if config.cpu_quota_us.is_some() {
+            return Err(error.into());
+        }
+        return Ok(None);
     }
 
     if config.cpu_quota_us.is_some() {
