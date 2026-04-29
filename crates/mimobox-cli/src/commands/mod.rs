@@ -429,10 +429,10 @@ pub(crate) enum CliError {
     #[error("argument parsing failed: {0}")]
     Args(String),
 
-    #[error("命令字符串解析失败：{0}")]
+    #[error("command string parse failed: {0}")]
     CommandParse(String),
 
-    #[error("命令不能为空")]
+    #[error("command must not be empty")]
     EmptyCommand,
 
     #[error("logging initialization failed: {0}")]
@@ -624,8 +624,9 @@ pub(crate) fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> S
 }
 
 pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
-    let argv = shlex::split(command)
-        .ok_or_else(|| CliError::CommandParse("命令字符串包含未闭合的引号".to_string()))?;
+    let argv = shlex::split(command).ok_or_else(|| {
+        CliError::CommandParse("command string contains unclosed quotes".to_string())
+    })?;
     if argv.is_empty() {
         return Err(CliError::EmptyCommand);
     }
@@ -893,6 +894,6 @@ mod tests {
         let error = resolve_run_command(None, Vec::new()).expect_err("缺少命令应返回错误");
 
         assert_eq!(error.code(), "empty_command");
-        assert!(error.to_string().contains("命令不能为空"));
+        assert!(error.to_string().contains("command must not be empty"));
     }
 }

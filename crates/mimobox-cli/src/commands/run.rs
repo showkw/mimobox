@@ -170,7 +170,9 @@ where
                 .active_isolation()
                 .and_then(backend_from_sdk_isolation)
                 .ok_or_else(|| {
-                    let error = CliError::Sdk("SDK 执行成功但未记录实际后端".to_string());
+                    let error = CliError::Sdk(
+                        "SDK execution succeeded but did not record the actual backend".to_string(),
+                    );
                     error!(
                         code = error.code(),
                         message = %error,
