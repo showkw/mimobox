@@ -5,11 +5,13 @@ mod execute;
 mod files;
 mod http;
 mod pty;
+pub mod registry;
 mod snapshot;
 
 use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
 use crate::router::resolve_isolation;
+use crate::sandbox::registry::SandboxInfo;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::SandboxSnapshot;
 #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -87,6 +89,7 @@ pub(crate) enum SandboxInner {
 /// # }
 /// ```
 pub struct Sandbox {
+    pub(crate) id: uuid::Uuid,
     pub(crate) config: Config,
     pub(crate) inner: Option<SandboxInner>,
     pub(crate) active_isolation: Option<IsolationLevel>,
@@ -517,6 +520,27 @@ impl Sandbox {
         self.active_isolation
     }
 
+    /// 返回当前 SDK 沙箱实例的全局唯一 ID。
+    pub fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+
+    /// 返回当前进程内仍然注册的所有 SDK 沙箱实例。
+    pub fn list() -> Vec<SandboxInfo> {
+        registry::list()
+    }
+
+    /// 返回当前 SDK 沙箱实例的注册表信息快照。
+    pub fn info(&self) -> SandboxInfo {
+        registry::get(self.id).unwrap_or_else(|| SandboxInfo {
+            id: self.id,
+            configured_isolation: Some(self.config.isolation),
+            active_isolation: self.active_isolation,
+            created_at: std::time::Instant::now(),
+            is_ready: self.is_ready(),
+        })
+    }
+
     /// Waits for the current sandbox backend to become ready.
     ///
     /// For microVM backends, runs a PING/PONG readiness probe; OS/Wasm backends
@@ -552,15 +576,21 @@ impl Sandbox {
             other => other,
         };
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
-            return self.wait_ready_inner(timeout);
+            self.wait_ready_inner(timeout)?;
+            registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+            registry::update_ready(self.id, true);
+            return Ok(());
         }
 
         if self.inner.is_some() {
-            self.destroy_inner()?;
+            self.destroy_backend()?;
         }
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
-        self.wait_ready_inner(timeout)
+        self.wait_ready_inner(timeout)?;
+        registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+        registry::update_ready(self.id, true);
+        Ok(())
     }
 
     /// Returns whether the current SDK sandbox has been initialized with a usable backend.
@@ -607,15 +637,19 @@ impl Sandbox {
         let isolation = resolve_isolation(&self.config, command)?;
 
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+            registry::update_ready(self.id, true);
             return Ok(());
         }
 
         if self.inner.is_some() {
-            self.destroy_inner()?;
+            self.destroy_backend()?;
         }
 
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
+        registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+        registry::update_ready(self.id, true);
         Ok(())
     }
 
@@ -654,15 +688,19 @@ impl Sandbox {
         };
 
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+            registry::update_ready(self.id, true);
             return Ok(());
         }
 
         if self.inner.is_some() {
-            self.destroy_inner()?;
+            self.destroy_backend()?;
         }
 
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
+        registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+        registry::update_ready(self.id, true);
         Ok(())
     }
 
@@ -670,7 +708,15 @@ impl Sandbox {
     pub(crate) fn ensure_backend_for_snapshot(&mut self) -> Result<(), SdkError> {
         if self.inner.is_some() {
             return match self.active_isolation {
-                Some(IsolationLevel::MicroVm) => Ok(()),
+                Some(IsolationLevel::MicroVm) => {
+                    registry::update_isolation(
+                        self.id,
+                        Some(self.config.isolation),
+                        Some(IsolationLevel::MicroVm),
+                    );
+                    registry::update_ready(self.id, true);
+                    Ok(())
+                }
                 Some(_) => Err(SdkError::sandbox(
                     ErrorCode::UnsupportedPlatform,
                     "current sandbox backend does not support snapshot",
@@ -697,6 +743,8 @@ impl Sandbox {
 
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
+        registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+        registry::update_ready(self.id, true);
         Ok(())
     }
 
@@ -723,20 +771,25 @@ impl Sandbox {
         };
 
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
+            registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+            registry::update_ready(self.id, true);
             return Ok(());
         }
 
         if self.inner.is_some() {
-            self.destroy_inner()?;
+            self.destroy_backend()?;
         }
 
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
+        registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+        registry::update_ready(self.id, true);
         Ok(())
     }
 
     fn new_uninitialized(config: Config) -> Self {
         Self {
+            id: registry::register(),
             config,
             inner: None,
             active_isolation: None,
@@ -747,7 +800,12 @@ impl Sandbox {
 
     #[allow(dead_code)]
     pub(crate) fn from_initialized_inner(inner: SandboxInner, config: Config) -> Self {
+        let id = registry::register();
+        registry::update_isolation(id, Some(config.isolation), Some(IsolationLevel::MicroVm));
+        registry::update_ready(id, true);
+
         Self {
+            id,
             config,
             inner: Some(inner),
             active_isolation: Some(IsolationLevel::MicroVm),
@@ -823,14 +881,21 @@ impl Sandbox {
         }
     }
 
-    fn destroy_inner(&mut self) -> Result<(), SdkError> {
+    fn destroy_backend(&mut self) -> Result<(), SdkError> {
         let inner = self.inner.take();
         self.active_isolation = None;
+        registry::update_isolation(self.id, Some(self.config.isolation), None);
+        registry::update_ready(self.id, false);
 
         match inner {
             Some(inner) => destroy_backend_inner(inner),
             None => Ok(()),
         }
+    }
+
+    fn destroy_inner(&mut self) -> Result<(), SdkError> {
+        registry::unregister(self.id);
+        self.destroy_backend()
     }
 }
 

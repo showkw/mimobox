@@ -53,6 +53,7 @@ pub use mimobox_core::{
     DirEntry, ErrorCode, FileStat, FileType, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, PtyConfig,
     PtyEvent, PtySize,
 };
+pub use sandbox::registry::SandboxInfo;
 pub use sandbox::{Sandbox, SdkExecOptions};
 pub use types::{ExecuteResult, HttpResponse, PtySession, SandboxSnapshot, StreamEvent};
 #[cfg(all(feature = "vm", target_os = "linux"))]

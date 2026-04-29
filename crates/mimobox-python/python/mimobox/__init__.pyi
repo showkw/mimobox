@@ -126,6 +126,14 @@ class Snapshot:
         ...
 
 
+class SandboxInfo:
+    """当前进程内已注册沙箱的快照信息。"""
+
+    id: str
+    is_ready: bool
+    active_isolation: Optional[_IsolationLevel]
+
+
 class StreamEvent:
     """A single event from a streaming sandbox execution.
 
@@ -287,6 +295,16 @@ class Sandbox:
         trust_level: Optional[_TrustLevel] = ...,
         network: Optional[_NetworkPolicy] = ...,
     ) -> None: ...
+
+    @property
+    def id(self) -> Optional[str]:
+        """返回 Rust SDK 沙箱的全局唯一 ID；关闭后返回 ``None``。"""
+        ...
+
+    @classmethod
+    def list(cls) -> List[SandboxInfo]:
+        """列出当前进程内已注册的 Rust SDK 沙箱。"""
+        ...
 
     @property
     def fs(self) -> FileSystem: ...
@@ -688,6 +706,7 @@ __all__ = [
     "PtyOutput",
     "PtySession",
     "Sandbox",
+    "SandboxInfo",
     "SandboxCpuLimitError",
     "SandboxError",
     "SandboxHttpError",

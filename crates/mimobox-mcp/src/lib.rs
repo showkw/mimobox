@@ -100,6 +100,7 @@ pub struct CreateSandboxRequest {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CreateSandboxResponse {
     sandbox_id: u64,
+    sandbox_uuid: Option<String>,
     requested_isolation_level: String,
     actual_isolation_level: Option<String>,
 }
@@ -214,6 +215,7 @@ pub struct ListSandboxesResponse {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SandboxSummary {
     sandbox_id: u64,
+    sandbox_uuid: Option<String>,
     isolation_level: Option<String>,
     created_at: u64,
     uptime_ms: u128,
@@ -503,6 +505,7 @@ impl MimoboxServer {
             .active_isolation()
             .map(format_isolation_level)
             .map(str::to_string);
+        let sandbox_uuid = Some(sandbox.id().to_string());
         sandboxes.insert(
             sandbox_id,
             ManagedSandbox {
@@ -514,6 +517,7 @@ impl MimoboxServer {
 
         Ok(Json(CreateSandboxResponse {
             sandbox_id,
+            sandbox_uuid,
             requested_isolation_level: format_isolation_level(isolation).to_string(),
             actual_isolation_level,
         }))
@@ -581,6 +585,7 @@ impl MimoboxServer {
             .iter()
             .map(|(sandbox_id, managed)| SandboxSummary {
                 sandbox_id: *sandbox_id,
+                sandbox_uuid: Some(managed.sandbox.id().to_string()),
                 isolation_level: managed
                     .sandbox
                     .active_isolation()

@@ -19,6 +19,7 @@ mimobox-wasm = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 shlex.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -7,7 +7,8 @@
 use mimobox_sdk::{
     Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
     MAX_MEMORY_LIMIT_MB, NetworkPolicy, PtyConfig, PtyEvent as CorePtyEvent, PtySize,
-    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent, TrustLevel,
+    Sandbox as RustSandbox, SandboxInfo, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
+    TrustLevel,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -332,6 +333,31 @@ impl PySnapshot {
 #[pyclass(name = "Sandbox")]
 struct PySandbox {
     inner: Option<RustSandbox>,
+}
+
+/// 暴露给 Python 的沙箱注册表条目。
+#[pyclass(name = "SandboxInfo")]
+#[derive(Debug, Clone)]
+struct PySandboxInfo {
+    #[pyo3(get)]
+    id: String,
+    #[pyo3(get)]
+    is_ready: bool,
+    #[pyo3(get)]
+    active_isolation: Option<String>,
+}
+
+impl From<SandboxInfo> for PySandboxInfo {
+    fn from(info: SandboxInfo) -> Self {
+        Self {
+            id: info.id.to_string(),
+            is_ready: info.is_ready,
+            active_isolation: info
+                .active_isolation
+                .map(format_python_isolation)
+                .map(str::to_string),
+        }
+    }
 }
 
 struct SandboxRegistryEntry {
@@ -1104,6 +1130,21 @@ impl PySandbox {
         Ok(sandbox)
     }
 
+    /// 返回 Rust SDK 沙箱的全局唯一 ID。
+    #[getter]
+    fn id(&self) -> Option<String> {
+        self.inner.as_ref().map(|sandbox| sandbox.id().to_string())
+    }
+
+    /// 列出当前进程内注册的 Rust SDK 沙箱。
+    #[classmethod]
+    fn list(_cls: &Bound<'_, PyType>) -> Vec<PySandboxInfo> {
+        RustSandbox::list()
+            .into_iter()
+            .map(PySandboxInfo::from)
+            .collect()
+    }
+
     /// Return the filesystem sub-module.
     #[getter]
     fn fs(slf: PyRef<'_, Self>) -> PyFileSystem {
@@ -1369,15 +1410,8 @@ impl PySandbox {
         self.inner
             .as_ref()
             .and_then(|s| s.active_isolation())
-            .map(|level| {
-                match level {
-                    IsolationLevel::Os => "os",
-                    IsolationLevel::Wasm => "wasm",
-                    IsolationLevel::MicroVm => "microvm",
-                    IsolationLevel::Auto => "auto",
-                }
-                .to_string()
-            })
+            .map(format_python_isolation)
+            .map(str::to_string)
     }
 
     /// Return whether the sandbox is currently ready.
@@ -2011,6 +2045,15 @@ fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {
     }
 }
 
+fn format_python_isolation(level: IsolationLevel) -> &'static str {
+    match level {
+        IsolationLevel::Auto => "auto",
+        IsolationLevel::Os => "os",
+        IsolationLevel::Wasm => "wasm",
+        IsolationLevel::MicroVm => "microvm",
+    }
+}
+
 fn parse_python_isolation(value: &str) -> Result<IsolationLevel, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(IsolationLevel::Auto),
@@ -2256,6 +2299,7 @@ fn parse_python_timeout(timeout: f64) -> PyResult<Duration> {
 fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add_class::<PySandbox>()?;
+    module.add_class::<PySandboxInfo>()?;
     module.add_class::<PySnapshot>()?;
     module.add_class::<PyExecuteResult>()?;
     module.add_class::<PyHttpResponse>()?;
