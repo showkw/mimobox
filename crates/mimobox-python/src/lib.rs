@@ -325,6 +325,8 @@ impl PySnapshot {
 /// * `network` - Network policy: `"deny_all"`, `"allow_domains"`, or `"allow_all"`.
 /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
 ///   Supports glob patterns like `"*.openai.com"`.
+/// * `http_acl_allow` - HTTP ACL allow rules in `"METHOD host/path"` format.
+/// * `http_acl_deny` - HTTP ACL deny rules in `"METHOD host/path"` format.
 #[pyclass(name = "Sandbox")]
 struct PySandbox {
     inner: Option<RustSandbox>,
@@ -959,6 +961,8 @@ impl PySandbox {
     ///   Defaults to Rust SDK default (`"deny_all"`).
     /// * `allowed_http_domains` - List of domains allowed for HTTP proxy requests.
     ///   Supports glob patterns like `"*.openai.com"`. Defaults to empty when `None`.
+    /// * `http_acl_allow` - HTTP ACL allow rules in `"METHOD host/path"` format.
+    /// * `http_acl_deny` - HTTP ACL deny rules in `"METHOD host/path"` format.
     ///
     /// # Returns
     ///
@@ -973,6 +977,8 @@ impl PySandbox {
         *,
         isolation=None,
         allowed_http_domains=None,
+        http_acl_allow=None,
+        http_acl_deny=None,
         memory_limit_mb=None,
         timeout_secs=None,
         max_processes=None,
@@ -984,6 +990,8 @@ impl PySandbox {
         py: Python<'_>,
         isolation: Option<&str>,
         allowed_http_domains: Option<Vec<String>>,
+        http_acl_allow: Option<Vec<String>>,
+        http_acl_deny: Option<Vec<String>>,
         memory_limit_mb: Option<u64>,
         timeout_secs: Option<f64>,
         max_processes: Option<u32>,
@@ -993,6 +1001,8 @@ impl PySandbox {
         let config = build_python_config(PythonConfigOptions {
             isolation,
             allowed_http_domains,
+            http_acl_allow,
+            http_acl_deny,
             memory_limit_mb,
             timeout_secs,
             max_processes,
@@ -1706,6 +1716,8 @@ impl PySandbox {
 struct PythonConfigOptions<'a> {
     isolation: Option<&'a str>,
     allowed_http_domains: Option<Vec<String>>,
+    http_acl_allow: Option<Vec<String>>,
+    http_acl_deny: Option<Vec<String>>,
     memory_limit_mb: Option<u64>,
     timeout_secs: Option<f64>,
     max_processes: Option<u32>,
@@ -1747,6 +1759,14 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
 
     if let Some(domains) = options.allowed_http_domains {
         builder = builder.allowed_http_domains(domains);
+    }
+
+    if let Some(rules) = options.http_acl_allow {
+        builder = builder.http_acl_allow_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    }
+
+    if let Some(rules) = options.http_acl_deny {
+        builder = builder.http_acl_deny_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     }
 
     if let Some(network) = options.network {
@@ -2006,6 +2026,7 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
                     suggestion_str,
                 ),
                 ErrorCode::HttpDeniedHost
+                | ErrorCode::HttpDeniedAcl
                 | ErrorCode::HttpBodyTooLarge
                 | ErrorCode::HttpInvalidUrl => make_exception_with_attrs(
                     &py.get_type::<SandboxHttpError>(),
@@ -2137,6 +2158,51 @@ mod tests {
     }
 
     #[test]
+    fn python_config_builder_accepts_http_acl() {
+        let config = build_python_config(PythonConfigOptions {
+            http_acl_allow: Some(vec![
+                "GET api.openai.com/v1/models".to_string(),
+                "POST api.openai.com/v1/*".to_string(),
+            ]),
+            http_acl_deny: Some(vec!["* api.openai.com/v1/admin/*".to_string()]),
+            network: Some("allow_domains"),
+            ..Default::default()
+        })
+        .expect("failed to build Python config with HTTP ACL");
+
+        assert_eq!(config.http_acl.allow.len(), 2);
+        assert_eq!(config.http_acl.deny.len(), 1);
+        assert_eq!(config.http_acl.allow[0].method.to_string(), "GET");
+        assert_eq!(config.http_acl.deny[0].method.to_string(), "*");
+    }
+
+    #[test]
+    fn python_config_builder_http_acl_backward_compatible() {
+        // 仅使用 allowed_http_domains，不配置 http_acl。
+        let config = build_python_config(PythonConfigOptions {
+            allowed_http_domains: Some(vec!["api.openai.com".to_string()]),
+            ..Default::default()
+        })
+        .expect("failed to build Python config");
+
+        assert_eq!(config.allowed_http_domains, vec!["api.openai.com"]);
+        assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
+        assert!(config.http_acl.allow.is_empty());
+        assert!(config.http_acl.deny.is_empty());
+    }
+
+    #[test]
+    fn python_config_builder_rejects_allow_all_with_http_acl() {
+        let result = build_python_config(PythonConfigOptions {
+            network: Some("allow_all"),
+            http_acl_allow: Some(vec!["GET api.openai.com/v1/*".to_string()]),
+            ..Default::default()
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn python_config_builder_rejects_invalid_security_options() {
         let result = build_python_config(PythonConfigOptions {
             memory_limit_mb: Some(0),
@@ -2173,6 +2239,8 @@ mod tests {
 
     #[test]
     fn parse_python_timeout_rejects_above_max_value() {
+        pyo3::prepare_freethreaded_python();
+
         let result = parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS + 0.001);
 
         assert!(result.is_err());

@@ -163,6 +163,9 @@ pub struct Config {
     /// 但仅在完全可信环境中使用。
     #[cfg(feature = "vm")]
     pub vm_security_profile: mimobox_vm::VmSecurityProfile,
+    /// HTTP ACL 策略，控制 host 侧 HTTP 代理的 method/host/path 粒度访问控制。
+    /// 与 allowed_http_domains 互为补充：allowed_http_domains 自动转换为 ANY host /* allow 规则。
+    pub http_acl: mimobox_core::HttpAclPolicy,
 }
 
 impl Default for Config {
@@ -196,6 +199,7 @@ impl Default for Config {
             rootfs_path: None,
             #[cfg(feature = "vm")]
             vm_security_profile: mimobox_vm::VmSecurityProfile::default(),
+            http_acl: mimobox_core::HttpAclPolicy::default(),
         }
     }
 }
@@ -289,6 +293,16 @@ impl Config {
 
         validate_microvm_artifact_paths(self)?;
 
+        // NetworkPolicy::AllowAll 与 http_acl 互斥（fail-closed）
+        if matches!(self.network, NetworkPolicy::AllowAll)
+            && (!self.http_acl.allow.is_empty() || !self.http_acl.deny.is_empty())
+        {
+            return Err(invalid_config(
+                "network=AllowAll 与 http_acl 互斥，不能同时配置",
+                "使用 NetworkPolicy::AllowDomains 替代 AllowAll，或移除 http_acl 配置",
+            ));
+        }
+
         self.to_sandbox_config()
             .validate()
             .map_err(SdkError::from_core_config_error)?;
@@ -313,6 +327,25 @@ impl Config {
         config.allow_fork = self.allow_fork;
         config.allowed_http_domains = resolve_allowed_http_domains(self);
         config.namespace_degradation = self.namespace_degradation;
+        config.http_acl = self.http_acl.clone();
+
+        // 将 allowed_http_domains 自动转换为 http_acl allow 规则（向后兼容）
+        let domains = resolve_allowed_http_domains(self);
+        for domain in &domains {
+            let already_covered = config.http_acl.allow.iter().any(|rule| {
+                rule.host == *domain
+                    && rule.path == "/*"
+                    && rule.method == mimobox_core::HttpMethod::Any
+            });
+            if !already_covered {
+                config.http_acl.allow.push(mimobox_core::HttpAclRule {
+                    method: mimobox_core::HttpMethod::Any,
+                    host: domain.clone(),
+                    path: "/*".to_string(),
+                });
+            }
+        }
+
         config
     }
 
@@ -706,6 +739,54 @@ impl ConfigBuilder {
         self
     }
 
+    /// 设置 HTTP ACL allow 规则（追加模式）。
+    ///
+    /// 每条规则为 'METHOD host/path' 格式的字符串。
+    /// 解析失败在 build() 阶段返回错误。
+    pub fn http_acl_allow_str(mut self, rules: &[&str]) -> Self {
+        for rule_str in rules {
+            if let Ok(rule) = mimobox_core::HttpAclRule::parse(rule_str) {
+                self.inner.http_acl.allow.push(rule);
+            }
+        }
+        if matches!(self.inner.network, NetworkPolicy::DenyAll)
+            && !self.inner.http_acl.allow.is_empty()
+        {
+            self.inner.network = NetworkPolicy::AllowDomains(Vec::new());
+        }
+        self
+    }
+
+    /// 设置 HTTP ACL allow 规则（从已解析的规则列表）。
+    pub fn http_acl_allow(mut self, rules: Vec<mimobox_core::HttpAclRule>) -> Self {
+        self.inner.http_acl.allow.extend(rules);
+        if matches!(self.inner.network, NetworkPolicy::DenyAll)
+            && !self.inner.http_acl.allow.is_empty()
+        {
+            self.inner.network = NetworkPolicy::AllowDomains(Vec::new());
+        }
+        self
+    }
+
+    /// 设置 HTTP ACL deny 规则（追加模式）。
+    ///
+    /// 每条规则为 'METHOD host/path' 格式的字符串。
+    /// 解析失败在 build() 阶段返回错误。
+    pub fn http_acl_deny_str(mut self, rules: &[&str]) -> Self {
+        for rule_str in rules {
+            if let Ok(rule) = mimobox_core::HttpAclRule::parse(rule_str) {
+                self.inner.http_acl.deny.push(rule);
+            }
+        }
+        self
+    }
+
+    /// 设置 HTTP ACL deny 规则（从已解析的规则列表）。
+    pub fn http_acl_deny(mut self, rules: Vec<mimobox_core::HttpAclRule>) -> Self {
+        self.inner.http_acl.deny.extend(rules);
+        self
+    }
+
     /// Set the microVM vCPU count.
     ///
     /// Only affects the microVM backend. Default is `1`.
@@ -1081,6 +1162,124 @@ mod tests {
             config.to_sandbox_config().allowed_http_domains,
             vec!["*.example.com".to_string()]
         );
+    }
+
+    #[test]
+    fn builder_http_acl_allow_str_parses_rules() {
+        let config = Config::builder()
+            .http_acl_allow_str(&["GET api.openai.com/v1/models", "POST api.openai.com/v1/*"])
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(config.http_acl.allow.len(), 2);
+        assert_eq!(
+            config.http_acl.allow[0].method,
+            mimobox_core::HttpMethod::Get
+        );
+        assert_eq!(config.http_acl.allow[0].host, "api.openai.com");
+        assert_eq!(config.http_acl.allow[0].path, "/v1/models");
+        assert_eq!(
+            config.http_acl.allow[1].method,
+            mimobox_core::HttpMethod::Post
+        );
+        assert_eq!(config.http_acl.allow[1].path, "/v1/*");
+    }
+
+    #[test]
+    fn builder_http_acl_deny_str_parses_rules() {
+        let config = Config::builder()
+            .network(NetworkPolicy::AllowDomains(vec![
+                "api.openai.com".to_string(),
+            ]))
+            .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(config.http_acl.deny.len(), 1);
+        assert_eq!(
+            config.http_acl.deny[0].method,
+            mimobox_core::HttpMethod::Any
+        );
+        assert_eq!(config.http_acl.deny[0].host, "api.openai.com");
+        assert_eq!(config.http_acl.deny[0].path, "/v1/admin/*");
+    }
+
+    #[test]
+    fn builder_rejects_allow_all_with_http_acl() {
+        let result = Config::builder()
+            .network(NetworkPolicy::AllowAll)
+            .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("AllowAll"));
+    }
+
+    #[test]
+    fn allowed_http_domains_auto_converts_to_http_acl() {
+        let config = Config::builder()
+            .allowed_http_domains(["api.openai.com", "*.openai.com"])
+            .build()
+            .expect("配置校验失败");
+        let sandbox_config = config.to_sandbox_config();
+
+        // allowed_http_domains 应自动转换为 http_acl allow 规则
+        assert!(sandbox_config.http_acl.allow.iter().any(|rule| {
+            rule.host == "api.openai.com"
+                && rule.path == "/*"
+                && rule.method == mimobox_core::HttpMethod::Any
+        }));
+        assert!(sandbox_config.http_acl.allow.iter().any(|rule| {
+            rule.host == "*.openai.com"
+                && rule.path == "/*"
+                && rule.method == mimobox_core::HttpMethod::Any
+        }));
+    }
+
+    #[test]
+    fn http_acl_backward_compatible_with_allowed_http_domains() {
+        // 仅使用 allowed_http_domains，不配置 http_acl，代码行为不变
+        let config = Config::builder()
+            .allowed_http_domains(["api.openai.com"])
+            .build()
+            .expect("配置校验失败");
+        let sandbox_config = config.to_sandbox_config();
+
+        assert_eq!(
+            sandbox_config.allowed_http_domains,
+            vec!["api.openai.com".to_string()]
+        );
+        assert!(
+            sandbox_config
+                .http_acl
+                .allow
+                .iter()
+                .any(|rule| rule.host == "api.openai.com")
+        );
+    }
+
+    #[test]
+    fn http_acl_allow_str_auto_sets_allow_domains_network() {
+        // http_acl_allow_str 设置规则时自动切换 network 策略
+        let config = Config::builder()
+            .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .build()
+            .expect("配置校验失败");
+
+        assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
+    }
+
+    #[test]
+    fn builder_chain_http_acl_allow_and_deny() {
+        let config = Config::builder()
+            .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
+            .build()
+            .expect("配置校验失败");
+
+        assert_eq!(config.http_acl.allow.len(), 1);
+        assert_eq!(config.http_acl.deny.len(), 1);
     }
 
     #[cfg(feature = "vm")]

@@ -259,6 +259,9 @@ class Sandbox:
             or ``"allow_all"``. Defaults to ``"deny_all"``.
         allowed_http_domains: List of domains allowed for HTTP proxy requests.
             Supports glob patterns like ``"*.openai.com"``.
+        http_acl_allow: Optional list of HTTP ACL allow rules in 'METHOD host/path' format.
+            Supports glob patterns like 'GET api.openai.com/v1/*'.
+        http_acl_deny: Optional list of HTTP ACL deny rules. Deny rules take precedence over allow.
     """
 
     def __init__(
@@ -266,6 +269,8 @@ class Sandbox:
         *,
         isolation: Optional[_IsolationLevel] = ...,
         allowed_http_domains: Optional[List[str]] = ...,
+        http_acl_allow: Optional[List[str]] = ...,
+        http_acl_deny: Optional[List[str]] = ...,
         memory_limit_mb: Optional[int] = ...,
         timeout_secs: Optional[float] = ...,
         max_processes: Optional[int] = ...,
@@ -623,7 +628,7 @@ class SandboxCpuLimitError(SandboxError):
 class SandboxHttpError(SandboxError):
     """Raised when an HTTP proxy request fails or the target host is denied.
 
-    Maps from ErrorCode::HttpDeniedHost, HttpBodyTooLarge, and HttpInvalidUrl.
+    Maps from ErrorCode::HttpDeniedHost, HttpDeniedAcl, HttpBodyTooLarge, and HttpInvalidUrl.
     HTTP connection/TLS failures map to the built-in ConnectionError instead.
     """
     ...

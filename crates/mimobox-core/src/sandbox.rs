@@ -1,4 +1,6 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -22,6 +24,281 @@ fn is_plain_ip_domain(domain: &str) -> bool {
         && domain
             .chars()
             .all(|character| character.is_ascii_digit() || character == '.')
+}
+
+/// HTTP 方法枚举，用于 HTTP ACL 规则匹配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HttpMethod {
+    /// HTTP GET 方法。
+    Get,
+    /// HTTP POST 方法。
+    Post,
+    /// HTTP PUT 方法。
+    Put,
+    /// HTTP DELETE 方法。
+    Delete,
+    /// HTTP PATCH 方法。
+    Patch,
+    /// HTTP HEAD 方法。
+    Head,
+    /// 匹配任意 HTTP 方法。
+    Any,
+}
+
+impl FromStr for HttpMethod {
+    type Err = String;
+
+    fn from_str(method: &str) -> Result<Self, Self::Err> {
+        match method.trim().to_ascii_uppercase().as_str() {
+            "GET" => Ok(Self::Get),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "DELETE" => Ok(Self::Delete),
+            "PATCH" => Ok(Self::Patch),
+            "HEAD" => Ok(Self::Head),
+            "*" => Ok(Self::Any),
+            _ => Err(format!("不支持的 HTTP 方法: {method}")),
+        }
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+            Self::Head => "HEAD",
+            Self::Any => "*",
+        })
+    }
+}
+
+/// HTTP ACL 规则，定义 method + host + path 的匹配条件。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HttpAclRule {
+    /// HTTP 方法匹配条件。
+    pub method: HttpMethod,
+    /// 主机名匹配条件，支持 `*` 和 `*.example.com`。
+    pub host: String,
+    /// 路径匹配条件，支持 `/*` 和 `/prefix/*`。
+    pub path: String,
+}
+
+impl HttpAclRule {
+    /// 解析 `METHOD host/path` 格式的 HTTP ACL 规则。
+    pub fn parse(rule: &str) -> Result<Self, String> {
+        let mut parts = rule.split_whitespace();
+        let method = parts
+            .next()
+            .ok_or_else(|| "HTTP ACL 规则不能为空".to_string())?
+            .parse::<HttpMethod>()?;
+        let target = parts
+            .next()
+            .ok_or_else(|| "HTTP ACL 规则缺少 host/path".to_string())?;
+        let explicit_path = parts.next();
+
+        if parts.next().is_some() {
+            return Err("HTTP ACL 规则格式无效，请使用 METHOD host/path".to_string());
+        }
+
+        let (host, path) = match explicit_path {
+            Some(path) => (target, path),
+            None => split_acl_target(target),
+        };
+        if host.is_empty() {
+            return Err("HTTP ACL 规则 host 不能为空".to_string());
+        }
+
+        Ok(Self {
+            method,
+            host: host.to_string(),
+            path: normalize_path(path),
+        })
+    }
+
+    /// 判断当前规则是否匹配指定 HTTP 请求。
+    pub fn matches(&self, method: HttpMethod, host: &str, path: &str) -> bool {
+        self.matches_method(method)
+            && matches_acl_host(&self.host, host)
+            && matches_acl_path(&self.path, path)
+    }
+
+    fn matches_method(&self, method: HttpMethod) -> bool {
+        self.method == HttpMethod::Any || self.method == method
+    }
+}
+
+/// HTTP ACL 策略，包含 allow 和 deny 规则列表。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HttpAclPolicy {
+    /// 允许通过的 HTTP ACL 规则列表。
+    pub allow: Vec<HttpAclRule>,
+    /// 拒绝通过的 HTTP ACL 规则列表。
+    pub deny: Vec<HttpAclRule>,
+}
+
+impl HttpAclPolicy {
+    /// 按 deny-first 语义评估请求是否允许通过。
+    pub fn evaluate(&self, method: HttpMethod, host: &str, path: &str) -> bool {
+        if self
+            .deny
+            .iter()
+            .any(|rule| rule.matches(method, host, path))
+        {
+            return false;
+        }
+
+        if self.allow.is_empty() {
+            return true;
+        }
+
+        self.allow
+            .iter()
+            .any(|rule| rule.matches(method, host, path))
+    }
+
+    /// 校验 HTTP ACL 规则配置是否合法。
+    pub fn validate(&self) -> Result<(), String> {
+        for rule in self.allow.iter().chain(&self.deny) {
+            validate_acl_rule(rule)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// 规范化 HTTP 路径，消除常见路径绕过形式。
+pub fn normalize_path(path: &str) -> String {
+    let decoded = percent_decode_path(path);
+    let mut segments = Vec::new();
+
+    for segment in decoded.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+
+    if segments.is_empty() {
+        return "/".to_string();
+    }
+
+    format!("/{}", segments.join("/"))
+}
+
+fn split_acl_target(target: &str) -> (&str, &str) {
+    match target.find('/') {
+        Some(index) => (&target[..index], &target[index..]),
+        None => (target, "/*"),
+    }
+}
+
+fn validate_acl_rule(rule: &HttpAclRule) -> Result<(), String> {
+    if rule.host.is_empty() {
+        return Err("host 不能为空".to_string());
+    }
+
+    if rule.host.chars().any(char::is_whitespace) {
+        return Err(format!("host 不能包含空白字符: {}", rule.host));
+    }
+
+    if has_invalid_acl_host_wildcard(&rule.host) {
+        return Err(format!(
+            "host 通配符格式无效: {}，仅支持 * 或 *.example.com",
+            rule.host
+        ));
+    }
+
+    if !rule.path.starts_with('/') {
+        return Err(format!("path 必须以 / 开头: {}", rule.path));
+    }
+
+    Ok(())
+}
+
+fn has_invalid_acl_host_wildcard(host: &str) -> bool {
+    let wildcard_count = host.chars().filter(|character| *character == '*').count();
+    wildcard_count > 0
+        && host != "*"
+        && (wildcard_count != 1 || !host.starts_with("*.") || host.len() <= 2)
+}
+
+fn matches_acl_host(rule_host: &str, host: &str) -> bool {
+    let rule_host = normalize_acl_host(rule_host);
+    let host = normalize_acl_host(host);
+
+    if rule_host == "*" {
+        return true;
+    }
+
+    if let Some(domain) = rule_host.strip_prefix("*.") {
+        let suffix = format!(".{domain}");
+        return host.len() > suffix.len() && host.ends_with(&suffix);
+    }
+
+    rule_host == host
+}
+
+fn normalize_acl_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn matches_acl_path(rule_path: &str, path: &str) -> bool {
+    let path = normalize_path(path);
+
+    match rule_path {
+        "*" | "/*" => true,
+        _ if rule_path.ends_with('*') => {
+            let prefix = rule_path.trim_end_matches('*');
+            path.starts_with(prefix)
+        }
+        _ => rule_path == path,
+    }
+}
+
+fn percent_decode_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = String::with_capacity(path.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(value) = decode_hex_pair(bytes[index + 1], bytes[index + 2])
+        {
+            decoded.push(value as char);
+            index += 3;
+            continue;
+        }
+
+        if let Some(character) = path[index..].chars().next() {
+            decoded.push(character);
+            index += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    decoded
+}
+
+fn decode_hex_pair(high: u8, low: u8) -> Option<u8> {
+    Some(hex_value(high)? * 16 + hex_value(low)?)
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Structured error code for programmatic error matching.
@@ -80,6 +357,8 @@ pub enum ErrorCode {
     MemoryLimitExceeded,
     /// 沙箱 CPU 配额耗尽（cgroups cpu.stat throttle）。
     CpuLimitExceeded,
+    /// HTTP proxy request denied by ACL rule.
+    HttpDeniedAcl,
 }
 
 impl ErrorCode {
@@ -107,6 +386,7 @@ impl ErrorCode {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::MemoryLimitExceeded => "memory_limit_exceeded",
             Self::CpuLimitExceeded => "cpu_limit_exceeded",
+            Self::HttpDeniedAcl => "http_denied_acl",
             _ => "unknown_error",
         }
     }
@@ -267,6 +547,10 @@ pub struct SandboxConfig {
     /// Namespace 降级行为控制。默认 FailClosed（任何 namespace 创建失败都返回错误）。
     #[serde(default)]
     pub namespace_degradation: NamespaceDegradation,
+    /// HTTP ACL 策略，控制 host 侧 HTTP 代理的 method/host/path 粒度访问控制。
+    /// 未配置时（allow 和 deny 都为空），保持现有行为。
+    #[serde(default)]
+    pub http_acl: HttpAclPolicy,
 }
 
 impl Default for SandboxConfig {
@@ -284,6 +568,7 @@ impl Default for SandboxConfig {
             allow_fork: false,
             allowed_http_domains: Vec::new(),
             namespace_degradation: NamespaceDegradation::FailClosed,
+            http_acl: HttpAclPolicy::default(),
         }
     }
 }
@@ -368,6 +653,11 @@ impl SandboxConfig {
         if self.cpu_period_us == 0 {
             return Err(SandboxError::new("cpu_period_us=0 无效，请设为正整数")
                 .suggestion("cpu_period_us 最小值为 1，推荐 100000"));
+        }
+
+        if let Err(msg) = self.http_acl.validate() {
+            return Err(SandboxError::new(format!("http_acl 配置无效: {msg}"))
+                .suggestion("请检查 HTTP ACL 规则格式"));
         }
 
         Ok(())
@@ -893,7 +1183,243 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{MAX_MEMORY_LIMIT_MB, PtySize, SandboxConfig, SandboxError, SandboxSnapshot};
+    use super::{
+        HttpAclPolicy, HttpAclRule, HttpMethod, MAX_MEMORY_LIMIT_MB, PtySize, SandboxConfig,
+        SandboxError, SandboxSnapshot, normalize_path,
+    };
+
+    fn parse_acl_rule(rule: &str) -> HttpAclRule {
+        HttpAclRule::parse(rule).expect("HTTP ACL 规则解析必须成功")
+    }
+
+    fn acl_policy(allow: &[&str], deny: &[&str]) -> HttpAclPolicy {
+        HttpAclPolicy {
+            allow: allow.iter().map(|rule| parse_acl_rule(rule)).collect(),
+            deny: deny.iter().map(|rule| parse_acl_rule(rule)).collect(),
+        }
+    }
+
+    #[test]
+    fn test_http_method_from_str_uppercase() {
+        assert_eq!("GET".parse::<HttpMethod>(), Ok(HttpMethod::Get));
+    }
+
+    #[test]
+    fn test_http_method_from_str_lowercase() {
+        assert_eq!("get".parse::<HttpMethod>(), Ok(HttpMethod::Get));
+    }
+
+    #[test]
+    fn test_http_method_from_str_wildcard() {
+        assert_eq!("*".parse::<HttpMethod>(), Ok(HttpMethod::Any));
+    }
+
+    #[test]
+    fn test_http_method_from_str_invalid() {
+        assert!("INVALID".parse::<HttpMethod>().is_err());
+    }
+
+    #[test]
+    fn test_acl_rule_parse_full() {
+        let rule = parse_acl_rule("GET api.openai.com/v1/models");
+
+        assert_eq!(rule.method, HttpMethod::Get);
+        assert_eq!(rule.host, "api.openai.com");
+        assert_eq!(rule.path, "/v1/models");
+    }
+
+    #[test]
+    fn test_acl_rule_parse_wildcard_method() {
+        let rule = parse_acl_rule("* *.openai.com/*");
+
+        assert_eq!(rule.method, HttpMethod::Any);
+        assert_eq!(rule.host, "*.openai.com");
+        assert_eq!(rule.path, "/*");
+    }
+
+    #[test]
+    fn test_acl_rule_parse_no_path() {
+        let rule = parse_acl_rule("GET example.com");
+
+        assert_eq!(rule.method, HttpMethod::Get);
+        assert_eq!(rule.host, "example.com");
+        assert_eq!(rule.path, "/*");
+    }
+
+    #[test]
+    fn test_acl_rule_parse_wildcard_all() {
+        let rule = parse_acl_rule("* */admin/*");
+
+        assert_eq!(rule.method, HttpMethod::Any);
+        assert_eq!(rule.host, "*");
+        assert_eq!(rule.path, "/admin/*");
+    }
+
+    #[test]
+    fn test_acl_rule_parse_post_wildcard_path() {
+        let rule = parse_acl_rule("POST api.openai.com/v1/*");
+
+        assert_eq!(rule.method, HttpMethod::Post);
+        assert_eq!(rule.host, "api.openai.com");
+        assert_eq!(rule.path, "/v1/*");
+    }
+
+    #[test]
+    fn test_acl_rule_parse_empty_input() {
+        assert!(HttpAclRule::parse("").is_err());
+    }
+
+    #[test]
+    fn test_normalize_path_percent_decode() {
+        assert_eq!(normalize_path("/%61dmin"), "/admin");
+    }
+
+    #[test]
+    fn test_normalize_path_double_slash() {
+        assert_eq!(normalize_path("//admin"), "/admin");
+    }
+
+    #[test]
+    fn test_normalize_path_dotdot() {
+        assert_eq!(normalize_path("/public/../admin"), "/admin");
+    }
+
+    #[test]
+    fn test_normalize_path_complex() {
+        assert_eq!(normalize_path("/a/b/../../c"), "/c");
+    }
+
+    #[test]
+    fn test_normalize_path_already_normal() {
+        assert_eq!(normalize_path("/v1/models"), "/v1/models");
+    }
+
+    #[test]
+    fn test_normalize_path_root() {
+        assert_eq!(normalize_path("/"), "/");
+    }
+
+    #[test]
+    fn test_normalize_path_percent_slash() {
+        assert_eq!(normalize_path("/%2Fadmin"), "/admin");
+    }
+
+    #[test]
+    fn test_normalize_path_invalid_percent() {
+        assert_eq!(normalize_path("/%GG"), "/%GG");
+    }
+
+    #[test]
+    fn test_evaluate_deny_first() {
+        let policy = acl_policy(&["* * /*"], &["* */admin/*"]);
+
+        assert!(!policy.evaluate(HttpMethod::Get, "any", "/admin/settings"));
+    }
+
+    #[test]
+    fn test_evaluate_allow_match() {
+        let policy = acl_policy(&["GET api.openai.com/v1/*"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "api.openai.com", "/v1/models"));
+    }
+
+    #[test]
+    fn test_evaluate_default_deny() {
+        let policy = acl_policy(&["GET api.openai.com/v1/*"], &[]);
+
+        assert!(!policy.evaluate(HttpMethod::Post, "api.openai.com", "/v1/models"));
+    }
+
+    #[test]
+    fn test_evaluate_no_rules() {
+        let policy = HttpAclPolicy::default();
+
+        assert!(policy.evaluate(HttpMethod::Get, "any.com", "/any"));
+    }
+
+    #[test]
+    fn test_evaluate_host_exact() {
+        let policy = acl_policy(&["GET example.com/*"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "example.com", "/path"));
+        assert!(!policy.evaluate(HttpMethod::Get, "other.com", "/path"));
+    }
+
+    #[test]
+    fn test_evaluate_host_wildcard_subdomain() {
+        let policy = acl_policy(&["* *.openai.com/*"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "api.openai.com", "/v1"));
+        assert!(!policy.evaluate(HttpMethod::Get, "openai.com", "/v1"));
+    }
+
+    #[test]
+    fn test_evaluate_host_wildcard_all() {
+        let policy = acl_policy(&["* * /*"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "any.com", "/any"));
+    }
+
+    #[test]
+    fn test_evaluate_path_prefix() {
+        let policy = acl_policy(&["GET example.com/v1/*"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "example.com", "/v1/models"));
+        assert!(!policy.evaluate(HttpMethod::Get, "example.com", "/v2/models"));
+    }
+
+    #[test]
+    fn test_evaluate_path_exact() {
+        let policy = acl_policy(&["GET example.com/v1/models"], &[]);
+
+        assert!(policy.evaluate(HttpMethod::Get, "example.com", "/v1/models"));
+        assert!(!policy.evaluate(HttpMethod::Get, "example.com", "/v1/models/123"));
+    }
+
+    #[test]
+    fn test_evaluate_path_bypass_percent() {
+        let policy = acl_policy(&["* * /*"], &["* */admin/*"]);
+
+        assert!(!policy.evaluate(HttpMethod::Get, "any", "/%61dmin/settings"));
+    }
+
+    #[test]
+    fn test_evaluate_path_bypass_dotdot() {
+        let policy = acl_policy(&["* * /*"], &["* */admin/*"]);
+
+        assert!(!policy.evaluate(HttpMethod::Get, "any", "/public/../admin/settings"));
+    }
+
+    #[test]
+    fn test_evaluate_path_bypass_double_slash() {
+        let policy = acl_policy(&["* * /*"], &["* */admin/*"]);
+
+        assert!(!policy.evaluate(HttpMethod::Get, "any", "//admin/settings"));
+    }
+
+    #[test]
+    fn test_validate_empty_host() {
+        let policy = HttpAclPolicy {
+            allow: vec![HttpAclRule {
+                method: HttpMethod::Get,
+                host: String::new(),
+                path: "/*".to_string(),
+            }],
+            deny: Vec::new(),
+        };
+
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_valid_rules() {
+        let policy = acl_policy(
+            &["GET example.com/v1/*", "* *.openai.com/*"],
+            &["* */admin/*"],
+        );
+
+        assert!(policy.validate().is_ok());
+    }
 
     #[test]
     fn pty_size_default_is_80x24() {
