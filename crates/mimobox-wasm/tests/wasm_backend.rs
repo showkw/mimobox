@@ -147,10 +147,22 @@ fn wasm_sandbox_enforces_memory_limits() -> Result<(), Box<dyn Error>> {
     config.memory_limit_mb = Some(1);
     let mut sandbox = WasmSandbox::new(config)?;
     let command = vec![wasm_path.to_string_lossy().into_owned()];
-    let result = sandbox.execute(&command)?;
+    let result = sandbox.execute(&command);
 
-    assert!(!result.timed_out);
-    assert_eq!(result.exit_code, Some(1));
+    match result {
+        Err(e) => {
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("memory limit exceeded") || msg.contains("oom"),
+                "expected OOM error, got: {e}"
+            );
+        }
+        Ok(r) => {
+            // Some runtimes may return exit_code=1 instead of an error
+            assert_eq!(r.exit_code, Some(1));
+            assert!(!r.timed_out);
+        }
+    }
 
     Ok(())
 }

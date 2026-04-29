@@ -1726,18 +1726,18 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyProcess>()?;
     module.add_class::<PySnapshotOps>()?;
     module.add_class::<PyNetwork>()?;
-    module.add("SandboxError", &py.get_type::<SandboxError>())?;
-    module.add("SandboxTimeoutError", &py.get_type::<SandboxTimeoutError>())?;
-    module.add("SandboxProcessError", &py.get_type::<SandboxProcessError>())?;
-    module.add("SandboxMemoryError", &py.get_type::<SandboxMemoryError>())?;
+    module.add("SandboxError", py.get_type::<SandboxError>())?;
+    module.add("SandboxTimeoutError", py.get_type::<SandboxTimeoutError>())?;
+    module.add("SandboxProcessError", py.get_type::<SandboxProcessError>())?;
+    module.add("SandboxMemoryError", py.get_type::<SandboxMemoryError>())?;
     module.add(
         "SandboxCpuLimitError",
-        &py.get_type::<SandboxCpuLimitError>(),
+        py.get_type::<SandboxCpuLimitError>(),
     )?;
-    module.add("SandboxHttpError", &py.get_type::<SandboxHttpError>())?;
+    module.add("SandboxHttpError", py.get_type::<SandboxHttpError>())?;
     module.add(
         "SandboxLifecycleError",
-        &py.get_type::<SandboxLifecycleError>(),
+        py.get_type::<SandboxLifecycleError>(),
     )?;
     register_atexit_handler(module)?;
     Ok(())
