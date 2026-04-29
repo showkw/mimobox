@@ -516,6 +516,13 @@ impl PyFileSystem {
         result.extract(py)
     }
 
+    /// Read file contents as UTF-8 text.
+    #[pyo3(signature = (path, encoding="utf-8"))]
+    fn read_text(&self, py: Python<'_>, path: &str, encoding: &str) -> PyResult<String> {
+        let bytes = self.read(py, path)?;
+        decode_text_bytes(bytes, encoding)
+    }
+
     /// Write to a file.
     fn write(&self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = extract_bytes_data(data)?;
@@ -538,6 +545,18 @@ impl PyFileSystem {
     /// Delete a file.
     fn remove(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         self.sandbox.call_method1(py, "remove_file", (path,))?;
+        Ok(())
+    }
+
+    /// Create a directory and its missing parents.
+    fn mkdir(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.sandbox.call_method1(py, "make_dir", (path,))?;
+        Ok(())
+    }
+
+    /// Copy a file.
+    fn copy(&self, py: Python<'_>, src: &str, to: &str) -> PyResult<()> {
+        self.sandbox.call_method1(py, "_copy_file", (src, to))?;
         Ok(())
     }
 
@@ -1408,6 +1427,27 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))
     }
 
+    /// Create a directory and any missing parent directories.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Directory path inside the sandbox filesystem.
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If the path is empty, contains NUL bytes, or parent traversal.
+    /// * `SandboxError` - If the directory cannot be created.
+    fn make_dir(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let command = build_make_dir_command(path)?;
+        self.execute(py, &command, None, None, None).map(|_| ())
+    }
+
+    /// Copy a file inside the sandbox.
+    fn _copy_file(&mut self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
+        let command = build_copy_file_command(src, dst)?;
+        self.execute(py, &command, None, None, None).map(|_| ())
+    }
+
     /// Capture a snapshot of the current sandbox state.
     ///
     /// # Returns
@@ -1815,6 +1855,36 @@ fn build_cwd_command(command: &str, cwd: &str) -> PyResult<String> {
     Ok(format!("cd {quoted} && {command}"))
 }
 
+fn build_make_dir_command(path: &str) -> PyResult<String> {
+    validate_python_cwd(path)?;
+    let quoted = shlex::try_quote(path).map_err(|_| {
+        PyValueError::new_err("path contains characters that cannot be shell-escaped")
+    })?;
+
+    Ok(format!("mkdir -p {quoted}"))
+}
+
+fn build_copy_file_command(src: &str, dst: &str) -> PyResult<String> {
+    let src_quoted = shlex::try_quote(src).map_err(|_| {
+        PyValueError::new_err("src contains characters that cannot be shell-escaped")
+    })?;
+    let dst_quoted = shlex::try_quote(dst).map_err(|_| {
+        PyValueError::new_err("dst contains characters that cannot be shell-escaped")
+    })?;
+
+    Ok(format!("cp {src_quoted} {dst_quoted}"))
+}
+
+fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> PyResult<String> {
+    if !encoding.eq_ignore_ascii_case("utf-8") && !encoding.eq_ignore_ascii_case("utf8") {
+        return Err(PyValueError::new_err(
+            "encoding must be utf-8; other encodings are not supported",
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|_| PyValueError::new_err("file is not valid UTF-8"))
+}
+
 fn parse_pty_command(command: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     if let Ok(command) = command.extract::<String>() {
         let argv = shlex::split(&command).ok_or_else(|| {
@@ -1964,6 +2034,29 @@ fn make_exception_with_attrs(
     PyErr::from_value(instance.into_any())
 }
 
+fn make_process_error(
+    py: Python<'_>,
+    exit_code: i32,
+    message: String,
+    code: Option<&str>,
+    suggestion: Option<&str>,
+) -> PyErr {
+    let instance = py
+        .get_type::<SandboxProcessError>()
+        .call1((message,))
+        .expect("failed to construct exception instance");
+    if let Some(c) = code {
+        instance.setattr("code", c).ok();
+    }
+    if let Some(s) = suggestion {
+        instance.setattr("suggestion", s).ok();
+    }
+    instance.setattr("exit_code", exit_code).ok();
+    instance.setattr("stdout", PyBytes::new(py, &[])).ok();
+    instance.setattr("stderr", PyBytes::new(py, &[])).ok();
+    PyErr::from_value(instance.into_any())
+}
+
 fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
     match error {
         SdkError::Config(message) => PyValueError::new_err(message),
@@ -2046,12 +2139,12 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
                     Some(code_str),
                     suggestion_str,
                 ),
-                ErrorCode::CommandExit(_) | ErrorCode::CommandKilled => make_exception_with_attrs(
-                    &py.get_type::<SandboxProcessError>(),
-                    message,
-                    Some(code_str),
-                    suggestion_str,
-                ),
+                ErrorCode::CommandExit(exit_code) => {
+                    make_process_error(py, exit_code, message, Some(code_str), suggestion_str)
+                }
+                ErrorCode::CommandKilled => {
+                    make_process_error(py, -1, message, Some(code_str), suggestion_str)
+                }
                 ErrorCode::HttpDeniedHost
                 | ErrorCode::HttpDeniedAcl
                 | ErrorCode::HttpBodyTooLarge
@@ -2294,6 +2387,35 @@ mod tests {
         let dashed = build_cwd_command("pwd", "-workspace")
             .expect("cwd with leading dash should be handled");
         assert_eq!(dashed, "cd ./-workspace && pwd");
+    }
+
+    #[test]
+    fn test_make_dir_rejects_empty_path() {
+        assert!(build_make_dir_command("").is_err());
+    }
+
+    #[test]
+    fn test_make_dir_rejects_parent_traversal() {
+        assert!(build_make_dir_command("../work").is_err());
+        assert!(build_make_dir_command("a/../work").is_err());
+    }
+
+    #[test]
+    fn test_read_text_rejects_non_utf8_encoding() {
+        let result = decode_text_bytes(b"hello".to_vec(), "latin-1");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copy_file_shell_escapes_paths() {
+        let command = build_copy_file_command("/tmp/source file;$(touch pwn)", "/tmp/dest file")
+            .expect("paths with shell metacharacters should be escapable");
+
+        assert_eq!(
+            command,
+            "cp '/tmp/source file;$(touch pwn)' '/tmp/dest file'"
+        );
     }
 
     #[test]

@@ -178,10 +178,13 @@ class PtySession:
 
 class FileSystem:
     def read(self, path: str) -> bytes: ...
+    def read_text(self, path: str, encoding: str = "utf-8") -> str: ...
     def write(self, path: str, data: Union[str, bytes]) -> None: ...
     def list(self, path: str) -> List[DirEntry]: ...
     def exists(self, path: str) -> bool: ...
     def remove(self, path: str) -> None: ...
+    def mkdir(self, path: str) -> None: ...
+    def copy(self, src: str, to: str) -> None: ...
     def rename(self, from: str, to: str) -> None: ...
     def stat(self, path: str) -> FileStat: ...
 
@@ -496,6 +499,18 @@ class Sandbox:
         """
         ...
 
+    def make_dir(self, path: str) -> None:
+        """Create a directory and any missing parent directories.
+
+        Args:
+            path: Directory path inside the sandbox filesystem.
+
+        Raises:
+            ValueError: If the path is empty, contains NUL bytes, or parent traversal.
+            SandboxError: If the directory cannot be created.
+        """
+        ...
+
     @classmethod
     def from_snapshot(cls, snapshot: Snapshot) -> "Sandbox":
         """Create a new sandbox by restoring from a snapshot.
@@ -606,7 +621,9 @@ class SandboxProcessError(SandboxError):
 
     Maps from ErrorCode::CommandExit(code) and ErrorCode::CommandKilled.
     """
-    ...
+    exit_code: int
+    stdout: bytes
+    stderr: bytes
 
 
 class SandboxMemoryError(SandboxError):
