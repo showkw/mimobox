@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--interactive") {
         run_interactive_loop(&mut sandbox)?;
     } else {
-        println!("提示：添加 --interactive 可进入交互模式，输入 quit 退出。");
+        println!("Tip: add --interactive to enter interactive mode; type quit to exit.");
     }
 
     sandbox.destroy()?;
@@ -37,15 +37,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_preset_tasks(sandbox: &mut Sandbox) -> Result<(), Box<dyn std::error::Error>> {
     let requests = [
         AgentRequest {
-            user_text: "请确认沙箱是否能执行基础命令",
+            user_text: "Please confirm the sandbox can run basic commands",
             command: "/bin/echo agent-ready",
         },
         AgentRequest {
-            user_text: "请生成一个简短的任务摘要",
+            user_text: "Please generate a short task summary",
             command: "/bin/sh -c 'printf \"task=%s\\nstatus=%s\\n\" demo safe'",
         },
         AgentRequest {
-            user_text: "请演示 stderr 和退出码处理",
+            user_text: "Please demonstrate stderr and exit code handling",
             command: "/bin/sh -c 'echo warning-from-agent >&2; exit 0'",
         },
     ];
@@ -61,7 +61,7 @@ fn run_preset_tasks(sandbox: &mut Sandbox) -> Result<(), Box<dyn std::error::Err
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn run_interactive_loop(sandbox: &mut Sandbox) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n进入交互模式。输入命令后由沙箱执行，输入 quit 退出。比如：/bin/echo hello");
+    println!("\nInteractive mode. Commands are executed by the sandbox; type quit to exit. Example: /bin/echo hello");
 
     loop {
         print!("agent> ");
@@ -114,5 +114,5 @@ fn execute_and_print(
 
 #[cfg(not(all(feature = "os", any(target_os = "linux", target_os = "macos"))))]
 fn main() {
-    eprintln!("此示例需要 Linux/macOS + mimobox-sdk 的 os feature。");
+    eprintln!("This example requires Linux/macOS + the mimobox-sdk os feature.");
 }

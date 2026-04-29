@@ -19,15 +19,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sandbox = Sandbox::with_config(config)?;
     let steps = [
         AgentStep {
-            description: "确认 microVM Agent 运行环境",
+            description: "Confirm the microVM Agent runtime",
             command: "/bin/sh -c 'echo agent-stream-ready'",
         },
         AgentStep {
-            description: "模拟逐步输出任务进度",
+            description: "Simulate step-by-step task progress output",
             command: "/bin/sh -c 'echo step-1; echo step-2; echo done'",
         },
         AgentStep {
-            description: "模拟错误通道输出",
+            description: "Simulate error channel output",
             command: "/bin/sh -c 'echo stderr-from-agent >&2; echo recovered'",
         },
     ];
@@ -71,5 +71,5 @@ fn stream_step(sandbox: &mut Sandbox, command: &str) -> Result<(), Box<dyn std::
 
 #[cfg(not(all(feature = "vm", target_os = "linux")))]
 fn main() {
-    eprintln!("此示例需要 Linux + mimobox-sdk 的 vm feature。");
+    eprintln!("This example requires Linux + the mimobox-sdk vm feature.");
 }

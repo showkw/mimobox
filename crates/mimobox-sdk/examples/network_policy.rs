@@ -24,5 +24,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(not(all(feature = "vm", target_os = "linux")))]
 fn main() {
-    eprintln!("network_policy 示例需要 Linux + mimobox-sdk 的 vm feature。");
+    eprintln!("The network_policy example requires Linux + the mimobox-sdk vm feature.");
 }

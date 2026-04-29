@@ -23,7 +23,7 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
 fn benchmark_config() -> MicrovmConfig {
     must(
         microvm_config_from_vm_assets(256),
-        "加载 benchmark VM assets 配置失败",
+        "failed to load benchmark VM assets config",
     )
 }
 
@@ -36,33 +36,33 @@ fn guest_cmd(args: &[&str]) -> Vec<String> {
 fn create_backend(config: &MicrovmConfig) -> KvmBackend {
     must(
         KvmBackend::create_vm(SandboxConfig::default(), config.clone()),
-        "创建 KVM 后端失败",
+        "failed to create KVM backend",
     )
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn boot_backend(backend: &mut KvmBackend) {
-    let exit_reason = must(backend.boot(), "启动 guest 失败");
+    let exit_reason = must(backend.boot(), "failed to boot guest");
     assert_eq!(
         exit_reason,
         KvmExitReason::Io,
-        "guest init 应进入命令循环并等待串口命令"
+        "guest init must enter the command loop and wait for serial commands"
     );
 
     let serial = String::from_utf8_lossy(backend.serial_output());
     assert!(
         serial.contains("mimobox-kvm: init OK"),
-        "boot 串口输出必须来自 guest /init"
+        "boot serial output must come from guest /init"
     );
-    assert!(serial.contains("READY"), "guest init 必须打印 READY");
+    assert!(serial.contains("READY"), "guest init must print READY");
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn build_booted_snapshot(config: &MicrovmConfig) -> (Vec<u8>, Vec<u8>) {
     let mut backend = create_backend(config);
     boot_backend(&mut backend);
-    let snapshot = must(backend.snapshot_state(), "保存快照失败");
-    must(backend.shutdown(), "关闭预热 VM 失败");
+    let snapshot = must(backend.snapshot_state(), "failed to save snapshot");
+    must(backend.shutdown(), "failed to shut down warm VM");
     snapshot
 }
 
@@ -81,12 +81,12 @@ fn bench_cold_start(c: &mut Criterion) {
 
                 let result = must(
                     backend.run_command(black_box(command.as_slice())),
-                    "冷启动命令执行失败",
+                    "cold-start command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "echo 命令必须成功");
+                assert_eq!(result.exit_code, Some(0), "echo command must succeed");
                 black_box(result);
 
-                must(backend.shutdown(), "关闭冷启动 VM 失败");
+                must(backend.shutdown(), "failed to shut down cold-start VM");
             }
 
             total_start.elapsed()
@@ -107,21 +107,21 @@ fn bench_snapshot_restore(c: &mut Criterion) {
             for _ in 0..iters {
                 let mut backend = must(
                     KvmBackend::create_vm_for_restore(SandboxConfig::default(), config.clone()),
-                    "创建 restore 用 KVM 后端失败",
+                    "failed to create KVM backend for restore",
                 );
                 must(
                     backend.restore_state(memory.as_slice(), vcpu_state.as_slice()),
-                    "恢复快照失败",
+                    "failed to restore snapshot",
                 );
 
                 let result = must(
                     backend.run_command(black_box(command.as_slice())),
-                    "快照恢复后的命令执行失败",
+                    "command execution after snapshot restore failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "恢复后的 echo 命令必须成功");
+                assert_eq!(result.exit_code, Some(0), "restored echo command must succeed");
                 black_box(result);
 
-                must(backend.shutdown(), "关闭恢复 VM 失败");
+                must(backend.shutdown(), "failed to shut down restored VM");
             }
 
             total_start.elapsed()
@@ -143,7 +143,7 @@ fn bench_restore_pool(c: &mut Criterion) {
                 max_size: 4,
             },
         ),
-        "创建 restore pool 失败",
+        "failed to create restore pool",
     );
 
     c.bench_function("bench_restore_pool", |b| {
@@ -153,14 +153,14 @@ fn bench_restore_pool(c: &mut Criterion) {
             for _ in 0..iters {
                 let mut restored = must(
                     pool.restore(memory.as_slice(), vcpu_state.as_slice()),
-                    "从 restore pool 恢复 VM 失败",
+                    "failed to restore VM from restore pool",
                 );
 
                 let result = must(
                     restored.execute(black_box(command.as_slice())),
-                    "restore pool 命令执行失败",
+                    "restore pool command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "restore pool echo 命令必须成功");
+                assert_eq!(result.exit_code, Some(0), "restore pool echo command must succeed");
                 black_box(result);
 
                 drop(restored);
@@ -191,14 +191,14 @@ fn bench_command_execution(c: &mut Criterion) {
                 let command = &commands[index as usize % commands.len()];
                 let result = must(
                     backend.run_command(black_box(command.as_slice())),
-                    "连续命令执行失败",
+                    "sequential command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "连续命令必须成功");
+                assert_eq!(result.exit_code, Some(0), "sequential command must succeed");
                 black_box(result);
             }
 
             let elapsed = total_start.elapsed();
-            must(backend.shutdown(), "关闭命令执行 VM 失败");
+            must(backend.shutdown(), "failed to shut down command execution VM");
             elapsed
         });
     });
@@ -215,7 +215,7 @@ fn bench_pool_hot_path(c: &mut Criterion) {
         max_idle_duration: Duration::from_secs(60),
         health_check_interval: None,
     };
-    let pool = must(VmPool::new(config, pool_config), "创建预热池失败");
+    let pool = must(VmPool::new(config, pool_config), "failed to create warm pool");
     let command = guest_cmd(&["/bin/echo", "hello"]);
 
     c.bench_function("bench_pool_hot_path", |b| {
@@ -223,12 +223,12 @@ fn bench_pool_hot_path(c: &mut Criterion) {
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let mut pooled = must(pool.acquire(), "从预热池获取 VM 失败");
+                let mut pooled = must(pool.acquire(), "failed to acquire VM from warm pool");
                 let result = must(
                     pooled.execute(black_box(command.as_slice())),
-                    "预热池命令执行失败",
+                    "warm pool command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "预热池 echo 命令必须成功");
+                assert_eq!(result.exit_code, Some(0), "warm pool echo command must succeed");
                 black_box(result);
                 drop(pooled);
             }

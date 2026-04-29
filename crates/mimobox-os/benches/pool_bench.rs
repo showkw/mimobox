@@ -61,7 +61,7 @@ fn warmed_pool(pool_size: usize) -> SandboxPool {
                 health_check_interval: None,
             },
         ),
-        "创建预热池失败",
+        "failed to create warm pool",
     )
 }
 
@@ -69,7 +69,7 @@ fn warmed_pool(pool_size: usize) -> SandboxPool {
 fn create_platform_sandbox(config: &SandboxConfig) -> PlatformSandbox {
     must(
         <PlatformSandbox as Sandbox>::new(config.clone()),
-        "创建平台沙箱失败",
+        "failed to create platform sandbox",
     )
 }
 
@@ -77,7 +77,7 @@ fn create_platform_sandbox(config: &SandboxConfig) -> PlatformSandbox {
 fn destroy_platform_sandbox(sandbox: PlatformSandbox) {
     must(
         <PlatformSandbox as Sandbox>::destroy(sandbox),
-        "销毁平台沙箱失败",
+        "failed to destroy platform sandbox",
     );
 }
 
@@ -98,7 +98,7 @@ fn bench_hot_acquire(c: &mut Criterion) {
 
             for index in 0..iters {
                 let hot_path_start = Instant::now();
-                let sandbox = must(pool.acquire(), "热获取失败");
+                let sandbox = must(pool.acquire(), "hot acquire failed");
                 black_box(&sandbox);
                 drop(sandbox);
                 let elapsed_us = hot_path_start.elapsed().as_secs_f64() * 1_000_000.0;
@@ -111,7 +111,7 @@ fn bench_hot_acquire(c: &mut Criterion) {
             if !HOT_P99_REPORTED.swap(true, Ordering::Relaxed) {
                 let p99 = percentile_us(&mut sampled_us, 0.99);
                 eprintln!(
-                    "[criterion] bench_hot_acquire sampled_p99={p99:.2}us (目标: P99 < 100us)"
+                    "[criterion] bench_hot_acquire sampled_p99={p99:.2}us (target: P99 < 100us)"
                 );
             }
 
@@ -142,7 +142,7 @@ fn bench_cold_create(c: &mut Criterion) {
                 let mut sandbox = create_platform_sandbox(black_box(&config));
                 let result = must(
                     sandbox.execute(black_box(command.as_slice())),
-                    "冷启动 execute 失败",
+                    "cold execute failed",
                 );
                 black_box(result);
                 destroy_platform_sandbox(black_box(sandbox));
@@ -167,7 +167,7 @@ fn bench_warm_throughput(c: &mut Criterion) {
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let sandbox = must(pool.acquire(), "预热吞吐量获取失败");
+                let sandbox = must(pool.acquire(), "warm throughput acquire failed");
                 black_box(&sandbox);
                 drop(sandbox);
             }
@@ -210,7 +210,7 @@ fn bench_concurrent_acquire(c: &mut Criterion) {
                     start_barrier.wait();
 
                     for _ in 0..ops {
-                        let sandbox = must(pool.acquire(), "并发获取失败");
+                        let sandbox = must(pool.acquire(), "concurrent acquire failed");
                         black_box(&sandbox);
                         drop(sandbox);
                     }
@@ -224,7 +224,7 @@ fn bench_concurrent_acquire(c: &mut Criterion) {
             for handle in handles {
                 match handle.join() {
                     Ok(()) => {}
-                    Err(_) => panic!("并发基准线程执行失败"),
+                    Err(_) => panic!("concurrent benchmark thread failed"),
                 }
             }
 

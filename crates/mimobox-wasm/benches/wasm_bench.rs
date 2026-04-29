@@ -87,32 +87,32 @@ fn assert_success(
     result: mimobox_core::SandboxResult,
     context: &str,
 ) -> mimobox_core::SandboxResult {
-    assert_eq!(result.exit_code, Some(0), "{context}: 退出码异常");
-    assert!(!result.timed_out, "{context}: 执行超时");
+    assert_eq!(result.exit_code, Some(0), "{context}: unexpected exit code");
+    assert!(!result.timed_out, "{context}: execution timed out");
     result
 }
 
 fn prime_disk_cache(command: &[String], config: &SandboxConfig) {
-    must(clear_wasm_cache(), "清理 Wasm 缓存失败");
-    let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-    let result = must(sandbox.execute(command), "预热磁盘缓存失败");
-    black_box(assert_success(result, "预热磁盘缓存失败"));
+    must(clear_wasm_cache(), "failed to clear Wasm cache");
+    let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+    let result = must(sandbox.execute(command), "failed to prime disk cache");
+    black_box(assert_success(result, "failed to prime disk cache"));
 }
 
 fn measure_true_cold_start_once(command: &[String], config: &SandboxConfig) -> Duration {
-    must(clear_wasm_cache(), "清理 Wasm 缓存失败");
+    must(clear_wasm_cache(), "failed to clear Wasm cache");
     let start = Instant::now();
-    let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-    let result = must(sandbox.execute(command), "true_cold_start 执行失败");
-    black_box(assert_success(result, "true_cold_start 执行失败"));
+    let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+    let result = must(sandbox.execute(command), "true_cold_start execution failed");
+    black_box(assert_success(result, "true_cold_start execution failed"));
     start.elapsed()
 }
 
 fn measure_cached_start_once(command: &[String], config: &SandboxConfig) -> Duration {
     let start = Instant::now();
-    let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-    let result = must(sandbox.execute(command), "cached_start 执行失败");
-    black_box(assert_success(result, "cached_start 执行失败"));
+    let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+    let result = must(sandbox.execute(command), "cached_start execution failed");
+    black_box(assert_success(result, "cached_start execution failed"));
     start.elapsed()
 }
 
@@ -173,13 +173,13 @@ fn print_manual_stats(module: &BenchModule, config: &SandboxConfig) {
     });
 
     prime_disk_cache(&module.command, config);
-    let mut hot_sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-    let warmup_result = must(hot_sandbox.execute(&module.command), "hot_execute 预热失败");
-    black_box(assert_success(warmup_result, "hot_execute 预热失败"));
+    let mut hot_sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+    let warmup_result = must(hot_sandbox.execute(&module.command), "hot_execute warmup failed");
+    black_box(assert_success(warmup_result, "hot_execute warmup failed"));
     let mut hot_execute = collect_samples(SAMPLE_SIZE, || {
         let start = Instant::now();
-        let result = must(hot_sandbox.execute(&module.command), "hot_execute 执行失败");
-        black_box(assert_success(result, "hot_execute 执行失败"));
+        let result = must(hot_sandbox.execute(&module.command), "hot_execute execution failed");
+        black_box(assert_success(result, "hot_execute execution failed"));
         start.elapsed()
     });
 
@@ -197,10 +197,10 @@ fn bench_true_cold_start(c: &mut Criterion, module: &BenchModule, config: &Sandb
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                must(clear_wasm_cache(), "清理 Wasm 缓存失败");
-                let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-                let result = must(sandbox.execute(&command), "true_cold_start 执行失败");
-                black_box(assert_success(result, "true_cold_start 执行失败"));
+                must(clear_wasm_cache(), "failed to clear Wasm cache");
+                let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+                let result = must(sandbox.execute(&command), "true_cold_start execution failed");
+                black_box(assert_success(result, "true_cold_start execution failed"));
             }
 
             total_start.elapsed()
@@ -219,9 +219,9 @@ fn bench_cached_start(c: &mut Criterion, module: &BenchModule, config: &SandboxC
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-                let result = must(sandbox.execute(&command), "cached_start 执行失败");
-                black_box(assert_success(result, "cached_start 执行失败"));
+                let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+                let result = must(sandbox.execute(&command), "cached_start execution failed");
+                black_box(assert_success(result, "cached_start execution failed"));
             }
 
             total_start.elapsed()
@@ -235,17 +235,17 @@ fn bench_hot_execute(c: &mut Criterion, module: &BenchModule, config: &SandboxCo
 
     c.bench_function("hot_execute", move |b| {
         prime_disk_cache(&command, &config);
-        let mut sandbox = must(WasmSandbox::new(config.clone()), "创建 Wasm 沙箱失败");
-        let warmup_result = must(sandbox.execute(&command), "hot_execute 预热失败");
-        black_box(assert_success(warmup_result, "hot_execute 预热失败"));
+        let mut sandbox = must(WasmSandbox::new(config.clone()), "failed to create Wasm sandbox");
+        let warmup_result = must(sandbox.execute(&command), "hot_execute warmup failed");
+        black_box(assert_success(warmup_result, "hot_execute warmup failed"));
         let command_for_iters = command.clone();
 
         b.iter_custom(move |iters| {
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let result = must(sandbox.execute(&command_for_iters), "hot_execute 执行失败");
-                black_box(assert_success(result, "hot_execute 执行失败"));
+                let result = must(sandbox.execute(&command_for_iters), "hot_execute execution failed");
+                black_box(assert_success(result, "hot_execute execution failed"));
             }
 
             total_start.elapsed()
@@ -260,7 +260,7 @@ fn main() {
         std::env::set_var("MIMOBOX_WASM_QUIET", "1");
     }
 
-    let module = must(build_noop_module(), "创建 benchmark Wasm 模块失败");
+    let module = must(build_noop_module(), "failed to create benchmark Wasm module");
     let config = benchmark_config();
 
     print_manual_stats(&module, &config);

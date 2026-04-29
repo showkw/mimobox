@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sandbox = Sandbox::with_config(config)?;
 
     println!("LLM Agent + mimobox sandbox demo");
-    println!("输入自然语言请求，LLM 会生成 shell 命令并交给沙箱执行。输入 quit 退出。\n");
+    println!("Enter a natural language request. The LLM will generate a shell command and run it in the sandbox. Type quit to exit.\n");
 
     run_agent_loop(&mut sandbox)?;
 
@@ -60,15 +60,15 @@ fn ask_llm_for_command(
     request: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let prompt = format!(
-        r#"你是一个将用户请求转换为安全 shell 命令的 Agent。
+        r#"You are an Agent that converts user requests into safe shell commands.
 
-要求：
-1. 只输出一条 shell 命令，不要解释，不要使用 Markdown。
-2. 优先使用只读、低风险命令。
-3. 不要输出会删除文件、修改系统配置、联网访问或泄露凭据的命令。
-4. 如果请求不适合执行命令，输出：/bin/echo '无法安全执行该请求'
+Requirements:
+1. Output exactly one shell command. Do not explain and do not use Markdown.
+2. Prefer read-only, low-risk commands.
+3. Do not output commands that delete files, modify system configuration, access the network, or leak credentials.
+4. If the request is not suitable for command execution, output: /bin/echo 'This request cannot be executed safely'
 
-用户请求：{request}"#
+User request: {request}"#
     );
 
     let command = llm.call(&prompt)?;
@@ -87,16 +87,16 @@ fn ask_llm_for_summary(
     let exit_code = result
         .exit_code
         .map(|code| code.to_string())
-        .unwrap_or_else(|| "无退出码".to_string());
+        .unwrap_or_else(|| "no exit code".to_string());
 
     let prompt = format!(
-        r#"你是一个命令执行结果总结助手。请用简体中文回答用户。
+        r#"You are a command execution result summarization assistant. Reply to the user in English.
 
-用户请求：{request}
-执行命令：{command}
-退出码：{exit_code}
-是否超时：{timed_out}
-耗时：{elapsed:?}
+User request: {request}
+Command: {command}
+Exit code: {exit_code}
+Timed out: {timed_out}
+Elapsed: {elapsed:?}
 
 stdout：
 {stdout}
@@ -104,7 +104,7 @@ stdout：
 stderr：
 {stderr}
 
-请基于以上信息给出简洁总结。如果命令失败，说明失败原因和可行下一步。"#,
+Give a concise summary based on the information above. If the command failed, explain why and suggest a next step."#,
         timed_out = result.timed_out,
         elapsed = result.elapsed,
     );
@@ -179,7 +179,7 @@ fn call_openai(
     let response = post_json(&endpoint, body, |request| request.bearer_auth(api_key))?;
     let content = response["output"][0]["content"][0]["text"]
         .as_str()
-        .ok_or("OpenAI 响应缺少 output[0].content[0].text")?;
+        .ok_or("OpenAI response missing output[0].content[0].text")?;
 
     Ok(content.trim().to_string())
 }
@@ -210,7 +210,7 @@ fn call_anthropic(
     })?;
     let content = response["content"][0]["text"]
         .as_str()
-        .ok_or("Anthropic 响应缺少 content[0].text")?;
+        .ok_or("Anthropic response missing content[0].text")?;
 
     Ok(content.trim().to_string())
 }
@@ -253,5 +253,5 @@ fn normalize_command(command: &str) -> String {
 
 #[cfg(not(all(feature = "os", any(target_os = "linux", target_os = "macos"))))]
 fn main() {
-    eprintln!("此示例需要 Linux/macOS + mimobox-sdk 的 os feature。");
+    eprintln!("This example requires Linux/macOS + the mimobox-sdk os feature.");
 }
