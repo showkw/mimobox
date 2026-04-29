@@ -5,6 +5,39 @@ All notable changes to mimobox are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Sandbox::list()` global sandbox registry — list all active sandbox instances
+- `Sandbox::id()` — unique UUID for each sandbox instance
+- `Sandbox::info()` — get sandbox registration info (isolation level, ready state, creation time)
+- `Sandbox::metrics()` — runtime resource metrics (CPU, memory, I/O, Wasm fuel)
+- `Config::env_var()` / `Config::env_vars()` — persistent environment variables at sandbox creation
+- MCP Server: `make_dir`, `stat`, `remove_file`, `rename` file management tools (15 tools total)
+- MCP Server: `env_vars` parameter in `create_sandbox`
+- MCP Server: `sandbox_uuid` field in sandbox responses
+- Python SDK: `Sandbox.id`, `Sandbox.list()`, `Sandbox.metrics()`, `SandboxInfo`, `SandboxMetrics`
+- Python SDK: `env_vars` parameter in `Sandbox()` constructor
+
+### Changed
+
+- All user-facing strings internationalized to English
+- MCP file tools path validation hardened (`validate_mcp_guest_path`)
+- MCP HTTP server requires authentication token by default
+- SDK default `/tmp` access removed (per-sandbox private tmpdir)
+- Linux fail-closed semantics for /proc remount and cgroup failures
+- Wasm compile-time limits: 50MB module size + 30s wall-clock timeout
+- macOS Seatbelt default read scope narrowed
+
+### Fixed
+
+- Linux CI regression: cgroup pids.max write permission in containers
+- MCP path traversal vulnerability in file tools
+- Python atexit UAF in sandbox registry
+- FD inheritance leak (macOS/Linux)
+
+
 ## [0.1.0-alpha] - 2026-04-26
 
 ### Added

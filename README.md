@@ -17,9 +17,18 @@ MimoBox is a local sandbox runtime for AI agents. It provides multi-layer isolat
 - **Local-first** — Runs entirely on your machine. No data leaves your network, no API keys required.
 - **Multi-layer isolation** — OS-level (Landlock + Seccomp + Namespaces), Wasm (Wasmtime), and microVM (KVM) backends with smart auto-routing.
 - **Ultra-low latency** — OS cold start P50 8.24 ms, Wasm cold start P50 1.01 ms, warm pool acquire P50 0.19 µs.
-- **Agent-native** — MCP server with 11 tools, Python SDK, LangChain / OpenAI Agents SDK integration out of the box.
+- **Agent-native** — MCP server with 15 tools, Python SDK, LangChain / OpenAI Agents SDK integration out of the box.
 
 See [Performance](#performance) for detailed benchmarks across all isolation layers.
+
+## Features
+
+- **Multi-layer isolation** — OS (Landlock + Seccomp + Namespaces), Wasm (Wasmtime), and microVM (KVM) with smart auto-routing
+- **Sandbox Registry** — `Sandbox.list()` to track all active instances, `Sandbox.id` for unique identification
+- **Persistent Env Vars** — Set environment variables at sandbox creation via `env_vars`, applied to every command
+- **Runtime Metrics** — Monitor CPU, memory, I/O, and Wasm fuel per sandbox with `Sandbox.metrics()`
+- **MCP Server** — 15 tools for AI agent integration, including file management and HTTP ACL
+- **Ultra-low latency** — OS cold start P50 8.24 ms, Wasm cold start P50 1.01 ms, warm pool acquire P50 0.19 us
 
 ## Quick Start
 

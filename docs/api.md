@@ -22,9 +22,15 @@ mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 ## Table of Contents
 
 - [Sandbox](#sandbox)
+- [Sandbox::list](#sandboxlist)
+- [Sandbox::id](#sandboxid)
+- [Sandbox::info](#sandboxinfo)
+- [Sandbox::metrics](#sandboxmetrics)
 - [Sandbox::execute_code](#sandboxexecute_code)
 - [Sandbox::list_dir](#sandboxlist_dir)
 - [Sandbox::execute_with_cwd](#sandboxexecute_with_cwd)
+- [SandboxInfo](#sandboxinfo-1)
+- [SandboxMetrics](#sandboxmetrics-1)
 - [Config](#config)
 - [ConfigBuilder](#configbuilder)
 - [IsolationLevel](#isolationlevel)
@@ -619,6 +625,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+
+### `Sandbox::id`
+
+```rust
+pub fn id(&self) -> uuid::Uuid
+```
+
+Returns the unique UUID assigned to this sandbox instance at creation time. The ID is globally unique across all sandbox instances in the current process and is registered in the global sandbox registry.
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = Sandbox::new()?;
+    let id = sandbox.id();
+    println!("sandbox id = {id}");
+    // The ID can be used for logging, tracing, and registry lookups.
+    Ok(())
+}
+```
+
+### `Sandbox::list`
+
+```rust
+pub fn list() -> Vec<SandboxInfo>
+```
+
+Returns a snapshot of all currently registered sandbox instances in the current process. This is a static method — call it on the `Sandbox` type, not on an instance.
+
+Each entry is a [`SandboxInfo`](#sandboxinfo-1) containing the instance ID, configured and active isolation levels, creation time, and readiness state.
+
+**Use cases**: Dashboard displays, debugging, resource auditing, and orchestration of multiple sandboxes.
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sb1 = Sandbox::new()?;
+    let mut sb2 = Sandbox::new()?;
+
+    let active = Sandbox::list();
+    println!("{} sandbox(es) registered", active.len());
+    for info in &active {
+        println!(
+            "  id={}, isolation={:?}, ready={}",
+            info.id, info.active_isolation, info.is_ready
+        );
+    }
+
+    sb1.destroy()?;
+    sb2.destroy()?;
+
+    assert!(Sandbox::list().is_empty());
+    Ok(())
+}
+```
+
+### `Sandbox::info`
+
+```rust
+pub fn info(&self) -> SandboxInfo
+```
+
+Returns a [`SandboxInfo`](#sandboxinfo-1) snapshot for this specific sandbox instance. This is equivalent to looking up `self.id()` in the global registry, but avoids a separate lookup.
+
+```rust
+use mimobox_sdk::Sandbox;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sandbox = Sandbox::new()?;
+    let info = sandbox.info();
+    println!("id = {}", info.id);
+    println!("configured isolation = {:?}", info.configured_isolation);
+    println!("active isolation = {:?}", info.active_isolation);
+    println!("ready = {}", info.is_ready);
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+### `Sandbox::metrics`
+
+```rust
+pub fn metrics(&self) -> SandboxMetrics
+```
+
+Returns runtime resource usage metrics from the most recent command execution. Metrics are sampled and cached after each `execute()` call. If no command has been executed yet, all fields return `None` (default values).
+
+See [`SandboxMetrics`](#sandboxmetrics-1) for the full list of available fields.
+
+**Note**: Not all backends populate every field. OS-level backends report memory and CPU metrics; Wasm backends additionally report fuel consumption; I/O metrics depend on backend capabilities.
+
+```rust
+use mimobox_sdk::{Config, IsolationLevel, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sandbox = Sandbox::new()?;
+    let result = sandbox.execute("/bin/echo hello")?;
+
+    let metrics = sandbox.metrics();
+    if let Some(mem) = metrics.memory_usage_bytes {
+        println!("memory used: {} bytes", mem);
+    }
+    if let Some(cpu_user) = metrics.cpu_time_user_us {
+        println!("CPU user time: {} us", cpu_user);
+    }
+    if let Some(cpu_sys) = metrics.cpu_time_system_us {
+        println!("CPU system time: {} us", cpu_sys);
+    }
+    if let Some(fuel) = metrics.wasm_fuel_consumed {
+        println!("Wasm fuel consumed: {}", fuel);
+    }
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
 ### `Sandbox::destroy`
 
 ```rust
@@ -650,6 +774,7 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 | `cpu_period_us` | `u64` | `100000` | CPU quota period in microseconds (100ms) |
 | `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths |
 | `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write mount paths |
+| `env_vars` | `HashMap<String, String>` | `{}` | Persistent environment variables set at sandbox creation. Applied to every subsequent command. Security-critical names are blocked (see below) |
 | `allowed_http_domains` | `Vec<String>` | `[]` | HTTP proxy domain whitelist |
 | `allow_fork` | `bool` | `false` | Allow child process creation |
 | `max_processes` | `Option<u32>` | `None` | Maximum process count per sandbox (cgroup v2 pids.max). `None` uses backend default |
@@ -665,6 +790,8 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 - **`timeout` precision**: Timeout is rounded up to whole seconds internally. For example, `1500ms` becomes `2s`.
 - **`allowed_http_domains`**: Supports glob patterns like `*.openai.com`. Combined with `NetworkPolicy::AllowDomains`.
 - **`MicrovmConfig.memory_mb`**: The default value (256 MiB) is unified with `Config.vm_memory_mb` to ensure consistency between the SDK-level and backend-level defaults.
+- **`env_vars` merge priority** (low to high): backend built-in minimum < `env_vars` (persistent) < per-command `env` parameter.
+- **`env_vars` security**: The following environment variable names are blocked at `build()` time to prevent sandbox escape: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`. Keys containing `=`, NUL, or spaces, or values containing NUL, are also rejected.
 
 ```rust
 use mimobox_sdk::Config;
@@ -709,6 +836,8 @@ Fluent builder for constructing `Config` instances.
 | `vm_memory_mb(mb)` | `u32` | Set microVM guest memory in MiB |
 | `kernel_path(path)` | `impl Into<PathBuf>` | Set microVM kernel image path |
 | `rootfs_path(path)` | `impl Into<PathBuf>` | Set microVM rootfs path |
+| `env_var(key, value)` | `impl Into<String>, impl Into<String>` | Add a single persistent environment variable |
+| `env_vars(vars)` | `HashMap<String, String>` | Set all persistent environment variables (replaces existing) |
 | `no_timeout()` | - | Remove timeout, allow unlimited execution |
 | `build()` | - | Produce final `Config` |
 
@@ -820,6 +949,64 @@ pub enum NamespaceDegradation {
 |---------|-------------|
 | `FailClosed` | Any namespace creation failure returns an error. Default, recommended for production. |
 | `AllowDegradation` | Warn on namespace failure and continue execution. Only for development/CI where namespace support may be incomplete. |
+---
+
+---
+
+## SandboxInfo
+
+```rust
+#[derive(Debug, Clone)]
+pub struct SandboxInfo {
+    pub id: uuid::Uuid,
+    pub configured_isolation: Option<IsolationLevel>,
+    pub active_isolation: Option<IsolationLevel>,
+    pub created_at: std::time::Instant,
+    pub is_ready: bool,
+}
+```
+
+A snapshot of a sandbox instance's registration info from the global registry. Returned by [`Sandbox::list`](#sandboxlist) and [`Sandbox::info`](#sandboxinfo).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `Uuid` | Globally unique sandbox instance identifier |
+| `configured_isolation` | `Option<IsolationLevel>` | Isolation level requested at creation. `None` before the config is written to the registry |
+| `active_isolation` | `Option<IsolationLevel>` | Actually active isolation level after backend initialization. `None` before the first command triggers backend init |
+| `created_at` | `Instant` | Monotonic timestamp when the registry entry was created |
+| `is_ready` | `bool` | Whether the backend has completed initialization and is ready to accept commands |
+
+---
+
+## SandboxMetrics
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct SandboxMetrics {
+    pub memory_usage_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub cpu_time_user_us: Option<u64>,
+    pub cpu_time_system_us: Option<u64>,
+    pub wasm_fuel_consumed: Option<u64>,
+    pub io_read_bytes: Option<u64>,
+    pub io_write_bytes: Option<u64>,
+    pub collected_at: Option<std::time::Instant>,
+}
+```
+
+Runtime resource usage metrics sampled after each command execution. Returned by [`Sandbox::metrics`](#sandboxmetrics). All fields are `Option` because not all backends support every metric.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `memory_usage_bytes` | `Option<u64>` | Current memory usage in bytes |
+| `memory_limit_bytes` | `Option<u64>` | Memory limit in bytes |
+| `cpu_time_user_us` | `Option<u64>` | User-mode CPU time in microseconds |
+| `cpu_time_system_us` | `Option<u64>` | Kernel-mode CPU time in microseconds |
+| `wasm_fuel_consumed` | `Option<u64>` | Wasm fuel consumed (Wasm backend only) |
+| `io_read_bytes` | `Option<u64>` | I/O read bytes |
+| `io_write_bytes` | `Option<u64>` | I/O write bytes |
+| `collected_at` | `Option<Instant>` | Monotonic timestamp when metrics were sampled |
+
 ---
 
 ## ExecuteResult
