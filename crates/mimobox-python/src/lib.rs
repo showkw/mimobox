@@ -703,6 +703,7 @@ struct PyPty {
 #[pymethods]
 impl PyPty {
     /// Create an interactive terminal session.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (command, *, cols=80, rows=24, env=None, cwd=None, timeout=None))]
     fn create(
         &self,
@@ -1320,6 +1321,7 @@ impl PySandbox {
     }
 
     /// Create a PTY session from a fully parsed configuration.
+    #[allow(clippy::too_many_arguments)]
     fn _create_pty_with_config(
         &mut self,
         py: Python<'_>,

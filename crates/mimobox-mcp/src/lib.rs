@@ -28,8 +28,6 @@ use std::{
 
 #[cfg(feature = "vm")]
 use base64::{Engine, engine::general_purpose::STANDARD};
-#[cfg(feature = "vm")]
-use mimobox_sdk::FileStat;
 use mimobox_sdk::{
     Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, Sandbox,
     SdkError, TrustLevel,
@@ -666,7 +664,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ReadFileRequest>,
     ) -> Result<Json<ReadFileResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         #[cfg(feature = "vm")]
         {
@@ -709,7 +707,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<WriteFileRequest>,
     ) -> Result<Json<WriteFileResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         #[cfg(feature = "vm")]
         {
@@ -913,7 +911,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<ListDirRequest>,
     ) -> Result<Json<ListDirResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         let path = request.path;
         let sdk_entries = self
@@ -964,7 +962,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<MakeDirRequest>,
     ) -> Result<Json<MakeDirResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         let path = request.path;
         let command = format!("mkdir -p {}", shell_single_quote(&path));
@@ -973,11 +971,17 @@ impl MimoboxServer {
             .await
             .map_err(to_error)?;
 
-        let created = result.exit_code == Some(0);
+        if result.exit_code != Some(0) {
+            return Err(to_error(format!(
+                "make_dir failed for path {path}: {}. Tip: ensure the parent path is writable and not blocked by sandbox policy",
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+
         Ok(Json(MakeDirResponse {
             sandbox_id: request.sandbox_id,
             path,
-            created,
+            created: true,
         }))
     }
 
@@ -988,7 +992,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<StatRequest>,
     ) -> Result<Json<StatResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         #[cfg(feature = "vm")]
         {
@@ -1035,7 +1039,7 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<RemoveFileRequest>,
     ) -> Result<Json<RemoveFileResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.path).map_err(to_error)?;
 
         #[cfg(feature = "vm")]
         {
@@ -1068,8 +1072,8 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<RenameRequest>,
     ) -> Result<Json<RenameResponse>, Json<ErrorResponse>> {
-        validate_path_size(&request.from_path).map_err(to_error)?;
-        validate_path_size(&request.to_path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.from_path).map_err(to_error)?;
+        validate_mcp_guest_path(&request.to_path).map_err(to_error)?;
 
         #[cfg(feature = "vm")]
         {
@@ -1320,6 +1324,35 @@ fn validate_execute_code_size(code: &str) -> Result<(), String> {
 
 fn validate_path_size(path: &str) -> Result<(), String> {
     validate_text_max_bytes("path", path, MAX_MCP_PATH_BYTES)
+}
+
+fn validate_mcp_guest_path(path: &str) -> Result<(), String> {
+    validate_path_size(path)?;
+
+    if path.is_empty() {
+        return Err("guest file path must not be empty".to_string());
+    }
+    if !path.starts_with('/') {
+        return Err(format!("guest file path must be absolute: {path}"));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err("guest file path must not contain NUL bytes".to_string());
+    }
+    if path.contains('\n') || path.contains('\r') {
+        return Err(
+            "guest file path must not contain newline or carriage return characters".to_string(),
+        );
+    }
+    if !path.starts_with("/sandbox/") {
+        return Err(format!("guest file path must start with /sandbox/: {path}"));
+    }
+    if path.split('/').any(|component| component == "..") {
+        return Err(format!(
+            "guest file path must not contain '..' path traversal: {path}"
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_text_max_bytes(field: &str, value: &str, max_bytes: usize) -> Result<(), String> {
@@ -1745,6 +1778,74 @@ mod tests {
         let result = validate_path_size(&excessive_path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("path"));
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_empty_path() {
+        let result = validate_mcp_guest_path("");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_relative_path() {
+        let result = validate_mcp_guest_path("sandbox/file.txt");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be absolute"));
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_nul_bytes() {
+        let result = validate_mcp_guest_path("/sandbox/file\0.txt");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("NUL"));
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_newlines() {
+        for path in [
+            "/sandbox/file\nname",
+            "/sandbox/file\rname",
+            "/sandbox/file\r\nname",
+        ] {
+            let result = validate_mcp_guest_path(path);
+
+            assert!(result.is_err(), "{path:?} should be rejected");
+            assert!(result.unwrap_err().contains("newline"));
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_path_traversal() {
+        for path in [
+            "/sandbox/../etc/passwd",
+            "/sandbox/dir/../../etc/passwd",
+            "/sandbox/dir/..",
+        ] {
+            let result = validate_mcp_guest_path(path);
+
+            assert!(result.is_err(), "{path} should be rejected");
+            assert!(result.unwrap_err().contains("path traversal"));
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_rejects_non_sandbox_prefix() {
+        for path in ["/tmp/file.txt", "/sandbox", "/sandboxed/file.txt"] {
+            let result = validate_mcp_guest_path(path);
+
+            assert!(result.is_err(), "{path} should be rejected");
+            assert!(result.unwrap_err().contains("/sandbox/"));
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_guest_path_accepts_valid_sandbox_path() {
+        assert!(validate_mcp_guest_path("/sandbox/file.txt").is_ok());
+        assert!(validate_mcp_guest_path("/sandbox/dir/nested-file.txt").is_ok());
     }
 
     #[test]
