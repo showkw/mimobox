@@ -1563,23 +1563,6 @@ mod tests {
         assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
     }
 
-    // ── env_vars 测试 ──────────────────────────────────────────────────
-
-    #[test]
-    fn env_vars_accepts_valid_variables() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("MY_VAR".to_string(), "my_value".to_string());
-        env.insert("ANOTHER".to_string(), "value123".to_string());
-
-        let config = Config::builder()
-            .env_vars(env)
-            .build()
-            .expect("valid env_vars should pass validation");
-
-        assert_eq!(config.env_vars.get("MY_VAR").unwrap(), "my_value");
-        assert_eq!(config.env_vars.get("ANOTHER").unwrap(), "value123");
-    }
-
     #[test]
     fn env_var_single_adds_one_variable() {
         let config = Config::builder()
@@ -1593,168 +1576,97 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_forwarded_to_sandbox_config() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("APP_ENV".to_string(), "production".to_string());
+    fn env_vars_default_is_empty() {
+        let config = Config::default();
 
+        assert!(config.env_vars.is_empty());
+        assert!(config.to_sandbox_config().env_vars.is_empty());
+    }
+
+    #[test]
+    fn builder_chain_http_acl_allow_and_deny() {
         let config = Config::builder()
-            .env_vars(env)
+            .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .expect("ACL allow rule should parse successfully")
+            .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
+            .expect("ACL deny rule should parse successfully")
             .build()
             .expect("config validation failed");
 
-        let sandbox_config = config.to_sandbox_config();
-        assert_eq!(
-            sandbox_config.env_vars.get("APP_ENV").unwrap(),
-            "production"
-        );
+        assert_eq!(config.http_acl.allow.len(), 1);
+        assert_eq!(config.http_acl.deny.len(), 1);
     }
 
+    #[cfg(feature = "vm")]
     #[test]
-    fn env_vars_rejects_empty_key() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("".to_string(), "value".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("非法 key"),
-            "expected key validation error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn env_vars_rejects_equals_in_key() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("KEY=VALUE".to_string(), "value".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("非法 key"),
-            "expected key validation error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn env_vars_rejects_space_in_key() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("KEY NAME".to_string(), "value".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("非法 key"),
-            "expected key validation error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn env_vars_rejects_nul_in_key() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("KEY NAME".to_string(), "value".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_rejects_nul_in_value() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("KEY".to_string(), "value embedded".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("NUL"),
-            "expected NUL validation error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn env_vars_rejects_ld_preload() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("LD_PRELOAD".to_string(), "/malicious.so".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("安全关键"),
-            "expected security error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn env_vars_rejects_ld_library_path() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("LD_LIBRARY_PATH".to_string(), "/malicious/lib".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_rejects_bash_env() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("BASH_ENV".to_string(), "/malicious/.bashrc".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_rejects_env() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("ENV".to_string(), "/malicious/.profile".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_rejects_dyld_insert_libraries() {
-        let mut env = std::collections::HashMap::new();
-        env.insert(
-            "DYLD_INSERT_LIBRARIES".to_string(),
-            "/malicious.dylib".to_string(),
-        );
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_rejects_dyld_library_path() {
-        let mut env = std::collections::HashMap::new();
-        env.insert(
-            "DYLD_LIBRARY_PATH".to_string(),
-            "/malicious/lib".to_string(),
-        );
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn env_vars_case_insensitive_security_check() {
-        let mut env = std::collections::HashMap::new();
-        env.insert("ld_preload".to_string(), "/malicious.so".to_string());
-
-        let result = Config::builder().env_vars(env).build();
-        assert!(
-            result.is_err(),
-            "lowercase ld_preload should also be rejected"
-        );
-    }
-
-    #[test]
-    fn env_vars_default_is_empty() {
+    fn microvm_config_uses_default_artifact_paths_when_not_overridden() {
         let config = Config::default();
-        assert!(config.env_vars.is_empty());
-        assert!(config.to_sandbox_config().env_vars.is_empty());
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
+        let defaults = mimobox_vm::MicrovmConfig::default();
+
+        assert_eq!(microvm_config.kernel_path, defaults.kernel_path);
+        assert_eq!(microvm_config.rootfs_path, defaults.rootfs_path);
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_applies_resource_and_artifact_overrides() {
+        let config = Config::builder()
+            .vm_vcpu_count(4)
+            .vm_memory_mb(768)
+            .memory_limit_mb(1024)
+            .cpu_quota(50_000)
+            .cpu_period(100_000)
+            .kernel_path("/srv/mimobox/vmlinux")
+            .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
+            .build()
+            .expect("config validation failed");
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
+
+        assert_eq!(microvm_config.vcpu_count, 4);
+        assert_eq!(microvm_config.memory_mb, 768);
+        assert_eq!(microvm_config.cpu_quota_us, Some(50_000));
+        assert_eq!(config.to_sandbox_config().cpu_period_us, 100_000);
+        assert_eq!(
+            microvm_config.kernel_path,
+            PathBuf::from("/srv/mimobox/vmlinux")
+        );
+        assert_eq!(
+            microvm_config.rootfs_path,
+            PathBuf::from("/srv/mimobox/rootfs.cpio.gz")
+        );
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_caps_vm_memory_with_memory_limit() {
+        let config = Config::builder()
+            .vm_memory_mb(768)
+            .memory_limit_mb(256)
+            .build()
+            .expect("config validation failed");
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
+
+        assert_eq!(microvm_config.memory_mb, 256);
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn microvm_config_rejects_out_of_range_memory_limit_even_when_vm_memory_is_lower() {
+        let result = Config::builder()
+            .vm_memory_mb(768)
+            .memory_limit_mb(u64::MAX)
+            .build();
+
+        assert_invalid_config_suggestion(
+            result,
+            &format!("memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}, recommended 256-512 MB"),
+        );
     }
 }

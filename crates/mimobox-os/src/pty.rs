@@ -75,6 +75,7 @@ pub(crate) fn build_session(
 ///
 /// 合并顺序为：内置最小环境、沙箱级持久环境变量、[`PtyConfig::env`]。
 /// `PWD` 默认跟随 [`PtyConfig::cwd`]，未设置时回退到 `/tmp`。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn build_child_env_with_base(
     config: &PtyConfig,
     base_env: &HashMap<String, String>,
