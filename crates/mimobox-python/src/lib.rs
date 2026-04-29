@@ -40,6 +40,9 @@ fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 
 mod tracing {
     macro_rules! tracing_warn {
+        ($message:literal) => {
+            eprintln!("{}", $message);
+        };
         ($message:literal, code = ?$code:expr) => {
             eprintln!("{} code={:?}", $message, $code);
         };
@@ -838,7 +841,9 @@ impl PyPtySession {
         _exc: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        let obj = slf.into_pyobject(py).expect("PyRef conversion cannot fail");
+        let obj = slf
+            .into_pyobject(py)
+            .map_err(|e| PyRuntimeError::new_err(format!("PyRef conversion failed: {e}")))?;
         let mut borrowed = obj
             .try_borrow_mut()
             .map_err(|_| PyRuntimeError::new_err("PtySession is currently borrowed"))?;
@@ -1493,14 +1498,27 @@ impl PySandbox {
     /// * `ValueError` - If the path is empty, contains NUL bytes, or parent traversal.
     /// * `SandboxError` - If the directory cannot be created.
     fn make_dir(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
-        let command = build_make_dir_command(path)?;
-        self.execute(py, &command, None, None, None).map(|_| ())
+        validate_python_cwd(path)?;
+        let sandbox = self.inner_mut()?;
+        let argv = vec!["mkdir".to_string(), "-p".to_string(), path.to_string()];
+        py.allow_threads(|| {
+            sandbox.exec_with_options(&argv, mimobox_sdk::SdkExecOptions::default())
+        })
+        .map_err(|e| map_sdk_error(e, py))?;
+        Ok(())
     }
 
     /// Copy a file inside the sandbox.
     fn _copy_file(&mut self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
-        let command = build_copy_file_command(src, dst)?;
-        self.execute(py, &command, None, None, None).map(|_| ())
+        validate_python_cwd(src)?;
+        validate_python_cwd(dst)?;
+        let sandbox = self.inner_mut()?;
+        let argv = vec!["cp".to_string(), src.to_string(), dst.to_string()];
+        py.allow_threads(|| {
+            sandbox.exec_with_options(&argv, mimobox_sdk::SdkExecOptions::default())
+        })
+        .map_err(|e| map_sdk_error(e, py))?;
+        Ok(())
     }
 
     /// Capture a snapshot of the current sandbox state.
@@ -1698,9 +1716,10 @@ impl Drop for PySandbox {
 }
 
 fn registry_entries() -> std::sync::MutexGuard<'static, Vec<SandboxRegistryEntry>> {
-    SANDBOX_REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    SANDBOX_REGISTRY.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("SANDBOX_REGISTRY mutex poisoned, recovering");
+        poisoned.into_inner()
+    })
 }
 
 fn register_sandbox(py: Python<'_>, sandbox: &Py<PySandbox>) -> PyResult<()> {
@@ -1904,6 +1923,7 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
     builder.build().map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 fn build_make_dir_command(path: &str) -> PyResult<String> {
     validate_python_cwd(path)?;
     let quoted = shlex::try_quote(path).map_err(|_| {
@@ -1913,6 +1933,7 @@ fn build_make_dir_command(path: &str) -> PyResult<String> {
     Ok(format!("mkdir -p {quoted}"))
 }
 
+#[allow(dead_code)]
 fn build_copy_file_command(src: &str, dst: &str) -> PyResult<String> {
     let src_quoted = shlex::try_quote(src).map_err(|_| {
         PyValueError::new_err("src contains characters that cannot be shell-escaped")

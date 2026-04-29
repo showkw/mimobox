@@ -318,7 +318,12 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
         ));
     }
 
-    if cwd.contains(';') || cwd.contains('|') || cwd.contains('&') {
+    if cwd.contains(';')
+        || cwd.contains('|')
+        || cwd.contains('&')
+        || cwd.contains('$')
+        || cwd.contains('`')
+    {
         return Err(SdkError::Config(
             "invalid cwd: 包含 shell 元字符".to_string(),
         ));

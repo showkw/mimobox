@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -706,6 +707,8 @@ impl Sandbox for MacOsSandbox {
         let sandbox_tmp_dir = format!("/private/tmp/mimobox-{sandbox_id}");
         std::fs::create_dir_all(&sandbox_tmp_dir)
             .map_err(|e| SandboxError::new(format!("failed to create sandbox tmp dir: {e}")))?;
+        std::fs::set_permissions(&sandbox_tmp_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| SandboxError::new(format!("failed to set tmp dir permissions: {e}")))?;
 
         Ok(Self {
             config,

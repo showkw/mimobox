@@ -39,25 +39,12 @@ pub async fn run_http_server(
     allowed_origins: Option<String>,
     auth_token: Option<String>,
 ) -> HttpResult<()> {
-    let is_local_bind = is_local_bind_addr(bind_addr);
-    if auth_token.is_none() && !is_local_bind {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "MCP HTTP 绑定到非本地地址但没有配置认证。请设置 --auth-token 或 MIMOBOX_AUTH_TOKEN 环境变量",
-        )
-        .into());
-    }
+    validate_bind_addr(bind_addr)?;
 
     if auth_token.is_some() {
         tracing::info!("MCP HTTP 模式已启用 Bearer token 认证");
     } else {
         tracing::warn!("HTTP 模式未启用认证，请勿在公网环境直接暴露。仅限本地开发和受信网络使用。");
-    }
-    if !is_local_bind {
-        tracing::warn!(
-            bind_addr,
-            "MCP HTTP 绑定地址不是本地回环地址，可能暴露到不受信网络"
-        );
     }
 
     // SECURITY: 在服务启动时即拒绝空 token 配置，避免配置失误导致认证旁路。
@@ -147,7 +134,25 @@ fn register_server(server_registry: &ServerRegistry, server: MimoboxServer) -> i
 }
 
 fn is_local_bind_addr(bind_addr: &str) -> bool {
-    matches!(bind_addr, "127.0.0.1" | "::1")
+    matches!(bind_addr, "127.0.0.1" | "::1" | "localhost")
+}
+
+fn validate_bind_addr(bind_addr: &str) -> io::Result<()> {
+    if matches!(bind_addr, "0.0.0.0" | "[::]" | "::") {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "MCP HTTP 禁止绑定所有网络接口",
+        ));
+    }
+
+    if !is_local_bind_addr(bind_addr) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "MCP HTTP 仅允许绑定本地回环地址",
+        ));
+    }
+
+    Ok(())
 }
 
 fn allowed_hosts(bind_addr: &str) -> Vec<String> {
