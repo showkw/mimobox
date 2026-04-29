@@ -7,8 +7,8 @@
 use mimobox_sdk::{
     Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
     MAX_MEMORY_LIMIT_MB, NetworkPolicy, PtyConfig, PtyEvent as CorePtyEvent, PtySize,
-    Sandbox as RustSandbox, SandboxInfo, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent,
-    TrustLevel,
+    Sandbox as RustSandbox, SandboxInfo, SandboxMetrics, SandboxSnapshot as RustSnapshot, SdkError,
+    StreamEvent, TrustLevel,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -112,6 +112,58 @@ impl PyExecuteResult {
         format!(
             "ExecuteResult(exit_code={}, timed_out={})",
             self.exit_code, self.timed_out
+        )
+    }
+}
+
+/// 沙箱运行时资源使用指标。
+///
+/// 所有资源字段都是可选值，因为不同后端支持的指标不同。
+/// `collected_at` 暴露为 Rust 单调时钟采样后已经经过的秒数。
+#[pyclass(name = "SandboxMetrics")]
+#[derive(Debug, Clone)]
+struct PySandboxMetrics {
+    #[pyo3(get)]
+    memory_usage_bytes: Option<u64>,
+    #[pyo3(get)]
+    memory_limit_bytes: Option<u64>,
+    #[pyo3(get)]
+    cpu_time_user_us: Option<u64>,
+    #[pyo3(get)]
+    cpu_time_system_us: Option<u64>,
+    #[pyo3(get)]
+    wasm_fuel_consumed: Option<u64>,
+    #[pyo3(get)]
+    io_read_bytes: Option<u64>,
+    #[pyo3(get)]
+    io_write_bytes: Option<u64>,
+    #[pyo3(get)]
+    collected_at: Option<f64>,
+}
+
+impl From<SandboxMetrics> for PySandboxMetrics {
+    fn from(metrics: SandboxMetrics) -> Self {
+        Self {
+            memory_usage_bytes: metrics.memory_usage_bytes,
+            memory_limit_bytes: metrics.memory_limit_bytes,
+            cpu_time_user_us: metrics.cpu_time_user_us,
+            cpu_time_system_us: metrics.cpu_time_system_us,
+            wasm_fuel_consumed: metrics.wasm_fuel_consumed,
+            io_read_bytes: metrics.io_read_bytes,
+            io_write_bytes: metrics.io_write_bytes,
+            collected_at: metrics
+                .collected_at
+                .map(|collected_at| collected_at.elapsed().as_secs_f64()),
+        }
+    }
+}
+
+#[pymethods]
+impl PySandboxMetrics {
+    fn __repr__(&self) -> String {
+        format!(
+            "SandboxMetrics(memory_usage_bytes={:?}, memory_limit_bytes={:?})",
+            self.memory_usage_bytes, self.memory_limit_bytes
         )
     }
 }
@@ -1137,6 +1189,15 @@ impl PySandbox {
     #[getter]
     fn id(&self) -> Option<String> {
         self.inner.as_ref().map(|sandbox| sandbox.id().to_string())
+    }
+
+    /// 返回最近一次执行的资源使用指标。
+    fn metrics(&self) -> PyResult<PySandboxMetrics> {
+        let sandbox = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))?;
+        Ok(sandbox.metrics().into())
     }
 
     /// 列出当前进程内注册的 Rust SDK 沙箱。
@@ -2310,6 +2371,7 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySandboxInfo>()?;
     module.add_class::<PySnapshot>()?;
     module.add_class::<PyExecuteResult>()?;
+    module.add_class::<PySandboxMetrics>()?;
     module.add_class::<PyHttpResponse>()?;
     module.add_class::<PyDirEntry>()?;
     module.add_class::<PyFileStat>()?;

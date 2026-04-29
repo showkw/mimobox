@@ -25,7 +25,6 @@ use crate::vm_helpers::map_restore_pool_error;
 use crate::vm_helpers::parse_command;
 #[cfg(feature = "vm")]
 use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
-use mimobox_core::ErrorCode;
 #[cfg(any(
     feature = "wasm",
     all(feature = "os", any(target_os = "linux", target_os = "macos")),
@@ -37,6 +36,7 @@ use mimobox_core::Sandbox as CoreSandbox;
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
 use mimobox_core::SandboxError;
+use mimobox_core::{ErrorCode, SandboxMetrics};
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
@@ -60,6 +60,29 @@ pub(crate) enum SandboxInner {
     RestoredPooledMicroVm(mimobox_vm::PooledRestoreVm),
     #[cfg(feature = "wasm")]
     Wasm(mimobox_wasm::WasmSandbox),
+}
+
+impl SandboxInner {
+    fn metrics(&self) -> Option<SandboxMetrics> {
+        match self {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => sandbox.metrics(),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => sandbox.metrics(),
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => sandbox.metrics(),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(_)
+            | SandboxInner::PooledMicroVm(_)
+            | SandboxInner::RestoredPooledMicroVm(_) => {
+                let mut metrics = SandboxMetrics::default();
+                metrics.collected_at = Some(std::time::Instant::now());
+                Some(metrics)
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
 }
 
 /// Primary entry point for all sandbox operations.
@@ -95,6 +118,7 @@ pub struct Sandbox {
     pub(crate) active_isolation: Option<IsolationLevel>,
     #[cfg(feature = "vm")]
     pub(crate) vm_pool: Option<Arc<mimobox_vm::VmPool>>,
+    pub(crate) cached_metrics: Option<SandboxMetrics>,
 }
 
 // ── RestorePool ──
@@ -550,6 +574,14 @@ impl Sandbox {
         &self.config.env_vars
     }
 
+    /// 返回最近一次执行的资源使用指标。
+    ///
+    /// 指标在 execute() 返回时自动采样并缓存。
+    /// 如果尚未执行过命令，返回 Default 的 SandboxMetrics（所有字段为 None）。
+    pub fn metrics(&self) -> SandboxMetrics {
+        self.cached_metrics.clone().unwrap_or_default()
+    }
+
     /// 返回当前 SDK 沙箱实例的注册表信息快照。
     pub fn info(&self) -> SandboxInfo {
         registry::get(self.id).unwrap_or_else(|| SandboxInfo {
@@ -815,6 +847,7 @@ impl Sandbox {
             active_isolation: None,
             #[cfg(feature = "vm")]
             vm_pool: None,
+            cached_metrics: None,
         }
     }
 
@@ -831,7 +864,12 @@ impl Sandbox {
             active_isolation: Some(IsolationLevel::MicroVm),
             #[cfg(feature = "vm")]
             vm_pool: None,
+            cached_metrics: None,
         }
+    }
+
+    pub(crate) fn sync_cached_metrics_from_inner(&mut self) {
+        self.cached_metrics = self.inner.as_ref().and_then(SandboxInner::metrics);
     }
 
     fn create_inner(&self, isolation: IsolationLevel) -> Result<SandboxInner, SdkError> {
@@ -955,7 +993,7 @@ mod tests {
     use crate::types::StreamEvent;
     #[cfg(feature = "vm")]
     use crate::vm_helpers::should_prepare_vm_pool;
-    #[cfg(feature = "vm")]
+    #[cfg(all(feature = "vm", target_os = "linux"))]
     use mimobox_core::{PtyConfig, PtySize};
 
     fn inner_is_initialized(sandbox: &Sandbox) -> bool {
@@ -1186,6 +1224,40 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn metrics_before_first_execute_returns_default_values() {
+        let sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
+
+        let metrics = sandbox.metrics();
+
+        assert!(metrics.memory_usage_bytes.is_none());
+        assert!(metrics.memory_limit_bytes.is_none());
+        assert!(metrics.cpu_time_user_us.is_none());
+        assert!(metrics.cpu_time_system_us.is_none());
+        assert!(metrics.wasm_fuel_consumed.is_none());
+        assert!(metrics.io_read_bytes.is_none());
+        assert!(metrics.io_write_bytes.is_none());
+        assert!(metrics.collected_at.is_none());
+    }
+
+    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn metrics_after_execute_are_cached() {
+        if should_skip_os_runtime_tests() {
+            return;
+        }
+
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
+        sandbox
+            .execute("/bin/echo metrics")
+            .expect("command execution failed");
+
+        let metrics = sandbox.metrics();
+
+        assert!(metrics.collected_at.is_some());
+        assert_eq!(metrics.memory_limit_bytes, Some(512 * 1024 * 1024));
     }
 
     #[cfg(feature = "vm")]

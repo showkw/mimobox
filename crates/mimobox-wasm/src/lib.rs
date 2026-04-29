@@ -29,7 +29,9 @@ use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-use mimobox_core::{ExecutionFailureKind, Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{
+    ExecutionFailureKind, Sandbox, SandboxConfig, SandboxError, SandboxMetrics, SandboxResult,
+};
 
 /// Sandbox Store data combining the WASI context and resource limits.
 ///
@@ -159,6 +161,57 @@ pub struct WasmSandbox {
     engine: Arc<Engine>,
     config: SandboxConfig,
     cache_dir: Option<PathBuf>,
+    cached_metrics: Option<SandboxMetrics>,
+}
+
+impl WasmSandbox {
+    /// 返回最近一次 Wasm 后端执行缓存的资源指标。
+    pub fn metrics(&self) -> Option<SandboxMetrics> {
+        self.cached_metrics.clone()
+    }
+
+    fn cache_wasm_metrics(
+        &mut self,
+        instance: &wasmtime::Instance,
+        store: &mut Store<StoreData>,
+        initial_fuel: u64,
+    ) {
+        let memory_usage_bytes = wasm_memory_usage_bytes(instance, store);
+        self.cached_metrics = Some(sample_wasm_metrics(
+            store,
+            memory_usage_bytes,
+            initial_fuel,
+            self.config.memory_limit_mb,
+        ));
+    }
+}
+
+fn wasm_memory_usage_bytes(
+    instance: &wasmtime::Instance,
+    store: &mut Store<StoreData>,
+) -> Option<u64> {
+    let memory = instance.get_memory(&mut *store, "memory")?;
+    u64::try_from(memory.data_size(&*store)).ok()
+}
+
+/// 采样 Wasm 执行后的资源指标。
+fn sample_wasm_metrics(
+    store: &Store<StoreData>,
+    memory_usage_bytes: Option<u64>,
+    initial_fuel: u64,
+    memory_limit_mb: Option<u64>,
+) -> SandboxMetrics {
+    let mut metrics = SandboxMetrics::default();
+
+    if let Ok(remaining_fuel) = store.get_fuel() {
+        metrics.wasm_fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+    }
+    metrics.memory_usage_bytes = memory_usage_bytes;
+    if let Some(limit_mb) = memory_limit_mb {
+        metrics.memory_limit_bytes = limit_mb.checked_mul(BYTES_PER_MIB);
+    }
+    metrics.collected_at = Some(std::time::Instant::now());
+    metrics
 }
 
 /// Calculates the SHA256 hash of file content.
@@ -1111,11 +1164,13 @@ impl Sandbox for WasmSandbox {
             engine,
             config,
             cache_dir,
+            cached_metrics: None,
         })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         let start = Instant::now();
+        self.cached_metrics = None;
 
         if cmd.is_empty() {
             return Err(SandboxError::new("Command is empty"));
@@ -1213,6 +1268,7 @@ impl Sandbox for WasmSandbox {
                             warn!(
                                 "Execution timed out (fuel exhausted or epoch deadline exceeded)"
                             );
+                            self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
                             let elapsed = start.elapsed();
                             let stdout =
                                 truncate_output(stdout_reader.contents().to_vec(), "stdout");
@@ -1227,6 +1283,7 @@ impl Sandbox for WasmSandbox {
                             });
                         } else if is_memory_trap(&e) {
                             warn!("Wasm memory limit exceeded (OOM)");
+                            self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
                             return Err(SandboxError::ExecutionFailed {
                                 kind: ExecutionFailureKind::Oom,
                                 message: "wasm memory limit exceeded".into(),
@@ -1250,6 +1307,7 @@ impl Sandbox for WasmSandbox {
                                 warn!(
                                     "Execution timed out (fuel exhausted or epoch deadline exceeded)"
                                 );
+                                self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
                                 let elapsed = start.elapsed();
                                 let stdout =
                                     truncate_output(stdout_reader.contents().to_vec(), "stdout");
@@ -1264,6 +1322,7 @@ impl Sandbox for WasmSandbox {
                                 });
                             } else if is_memory_trap(&e) {
                                 warn!("Wasm memory limit exceeded (OOM)");
+                                self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
                                 return Err(SandboxError::ExecutionFailed {
                                     kind: ExecutionFailureKind::Oom,
                                     message: "wasm memory limit exceeded".into(),
@@ -1283,6 +1342,7 @@ impl Sandbox for WasmSandbox {
             }
         };
 
+        self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
         let elapsed = start.elapsed();
 
         // 10. 从 clone 的 MemoryOutputPipe 中读取捕获的输出（带截断保护）

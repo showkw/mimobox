@@ -29,7 +29,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mimobox_core::{DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use mimobox_core::{
+    DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxMetrics, SandboxResult,
+};
 use uuid::Uuid;
 
 use crate::pty::{allocate_pty, build_session};
@@ -69,20 +71,14 @@ struct RUsageInfoV2 {
     ri_phys_footprint: u64,
     ri_proc_start_abstime: u64,
     ri_proc_exit_abstime: u64,
-    ri_user_time_continued: u64,
-    ri_system_time_continued: u64,
-    ri_minflt: u64,
-    ri_majflt: u64,
-    ri_cstime: u64,
-    ri_cutime: u64,
-    ri_messages_sent: u64,
-    ri_messages_received: u64,
-    ri_syscalls_mach: u64,
-    ri_syscalls_bsd: u64,
-    ri_csw: u64,
-    ri_threadnum: u64,
-    ri_numrunning: u64,
-    ri_priority: u32,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -175,6 +171,48 @@ pub struct MacOsSandbox {
     config: SandboxConfig,
     /// Sandbox-private temporary directory to prevent cross-sandbox `/tmp` leakage.
     sandbox_tmp_dir: String,
+    cached_metrics: Option<SandboxMetrics>,
+}
+
+impl MacOsSandbox {
+    /// 返回最近一次 macOS 后端执行缓存的资源指标。
+    pub fn metrics(&self) -> Option<SandboxMetrics> {
+        self.cached_metrics.clone()
+    }
+}
+
+/// 通过 proc_pidrusage 采样进程资源指标。
+///
+/// 在 waitpid 之后调用，获取子进程最终资源使用快照。
+#[cfg(target_os = "macos")]
+pub fn sample_metrics(pid: i32, memory_limit_mb: Option<u64>) -> SandboxMetrics {
+    // SAFETY: RUsageInfoV2 是 repr(C) 且字段均为整数/字节数组，零初始化有效；
+    // proc_pidrusage 会按 RUSAGE_INFO_V2 布局写入调用方提供的缓冲区。
+    let mut rusage: RUsageInfoV2 = unsafe { std::mem::zeroed() };
+    // SAFETY: pid 来自当前沙箱启动的子进程；rusage 指向栈上有效缓冲区，
+    // 按 Darwin API 要求转换为 rusage_info_t 指针输出槽。
+    let result = unsafe {
+        proc_pidrusage(
+            pid,
+            RUSAGE_INFO_V2,
+            &mut rusage as *mut _ as *mut libc::rusage_info_t,
+        )
+    };
+
+    let mut metrics = SandboxMetrics::default();
+    if result == 0 {
+        // ri_user_time 和 ri_system_time 单位是纳秒。
+        metrics.cpu_time_user_us = Some(rusage.ri_user_time / 1000);
+        metrics.cpu_time_system_us = Some(rusage.ri_system_time / 1000);
+        metrics.memory_usage_bytes = Some(rusage.ri_resident_size);
+        metrics.io_read_bytes = Some(rusage.ri_diskio_bytesread);
+        metrics.io_write_bytes = Some(rusage.ri_diskio_byteswritten);
+    }
+    if let Some(limit_mb) = memory_limit_mb {
+        metrics.memory_limit_bytes = limit_mb.checked_mul(1024 * 1024);
+    }
+    metrics.collected_at = Some(std::time::Instant::now());
+    metrics
 }
 
 fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Option<String> {
@@ -726,10 +764,13 @@ impl Sandbox for MacOsSandbox {
         Ok(Self {
             config,
             sandbox_tmp_dir,
+            cached_metrics: None,
         })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
+        self.cached_metrics = None;
+
         if cmd.is_empty() {
             return Err(SandboxError::new("command must not be empty"));
         }
@@ -814,6 +855,7 @@ impl Sandbox for MacOsSandbox {
         };
         child_running.store(false, Ordering::SeqCst);
         let (exit_status, mut timed_out) = wait_result?;
+        self.cached_metrics = Some(sample_metrics(pid, self.config.memory_limit_mb));
         if oom_killed.load(Ordering::SeqCst) {
             timed_out = true;
         }

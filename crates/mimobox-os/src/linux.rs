@@ -5,18 +5,18 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use nix::sched::CloneFlags;
 use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitStatus, waitpid};
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
 use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{
-    DirEntry, FileStat, NamespaceDegradation, Sandbox, SandboxConfig, SandboxError, SandboxResult,
-    SeccompProfile,
+    DirEntry, FileStat, NamespaceDegradation, Sandbox, SandboxConfig, SandboxError, SandboxMetrics,
+    SandboxResult, SeccompProfile,
 };
 
 use crate::pty::{allocate_pty, build_child_env_with_base, build_session};
@@ -28,6 +28,9 @@ const CGROUP_V2_ROOT: &str = "/sys/fs/cgroup";
 const DEFAULT_MAX_PROCESSES: u32 = 64;
 const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
+const FALLBACK_PAGE_SIZE_BYTES: u64 = 4096;
+const PROC_STAT_UTIME_INDEX: usize = 11;
+const PROC_STAT_STIME_INDEX: usize = 12;
 
 #[derive(Debug)]
 struct OutputCapture {
@@ -216,6 +219,84 @@ pub struct LinuxSandbox {
     #[cfg(target_os = "linux")]
     last_cgroup_path: Option<PathBuf>,
     last_isolation_report: IsolationReport,
+    cached_metrics: Option<SandboxMetrics>,
+}
+
+impl LinuxSandbox {
+    /// 返回最近一次 Linux 后端执行缓存的资源指标。
+    pub fn metrics(&self) -> Option<SandboxMetrics> {
+        self.cached_metrics.clone()
+    }
+}
+
+/// 通过 /proc/{pid}/statm、/proc/{pid}/io 和 /proc/{pid}/stat 采样进程资源指标。
+///
+/// 必须在子进程被 waitpid 回收前调用，否则 /proc/{pid} 会被内核清理。
+pub fn sample_metrics(pid: i32, memory_limit_mb: Option<u64>) -> SandboxMetrics {
+    let mut metrics = SandboxMetrics::default();
+
+    if let Ok(statm) = std::fs::read_to_string(format!("/proc/{pid}/statm"))
+        && let Some(rss_pages) = statm
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<u64>().ok())
+    {
+        metrics.memory_usage_bytes = Some(rss_pages.saturating_mul(page_size_bytes()));
+    }
+
+    if let Ok(io_content) = std::fs::read_to_string(format!("/proc/{pid}/io")) {
+        for line in io_content.lines() {
+            if let Some(value) = line.strip_prefix("read_bytes:") {
+                metrics.io_read_bytes = value.trim().parse().ok();
+            } else if let Some(value) = line.strip_prefix("write_bytes:") {
+                metrics.io_write_bytes = value.trim().parse().ok();
+            }
+        }
+    }
+
+    if let Ok(stat_content) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        && let Some(close_paren) = stat_content.rfind(')')
+    {
+        // /proc/{pid}/stat 在 comm 后从 state 开始，utime/stime 分别是第 14/15 个原始字段。
+        let fields: Vec<&str> = stat_content[close_paren + 1..].split_whitespace().collect();
+        if fields.len() > PROC_STAT_STIME_INDEX {
+            let clk_tck = clock_ticks_per_second();
+            if let Some(clk_tck) = clk_tck {
+                if let Ok(utime) = fields[PROC_STAT_UTIME_INDEX].parse::<u64>() {
+                    metrics.cpu_time_user_us = Some(utime.saturating_mul(1_000_000) / clk_tck);
+                }
+                if let Ok(stime) = fields[PROC_STAT_STIME_INDEX].parse::<u64>() {
+                    metrics.cpu_time_system_us = Some(stime.saturating_mul(1_000_000) / clk_tck);
+                }
+            }
+        }
+    }
+
+    if let Some(limit_mb) = memory_limit_mb {
+        metrics.memory_limit_bytes = limit_mb.checked_mul(1024 * 1024);
+    }
+    metrics.collected_at = Some(std::time::Instant::now());
+    metrics
+}
+
+fn page_size_bytes() -> u64 {
+    // SAFETY: sysconf(_SC_PAGESIZE) 只读取当前系统页大小，无内存安全影响。
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size > 0 {
+        page_size as u64
+    } else {
+        FALLBACK_PAGE_SIZE_BYTES
+    }
+}
+
+fn clock_ticks_per_second() -> Option<u64> {
+    // SAFETY: sysconf(_SC_CLK_TCK) 只读取当前系统 clock tick 配置，无内存安全影响。
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if clk_tck > 0 {
+        Some(clk_tck as u64)
+    } else {
+        None
+    }
 }
 
 /// Writes to a file descriptor in the child process without depending on Rust `std`, making it safe after `fork`.
@@ -1120,11 +1201,13 @@ impl Sandbox for LinuxSandbox {
             #[cfg(target_os = "linux")]
             last_cgroup_path: None,
             last_isolation_report: IsolationReport::default(),
+            cached_metrics: None,
         })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
         self.last_isolation_report = IsolationReport::default();
+        self.cached_metrics = None;
 
         if cmd.is_empty() {
             return Err(SandboxError::new("command must not be empty"));
@@ -1229,15 +1312,9 @@ impl Sandbox for LinuxSandbox {
                     return Err(error);
                 }
 
-                // 使用 WNOHANG 轮询实现超时
-                let (wait_result, timed_out) = if let Some(dur) = timeout {
-                    waitpid_with_timeout(child, dur)?
-                } else {
-                    (
-                        waitpid(child, None).map_err(|e| SandboxError::Syscall(e.to_string()))?,
-                        false,
-                    )
-                };
+                let (wait_result, timed_out, metrics) =
+                    waitpid_with_metrics(child, timeout, self.config.memory_limit_mb)?;
+                self.cached_metrics = Some(metrics);
 
                 let stdout_capture = receive_output_capture(stdout_rx, "stdout");
                 let stderr_capture = receive_output_capture(stderr_rx, "stderr");
@@ -2126,44 +2203,60 @@ mod tests {
     }
 }
 
-/// Polls the child process with `WNOHANG` and sends `SIGKILL` after timeout.
+/// 等待子进程结束，并在回收前采样 /proc 指标。
 ///
-/// Returns `(WaitStatus, timed_out)`.
-fn waitpid_with_timeout(
+/// 返回 `(WaitStatus, timed_out, SandboxMetrics)`。
+fn waitpid_with_metrics(
     child: nix::unistd::Pid,
-    timeout: Duration,
-) -> Result<(WaitStatus, bool), SandboxError> {
-    let (tx, rx) = mpsc::sync_channel(1);
-    let waiter = std::thread::spawn(move || {
-        let result = waitpid(child, None).map_err(|e| SandboxError::Syscall(e.to_string()));
-        let _ = tx.send(result);
-    });
+    timeout: Option<Duration>,
+    memory_limit_mb: Option<u64>,
+) -> Result<(WaitStatus, bool, SandboxMetrics), SandboxError> {
+    let Some(timeout) = timeout else {
+        wait_until_exited_without_reaping(child)?;
+        let metrics = sample_metrics(child.as_raw(), memory_limit_mb);
+        let status = reap_child(child)?;
+        return Ok((status, false, metrics));
+    };
 
-    match rx.recv_timeout(timeout) {
-        Ok(result) => {
-            let _ = waiter.join();
-            Ok((result?, false))
+    let started_at = Instant::now();
+    loop {
+        let status = poll_exited_without_reaping(child)?;
+        if status != WaitStatus::StillAlive {
+            let metrics = sample_metrics(child.as_raw(), memory_limit_mb);
+            let status = reap_child(child)?;
+            return Ok((status, false, metrics));
         }
-        Err(RecvTimeoutError::Timeout) => {
+
+        if started_at.elapsed() >= timeout {
             tracing::warn!(
                 "Child process timeout ({:.1}s), sending SIGKILL",
                 timeout.as_secs_f64()
             );
+            let metrics = sample_metrics(child.as_raw(), memory_limit_mb);
             // SECURITY: 以负 PID 发送 SIGKILL，确保整个沙箱进程组（含 re-exec 孙进程）被回收，
             // 避免 supervisor 超时后留下孤儿子进程或 zombie 清理链。
             kill_process_group(child.as_raw(), Signal::SIGKILL);
+            let status = reap_child(child)?;
+            return Ok((status, true, metrics));
+        }
 
-            let status = rx.recv().map_err(|_| {
-                SandboxError::new("waitpid waiter thread disconnected unexpectedly")
-            })??;
-            let _ = waiter.join();
-            Ok((status, true))
-        }
-        Err(RecvTimeoutError::Disconnected) => {
-            let _ = waiter.join();
-            Err(SandboxError::new(
-                "waitpid monitoring thread disconnected unexpectedly",
-            ))
-        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn wait_until_exited_without_reaping(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
+    waitid(Id::Pid(child), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)
+        .map_err(|error| SandboxError::Syscall(error.to_string()))
+}
+
+fn poll_exited_without_reaping(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
+    waitid(
+        Id::Pid(child),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
+    )
+    .map_err(|error| SandboxError::Syscall(error.to_string()))
+}
+
+fn reap_child(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
+    waitpid(child, None).map_err(|error| SandboxError::Syscall(error.to_string()))
 }

@@ -51,7 +51,7 @@ pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLeve
 pub use error::SdkError;
 pub use mimobox_core::{
     DirEntry, ErrorCode, FileStat, FileType, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, PtyConfig,
-    PtyEvent, PtySize,
+    PtyEvent, PtySize, SandboxMetrics,
 };
 pub use sandbox::registry::SandboxInfo;
 pub use sandbox::{Sandbox, SdkExecOptions};

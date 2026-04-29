@@ -728,6 +728,30 @@ pub struct SandboxResult {
     pub timed_out: bool,
 }
 
+/// 沙箱运行时资源使用指标。
+///
+/// 在 execute() 返回时采样并缓存，通过 SDK 层 metrics() 方法获取。
+/// 所有字段为 Option，表示后端可能不支持某项指标。
+#[derive(Debug, Clone, Default)]
+pub struct SandboxMetrics {
+    /// 当前内存使用量（字节）。
+    pub memory_usage_bytes: Option<u64>,
+    /// 内存限制（字节）。
+    pub memory_limit_bytes: Option<u64>,
+    /// 用户态 CPU 时间（微秒）。
+    pub cpu_time_user_us: Option<u64>,
+    /// 内核态 CPU 时间（微秒）。
+    pub cpu_time_system_us: Option<u64>,
+    /// Wasm fuel 消耗量（仅 Wasm 后端）。
+    pub wasm_fuel_consumed: Option<u64>,
+    /// IO 读取字节数。
+    pub io_read_bytes: Option<u64>,
+    /// IO 写入字节数。
+    pub io_write_bytes: Option<u64>,
+    /// 指标采样时间。
+    pub collected_at: Option<std::time::Instant>,
+}
+
 /// Internal storage for sandbox snapshots.
 ///
 /// This enum supports two snapshot storage modes:

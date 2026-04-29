@@ -277,73 +277,78 @@ impl Sandbox {
         };
         let _ = (&options.env, options.timeout);
 
+        self.cached_metrics = None;
         self.ensure_backend(command)?;
-        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(sandbox) => {
-                let args = build_fallback_command_args(command, &options)?;
-                sandbox.execute_for_sdk(&args)
+        let result = {
+            let inner = self.require_inner()?;
+            match inner {
+                #[cfg(all(feature = "os", target_os = "linux"))]
+                SandboxInner::Os(sandbox) => {
+                    let args = build_fallback_command_args(command, &options)?;
+                    sandbox.execute_for_sdk(&args)
+                }
+                #[cfg(all(feature = "os", target_os = "macos"))]
+                SandboxInner::OsMac(sandbox) => {
+                    let args = build_fallback_command_args(command, &options)?;
+                    sandbox.execute_for_sdk(&args)
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::MicroVm(sandbox) => {
+                    let args = parse_command(command)?;
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::PooledMicroVm(sandbox) => {
+                    let args = parse_command(command)?;
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::RestoredPooledMicroVm(sandbox) => {
+                    let args = parse_command(command)?;
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(feature = "wasm")]
+                SandboxInner::Wasm(sandbox) => {
+                    let args = parse_command(command)?;
+                    sandbox.execute_for_sdk(&args)
+                }
+                #[allow(unreachable_patterns)]
+                _ => unreachable!("no backend variant matched"),
             }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(sandbox) => {
-                let args = build_fallback_command_args(command, &options)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                let args = parse_command(command)?;
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(sandbox) => {
-                let args = parse_command(command)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("no backend variant matched"),
-        }
+        };
+        self.sync_cached_metrics_from_inner();
+        result
     }
 
     /// Executes an argv vector with per-call execution options.
@@ -385,78 +390,86 @@ impl Sandbox {
         let _ = (&options.env, options.timeout);
 
         let command = args.join(" ");
+        self.cached_metrics = None;
         self.ensure_backend(&command)?;
-        let inner = self.require_inner()?;
 
-        match inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(sandbox) => {
-                let args = build_fallback_argv_args(&args, &options)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(sandbox) => {
-                let args = build_fallback_argv_args(&args, &options)?;
-                sandbox.execute_for_sdk(&args)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                let start = std::time::Instant::now();
-                sandbox
-                    .execute_with_options(&args, options.to_guest_exec_options())
-                    .map(|result| ExecuteResult {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exit_code: result.exit_code,
-                        timed_out: result.timed_out,
-                        elapsed: start.elapsed(),
-                    })
-                    .map_err(super::map_microvm_error)
-            }
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm(sandbox) => {
-                #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-                {
+        let result = {
+            let inner = self.require_inner()?;
+            match inner {
+                #[cfg(all(feature = "os", target_os = "linux"))]
+                SandboxInner::Os(sandbox) => {
                     let args = build_fallback_argv_args(&args, &options)?;
                     sandbox.execute_for_sdk(&args)
                 }
-
-                #[cfg(not(all(feature = "os", any(target_os = "linux", target_os = "macos"))))]
-                {
+                #[cfg(all(feature = "os", target_os = "macos"))]
+                SandboxInner::OsMac(sandbox) => {
+                    let args = build_fallback_argv_args(&args, &options)?;
                     sandbox.execute_for_sdk(&args)
                 }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::MicroVm(sandbox) => {
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::PooledMicroVm(sandbox) => {
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                SandboxInner::RestoredPooledMicroVm(sandbox) => {
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .map(|result| ExecuteResult {
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            exit_code: result.exit_code,
+                            timed_out: result.timed_out,
+                            elapsed: start.elapsed(),
+                        })
+                        .map_err(super::map_microvm_error)
+                }
+                #[cfg(feature = "wasm")]
+                SandboxInner::Wasm(sandbox) => {
+                    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+                    {
+                        let args = build_fallback_argv_args(&args, &options)?;
+                        sandbox.execute_for_sdk(&args)
+                    }
+
+                    #[cfg(not(all(
+                        feature = "os",
+                        any(target_os = "linux", target_os = "macos")
+                    )))]
+                    {
+                        sandbox.execute_for_sdk(&args)
+                    }
+                }
+                #[allow(unreachable_patterns)]
+                _ => unreachable!("no backend variant matched"),
             }
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("no backend variant matched"),
-        }
+        };
+        self.sync_cached_metrics_from_inner();
+        result
     }
 }
 
