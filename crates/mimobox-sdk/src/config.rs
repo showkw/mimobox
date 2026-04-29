@@ -742,12 +742,18 @@ impl ConfigBuilder {
     /// 设置 HTTP ACL allow 规则（追加模式）。
     ///
     /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败会记录 warn 并跳过该规则。
-    pub fn http_acl_allow_str(mut self, rules: &[&str]) -> Self {
+    /// 解析失败会 fail-closed 返回错误，避免误配置被静默跳过。
+    pub fn http_acl_allow_str(mut self, rules: &[&str]) -> Result<Self, SdkError> {
         for rule_str in rules {
             match mimobox_core::HttpAclRule::parse(rule_str) {
                 Ok(rule) => self.inner.http_acl.allow.push(rule),
-                Err(err) => tracing::warn!("HTTP ACL allow 规则解析失败: {} - {}", rule_str, err),
+                Err(err) => {
+                    // SECURITY: fail-closed - 无效 ACL 规则直接报错，不静默跳过。
+                    return Err(SdkError::Config(format!(
+                        "HTTP ACL allow 规则解析失败: {} - {}",
+                        rule_str, err
+                    )));
+                }
             }
         }
         if matches!(self.inner.network, NetworkPolicy::DenyAll)
@@ -755,7 +761,7 @@ impl ConfigBuilder {
         {
             self.inner.network = NetworkPolicy::AllowDomains(Vec::new());
         }
-        self
+        Ok(self)
     }
 
     /// 设置 HTTP ACL allow 规则（从已解析的规则列表）。
@@ -772,15 +778,21 @@ impl ConfigBuilder {
     /// 设置 HTTP ACL deny 规则（追加模式）。
     ///
     /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败会记录 warn 并跳过该规则。
-    pub fn http_acl_deny_str(mut self, rules: &[&str]) -> Self {
+    /// 解析失败会 fail-closed 返回错误，避免误配置被静默跳过。
+    pub fn http_acl_deny_str(mut self, rules: &[&str]) -> Result<Self, SdkError> {
         for rule_str in rules {
             match mimobox_core::HttpAclRule::parse(rule_str) {
                 Ok(rule) => self.inner.http_acl.deny.push(rule),
-                Err(err) => tracing::warn!("HTTP ACL deny 规则解析失败: {} - {}", rule_str, err),
+                Err(err) => {
+                    // SECURITY: fail-closed - 无效 ACL 规则直接报错，不静默跳过。
+                    return Err(SdkError::Config(format!(
+                        "HTTP ACL deny 规则解析失败: {} - {}",
+                        rule_str, err
+                    )));
+                }
             }
         }
-        self
+        Ok(self)
     }
 
     /// 设置 HTTP ACL deny 规则（从已解析的规则列表）。
@@ -1170,6 +1182,7 @@ mod tests {
     fn builder_http_acl_allow_str_parses_rules() {
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/models", "POST api.openai.com/v1/*"])
+            .expect("ACL allow 规则应解析成功")
             .build()
             .expect("配置校验失败");
 
@@ -1194,6 +1207,7 @@ mod tests {
                 "api.openai.com".to_string(),
             ]))
             .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
+            .expect("ACL deny 规则应解析成功")
             .build()
             .expect("配置校验失败");
 
@@ -1207,20 +1221,17 @@ mod tests {
     }
 
     #[test]
-    fn http_acl_allow_str_invalid_rule_warns_but_other_rules_work() {
-        // 无效规则（拼错的 method）应被跳过，但其他合法规则应正常生效
-        let config = Config::builder()
-            .http_acl_allow_str(&["GETT api.openai.com/v1/*", "GET api.openai.com/v2/*"])
-            .build()
-            .expect("配置校验失败");
+    fn http_acl_allow_str_invalid_rule_fails_closed() {
+        let result = Config::builder()
+            .http_acl_allow_str(&["GETT api.openai.com/v1/*", "GET api.openai.com/v2/*"]);
 
-        // 只有一条合法规则被加入
-        assert_eq!(config.http_acl.allow.len(), 1);
-        assert_eq!(
-            config.http_acl.allow[0].method,
-            mimobox_core::HttpMethod::Get
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("HTTP ACL allow 规则解析失败")
         );
-        assert_eq!(config.http_acl.allow[0].path, "/v2/*");
     }
 
     #[test]
@@ -1228,6 +1239,7 @@ mod tests {
         let result = Config::builder()
             .network(NetworkPolicy::AllowAll)
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .expect("ACL allow 规则应解析成功")
             .build();
 
         assert!(result.is_err());
@@ -1283,6 +1295,7 @@ mod tests {
         // http_acl_allow_str 设置规则时自动切换 network 策略
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .expect("ACL allow 规则应解析成功")
             .build()
             .expect("配置校验失败");
 
@@ -1293,7 +1306,9 @@ mod tests {
     fn builder_chain_http_acl_allow_and_deny() {
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
+            .expect("ACL allow 规则应解析成功")
             .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
+            .expect("ACL deny 规则应解析成功")
             .build()
             .expect("配置校验失败");
 

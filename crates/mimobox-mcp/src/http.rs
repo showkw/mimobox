@@ -60,6 +60,16 @@ pub async fn run_http_server(
         );
     }
 
+    // SECURITY: 在服务启动时即拒绝空 token 配置，避免配置失误导致认证旁路。
+    if auth_token
+        .as_ref()
+        .is_some_and(|token| token.trim().is_empty())
+    {
+        let msg = "auth_token 不能为空字符串或纯空白字符";
+        tracing::error!("{msg}");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, msg).into());
+    }
+
     let allowed_origins = Arc::new(parse_allowed_origins(allowed_origins));
     let auth_token = auth_token.map(Arc::new);
     let server_registry = Arc::new(Mutex::new(Vec::new()));
@@ -313,6 +323,12 @@ async fn auth_middleware(
         return next.run(req).await;
     };
 
+    // SECURITY: 拒绝空/纯空白 token，防止配置失误导致认证旁路。
+    if expected_token.trim().is_empty() {
+        tracing::error!("auth_token 配置为空字符串，拒绝所有请求");
+        return unauthorized_response();
+    }
+
     if bearer_token(req.headers())
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
     {
@@ -371,6 +387,18 @@ mod tests {
             .expect("拒绝启动必须返回 I/O 权限错误");
 
         assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_run_http_server_rejects_blank_token() {
+        let err = run_http_server("127.0.0.1", 0, None, Some(" \t ".to_string()))
+            .await
+            .expect_err("SECURITY: 空白 token 必须 fail-closed 拒绝启动");
+        let io_err = err
+            .downcast_ref::<std::io::Error>()
+            .expect("空白 token 应返回 I/O 配置错误");
+
+        assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

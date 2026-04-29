@@ -8,8 +8,8 @@
 //!
 //! | Dimension | Policy | Description |
 //! |------|------|------|
-//! | File reads | Deny-default + allowlist | Allows minimal system paths, temporary directories, and user-configured `fs_readonly` / `fs_readwrite` paths. |
-//! | File writes | Deny-default + allowlist | Allows configured `fs_readwrite` paths, or `/private/tmp` when no write path is configured. |
+//! | File reads | Deny-default + allowlist | Allows minimal system paths, the sandbox-specific temporary directory, and user-configured `fs_readonly` / `fs_readwrite` paths. |
+//! | File writes | Deny-default + allowlist | Allows configured `fs_readwrite` paths, or the sandbox-specific temporary directory when no write path is configured. |
 //! | Network access | Deny by default | Allows network operations only when `deny_network = false`. |
 //! | Process execution | Path-restricted | Allows system and developer toolchain paths while denying writable execution locations. |
 //! | Process fork | Config-controlled | Controlled by `allow_fork` config; denied by default. |
@@ -29,14 +29,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mimobox_core::{DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult};
+use uuid::Uuid;
 
 use crate::pty::{allocate_pty, build_child_env, build_session};
 
 #[cfg(target_os = "macos")]
 // SAFETY: This block declares external C linkage functions from the macOS system library.
-// sandbox_init and proc_pid_rusage signatures match the system headers. sandbox_init
-// is called only within pre_exec closures with validated CString pointers; proc_pid_rusage
-// is called with a valid child pid and caller-owned rusage buffer.
+// sandbox_init and proc_pid_rusage signatures match the system headers.
+// sandbox_init is called only within pre_exec closures with validated CString pointers;
+// proc_pid_rusage is called with a valid child pid and caller-owned rusage buffer.
 unsafe extern "C" {
     fn sandbox_init(
         profile: *const libc::c_char,
@@ -133,20 +134,20 @@ struct OutputCapture {
     read_error: Option<String>,
 }
 
-fn build_safe_child_env() -> HashMap<String, String> {
+fn build_safe_child_env(sandbox_tmp_dir: &str) -> HashMap<String, String> {
     HashMap::from([
         (
             "PATH".to_string(),
             "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin".to_string(),
         ),
-        ("HOME".to_string(), "/tmp".to_string()),
+        ("HOME".to_string(), sandbox_tmp_dir.to_string()),
         ("TERM".to_string(), "dumb".to_string()),
         ("USER".to_string(), "sandbox".to_string()),
         ("LOGNAME".to_string(), "sandbox".to_string()),
         ("SHELL".to_string(), "/bin/sh".to_string()),
         ("LANG".to_string(), "C".to_string()),
-        ("TMPDIR".to_string(), "/tmp".to_string()),
-        ("PWD".to_string(), "/tmp".to_string()),
+        ("TMPDIR".to_string(), sandbox_tmp_dir.to_string()),
+        ("PWD".to_string(), sandbox_tmp_dir.to_string()),
     ])
 }
 
@@ -161,6 +162,8 @@ fn build_safe_child_env() -> HashMap<String, String> {
 /// - Memory limits are enforced by sampling child process physical footprint with `proc_pidrusage`.
 pub struct MacOsSandbox {
     config: SandboxConfig,
+    /// 沙箱专属临时目录，避免跨沙箱 /tmp 泄露。
+    sandbox_tmp_dir: String,
 }
 
 fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Option<String> {
@@ -269,6 +272,19 @@ fn create_child_process_group() -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+fn close_inherited_fds_from(min_fd: libc::c_int) {
+    // SECURITY: 当前 macOS SDK 未导出 closefrom 符号，使用 getdtablesize()+close 等价关闭
+    // min_fd 及以上 FD，防止继承文件描述符泄漏到沙箱子进程。
+    // SAFETY: getdtablesize 无入参，返回当前进程可用 fd 表大小。
+    let max_fd = unsafe { libc::getdtablesize() };
+    for fd in min_fd..max_fd {
+        // SAFETY: close 对无效/已关闭 fd 只会返回错误；这里在 fork 后子进程中尽力关闭非必要 fd。
+        unsafe {
+            libc::close(fd);
+        }
     }
 }
 
@@ -564,14 +580,19 @@ impl MacOsSandbox {
     ///
     /// Policy structure using Seatbelt Scheme compiled format version 1:
     /// 1. `(deny default)` — denies all operations by default.
-    /// 2. `(allow file-read* (subpath ...))` — 仅允许系统最小路径、临时目录、`fs_readonly` 和 `fs_readwrite` 路径读取。
-    /// 3. `(allow file-write* (subpath ...))` — 仅允许 `fs_readwrite` 路径；未配置时默认允许 `/private/tmp` 写入。
+    /// 2. `(allow file-read* (subpath ...))` — 仅允许系统最小路径、沙箱专属临时目录、`fs_readonly` 和 `fs_readwrite` 路径读取。
+    /// 3. `(allow file-write* (subpath ...))` — 仅允许 `fs_readwrite` 路径；未配置时默认允许沙箱专属临时目录写入。
     /// 4. `(allow process-exec (subpath ...))` — restricts executable paths.
     /// 5. `(deny process-exec (subpath ...))` — denies execution from writable locations.
     /// 6. `(allow process-fork)` — emitted only when `allow_fork = true`.
     /// 7. `(allow network*)` — emitted only when `deny_network = false`.
     /// 8. `(allow mach-lookup (global-name ...))` — permits only required Mach services.
+    #[cfg(test)]
     fn generate_policy(&self) -> String {
+        Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir)
+    }
+
+    fn build_seatbelt_policy(config: &SandboxConfig, sandbox_tmp_dir: &str) -> String {
         let mut rules = Vec::new();
 
         rules.push("(version 1)".to_string());
@@ -587,27 +608,26 @@ impl MacOsSandbox {
                 .iter()
                 .map(|s| format!("(subpath \"{}\")", s.trim_end_matches('/'))),
         );
-        push_sbpl_subpath(&mut read_paths, "/private/tmp");
-        push_sbpl_subpath(&mut read_paths, "/tmp");
+        // SECURITY: 只允许当前沙箱实例的专属临时目录，避免共享 /private/tmp 泄露跨沙箱数据。
+        push_sbpl_subpath(&mut read_paths, sandbox_tmp_dir);
 
-        for path in &self.config.fs_readonly {
+        for path in &config.fs_readonly {
             push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
         }
 
-        for path in &self.config.fs_readwrite {
+        for path in &config.fs_readwrite {
             push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
         }
 
         rules.push(format!("(allow file-read* {})", read_paths.join(" ")));
 
         let mut write_paths: Vec<String> = Vec::new();
-        for path in &self.config.fs_readwrite {
+        for path in &config.fs_readwrite {
             push_normalized_sbpl_subpath(&mut write_paths, path.to_string_lossy().as_ref());
         }
-        // 仅当用户未配置任何自定义写入路径时，使用 /private/tmp 作为默认工作目录。
+        // SECURITY: 仅当用户未配置任何自定义写入路径时，使用沙箱专属临时目录作为默认写入目录。
         if write_paths.is_empty() {
-            push_sbpl_subpath(&mut write_paths, "/private/tmp");
-            push_sbpl_subpath(&mut write_paths, "/tmp");
+            push_sbpl_subpath(&mut write_paths, sandbox_tmp_dir);
         }
         rules.push(format!("(allow file-write* {})", write_paths.join(" ")));
 
@@ -629,11 +649,11 @@ impl MacOsSandbox {
         rules.push("(deny process-exec (literal \"/usr/sbin/screencapture\"))".to_string());
         rules.push("(deny process-exec (literal \"/usr/bin/open\"))".to_string());
 
-        if self.config.allow_fork {
+        if config.allow_fork {
             rules.push("(allow process-fork)".to_string());
         }
 
-        if !self.config.deny_network {
+        if !config.deny_network {
             rules.push("(allow network*)".to_string());
         }
 
@@ -675,7 +695,16 @@ impl Sandbox for MacOsSandbox {
             tracing::info!("macOS 内存限制将通过 watchdog 采样强制执行");
         }
 
-        Ok(Self { config })
+        // SECURITY: 创建沙箱专属临时目录，避免多个沙箱实例共享 /private/tmp 导致数据泄露。
+        let sandbox_id = Uuid::new_v4();
+        let sandbox_tmp_dir = format!("/private/tmp/mimobox-{sandbox_id}");
+        std::fs::create_dir_all(&sandbox_tmp_dir)
+            .map_err(|e| SandboxError::new(format!("failed to create sandbox tmp dir: {e}")))?;
+
+        Ok(Self {
+            config,
+            sandbox_tmp_dir,
+        })
     }
 
     fn execute(&mut self, cmd: &[String]) -> Result<SandboxResult, SandboxError> {
@@ -689,7 +718,7 @@ impl Sandbox for MacOsSandbox {
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
         // 生成 Seatbelt 策略，并在 fork 前转换为 CString，避免 pre_exec 中分配内存。
-        let policy = self.generate_policy();
+        let policy = Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir);
         tracing::debug!(
             "Seatbelt 策略已生成 (规则数: {}, 长度: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -706,9 +735,14 @@ impl Sandbox for MacOsSandbox {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .env_clear()
-                .envs(build_safe_child_env())
-                .current_dir("/private/tmp")
+                // SECURITY: HOME/TMPDIR/PWD 指向沙箱专属临时目录，避免子进程通过 /tmp 读写跨沙箱数据。
+                .envs(build_safe_child_env(&self.sandbox_tmp_dir))
+                .current_dir(&self.sandbox_tmp_dir)
                 .pre_exec(move || {
+                    // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
+                    // stdin(0)/stdout(1)/stderr(2) 已通过 Stdio 配置设置，不需要保留其他 FD。
+                    // SAFETY: 从 min_fd=3 开始关闭所有非 stdio FD；无效 fd 的 close 错误可安全忽略。
+                    close_inherited_fds_from(3);
                     create_child_process_group()?;
                     apply_seatbelt_policy_or_exit(policy.as_ptr());
                     Ok(())
@@ -806,7 +840,7 @@ impl Sandbox for MacOsSandbox {
         );
 
         let allocated = allocate_pty(config.size)?;
-        let policy = self.generate_policy();
+        let policy = Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir);
         tracing::debug!(
             "PTY Seatbelt 策略已生成 (规则数: {}, 长度: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -826,21 +860,37 @@ impl Sandbox for MacOsSandbox {
             .try_clone()
             .map_err(|error| SandboxError::new(format!("failed to clone PTY stdout: {error}")))?;
 
+        let mut child_env = build_child_env(&config);
+        // SECURITY: PTY 默认环境中的 HOME/TMPDIR/PWD 指向沙箱专属目录，避免默认 /tmp 跨沙箱共享。
+        child_env.insert("HOME".to_string(), self.sandbox_tmp_dir.clone());
+        child_env.insert("TMPDIR".to_string(), self.sandbox_tmp_dir.clone());
+        child_env.insert(
+            "PWD".to_string(),
+            config
+                .cwd
+                .clone()
+                .unwrap_or_else(|| self.sandbox_tmp_dir.clone()),
+        );
+
         let mut command = Command::new(&config.command[0]);
         command
             .args(&config.command[1..])
             .env_clear()
-            .envs(build_child_env(&config))
+            .envs(child_env)
             .stdin(Stdio::from(stdin_slave))
             .stdout(Stdio::from(stdout_slave))
             .stderr(Stdio::from(slave_file));
 
-        command.current_dir(config.cwd.as_deref().unwrap_or("/private/tmp"));
+        command.current_dir(config.cwd.as_deref().unwrap_or(&self.sandbox_tmp_dir));
 
         // SAFETY: pre_exec 在子进程 exec 前接管 PTY 并应用 Seatbelt 策略；
         // 闭包捕获的 CString 在 sandbox_init 调用期间有效。
         let child = unsafe {
             command.pre_exec(move || {
+                // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
+                // PTY slave 已通过 Stdio::from() 传递给 stdin/stdout/stderr，关闭 3+ FD 安全。
+                // SAFETY: 从 min_fd=3 开始关闭所有非 stdio FD；无效 fd 的 close 错误可安全忽略。
+                close_inherited_fds_from(3);
                 configure_pty_controlling_terminal()?;
                 apply_seatbelt_policy_or_exit(policy.as_ptr());
                 Ok(())
@@ -879,6 +929,17 @@ impl Sandbox for MacOsSandbox {
     fn destroy(self) -> Result<(), SandboxError> {
         tracing::debug!("销毁 macOS Seatbelt 沙箱");
         Ok(())
+    }
+}
+
+impl Drop for MacOsSandbox {
+    fn drop(&mut self) {
+        // SECURITY: 沙箱销毁时清理专属临时目录，防止数据残留。
+        if !self.sandbox_tmp_dir.is_empty() {
+            if let Err(e) = std::fs::remove_dir_all(&self.sandbox_tmp_dir) {
+                tracing::warn!("清理沙箱临时目录失败: {} - {}", self.sandbox_tmp_dir, e);
+            }
+        }
     }
 }
 
@@ -1033,8 +1094,10 @@ mod tests {
             "子进程环境应设置 USER=sandbox, 实际输出:\n{stdout}"
         );
         assert!(
-            stdout.lines().any(|line| line == "HOME=/tmp"),
-            "子进程环境应设置 HOME=/tmp, 实际输出:\n{stdout}"
+            stdout
+                .lines()
+                .any(|line| line.starts_with("HOME=/private/tmp/mimobox-")),
+            "SECURITY: 子进程 HOME 应设置为沙箱专属临时目录, 实际输出:\n{stdout}"
         );
     }
 
@@ -1775,8 +1838,8 @@ mod tests {
             "策略应允许 CommandLineTools 工具链路径执行"
         );
         assert!(
-            policy.contains("(subpath \"/private/tmp\")"),
-            "策略应允许 /private/tmp 写入"
+            policy.contains(&format!("(subpath \"{}\")", sb.sandbox_tmp_dir)),
+            "SECURITY: 策略应允许沙箱专属临时目录写入"
         );
     }
 

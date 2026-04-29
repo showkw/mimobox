@@ -65,6 +65,7 @@ schemars = "1"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
+uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

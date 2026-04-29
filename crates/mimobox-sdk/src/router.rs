@@ -88,7 +88,12 @@ fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
 }
 
 fn is_wasm_command(command: &str) -> bool {
-    command.ends_with(".wasm") || command.ends_with(".wat") || command.ends_with(".wast")
+    // SECURITY: 只检查命令的第一个 token（可执行文件路径），避免参数中的 .wasm 后缀
+    // 导致错误路由。例如 "run module.wasm --arg" 不应被路由到 Wasm 后端。
+    let first_token = command.split_whitespace().next().unwrap_or(command);
+    first_token.ends_with(".wasm")
+        || first_token.ends_with(".wat")
+        || first_token.ends_with(".wast")
 }
 
 #[cfg(test)]
@@ -189,7 +194,9 @@ mod tests {
     #[test]
     fn is_wasm_detection() {
         assert!(is_wasm_command("app.wasm"));
+        assert!(is_wasm_command("path/to/app.wasm"));
         assert!(is_wasm_command("module.wat"));
+        assert!(!is_wasm_command("run module.wasm --arg"));
         assert!(!is_wasm_command("app.py"));
         assert!(!is_wasm_command("/bin/echo hello"));
     }

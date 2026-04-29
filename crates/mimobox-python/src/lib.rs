@@ -16,7 +16,6 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path};
@@ -1176,21 +1175,31 @@ impl PySandbox {
         cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
         let sandbox = self.inner_mut()?;
-        let effective_command = match cwd {
-            Some(dir) => build_cwd_command(command, dir)?,
-            None => command.to_string(),
-        };
         let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
-        let result = py
-            .allow_threads(|| match (env, parsed_timeout) {
+        let result = if let Some(dir) = cwd {
+            validate_python_cwd(dir)?;
+            let argv = parse_python_command(command)?;
+            let options = mimobox_sdk::SdkExecOptions {
+                env: env.unwrap_or_default(),
+                timeout: parsed_timeout,
+                cwd: Some(dir.to_string()),
+            };
+
+            // SECURITY: cwd 执行走 argv + current_dir 选项，避免拼接 `cd dir && command`
+            // 造成 shell 注入；command 只做 shell-style 分词，不进入 shell 解释。
+            py.allow_threads(|| sandbox.exec_with_options(&argv, options))
+                .map_err(|e| map_sdk_error(e, py))?
+        } else {
+            py.allow_threads(|| match (env, parsed_timeout) {
                 (Some(env), Some(timeout)) => {
-                    sandbox.execute_with_env_and_timeout(&effective_command, env, timeout)
+                    sandbox.execute_with_env_and_timeout(command, env, timeout)
                 }
-                (Some(env), None) => sandbox.execute_with_env(&effective_command, env),
-                (None, Some(timeout)) => sandbox.execute_with_timeout(&effective_command, timeout),
-                (None, None) => sandbox.execute(&effective_command),
+                (Some(env), None) => sandbox.execute_with_env(command, env),
+                (None, Some(timeout)) => sandbox.execute_with_timeout(command, timeout),
+                (None, None) => sandbox.execute(command),
             })
-            .map_err(|e| map_sdk_error(e, py))?;
+            .map_err(|e| map_sdk_error(e, py))?
+        };
         Ok(result.into())
     }
 
@@ -1877,11 +1886,15 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
     }
 
     if let Some(rules) = options.http_acl_allow {
-        builder = builder.http_acl_allow_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        builder = builder
+            .http_acl_allow_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .map_err(|e| e.to_string())?;
     }
 
     if let Some(rules) = options.http_acl_deny {
-        builder = builder.http_acl_deny_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        builder = builder
+            .http_acl_deny_str(&rules.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .map_err(|e| e.to_string())?;
     }
 
     if let Some(network) = options.network {
@@ -1889,16 +1902,6 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
     }
 
     builder.build().map_err(|e| e.to_string())
-}
-
-fn build_cwd_command(command: &str, cwd: &str) -> PyResult<String> {
-    validate_python_cwd(cwd)?;
-    let cwd_for_shell = normalize_cwd_for_cd(cwd);
-    let quoted = shlex::try_quote(&cwd_for_shell).map_err(|_| {
-        PyValueError::new_err("cwd contains characters that cannot be shell-escaped")
-    })?;
-
-    Ok(format!("cd {quoted} && {command}"))
 }
 
 fn build_make_dir_command(path: &str) -> PyResult<String> {
@@ -1950,6 +1953,14 @@ fn parse_pty_command(command: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     ))
 }
 
+fn parse_python_command(command: &str) -> PyResult<Vec<String>> {
+    let argv = shlex::split(command).ok_or_else(|| {
+        PyValueError::new_err("command parsing failed: mismatched shell-style quotes")
+    })?;
+    validate_non_empty_argv(&argv)?;
+    Ok(argv)
+}
+
 fn validate_non_empty_argv(argv: &[String]) -> PyResult<()> {
     if argv.is_empty() {
         return Err(PyValueError::new_err("command must not be empty"));
@@ -1977,14 +1988,6 @@ fn validate_python_cwd(cwd: &str) -> PyResult<()> {
     }
 
     Ok(())
-}
-
-fn normalize_cwd_for_cd(cwd: &str) -> Cow<'_, str> {
-    if !Path::new(cwd).is_absolute() && cwd.starts_with('-') {
-        Cow::Owned(format!("./{cwd}"))
-    } else {
-        Cow::Borrowed(cwd)
-    }
 }
 
 fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {
@@ -2415,24 +2418,25 @@ mod tests {
     }
 
     #[test]
-    fn cwd_command_rejects_parent_traversal_without_false_positive() {
-        assert!(build_cwd_command("pwd", "../work").is_err());
-        assert!(build_cwd_command("pwd", "a/../work").is_err());
-
-        let command =
-            build_cwd_command("pwd", "release.../work").expect("valid cwd should not be rejected");
-        assert_eq!(command, "cd release.../work && pwd");
+    fn cwd_validation_rejects_parent_traversal_without_false_positive() {
+        assert!(validate_python_cwd("../work").is_err());
+        assert!(validate_python_cwd("a/../work").is_err());
+        assert!(validate_python_cwd("release.../work").is_ok());
     }
 
     #[test]
-    fn cwd_command_shell_quotes_and_handles_leading_dash() {
-        let spaced =
-            build_cwd_command("pwd", "/tmp/work dir").expect("cwd with spaces should be escapable");
-        assert_eq!(spaced, "cd '/tmp/work dir' && pwd");
+    fn cwd_validation_allows_paths_that_no_longer_enter_shell_cd() {
+        assert!(validate_python_cwd("/tmp/work dir").is_ok());
+        assert!(validate_python_cwd("-workspace").is_ok());
+    }
 
-        let dashed = build_cwd_command("pwd", "-workspace")
-            .expect("cwd with leading dash should be handled");
-        assert_eq!(dashed, "cd ./-workspace && pwd");
+    #[test]
+    fn python_command_parser_rejects_invalid_commands_for_cwd_exec() {
+        assert!(parse_python_command("").is_err());
+        assert!(parse_python_command("echo 'unterminated").is_err());
+
+        let argv = parse_python_command("echo hello").expect("command should parse");
+        assert_eq!(argv, vec!["echo".to_string(), "hello".to_string()]);
     }
 
     #[test]

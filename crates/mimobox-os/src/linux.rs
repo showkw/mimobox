@@ -856,6 +856,32 @@ impl LinuxSandbox {
         unsafe {
             libc::setpgid(0, 0);
         }
+        // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
+        // 使用 /proc/self/fd 遍历关闭（兼容不支持 close_range 的内核）。
+        // SAFETY: 仅关闭非 stdio(0/1/2) 的 FD，排除管道和即将 dup2 的 FD。
+        {
+            let mut preserve_fds: [RawFd; 4] = [stdout_fd, stderr_fd, -1, -1];
+            let mut preserve_count = 2usize;
+            if let Some((r1, r2)) = close_fds {
+                preserve_fds[2] = r1;
+                preserve_fds[3] = r2;
+                preserve_count = 4;
+            }
+            if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+                for entry in entries.flatten() {
+                    if let Ok(name) = entry.file_name().into_string()
+                        && let Ok(fd) = name.parse::<RawFd>()
+                        && fd > 2
+                        && !preserve_fds[..preserve_count].contains(&fd)
+                    {
+                        // SAFETY: fd 来自 /proc/self/fd 枚举，且已排除 stdio 与后续仍需使用的保留 fd。
+                        unsafe {
+                            libc::close(fd);
+                        }
+                    }
+                }
+            }
+        }
         // 关闭管道读端
         if let Some((r1, r2)) = close_fds {
             // SAFETY: fd 有效且子进程不需要读端
@@ -915,6 +941,22 @@ impl LinuxSandbox {
             unsafe {
                 write_error(2, "PTY environment variable initialization failed");
                 libc::_exit(119);
+            }
+        }
+
+        // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
+        // SAFETY: 仅关闭非 stdio(0/1/2) 的 FD。PTY slave 尚未 attach。
+        if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string()
+                    && let Ok(fd) = name.parse::<RawFd>()
+                    && fd > 2
+                {
+                    // SAFETY: fd 来自 /proc/self/fd 枚举，且已排除 stdio；PTY slave 尚未打开，无需保留。
+                    unsafe {
+                        libc::close(fd);
+                    }
+                }
             }
         }
 
