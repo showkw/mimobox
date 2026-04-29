@@ -159,6 +159,23 @@ class StreamIterator:
     def __next__(self) -> Optional[StreamEvent]: ...
 
 
+class PtyOutput:
+    data: bytes
+
+
+class PtyExit:
+    code: int
+
+
+class PtySession:
+    def send_input(self, data: Union[str, bytes]) -> None: ...
+    def resize(self, cols: int, rows: int) -> None: ...
+    def kill(self) -> None: ...
+    def wait(self, *, timeout: Optional[float] = None) -> int: ...
+    def __iter__(self) -> "PtySession": ...
+    def __next__(self) -> Optional[Union[PtyOutput, PtyExit]]: ...
+
+
 class FileSystem:
     def read(self, path: str) -> bytes: ...
     def write(self, path: str, data: Union[str, bytes]) -> None: ...
@@ -203,6 +220,19 @@ class Network:
         headers: Optional[Dict[str, str]] = ...,
         body: Optional[bytes] = ...,
     ) -> HttpResponse: ...
+
+
+class Pty:
+    def create(
+        self,
+        command: Union[str, List[str]],
+        *,
+        cols: int = 80,
+        rows: int = 24,
+        env: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> PtySession: ...
 
 
 class Sandbox:
@@ -254,6 +284,9 @@ class Sandbox:
 
     @property
     def network(self) -> Network: ...
+
+    @property
+    def pty(self) -> Pty: ...
 
     def execute(
         self,
@@ -621,6 +654,10 @@ __all__ = [
     "HttpResponse",
     "Network",
     "Process",
+    "Pty",
+    "PtyExit",
+    "PtyOutput",
+    "PtySession",
     "Sandbox",
     "SandboxCpuLimitError",
     "SandboxError",

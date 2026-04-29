@@ -6,22 +6,23 @@
 
 use mimobox_sdk::{
     Config, DirEntry, ErrorCode, ExecuteResult, FileStat, FileType, IsolationLevel,
-    MAX_MEMORY_LIMIT_MB, NetworkPolicy, Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot,
-    SdkError, StreamEvent, TrustLevel,
+    MAX_MEMORY_LIMIT_MB, NetworkPolicy, PtyConfig, PtyEvent as CorePtyEvent, PtySize,
+    Sandbox as RustSandbox, SandboxSnapshot as RustSnapshot, SdkError, StreamEvent, TrustLevel,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
     PyConnectionError, PyFileNotFoundError, PyNotImplementedError, PyPermissionError,
-    PyRuntimeError, PyValueError,
+    PyRuntimeError, PyTimeoutError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path};
 use std::sync::Mutex;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_PYTHON_TIMEOUT_SECS: f64 = 86_400.0;
 
@@ -442,6 +443,61 @@ impl From<StreamEvent> for PyStreamEvent {
     }
 }
 
+/// Terminal output event from a PTY session.
+#[pyclass(name = "PtyOutput")]
+#[derive(Debug, Clone)]
+struct PyPtyOutput {
+    data: Vec<u8>,
+}
+
+#[pymethods]
+impl PyPtyOutput {
+    /// Returns raw terminal output bytes.
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.data.as_slice())
+    }
+}
+
+/// Terminal process exit event from a PTY session.
+#[pyclass(name = "PtyExit")]
+#[derive(Debug, Clone)]
+struct PyPtyExit {
+    code: i32,
+}
+
+#[pymethods]
+impl PyPtyExit {
+    /// Returns process exit code.
+    #[getter]
+    fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+enum PyPtyEvent {
+    Output(PyPtyOutput),
+    Exit(PyPtyExit),
+}
+
+impl PyPtyEvent {
+    fn into_py_any(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self {
+            Self::Output(output) => Ok(Py::new(py, output)?.into_any()),
+            Self::Exit(exit) => Ok(Py::new(py, exit)?.into_any()),
+        }
+    }
+}
+
+impl From<CorePtyEvent> for PyPtyEvent {
+    fn from(event: CorePtyEvent) -> Self {
+        match event {
+            CorePtyEvent::Output(data) => Self::Output(PyPtyOutput { data }),
+            CorePtyEvent::Exit(code) => Self::Exit(PyPtyExit { code }),
+        }
+    }
+}
+
 /// Filesystem sub-module (sandbox.fs).
 ///
 /// Aggregates file operation APIs via proxy pattern, delegating to PySandbox methods.
@@ -621,6 +677,231 @@ impl PyNetwork {
     }
 }
 
+/// PTY sub-module (sandbox.pty).
+///
+/// Aggregates interactive terminal APIs via proxy pattern, delegating to PySandbox methods.
+#[pyclass(name = "Pty")]
+struct PyPty {
+    sandbox: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyPty {
+    /// Create an interactive terminal session.
+    #[pyo3(signature = (command, *, cols=80, rows=24, env=None, cwd=None, timeout=None))]
+    fn create(
+        &self,
+        py: Python<'_>,
+        command: &Bound<'_, PyAny>,
+        cols: u16,
+        rows: u16,
+        env: Option<HashMap<String, String>>,
+        cwd: Option<&str>,
+        timeout: Option<f64>,
+    ) -> PyResult<PyPtySession> {
+        let command = parse_pty_command(command)?;
+        let cwd = cwd.map(str::to_string);
+        let sandbox = self.sandbox.bind(py).downcast::<PySandbox>()?;
+        let mut sandbox = sandbox.try_borrow_mut()?;
+        sandbox._create_pty_with_config(
+            py,
+            command,
+            cols,
+            rows,
+            env.unwrap_or_default(),
+            cwd,
+            timeout,
+        )
+    }
+}
+
+/// Interactive terminal session.
+///
+/// Yields `PtyOutput` and `PtyExit` objects via Python iterator protocol.
+#[pyclass(name = "PtySession", unsendable)]
+struct PyPtySession {
+    inner: Option<mimobox_sdk::PtySession>,
+    done: bool,
+    pending_events: VecDeque<CorePtyEvent>,
+}
+
+struct UngilPtySessionMut<'a>(&'a mut mimobox_sdk::PtySession);
+
+// SAFETY: this wrapper is private and only used with Python::allow_threads,
+// which runs the closure synchronously on the current thread. The wrapped
+// PTY session is never transferred to another thread.
+unsafe impl<'a> Send for UngilPtySessionMut<'a> {}
+
+impl UngilPtySessionMut<'_> {
+    fn send_input(&mut self, data: &[u8]) -> Result<(), SdkError> {
+        self.0.send_input(data)
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SdkError> {
+        self.0.resize(cols, rows)
+    }
+
+    fn kill(&mut self) -> Result<(), SdkError> {
+        self.0.kill()
+    }
+
+    fn wait(&mut self) -> Result<i32, SdkError> {
+        self.0.wait()
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Result<CorePtyEvent, mpsc::RecvTimeoutError> {
+        self.0.output().recv_timeout(timeout)
+    }
+}
+
+struct UngilPtyCreateResult(Result<mimobox_sdk::PtySession, SdkError>);
+
+// SAFETY: this wrapper only carries the create result back from the synchronous
+// Python::allow_threads closure. It is not stored or sent to another thread.
+unsafe impl Send for UngilPtyCreateResult {}
+
+#[pymethods]
+impl PyPtySession {
+    /// Send input bytes to the PTY.
+    fn send_input(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let data = extract_bytes_data(data)?;
+        let mut session = UngilPtySessionMut(self.inner_mut()?);
+        py.allow_threads(move || session.send_input(&data))
+            .map_err(|e| map_sdk_error(e, py))
+    }
+
+    /// Resize the terminal.
+    fn resize(&mut self, py: Python<'_>, cols: u16, rows: u16) -> PyResult<()> {
+        let mut session = UngilPtySessionMut(self.inner_mut()?);
+        py.allow_threads(move || session.resize(cols, rows))
+            .map_err(|e| map_sdk_error(e, py))
+    }
+
+    /// Forcefully terminate the PTY session.
+    fn kill(&mut self, py: Python<'_>) -> PyResult<()> {
+        let mut session = UngilPtySessionMut(self.inner_mut()?);
+        py.allow_threads(move || session.kill())
+            .map_err(|e| map_sdk_error(e, py))
+    }
+
+    /// Wait for the PTY process to exit.
+    #[pyo3(signature = (*, timeout=None))]
+    fn wait(&mut self, py: Python<'_>, timeout: Option<f64>) -> PyResult<i32> {
+        let code = match timeout {
+            Some(timeout) => {
+                let timeout = parse_python_timeout(timeout)?;
+                self.wait_with_timeout(py, timeout)?
+            }
+            None => {
+                let mut session = UngilPtySessionMut(self.inner_mut()?);
+                py.allow_threads(move || session.wait())
+                    .map_err(|e| map_sdk_error(e, py))?
+            }
+        };
+        self.done = true;
+        Ok(code)
+    }
+
+    /// Returns self as the iterator object.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Returns the next PTY event, blocking briefly without holding the GIL.
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        if self.done {
+            return Ok(None);
+        }
+
+        loop {
+            if let Some(event) = self.pending_events.pop_front() {
+                return self.convert_next_event(py, event);
+            }
+
+            let event = {
+                let Some(session) = self.inner.as_mut() else {
+                    self.done = true;
+                    return Ok(None);
+                };
+                session.output().try_recv()
+            };
+
+            match event {
+                Ok(event) => return self.convert_next_event(py, event),
+                Err(mpsc::TryRecvError::Empty) => {
+                    py.allow_threads(|| std::thread::sleep(Duration::from_millis(10)));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.done = true;
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.is_some() && !self.done {
+            "PtySession(active)".to_string()
+        } else {
+            "PtySession(closed)".to_string()
+        }
+    }
+}
+
+impl PyPtySession {
+    fn inner_mut(&mut self) -> PyResult<&mut mimobox_sdk::PtySession> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("PtySession has been closed"))
+    }
+
+    fn convert_next_event(
+        &mut self,
+        py: Python<'_>,
+        event: CorePtyEvent,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let py_event = PyPtyEvent::from(event);
+        if matches!(py_event, PyPtyEvent::Exit(_)) {
+            self.done = true;
+        }
+        Ok(Some(py_event.into_py_any(py)?))
+    }
+
+    fn wait_with_timeout(&mut self, py: Python<'_>, timeout: Duration) -> PyResult<i32> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(PyTimeoutError::new_err("PTY wait timed out"));
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let event = {
+                let session = UngilPtySessionMut(self.inner_mut()?);
+                py.allow_threads(move || session.recv_timeout(remaining))
+            };
+
+            match event {
+                Ok(CorePtyEvent::Output(data)) => {
+                    self.pending_events.push_back(CorePtyEvent::Output(data));
+                }
+                Ok(CorePtyEvent::Exit(code)) => return Ok(code),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(PyTimeoutError::new_err("PTY wait timed out"));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.done = true;
+                    let mut session = UngilPtySessionMut(self.inner_mut()?);
+                    return py
+                        .allow_threads(move || session.wait())
+                        .map_err(|e| map_sdk_error(e, py));
+                }
+            }
+        }
+    }
+}
+
 /// Python iterator over `StreamEvent` objects from a streaming execution.
 ///
 /// Created by `Sandbox.stream_execute()`. Yields `StreamEvent` objects
@@ -759,6 +1040,14 @@ impl PySandbox {
     #[getter]
     fn network(slf: PyRef<'_, Self>) -> PyNetwork {
         PyNetwork {
+            sandbox: Py::<PySandbox>::from(slf).into_any(),
+        }
+    }
+
+    /// Return the PTY sub-module.
+    #[getter]
+    fn pty(slf: PyRef<'_, Self>) -> PyPty {
+        PyPty {
             sandbox: Py::<PySandbox>::from(slf).into_any(),
         }
     }
@@ -925,6 +1214,36 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))?;
         Ok(PyStreamIterator {
             receiver: Some(receiver),
+        })
+    }
+
+    /// Create a PTY session from a fully parsed configuration.
+    fn _create_pty_with_config(
+        &mut self,
+        py: Python<'_>,
+        command: Vec<String>,
+        cols: u16,
+        rows: u16,
+        env: HashMap<String, String>,
+        cwd: Option<String>,
+        timeout: Option<f64>,
+    ) -> PyResult<PyPtySession> {
+        let sandbox = self.inner_mut()?;
+        let config = PtyConfig {
+            command,
+            size: PtySize { cols, rows },
+            env,
+            cwd,
+            timeout: timeout.map(parse_python_timeout).transpose()?,
+        };
+        let session = py
+            .allow_threads(move || UngilPtyCreateResult(sandbox.create_pty_with_config(config)))
+            .0
+            .map_err(|e| map_sdk_error(e, py))?;
+        Ok(PyPtySession {
+            inner: Some(session),
+            done: false,
+            pending_events: VecDeque::new(),
         })
     }
 
@@ -1447,6 +1766,33 @@ fn build_cwd_command(command: &str, cwd: &str) -> PyResult<String> {
     Ok(format!("cd {quoted} && {command}"))
 }
 
+fn parse_pty_command(command: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(command) = command.extract::<String>() {
+        let argv = shlex::split(&command).ok_or_else(|| {
+            PyValueError::new_err("command parsing failed: mismatched shell-style quotes")
+        })?;
+        validate_non_empty_argv(&argv)?;
+        return Ok(argv);
+    }
+
+    if let Ok(argv) = command.extract::<Vec<String>>() {
+        validate_non_empty_argv(&argv)?;
+        return Ok(argv);
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "command must be str or list[str]",
+    ))
+}
+
+fn validate_non_empty_argv(argv: &[String]) -> PyResult<()> {
+    if argv.is_empty() {
+        return Err(PyValueError::new_err("command must not be empty"));
+    }
+
+    Ok(())
+}
+
 fn validate_python_cwd(cwd: &str) -> PyResult<()> {
     if cwd.is_empty() {
         return Err(PyValueError::new_err("cwd must not be empty"));
@@ -1722,6 +2068,10 @@ fn mimobox(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFileStat>()?;
     module.add_class::<PyStreamEvent>()?;
     module.add_class::<PyStreamIterator>()?;
+    module.add_class::<PyPtyOutput>()?;
+    module.add_class::<PyPtyExit>()?;
+    module.add_class::<PyPtySession>()?;
+    module.add_class::<PyPty>()?;
     module.add_class::<PyFileSystem>()?;
     module.add_class::<PyProcess>()?;
     module.add_class::<PySnapshotOps>()?;
