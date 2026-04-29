@@ -106,16 +106,18 @@ fn fuel_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
 /// Converts `memory_limit_mb` into bytes for Wasmtime's resource limiter.
 fn memory_limit_bytes(memory_limit_mb: Option<u64>) -> Result<usize, SandboxError> {
     let mb = memory_limit_mb.unwrap_or(DEFAULT_MEMORY_LIMIT_MB);
-    let bytes = mb.checked_mul(BYTES_PER_MIB).ok_or_else(|| {
-        SandboxError::new(format!(
-            "memory_limit_mb={mb} is too large; converting to bytes would overflow"
-        ))
-    })?;
+    let bytes = mb
+        .checked_mul(BYTES_PER_MIB)
+        .ok_or_else(|| SandboxError::ExecutionFailed {
+            kind: ExecutionFailureKind::Oom,
+            message: format!(
+                "memory_limit_mb={mb} is too large; converting to bytes would overflow"
+            ),
+        })?;
 
-    usize::try_from(bytes).map_err(|_| {
-        SandboxError::new(format!(
-            "memory_limit_mb={mb} is too large for this platform"
-        ))
+    usize::try_from(bytes).map_err(|_| SandboxError::ExecutionFailed {
+        kind: ExecutionFailureKind::Oom,
+        message: format!("memory_limit_mb={mb} is too large for this platform"),
     })
 }
 
@@ -1195,8 +1197,11 @@ impl Sandbox for WasmSandbox {
                                 timed_out: true,
                             });
                         } else if is_memory_trap(&e) {
-                            info!("Wasm memory limit exceeded, mapping to exit code 1");
-                            Some(1)
+                            warn!("Wasm memory limit exceeded (OOM)");
+                            return Err(SandboxError::ExecutionFailed {
+                                kind: ExecutionFailureKind::Oom,
+                                message: "wasm memory limit exceeded".into(),
+                            });
                         } else {
                             warn!("Wasm execution error: {}", e);
                             None
@@ -1213,8 +1218,11 @@ impl Sandbox for WasmSandbox {
                             if let Some(exit) = find_exit_code(&e) {
                                 Some(exit)
                             } else if is_memory_trap(&e) {
-                                info!("Wasm memory limit exceeded, mapping to exit code 1");
-                                Some(1)
+                                warn!("Wasm memory limit exceeded (OOM)");
+                                return Err(SandboxError::ExecutionFailed {
+                                    kind: ExecutionFailureKind::Oom,
+                                    message: "wasm memory limit exceeded".into(),
+                                });
                             } else {
                                 warn!("main function execution failed: {}", e);
                                 None

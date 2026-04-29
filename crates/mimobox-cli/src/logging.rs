@@ -14,14 +14,16 @@ pub(crate) struct SharedFileWriter {
 }
 
 pub(crate) fn init_tracing() -> Result<(), CliError> {
-    let log_dir = "logs";
-    fs::create_dir_all(log_dir).map_err(|error| CliError::Logging(error.to_string()))?;
+    let log_dir = std::env::var("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".mimobox").join("logs"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".mimobox").join("logs"));
+    fs::create_dir_all(&log_dir).map_err(|error| CliError::Logging(error.to_string()))?;
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CliError::Logging(error.to_string()))?
         .as_secs();
-    let log_path = format!("{log_dir}/mimobox-cli-{timestamp}.log");
+    let log_path = format!("{}/mimobox-cli-{timestamp}.log", log_dir.display());
     let file = File::options()
         .create(true)
         .append(true)
