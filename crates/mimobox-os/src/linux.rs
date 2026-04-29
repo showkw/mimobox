@@ -857,28 +857,71 @@ impl LinuxSandbox {
             libc::setpgid(0, 0);
         }
         // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
-        // 使用 /proc/self/fd 遍历关闭（兼容不支持 close_range 的内核）。
-        // SAFETY: 仅关闭非 stdio(0/1/2) 的 FD，排除管道和即将 dup2 的 FD。
+        // 使用原始 open + getdents64 syscall，完全 async-signal-safe。
+        // SAFETY: 仅使用 syscall 层面调用，无堆内存分配，安全在 clone 后子进程中执行。
         {
-            let mut preserve_fds: [RawFd; 4] = [stdout_fd, stderr_fd, -1, -1];
-            let mut preserve_count = 2usize;
-            if let Some((r1, r2)) = close_fds {
-                preserve_fds[2] = r1;
-                preserve_fds[3] = r2;
-                preserve_count = 4;
-            }
-            if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
-                for entry in entries.flatten() {
-                    if let Ok(name) = entry.file_name().into_string()
-                        && let Ok(fd) = name.parse::<RawFd>()
-                        && fd > 2
-                        && !preserve_fds[..preserve_count].contains(&fd)
-                    {
-                        // SAFETY: fd 来自 /proc/self/fd 枚举，且已排除 stdio 与后续仍需使用的保留 fd。
-                        unsafe {
-                            libc::close(fd);
-                        }
+            let dir_fd = unsafe {
+                libc::open(
+                    c"/proc/self/fd".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                )
+            };
+            if dir_fd >= 0 {
+                let mut buf = [0u8; 512]; // 栈上分配，无 malloc
+                let mut preserve_fds: [RawFd; 4] = [stdout_fd, stderr_fd, -1, -1];
+                let mut preserve_count = 2usize;
+                if let Some((r1, r2)) = close_fds {
+                    preserve_fds[2] = r1;
+                    preserve_fds[3] = r2;
+                    preserve_count = 4;
+                }
+                loop {
+                    // SAFETY: getdents64 系统调用，使用栈缓冲区，无 malloc
+                    let nread = unsafe {
+                        libc::syscall(
+                            libc::SYS_getdents64,
+                            dir_fd,
+                            buf.as_mut_ptr(),
+                            buf.len(),
+                        )
+                    };
+                    if nread <= 0 {
+                        break;
                     }
+                    let nread = nread as usize;
+                    let mut pos = 0usize;
+                    while pos < nread {
+                        // linux_dirent64: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name(var)
+                        if pos + 19 > nread {
+                            break;
+                        }
+                        let reclen = u16::from_ne_bytes([buf[pos + 16], buf[pos + 17]]) as usize;
+                        if reclen == 0 || pos + reclen > nread {
+                            break;
+                        }
+                        let name_start = pos + 18;
+                        let name_end = (name_start..pos + reclen)
+                            .find(|&i| buf[i] == 0)
+                            .unwrap_or(pos + reclen);
+                        let name_bytes = &buf[name_start..name_end];
+                        if let Ok(name_str) = core::str::from_utf8(name_bytes) {
+                            if let Ok(fd) = name_str.parse::<RawFd>() {
+                                if fd > 2 && fd != dir_fd
+                                    && !preserve_fds[..preserve_count].contains(&fd)
+                                {
+                                    // SAFETY: fd 来自 getdents64 枚举，且已排除 stdio、dir_fd 与保留 fd。
+                                    unsafe {
+                                        libc::close(fd);
+                                    }
+                                }
+                            }
+                        }
+                        pos += reclen;
+                    }
+                }
+                // SAFETY: dir_fd 枚举完成，关闭自身
+                unsafe {
+                    libc::close(dir_fd);
                 }
             }
         }
@@ -945,17 +988,63 @@ impl LinuxSandbox {
         }
 
         // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
-        // SAFETY: 仅关闭非 stdio(0/1/2) 的 FD。PTY slave 尚未 attach。
-        if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
-            for entry in entries.flatten() {
-                if let Ok(name) = entry.file_name().into_string()
-                    && let Ok(fd) = name.parse::<RawFd>()
-                    && fd > 2
-                {
-                    // SAFETY: fd 来自 /proc/self/fd 枚举，且已排除 stdio；PTY slave 尚未打开，无需保留。
-                    unsafe {
-                        libc::close(fd);
+        // 使用原始 open + getdents64 syscall，完全 async-signal-safe。
+        // SAFETY: 仅使用 syscall 层面调用，无堆内存分配，安全在 clone 后子进程中执行。
+        // PTY slave 尚未打开，无需保留额外 FD（stdout/stderr 将在 attach_pty_stdio 中替换）。
+        {
+            let dir_fd = unsafe {
+                libc::open(
+                    c"/proc/self/fd".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                )
+            };
+            if dir_fd >= 0 {
+                let mut buf = [0u8; 512]; // 栈上分配，无 malloc
+                loop {
+                    // SAFETY: getdents64 系统调用，使用栈缓冲区，无 malloc
+                    let nread = unsafe {
+                        libc::syscall(
+                            libc::SYS_getdents64,
+                            dir_fd,
+                            buf.as_mut_ptr(),
+                            buf.len(),
+                        )
+                    };
+                    if nread <= 0 {
+                        break;
                     }
+                    let nread = nread as usize;
+                    let mut pos = 0usize;
+                    while pos < nread {
+                        // linux_dirent64: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name(var)
+                        if pos + 19 > nread {
+                            break;
+                        }
+                        let reclen = u16::from_ne_bytes([buf[pos + 16], buf[pos + 17]]) as usize;
+                        if reclen == 0 || pos + reclen > nread {
+                            break;
+                        }
+                        let name_start = pos + 18;
+                        let name_end = (name_start..pos + reclen)
+                            .find(|&i| buf[i] == 0)
+                            .unwrap_or(pos + reclen);
+                        let name_bytes = &buf[name_start..name_end];
+                        if let Ok(name_str) = core::str::from_utf8(name_bytes) {
+                            if let Ok(fd) = name_str.parse::<RawFd>() {
+                                if fd > 2 && fd != dir_fd {
+                                    // SAFETY: fd 来自 getdents64 枚举，且已排除 stdio 与 dir_fd。
+                                    unsafe {
+                                        libc::close(fd);
+                                    }
+                                }
+                            }
+                        }
+                        pos += reclen;
+                    }
+                }
+                // SAFETY: dir_fd 枚举完成，关闭自身
+                unsafe {
+                    libc::close(dir_fd);
                 }
             }
         }
