@@ -21,7 +21,7 @@ use mimobox_core::{PtyConfig, PtySize};
     all(feature = "vm", target_os = "linux")
 ))]
 use super::SandboxInner;
-use super::{Sandbox, validate_cwd};
+use super::{Sandbox, merge_env_vars, validate_cwd};
 
 impl Sandbox {
     /// Creates an interactive terminal session.
@@ -56,7 +56,10 @@ impl Sandbox {
     }
 
     /// Creates an interactive terminal session with a complete `PtyConfig`.
-    pub fn create_pty_with_config(&mut self, config: PtyConfig) -> Result<PtySession, SdkError> {
+    pub fn create_pty_with_config(
+        &mut self,
+        mut config: PtyConfig,
+    ) -> Result<PtySession, SdkError> {
         if config.command.is_empty() {
             return Err(SdkError::Config(
                 "PTY command must not be empty".to_string(),
@@ -66,6 +69,8 @@ impl Sandbox {
         if let Some(cwd) = config.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+
+        config.env = merge_env_vars(&self.config.env_vars, &config.env);
 
         self.ensure_backend_for_pty()?;
 

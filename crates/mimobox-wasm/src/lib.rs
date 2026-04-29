@@ -1017,6 +1017,11 @@ fn build_wasi_ctx(
     builder.env("TERM", "dumb");
     builder.env("SANDBOX", "wasm");
 
+    // 注入用户配置的持久环境变量（优先级高于内置最小环境）
+    for (key, value) in &config.env_vars {
+        builder.env(key, value);
+    }
+
     // 配置 stdout/stderr 捕获
     builder.stdout(Box::new(stdout_pipe));
     builder.stderr(Box::new(stderr_pipe));

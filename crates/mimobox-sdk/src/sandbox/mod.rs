@@ -201,6 +201,21 @@ impl SdkExecOptions {
     }
 }
 
+/// 合并 config 级别环境变量与 per-command 环境变量。
+/// per-command env 覆盖 config env_vars。
+pub(crate) fn merge_env_vars(
+    config_env: &HashMap<String, String>,
+    command_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut merged = config_env.clone();
+    merged.extend(
+        command_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    merged
+}
+
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn build_fallback_command_args(
     command: &str,
@@ -528,6 +543,11 @@ impl Sandbox {
     /// 返回当前进程内仍然注册的所有 SDK 沙箱实例。
     pub fn list() -> Vec<SandboxInfo> {
         registry::list()
+    }
+
+    /// 返回创建沙箱时配置的持久环境变量。
+    pub fn env_vars(&self) -> &std::collections::HashMap<String, String> {
+        &self.config.env_vars
     }
 
     /// 返回当前 SDK 沙箱实例的注册表信息快照。

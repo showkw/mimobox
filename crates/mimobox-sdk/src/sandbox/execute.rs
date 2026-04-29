@@ -10,7 +10,6 @@ use crate::vm_helpers::parse_command;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
-use tracing::debug;
 
 #[cfg(any(
     feature = "wasm",
@@ -18,31 +17,9 @@ use tracing::debug;
     all(feature = "vm", target_os = "linux")
 ))]
 use super::SandboxInner;
-use super::{Sandbox, SdkExecOptions, validate_cwd};
+use super::{Sandbox, SdkExecOptions, merge_env_vars, validate_cwd};
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 use super::{build_fallback_argv_args, build_fallback_command_args};
-
-macro_rules! dispatch_execute {
-    ($inner:expr, $binding:ident, $expr:expr, $ctx:literal) => {{
-        debug!(context = $ctx, "dispatching execute");
-        match $inner {
-            #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os($binding) => $expr,
-            #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::MicroVm($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::PooledMicroVm($binding) => $expr,
-            #[cfg(all(feature = "vm", target_os = "linux"))]
-            SandboxInner::RestoredPooledMicroVm($binding) => $expr,
-            #[cfg(feature = "wasm")]
-            SandboxInner::Wasm($binding) => $expr,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("no backend variant matched for dispatch_execute"),
-        }
-    }};
-}
 
 impl Sandbox {
     /// Executes a command inside the sandbox.
@@ -62,11 +39,7 @@ impl Sandbox {
     /// # }
     /// ```
     pub fn execute(&mut self, command: &str) -> Result<ExecuteResult, SdkError> {
-        let args = parse_command(command)?;
-        let _ = &args;
-        self.ensure_backend(command)?;
-        let inner = self.require_inner()?;
-        dispatch_execute!(inner, s, s.execute_for_sdk(&args), "execute")
+        self.execute_with_sdk_options(command, SdkExecOptions::default())
     }
 
     /// Executes an argv vector inside the sandbox without shell parsing.
@@ -89,11 +62,7 @@ impl Sandbox {
     /// # }
     /// ```
     pub fn exec<A: AsRef<str>>(&mut self, argv: &[A]) -> Result<ExecuteResult, SdkError> {
-        let args = argv_to_strings(argv)?;
-        let command = args.join(" ");
-        self.ensure_backend(&command)?;
-        let inner = self.require_inner()?;
-        dispatch_execute!(inner, s, s.execute_for_sdk(&args), "exec")
+        self.exec_with_options(argv, SdkExecOptions::default())
     }
 
     /// Execute code in the given language inside the sandbox.
@@ -119,14 +88,38 @@ impl Sandbox {
         let args = parse_command(command)?;
         let _ = &args;
         self.ensure_backend(command)?;
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        let options = SdkExecOptions {
+            env: self.config.env_vars.clone(),
+            ..Default::default()
+        };
         let inner = self.require_inner()?;
 
-        dispatch_execute!(
-            inner,
-            sandbox,
-            sandbox.stream_execute_for_sdk(&args),
-            "stream_execute"
-        )
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
+        }
     }
 
     /// Executes an argv vector as a stream of events without shell parsing.
@@ -155,14 +148,38 @@ impl Sandbox {
         let args = argv_to_strings(argv)?;
         let command = args.join(" ");
         self.ensure_backend(&command)?;
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        let options = SdkExecOptions {
+            env: self.config.env_vars.clone(),
+            ..Default::default()
+        };
         let inner = self.require_inner()?;
 
-        dispatch_execute!(
-            inner,
-            sandbox,
-            sandbox.stream_execute_for_sdk(&args),
-            "stream_exec"
-        )
+        match inner {
+            #[cfg(all(feature = "os", target_os = "linux"))]
+            SandboxInner::Os(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[cfg(all(feature = "os", target_os = "macos"))]
+            SandboxInner::OsMac(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::MicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::PooledMicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            SandboxInner::RestoredPooledMicroVm(sandbox) => sandbox
+                .stream_execute_with_options(&args, options.to_guest_exec_options())
+                .map(crate::vm_helpers::bridge_vm_stream)
+                .map_err(super::map_microvm_error),
+            #[cfg(feature = "wasm")]
+            SandboxInner::Wasm(sandbox) => sandbox.stream_execute_for_sdk(&args),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("no backend variant matched"),
+        }
     }
 
     /// Executes a command with additional environment variables for this call.
@@ -253,6 +270,11 @@ impl Sandbox {
         if let Some(cwd) = options.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+        let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
+        let options = SdkExecOptions {
+            env: merged_env,
+            ..options
+        };
         let _ = (&options.env, options.timeout);
 
         self.ensure_backend(command)?;
@@ -355,6 +377,11 @@ impl Sandbox {
         if let Some(cwd) = options.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+        let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
+        let options = SdkExecOptions {
+            env: merged_env,
+            ..options
+        };
         let _ = (&options.env, options.timeout);
 
         let command = args.join(" ");

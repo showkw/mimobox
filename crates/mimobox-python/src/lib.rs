@@ -1092,7 +1092,8 @@ impl PySandbox {
         timeout_secs=None,
         max_processes=None,
         trust_level=None,
-        network=None
+        network=None,
+        env_vars=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1106,6 +1107,7 @@ impl PySandbox {
         max_processes: Option<u32>,
         trust_level: Option<&str>,
         network: Option<&str>,
+        env_vars: Option<HashMap<String, String>>,
     ) -> PyResult<Py<Self>> {
         let config = build_python_config(PythonConfigOptions {
             isolation,
@@ -1117,6 +1119,7 @@ impl PySandbox {
             max_processes,
             trust_level,
             network,
+            env_vars,
         })
         .map_err(PyValueError::new_err)?;
         let sandbox = RustSandbox::with_config(config).map_err(|e| map_sdk_error(e, py))?;
@@ -1884,6 +1887,7 @@ struct PythonConfigOptions<'a> {
     max_processes: Option<u32>,
     trust_level: Option<&'a str>,
     network: Option<&'a str>,
+    env_vars: Option<HashMap<String, String>>,
 }
 
 fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, String> {
@@ -1936,6 +1940,10 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
 
     if let Some(network) = options.network {
         builder = builder.network(parse_python_network_policy(network)?);
+    }
+
+    if let Some(env_vars) = options.env_vars {
+        builder = builder.env_vars(env_vars);
     }
 
     builder.build().map_err(|e| e.to_string())
@@ -2373,6 +2381,20 @@ mod tests {
         assert_eq!(config.max_processes, Some(16));
         assert_eq!(config.trust_level, TrustLevel::Trusted);
         assert!(matches!(config.network, NetworkPolicy::AllowAll));
+    }
+
+    #[test]
+    fn python_config_builder_accepts_env_vars() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("MIMOBOX_TOKEN".to_string(), "value".to_string());
+
+        let config = build_python_config(PythonConfigOptions {
+            env_vars: Some(env_vars.clone()),
+            ..Default::default()
+        })
+        .expect("failed to build Python config with env vars");
+
+        assert_eq!(config.env_vars, env_vars);
     }
 
     #[test]

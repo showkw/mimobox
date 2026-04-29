@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use mimobox_core::{DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxResult};
 use uuid::Uuid;
 
-use crate::pty::{allocate_pty, build_child_env, build_session};
+use crate::pty::{allocate_pty, build_session};
 
 #[cfg(target_os = "macos")]
 // SAFETY: This block declares external C linkage functions from the macOS system library.
@@ -138,8 +138,12 @@ struct OutputCapture {
     read_error: Option<String>,
 }
 
-fn build_safe_child_env(sandbox_tmp_dir: &str) -> HashMap<String, String> {
-    HashMap::from([
+fn build_safe_child_env(
+    sandbox_tmp_dir: &str,
+    pwd: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut env = HashMap::from([
         (
             "PATH".to_string(),
             "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin".to_string(),
@@ -151,8 +155,11 @@ fn build_safe_child_env(sandbox_tmp_dir: &str) -> HashMap<String, String> {
         ("SHELL".to_string(), "/bin/sh".to_string()),
         ("LANG".to_string(), "C".to_string()),
         ("TMPDIR".to_string(), sandbox_tmp_dir.to_string()),
-        ("PWD".to_string(), sandbox_tmp_dir.to_string()),
-    ])
+        ("PWD".to_string(), pwd.to_string()),
+    ]);
+    // 注入用户配置的持久环境变量（优先级高于内置最小环境）
+    env.extend(env_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
 }
 
 /// macOS Seatbelt sandbox backend.
@@ -750,8 +757,12 @@ impl Sandbox for MacOsSandbox {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .env_clear()
-                // SECURITY: HOME/TMPDIR/PWD 指向沙箱专属临时目录，避免子进程通过 /tmp 读写跨沙箱数据。
-                .envs(build_safe_child_env(&self.sandbox_tmp_dir))
+                // 内置默认 HOME/TMPDIR/PWD 指向沙箱专属目录；随后允许 env_vars 按优先级覆盖。
+                .envs(build_safe_child_env(
+                    &self.sandbox_tmp_dir,
+                    &self.sandbox_tmp_dir,
+                    &self.config.env_vars,
+                ))
                 .current_dir(&self.sandbox_tmp_dir)
                 .pre_exec(move || {
                     // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
@@ -875,16 +886,17 @@ impl Sandbox for MacOsSandbox {
             .try_clone()
             .map_err(|error| SandboxError::new(format!("failed to clone PTY stdout: {error}")))?;
 
-        let mut child_env = build_child_env(&config);
-        // SECURITY: PTY 默认环境中的 HOME/TMPDIR/PWD 指向沙箱专属目录，避免默认 /tmp 跨沙箱共享。
-        child_env.insert("HOME".to_string(), self.sandbox_tmp_dir.clone());
-        child_env.insert("TMPDIR".to_string(), self.sandbox_tmp_dir.clone());
-        child_env.insert(
-            "PWD".to_string(),
+        let pwd = config
+            .cwd
+            .clone()
+            .unwrap_or_else(|| self.sandbox_tmp_dir.clone());
+        let mut child_env =
+            build_safe_child_env(&self.sandbox_tmp_dir, &pwd, &self.config.env_vars);
+        child_env.extend(
             config
-                .cwd
-                .clone()
-                .unwrap_or_else(|| self.sandbox_tmp_dir.clone()),
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
         );
 
         let mut command = Command::new(&config.command[0]);

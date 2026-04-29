@@ -19,7 +19,7 @@ use mimobox_core::{
     SeccompProfile,
 };
 
-use crate::pty::{allocate_pty, build_child_env, build_session};
+use crate::pty::{allocate_pty, build_child_env_with_base, build_session};
 use crate::seccomp;
 
 #[cfg(target_os = "linux")]
@@ -68,6 +68,42 @@ fn child_env_pairs() -> &'static [(&'static std::ffi::CStr, &'static std::ffi::C
     ]
 }
 
+type PreparedChildEnv = Vec<(CString, CString)>;
+
+fn prepare_child_env_vars(
+    env_vars: &std::collections::HashMap<String, String>,
+) -> Result<PreparedChildEnv, SandboxError> {
+    let mut prepared = Vec::with_capacity(env_vars.len());
+    for (key, value) in env_vars {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
+            return Err(SandboxError::new(format!(
+                "invalid environment variable name: {key}"
+            )));
+        }
+        let key = CString::new(key.as_str()).map_err(|_| {
+            SandboxError::new(format!("environment variable name contains NUL: {key}"))
+        })?;
+        let value = CString::new(value.as_str())
+            .map_err(|_| SandboxError::new("environment variable value contains NUL byte"))?;
+        prepared.push((key, value));
+    }
+    Ok(prepared)
+}
+
+/// # Safety
+///
+/// 只能在 fork 后、exec 前的子进程中调用。调用方必须保证 `env_vars`
+/// 已在 fork 前转换为有效的 NUL 结尾字符串，且调用期间不会被修改。
+unsafe fn set_prepared_child_env(env_vars: &[(CString, CString)]) -> Result<(), ()> {
+    for (name, value) in env_vars {
+        // SAFETY: name/value 已在 fork 前转换为 NUL 结尾字符串，子进程只读取已准备好的字节。
+        if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 fn command_log_summary(cmd: &[String]) -> String {
     let Some(program) = cmd.first() else {
         return "<empty>".to_string();
@@ -113,7 +149,7 @@ fn apply_namespace_fallback_to_report(report: &mut IsolationReport, stderr_buf: 
 /// and rebuilds the process environment from a static allowlist, which is safe only
 /// when the process is single-threaded (post-fork). Calling in a multi-threaded
 /// process would race with other threads reading/writing environ.
-unsafe fn reset_child_environment() -> Result<(), ()> {
+unsafe fn reset_child_environment(env_vars: &[(CString, CString)]) -> Result<(), ()> {
     // SECURITY: clearenv() 必须成功，失败时不能继续沿用父进程环境，
     // 否则 LD_PRELOAD/BASH_ENV 等注入变量可能带入沙箱子进程。
     // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
@@ -129,6 +165,9 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
             return Err(());
         }
     }
+
+    // SAFETY: env_vars 已在 fork 前完成 CString 序列化，子进程不访问父进程 HashMap。
+    unsafe { set_prepared_child_env(env_vars)? };
 
     Ok(())
 }
@@ -845,6 +884,7 @@ impl LinuxSandbox {
     fn child_main(
         cmd: &[String],
         config: &SandboxConfig,
+        env_vars: &[(CString, CString)],
         stdout_fd: RawFd,
         stderr_fd: RawFd,
         close_fds: Option<(RawFd, RawFd)>, // 需要关闭的管道读端 fd
@@ -930,7 +970,7 @@ impl LinuxSandbox {
 
         // IMPORTANT-04 修复：清理环境变量，防止预热池复用时信息泄漏
         // SAFETY: 仅在 fork 后子进程中重置环境，不影响父进程。
-        if unsafe { reset_child_environment() }.is_err() {
+        if unsafe { reset_child_environment(env_vars) }.is_err() {
             // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, "environment variable initialization failed");
@@ -970,10 +1010,11 @@ impl LinuxSandbox {
         cmd: &[String],
         sandbox_config: &SandboxConfig,
         pty_config: &mimobox_core::PtyConfig,
+        env_vars: &[(CString, CString)],
         slave_path: &Path,
     ) -> ! {
         // SAFETY: Only the forked child environment is reset before exec.
-        if unsafe { reset_child_environment_for_pty(pty_config) }.is_err() {
+        if unsafe { reset_child_environment_for_pty(env_vars) }.is_err() {
             // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
             unsafe {
                 write_error(2, "PTY environment variable initialization failed");
@@ -1124,6 +1165,7 @@ impl Sandbox for LinuxSandbox {
         // 创建临时 config 副本（含正确的 seccomp profile）
         let mut child_config = self.config.clone();
         child_config.seccomp_profile = effective_profile;
+        let child_env_vars = prepare_child_env_vars(&child_config.env_vars)?;
 
         // SAFETY: The parent immediately manages both branches and the child only runs fork-safe setup.
         match unsafe { fork() }.map_err(|e| SandboxError::Syscall(e.to_string()))? {
@@ -1304,6 +1346,7 @@ impl Sandbox for LinuxSandbox {
                 Self::child_main(
                     cmd,
                     &child_config,
+                    &child_env_vars,
                     stdout_write_fd,
                     stderr_write_fd,
                     Some((stdout_read_fd, stderr_read_fd)),
@@ -1350,6 +1393,8 @@ impl Sandbox for LinuxSandbox {
             }
             other => other,
         };
+        let pty_env = build_child_env_with_base(&config, &child_config.env_vars);
+        let child_env_vars = prepare_child_env_vars(&pty_env)?;
 
         // SAFETY: The parent manages the child process while the child only performs fork-safe PTY setup.
         match unsafe { fork() }.map_err(|error| SandboxError::Syscall(error.to_string()))? {
@@ -1396,7 +1441,13 @@ impl Sandbox for LinuxSandbox {
                         libc::_exit(118);
                     }
                 }
-                Self::pty_child_main(&config.command, &child_config, &config, &slave_path);
+                Self::pty_child_main(
+                    &config.command,
+                    &child_config,
+                    &config,
+                    &child_env_vars,
+                    &slave_path,
+                );
             }
         }
     }
@@ -1435,20 +1486,14 @@ impl Sandbox for LinuxSandbox {
 /// and set the child environment required for PTY execution.
 /// Calling this after `fork` and before `exec` is safe because the child is
 /// single-threaded, so environment mutation cannot affect other threads.
-unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> Result<(), ()> {
+unsafe fn reset_child_environment_for_pty(env_vars: &[(CString, CString)]) -> Result<(), ()> {
     // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
     if unsafe { libc::clearenv() } != 0 {
         return Err(());
     }
 
-    for (name, value) in build_child_env(config) {
-        let name = CString::new(name).map_err(|_| ())?;
-        let value = CString::new(value).map_err(|_| ())?;
-        // SAFETY: name and value are valid NUL-terminated C strings created above.
-        if unsafe { libc::setenv(name.as_ptr(), value.as_ptr(), 1) } != 0 {
-            return Err(());
-        }
-    }
+    // SAFETY: env_vars 已在 fork 前完成 CString 序列化，子进程不访问父进程 HashMap。
+    unsafe { set_prepared_child_env(env_vars)? };
 
     Ok(())
 }

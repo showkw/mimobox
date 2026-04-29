@@ -71,12 +71,14 @@ pub(crate) fn build_session(
     Box::new(OsPtySession::new(allocated, child_pid, timeout))
 }
 
-/// Builds the sanitized child environment used for PTY-backed commands.
+/// 构建 PTY 子进程使用的净化环境变量集合。
 ///
-/// The result starts from a minimal allowlist and then overlays variables from
-/// [`PtyConfig::env`]. The `PWD` value follows [`PtyConfig::cwd`] when present
-/// and defaults to `/tmp` otherwise.
-pub(crate) fn build_child_env(config: &PtyConfig) -> HashMap<String, String> {
+/// 合并顺序为：内置最小环境、沙箱级持久环境变量、[`PtyConfig::env`]。
+/// `PWD` 默认跟随 [`PtyConfig::cwd`]，未设置时回退到 `/tmp`。
+pub(crate) fn build_child_env_with_base(
+    config: &PtyConfig,
+    base_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
             "PATH".to_string(),
@@ -94,6 +96,10 @@ pub(crate) fn build_child_env(config: &PtyConfig) -> HashMap<String, String> {
             config.cwd.clone().unwrap_or_else(|| "/tmp".to_string()),
         ),
     ]);
+
+    for (key, value) in base_env {
+        env.insert(key.clone(), value.clone());
+    }
 
     for (key, value) in &config.env {
         env.insert(key.clone(), value.clone());

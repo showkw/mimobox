@@ -95,6 +95,8 @@ pub struct CreateSandboxRequest {
     timeout_ms: Option<u64>,
     /// Sandbox memory limit in MiB.
     memory_limit_mb: Option<u64>,
+    /// 创建沙箱时设置的持久环境变量，会应用到后续所有命令。
+    env_vars: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -472,8 +474,9 @@ impl MimoboxServer {
             }
         }
 
+        let env_vars = request.env_vars;
         let sandbox = tokio::task::spawn_blocking(move || {
-            create_sandbox_with_options(isolation, timeout_ms, memory_limit_mb)
+            create_sandbox_with_options(isolation, timeout_ms, memory_limit_mb, env_vars)
         })
         .await
         .map_err(|error| to_error(format_join_error(error)))?
@@ -1149,6 +1152,7 @@ impl MimoboxServer {
                 IsolationLevel::Auto,
                 timeout_ms,
                 Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+                None,
             )?;
             let result = sandbox.execute(&command);
             if let Err(err) = sandbox.destroy() {
@@ -1206,6 +1210,7 @@ impl MimoboxServer {
                 IsolationLevel::Auto,
                 timeout_ms,
                 Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+                None,
             )?;
             let result = sandbox.exec(&argv);
             if let Err(err) = sandbox.destroy() {
@@ -1242,6 +1247,7 @@ fn create_sandbox_with_options(
     isolation: IsolationLevel,
     timeout_ms: Option<u64>,
     memory_limit_mb: Option<u64>,
+    env_vars: Option<HashMap<String, String>>,
 ) -> Result<Sandbox, SdkError> {
     validate_create_sandbox_memory_limit(memory_limit_mb)?;
     validate_timeout_ms(timeout_ms).map_err(SdkError::Config)?;
@@ -1254,6 +1260,9 @@ fn create_sandbox_with_options(
     }
     if let Some(memory_limit_mb) = memory_limit_mb {
         builder = builder.memory_limit_mb(memory_limit_mb);
+    }
+    if let Some(env_vars) = env_vars {
+        builder = builder.env_vars(env_vars);
     }
 
     Sandbox::with_config(builder.build()?)
@@ -1651,8 +1660,12 @@ mod tests {
 
     #[test]
     fn test_create_sandbox_rejects_memory_limit_above_global_max() {
-        let result =
-            create_sandbox_with_options(IsolationLevel::Auto, None, Some(MAX_MEMORY_LIMIT_MB + 1));
+        let result = create_sandbox_with_options(
+            IsolationLevel::Auto,
+            None,
+            Some(MAX_MEMORY_LIMIT_MB + 1),
+            None,
+        );
 
         assert!(
             matches!(result, Err(SdkError::Config(message)) if message.contains("create_sandbox memory_limit_mb"))
@@ -1662,8 +1675,12 @@ mod tests {
     #[test]
     fn test_create_sandbox_rejects_timeout_above_max() {
         let excessive_timeout_ms = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
-        let result =
-            create_sandbox_with_options(IsolationLevel::Auto, Some(excessive_timeout_ms), None);
+        let result = create_sandbox_with_options(
+            IsolationLevel::Auto,
+            Some(excessive_timeout_ms),
+            None,
+            None,
+        );
 
         assert!(matches!(result, Err(SdkError::Config(message)) if message.contains("timeout_ms")));
     }
@@ -1671,7 +1688,8 @@ mod tests {
     #[test]
     fn test_create_sandbox_accepts_timeout_at_max() {
         let max_timeout_ms = MAX_SANDBOX_TIMEOUT_SECS * 1000;
-        let result = create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None);
+        let result =
+            create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None, None);
 
         // 可能因后端不可用失败，但不应因 timeout 校验失败
         if let Err(SdkError::Config(message)) = &result {

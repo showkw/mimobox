@@ -26,6 +26,36 @@ fn is_plain_ip_domain(domain: &str) -> bool {
             .all(|character| character.is_ascii_digit() || character == '.')
 }
 
+// 这些变量会影响动态加载器或 shell 启动流程，持久注入时必须 fail-closed。
+const BLOCKED_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "BASH_ENV",
+    "ENV",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+];
+
+fn validate_persistent_env_vars(
+    env_vars: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    for (key, value) in env_vars {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
+            return Err(format!("env_vars contains invalid key: {key}"));
+        }
+        if value.contains('\0') {
+            return Err(format!("env_vars value for key {key} contains NUL byte"));
+        }
+        if BLOCKED_ENV_VARS
+            .iter()
+            .any(|blocked| key.eq_ignore_ascii_case(blocked))
+        {
+            return Err(format!("env_vars contains blocked security key: {key}"));
+        }
+    }
+    Ok(())
+}
+
 /// HTTP method enum used for HTTP ACL rule matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HttpMethod {
@@ -555,6 +585,10 @@ pub struct SandboxConfig {
     /// When unset (both allow and deny are empty), existing behavior is preserved.
     #[serde(default)]
     pub http_acl: HttpAclPolicy,
+    /// 创建沙箱时的持久环境变量，对所有后续命令生效。
+    /// 合并优先级（低到高）：后端内置最小环境 < env_vars < per-command env。
+    #[serde(default)]
+    pub env_vars: std::collections::HashMap<String, String>,
 }
 
 impl Default for SandboxConfig {
@@ -573,6 +607,7 @@ impl Default for SandboxConfig {
             allowed_http_domains: Vec::new(),
             namespace_degradation: NamespaceDegradation::FailClosed,
             http_acl: HttpAclPolicy::default(),
+            env_vars: std::collections::HashMap::new(),
         }
     }
 }
@@ -664,6 +699,11 @@ impl SandboxConfig {
         if let Err(msg) = self.http_acl.validate() {
             return Err(SandboxError::new(format!("http_acl config invalid: {msg}"))
                 .suggestion("Check HTTP ACL rule format"));
+        }
+
+        if let Err(msg) = validate_persistent_env_vars(&self.env_vars) {
+            return Err(SandboxError::new(format!("env_vars config invalid: {msg}"))
+                .suggestion("Remove unsafe or malformed persistent environment variables"));
         }
 
         Ok(())

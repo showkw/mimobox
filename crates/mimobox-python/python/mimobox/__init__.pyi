@@ -280,6 +280,7 @@ class Sandbox:
         http_acl_allow: Optional list of HTTP ACL allow rules in 'METHOD host/path' format.
             Supports glob patterns like 'GET api.openai.com/v1/*'.
         http_acl_deny: Optional list of HTTP ACL deny rules. Deny rules take precedence over allow.
+        env_vars: 创建沙箱时设置的持久环境变量，会应用到后续所有命令。
     """
 
     def __init__(
@@ -294,6 +295,7 @@ class Sandbox:
         max_processes: Optional[int] = ...,
         trust_level: Optional[_TrustLevel] = ...,
         network: Optional[_NetworkPolicy] = ...,
+        env_vars: Optional[Dict[str, str]] = ...,
     ) -> None: ...
 
     @property
