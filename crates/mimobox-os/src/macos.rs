@@ -553,7 +553,10 @@ fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
 
 fn push_sbpl_subpath(paths: &mut Vec<String>, path: &str) {
     if validate_sbpl_path(path).is_ok() {
-        paths.push(format!("(subpath \"{}\")", path));
+        let rule = format!("(subpath \"{}\")", path);
+        if !paths.iter().any(|existing| existing == &rule) {
+            paths.push(rule);
+        }
     }
 }
 
@@ -580,7 +583,7 @@ impl MacOsSandbox {
     ///
     /// Policy structure using Seatbelt Scheme compiled format version 1:
     /// 1. `(deny default)` — denies all operations by default.
-    /// 2. `(allow file-read* (subpath ...))` — 仅允许系统最小路径、沙箱专属临时目录、`fs_readonly` 和 `fs_readwrite` 路径读取。
+    /// 2. `(allow file-read* (subpath ...))` — 仅允许系统最小路径、临时目录遍历、沙箱专属临时目录、`fs_readonly` 和 `fs_readwrite` 路径读取。
     /// 3. `(allow file-write* (subpath ...))` — 仅允许 `fs_readwrite` 路径；未配置时默认允许沙箱专属临时目录写入。
     /// 4. `(allow process-exec (subpath ...))` — restricts executable paths.
     /// 5. `(deny process-exec (subpath ...))` — denies execution from writable locations.
@@ -608,8 +611,11 @@ impl MacOsSandbox {
                 .iter()
                 .map(|s| format!("(subpath \"{}\")", s.trim_end_matches('/'))),
         );
-        // SECURITY: 只允许当前沙箱实例的专属临时目录，避免共享 /private/tmp 泄露跨沙箱数据。
+        // SECURITY: 显式允许当前沙箱实例的专属临时目录；基础临时目录只放入读取规则用于遍历。
         push_sbpl_subpath(&mut read_paths, sandbox_tmp_dir);
+        // 保留基础 /private/tmp 读取权限用于目录遍历（不包含写入权限）。
+        push_sbpl_subpath(&mut read_paths, "/private/tmp");
+        push_sbpl_subpath(&mut read_paths, "/tmp");
 
         for path in &config.fs_readonly {
             push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
@@ -1765,6 +1771,14 @@ mod tests {
     fn test_policy_generation() {
         let sb = MacOsSandbox::new(SandboxConfig::default()).expect("创建沙箱失败");
         let policy = sb.generate_policy();
+        let read_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-read*") && !line.contains("file-write*"))
+            .expect("应生成 file-read allow 规则");
+        let write_line = policy
+            .lines()
+            .find(|line| line.starts_with("(allow file-write*"))
+            .expect("应生成 file-write allow 规则");
 
         assert!(policy.contains("(version 1)"), "策略应包含 version 1");
         assert!(policy.contains("(deny default)"), "策略应包含 deny default");
@@ -1779,6 +1793,24 @@ mod tests {
         assert!(
             !policy.contains("(deny file-read-data (subpath \"/Users\"))"),
             "默认拒绝模式不需要额外拒绝 /Users 内容读取"
+        );
+        assert_eq!(
+            read_line.matches("(subpath \"/private/tmp\")").count(),
+            1,
+            "file-read 规则应包含且只包含一次 /private/tmp 遍历权限"
+        );
+        assert_eq!(
+            read_line.matches("(subpath \"/tmp\")").count(),
+            1,
+            "file-read 规则应包含且只包含一次 /tmp 遍历权限"
+        );
+        assert!(
+            !write_line.contains("(subpath \"/private/tmp\")"),
+            "默认 file-write 规则不应放开整个 /private/tmp"
+        );
+        assert!(
+            !write_line.contains("(subpath \"/tmp\")"),
+            "默认 file-write 规则不应放开整个 /tmp"
         );
         assert!(
             !policy.contains("(allow network*)"),
