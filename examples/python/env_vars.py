@@ -1,18 +1,18 @@
-# env_vars.py — 环境变量注入：execute 时传入 env 参数
+# env_vars.py — Environment variable injection: pass env parameter at execute time
 #
-# 演示如何在执行命令时注入自定义环境变量。
+# Demonstrates how to inject custom environment variables when executing commands.
 
 from mimobox import Sandbox
 
 with Sandbox() as sandbox:
-    # 注入单个环境变量
+    # Inject a single environment variable
     result = sandbox.execute(
         "/bin/sh -c 'echo $GREETING'",
         env={"GREETING": "Hello from env!"},
     )
     print(f"single env var: {result.stdout.strip()}")
 
-    # 注入多个环境变量
+    # Inject multiple environment variables
     result = sandbox.execute(
         "/bin/sh -c 'echo $APP_NAME v$APP_VERSION running in $APP_ENV'",
         env={
@@ -23,6 +23,6 @@ with Sandbox() as sandbox:
     )
     print(f"multiple env:   {result.stdout.strip()}")
 
-    # 环境变量仅在当前命令生效
+    # Environment variables only take effect for the current command
     result = sandbox.execute("/bin/sh -c 'echo $GREETING'")
     print(f"after scope:    {result.stdout.strip()!r} (empty as expected)")

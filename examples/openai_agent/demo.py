@@ -1,4 +1,4 @@
-"""OpenAI Agents SDK 与 mimobox 沙箱集成示例。"""
+"""OpenAI Agents SDK with mimobox sandbox integration example."""
 
 import asyncio
 import os
@@ -11,11 +11,11 @@ DEFAULT_PROMPT = "Write a Python function that computes the first 20 Fibonacci n
 
 
 async def run_demo() -> str:
-    """创建一个带 mimobox 工具的 Agent，并返回最终输出。"""
+    """Create an Agent with mimobox tools and return the final output."""
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY environment variable is required.")
 
-    # Sandbox 使用上下文管理器，确保 Agent 运行结束后自动释放资源。
+    # Sandbox uses a context manager to ensure automatic resource cleanup after the Agent finishes.
     with Sandbox() as sandbox:
 
         @function_tool
@@ -47,7 +47,7 @@ async def run_demo() -> str:
         def read_file(path: str) -> str:
             """Read a UTF-8 text file from the mimobox sandbox."""
             try:
-                # mimobox 返回 bytes，这里按 UTF-8 解码为 Agent 可读文本。
+                # mimobox returns bytes; decode as UTF-8 here for Agent-readable text.
                 return sandbox.read_file(path).decode("utf-8")
             except UnicodeDecodeError as exc:
                 return f"Read failed: file is not valid UTF-8: {exc}"
@@ -58,7 +58,7 @@ async def run_demo() -> str:
         def write_file(path: str, content: str) -> str:
             """Write UTF-8 text content to a file inside the mimobox sandbox."""
             try:
-                # mimobox 接收 bytes，这里将工具入参编码后写入沙箱文件系统。
+                # mimobox receives bytes; encode tool input parameters and write to sandbox filesystem.
                 sandbox.write_file(path, content.encode("utf-8"))
             except (SandboxError, OSError, UnicodeEncodeError) as exc:
                 return f"Write failed: {type(exc).__name__}: {exc}"
@@ -84,7 +84,7 @@ async def run_demo() -> str:
 
 
 def main() -> None:
-    """同步入口：用 asyncio.run 调用异步 Runner.run。"""
+    """Synchronous entry point: call async Runner.run via asyncio.run."""
     try:
         print(asyncio.run(run_demo()))
     except RuntimeError as exc:

@@ -1,9 +1,9 @@
-"""mimobox 集成 LangChain 示例。
+"""mimobox integration with LangChain example.
 
-使用前安装依赖：
+Install dependencies first:
     pip install mimobox langchain langchain-openai
 
-运行：
+Run:
     export OPENAI_API_KEY=sk-...
     python mimobox_tool.py
 """
@@ -14,13 +14,13 @@ from langchain_core.tools import tool
 
 @tool
 def sandbox_run_command(command: str) -> str:
-    """在安全沙箱中执行 shell 命令，返回输出结果。
+    """Execute a shell command in a secure sandbox and return the output.
 
-    适用于需要运行代码、检查文件、执行系统命令的场景。
-    所有命令在隔离的沙箱环境中运行，不会影响主机系统。
+    Suitable for scenarios that require running code, inspecting files, or executing system commands.
+    All commands run in an isolated sandbox environment and will not affect the host system.
 
     Args:
-        command: 要执行的 shell 命令
+        command: shell command to execute
     """
     with Sandbox() as sb:
         result = sb.execute(command, timeout=30.0)
@@ -29,23 +29,23 @@ def sandbox_run_command(command: str) -> str:
             output += f"\n[stderr] {result.stderr}"
         if result.exit_code != 0:
             output += f"\n[exit code: {result.exit_code}]"
-        return output or "(无输出)"
+        return output or "(no output)"
 
 
 @tool
 def sandbox_run_python(code: str) -> str:
-    """在安全沙箱中执行 Python 代码，返回输出结果。
+    """Execute Python code in a secure sandbox and return the output.
 
     Args:
-        code: 要执行的 Python 代码
+        code: Python code to execute
     """
     with Sandbox() as sb:
         result = sb.execute_code("python", code, timeout=30.0)
-        return result.stdout or "(无输出)"
+        return result.stdout or "(no output)"
 
 
-# 使用示例
+# Usage example
 if __name__ == "__main__":
-    # 快速验证
+    # Quick verification
     with Sandbox() as sb:
         print(sb.execute("python3 --version").stdout)

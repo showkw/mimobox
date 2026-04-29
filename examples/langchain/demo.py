@@ -12,7 +12,7 @@ from mimobox_tool import (
     MimoboxExecuteCodeTool,
 )
 
-# ReAct prompt template (LangChain 0.3+ 标准写法)
+# ReAct prompt template (LangChain 0.3+ standard pattern)
 REACT_PROMPT = """Answer the following questions as best you can. You have access to the following tools:
 
 {tools}

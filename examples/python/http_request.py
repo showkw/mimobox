@@ -1,11 +1,11 @@
-# http_request.py — HTTP 请求使用：通过沙箱内置代理发起 HTTPS 请求
+# http_request.py — HTTP request usage: send HTTPS requests through the built-in sandbox proxy
 #
-# 演示如何在沙箱内发起 HTTP 请求。需要在创建 Sandbox 时
-# 通过 allowed_http_domains 白名单指定允许访问的域名。
+# Demonstrates how to make HTTP requests inside a sandbox. When creating a Sandbox,
+# specify allowed domains via the allowed_http_domains whitelist.
 
 from mimobox import Sandbox
 
-# 必须在创建时指定允许的域名（支持 glob 模式，如 *.openai.com）
+# Must specify allowed domains at creation time (supports glob patterns, e.g. *.openai.com)
 with Sandbox(
     isolation="microvm",
     allowed_http_domains=["api.github.com"],

@@ -1,10 +1,10 @@
-# error_handling.py — 错误处理：演示各类异常的捕获
+# error_handling.py — Error handling: demonstrates catching various exception types
 #
-# mimobox 定义了异常层级：
-#   SandboxError (基类)
-#   ├── SandboxProcessError  — 命令非零退出或被 kill
-#   ├── SandboxHttpError     — HTTP 代理请求失败或域名未白名单
-#   └── SandboxLifecycleError — 创建/销毁/恢复失败
+# mimobox defines an exception hierarchy:
+#   SandboxError (base class)
+#   ├── SandboxProcessError  — Command exits non-zero or is killed
+#   ├── SandboxHttpError     — HTTP proxy request failed or domain not whitelisted
+#   └── SandboxLifecycleError — Create/destroy/restore failed
 
 from mimobox import (
     Sandbox,
@@ -14,28 +14,28 @@ from mimobox import (
     SandboxLifecycleError,
 )
 
-# 1. 捕获 SandboxProcessError：命令以非零退出码结束
+# 1. Catch SandboxProcessError: command exits with non-zero code
 try:
     with Sandbox() as sandbox:
         sandbox.execute("exit 42")
 except SandboxProcessError as exc:
     print(f"[SandboxProcessError] {exc}")
 
-# 2. 捕获 SandboxHttpError：请求未白名单的域名
+# 2. Catch SandboxHttpError: request to non-whitelisted domain
 try:
     with Sandbox(isolation="microvm", allowed_http_domains=[]) as sandbox:
         sandbox.http_request("GET", "https://example.com/")
 except SandboxHttpError as exc:
     print(f"[SandboxHttpError] {exc}")
 
-# 3. 捕获基类 SandboxError：超时场景
+# 3. Catch base class SandboxError: timeout scenario
 try:
     with Sandbox() as sandbox:
         sandbox.execute("sleep 999", timeout=0.5)
 except SandboxError as exc:
     print(f"[SandboxError/Timeout] {exc}")
 
-# 4. 异常层级：所有特定异常都可以被 SandboxError 捕获
+# 4. Exception hierarchy: all specific exceptions can be caught by SandboxError
 try:
     with Sandbox() as sandbox:
         sandbox.execute("exit 1")

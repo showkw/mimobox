@@ -102,9 +102,14 @@ def sandbox_execute(command: str) -> str:
 ```python
 from mimobox import Sandbox
 
-with Sandbox() as sandbox:
-    result = sandbox.execute("/bin/echo hello")
-    print(result.stdout, end="")
+with Sandbox() as sb:
+    # 不受信任的代码安全运行 -- 网络默认被拒绝
+    result = sb.execute("curl https://example.com")
+    print(result)  # 命令失败：网络访问被拒绝
+
+    # 沙箱临时目录之外的文件系统写入被阻止
+    result = sb.execute("touch /outside_sandbox.txt")
+    print(result)  # 命令失败：写入权限被拒绝
 ```
 
 ```python
@@ -121,6 +126,8 @@ with Sandbox() as sandbox:
 | --- | --- | --- | --- |
 | Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
 | macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
+
+> **macOS 用户注意**：macOS 目前仅支持 OS 级隔离（Seatbelt）。Wasm、microVM、MCP Server、流式执行、文件操作和 HTTP 代理功能需要 Linux 环境。详见[平台支持](#平台支持)。
 
 ## 隔离层
 

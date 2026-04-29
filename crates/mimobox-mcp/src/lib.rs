@@ -1,6 +1,6 @@
 //! mimobox MCP Server.
 //!
-//! Exposes 11 tools over stdio:
+//! Exposes 15 tools over stdio:
 //! - create_sandbox
 //! - destroy_sandbox
 //! - list_sandboxes
@@ -9,6 +9,10 @@
 //! - read_file
 //! - write_file
 //! - list_dir
+//! - make_dir
+//! - stat
+//! - remove_file
+//! - rename
 //! - snapshot
 //! - fork
 //! - http_request
@@ -24,6 +28,8 @@ use std::{
 
 #[cfg(feature = "vm")]
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(feature = "vm")]
+use mimobox_sdk::FileStat;
 use mimobox_sdk::{
     Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, Sandbox,
     SdkError, TrustLevel,
@@ -264,6 +270,78 @@ pub struct ListDirResponse {
     sandbox_id: u64,
     path: String,
     entries: Vec<ListDirEntry>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+pub struct MakeDirRequest {
+    /// Target sandbox ID.
+    sandbox_id: u64,
+    /// Directory path to create inside the sandbox.
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+pub struct StatRequest {
+    /// Target sandbox ID.
+    sandbox_id: u64,
+    /// File or directory path inside the sandbox.
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+pub struct RemoveFileRequest {
+    /// Target sandbox ID.
+    sandbox_id: u64,
+    /// File or directory path to remove inside the sandbox.
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+pub struct RenameRequest {
+    /// Target sandbox ID.
+    sandbox_id: u64,
+    /// Source path inside the sandbox.
+    from_path: String,
+    /// Destination path inside the sandbox.
+    to_path: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MakeDirResponse {
+    sandbox_id: u64,
+    path: String,
+    created: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct StatResponse {
+    sandbox_id: u64,
+    path: String,
+    file_type: String,
+    size: u64,
+    mode: u32,
+    modified_ms: Option<u64>,
+    is_dir: bool,
+    is_file: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RemoveFileResponse {
+    sandbox_id: u64,
+    path: String,
+    removed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameResponse {
+    sandbox_id: u64,
+    from_path: String,
+    to_path: String,
+    renamed: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -879,6 +957,147 @@ impl MimoboxServer {
         }))
     }
 
+    #[tool(
+        description = "Create a directory inside a sandbox. Uses mkdir -p to create parent directories as needed."
+    )]
+    async fn make_dir(
+        &self,
+        Parameters(request): Parameters<MakeDirRequest>,
+    ) -> Result<Json<MakeDirResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
+        let path = request.path;
+        let command = format!("mkdir -p {}", shell_single_quote(&path));
+        let result = self
+            .with_managed_sandbox(request.sandbox_id, move |sandbox| sandbox.execute(&command))
+            .await
+            .map_err(to_error)?;
+
+        let created = result.exit_code == Some(0);
+        Ok(Json(MakeDirResponse {
+            sandbox_id: request.sandbox_id,
+            path,
+            created,
+        }))
+    }
+
+    #[tool(
+        description = "Get file or directory metadata inside a sandbox. Returns file type, size, permissions, and modification time. Requires microVM isolation level."
+    )]
+    async fn stat(
+        &self,
+        Parameters(request): Parameters<StatRequest>,
+    ) -> Result<Json<StatResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
+        #[cfg(feature = "vm")]
+        {
+            let path = request.path;
+            let stat = self
+                .with_managed_sandbox(request.sandbox_id, {
+                    let path = path.clone();
+                    move |sandbox| sandbox.stat(&path)
+                })
+                .await
+                .map_err(to_error)?;
+
+            let file_type = if stat.is_file {
+                "file".to_string()
+            } else if stat.is_dir {
+                "dir".to_string()
+            } else {
+                "other".to_string()
+            };
+
+            Ok(Json(StatResponse {
+                sandbox_id: request.sandbox_id,
+                path,
+                file_type,
+                size: stat.size,
+                mode: stat.mode,
+                modified_ms: stat.modified_ms,
+                is_dir: stat.is_dir,
+                is_file: stat.is_file,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("stat")))
+        }
+    }
+
+    #[tool(
+        description = "Remove a file or empty directory inside a sandbox. Requires microVM isolation level."
+    )]
+    async fn remove_file(
+        &self,
+        Parameters(request): Parameters<RemoveFileRequest>,
+    ) -> Result<Json<RemoveFileResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.path).map_err(to_error)?;
+
+        #[cfg(feature = "vm")]
+        {
+            let path = request.path;
+            self.with_managed_sandbox(request.sandbox_id, {
+                let path = path.clone();
+                move |sandbox| sandbox.remove_file(&path)
+            })
+            .await
+            .map_err(to_error)?;
+
+            Ok(Json(RemoveFileResponse {
+                sandbox_id: request.sandbox_id,
+                path,
+                removed: true,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("remove_file")))
+        }
+    }
+
+    #[tool(
+        description = "Rename or move a file inside a sandbox. Requires microVM isolation level."
+    )]
+    async fn rename(
+        &self,
+        Parameters(request): Parameters<RenameRequest>,
+    ) -> Result<Json<RenameResponse>, Json<ErrorResponse>> {
+        validate_path_size(&request.from_path).map_err(to_error)?;
+        validate_path_size(&request.to_path).map_err(to_error)?;
+
+        #[cfg(feature = "vm")]
+        {
+            let from_path = request.from_path;
+            let to_path = request.to_path;
+            self.with_managed_sandbox(request.sandbox_id, {
+                let from_path = from_path.clone();
+                let to_path = to_path.clone();
+                move |sandbox| sandbox.rename(&from_path, &to_path)
+            })
+            .await
+            .map_err(to_error)?;
+
+            Ok(Json(RenameResponse {
+                sandbox_id: request.sandbox_id,
+                from_path,
+                to_path,
+                renamed: true,
+            }))
+        }
+
+        #[cfg(not(feature = "vm"))]
+        {
+            let _ = request;
+            Err(to_error(vm_feature_required("rename")))
+        }
+    }
+
     async fn execute_with_optional_sandbox(
         &self,
         sandbox_id: Option<u64>,
@@ -997,7 +1216,7 @@ impl MimoboxServer {
 impl ServerHandler for MimoboxServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents.\n\nProvides 11 tools for secure code execution and sandbox management:\n\nLIFECYCLE: create_sandbox (isolation: auto/os/wasm/microvm), destroy_sandbox, list_sandboxes\nEXECUTION: execute_code (python/node/bash/sh), execute_command (shell commands)\nFILES: read_file, write_file, list_dir (microVM only for read/write)\nADVANCED: snapshot, fork (microVM CoW memory cloning), http_request (HTTPS proxy with domain whitelist)\n\nTYPICAL WORKFLOW:\n1. create_sandbox -> get sandbox_id\n2. execute_code/execute_command with sandbox_id for persistent sessions\n3. Use snapshot+fork for fast parallel execution from pre-warmed state\n4. destroy_sandbox when done\n\nOr use execute_code/execute_command without sandbox_id for fire-and-forget ephemeral execution.",
+            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents.\n\nProvides 15 tools for secure code execution and sandbox management:\n\nLIFECYCLE: create_sandbox (isolation: auto/os/wasm/microvm), destroy_sandbox, list_sandboxes\nEXECUTION: execute_code (python/node/bash/sh), execute_command (shell commands)\nFILES: read_file, write_file, list_dir, make_dir, stat, remove_file, rename (microVM only for read/write/stat/rename/remove_file)\nADVANCED: snapshot, fork (microVM CoW memory cloning), http_request (HTTPS proxy with domain whitelist)\n\nTYPICAL WORKFLOW:\n1. create_sandbox -> get sandbox_id\n2. execute_code/execute_command with sandbox_id for persistent sessions\n3. Use file tools (write_file, stat, rename) to manage sandbox contents\n4. Use snapshot+fork for fast parallel execution from pre-warmed state\n5. destroy_sandbox when done\n\nOr use execute_code/execute_command without sandbox_id for fire-and-forget ephemeral execution.",
         )
     }
 }

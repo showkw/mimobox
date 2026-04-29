@@ -104,9 +104,14 @@ def sandbox_execute(command: str) -> str:
 ```python
 from mimobox import Sandbox
 
-with Sandbox() as sandbox:
-    result = sandbox.execute("/bin/echo hello")
-    print(result.stdout, end="")
+with Sandbox() as sb:
+    # Untrusted code runs safely -- network is denied by default
+    result = sb.execute("curl https://example.com")
+    print(result)  # Command fails: network access denied
+
+    # Filesystem writes outside the sandbox temp dir are blocked
+    result = sb.execute("touch /outside_sandbox.txt")
+    print(result)  # Command fails: write access denied
 ```
 
 ```python
@@ -123,6 +128,8 @@ with Sandbox() as sandbox:
 | --- | --- | --- | --- |
 | Linux (x86_64) | Landlock + Seccomp + Namespaces | Wasmtime | KVM (requires `/dev/kvm` + guest assets) |
 | macOS (ARM64, Intel) | Seatbelt | Wasmtime | Not available |
+
+> **Note for macOS users**: macOS currently supports OS-level isolation (Seatbelt) only. Wasm, microVM, MCP Server, streaming execution, file operations, and HTTP proxy require Linux. See [Platform Support](#platform-support) for details.
 
 ## Isolation Layers
 

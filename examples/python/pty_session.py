@@ -1,35 +1,35 @@
-# pty_session.py — PTY 交互式会话：通过伪终端执行命令并实时读取输出
+# pty_session.py — PTY interactive session: execute commands via pseudo-terminal and read output in real-time
 #
-# 演示 PtySession 的完整使用流程：创建 PTY 会话、发送输入、
-# 迭代输出事件、调整终端大小、优雅关闭。
-# 注意：PTY 功能需要 Linux + KVM 环境，其他平台可能抛出 NotImplementedError。
+# Demonstrates the full PtySession usage flow: create PTY session, send input,
+# iterate output events, resize terminal, and graceful shutdown.
+# Note: PTY features require Linux + KVM; other platforms may raise NotImplementedError.
 
 import sys
 
 from mimobox import PtyExit, PtyOutput, Sandbox
 
 with Sandbox(isolation="microvm") as sandbox:
-    # 创建一个 120x40 的 PTY 会话，运行 /bin/sh
+    # Create a 120x40 PTY session, running /bin/sh
     session = sandbox.pty.create("/bin/sh", cols=120, rows=40)
 
     try:
-        # 发送命令到 PTY
+        # Send command to PTY
         session.send_input("echo 'Hello from PTY!'\n")
 
-        # 迭代输出事件（PtyOutput 或 PtyExit）
+        # Iterate output events (PtyOutput or PtyExit)
         for event in session:
             if event is None:
                 continue
             if isinstance(event, PtyOutput):
-                # PtyOutput 事件：输出可能包含 ANSI 转义序列
+                # PtyOutput event: output may contain ANSI escape sequences
                 sys.stdout.buffer.write(event.data)
                 sys.stdout.buffer.flush()
             elif isinstance(event, PtyExit):
-                # PtyExit 事件：进程已退出
+                # PtyExit event: process has exited
                 print(f"\nprocess exited with code: {event.code}")
                 break
 
-        # 发送更多命令
+        # Send more commands
         session.send_input("uname -a\n")
         for event in session:
             if event is None:
@@ -41,7 +41,7 @@ with Sandbox(isolation="microvm") as sandbox:
                 print(f"\nprocess exited with code: {event.code}")
                 break
 
-        # 动态调整终端大小
+        # Dynamically resize terminal
         session.resize(cols=200, rows=50)
         session.send_input("echo 'resized!'\n")
         for event in session:
@@ -55,5 +55,5 @@ with Sandbox(isolation="microvm") as sandbox:
                 break
 
     finally:
-        # 确保会话被清理
+        # Ensure session is cleaned up
         session.kill()
