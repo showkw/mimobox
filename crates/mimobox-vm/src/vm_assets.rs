@@ -236,8 +236,8 @@ mod tests {
     fn resolve_vm_assets_dir_prefers_env_override() {
         let override_dir = PathBuf::from("/tmp/mimobox-custom-vm-assets");
 
-        let actual =
-            resolve_vm_assets_dir(Some(override_dir.clone()), None).expect("环境变量覆盖必须成功");
+        let actual = resolve_vm_assets_dir(Some(override_dir.clone()), None)
+            .expect("environment override must resolve successfully");
 
         assert_eq!(actual, override_dir);
     }
@@ -246,21 +246,22 @@ mod tests {
     fn resolve_vm_assets_dir_falls_back_to_home_default() {
         let home_dir = PathBuf::from("/tmp/mimobox-home");
 
-        let actual = resolve_vm_assets_dir(None, Some(home_dir.clone())).expect("默认回退必须成功");
+        let actual = resolve_vm_assets_dir(None, Some(home_dir.clone()))
+            .expect("default fallback must resolve successfully");
 
         assert_eq!(actual, home_dir.join(DEFAULT_VM_ASSETS_SUBDIR));
     }
 
     #[test]
     fn microvm_config_from_assets_dir_uses_expected_filenames() {
-        let assets_dir = tempdir().expect("临时目录必须创建成功");
+        let assets_dir = tempdir().expect("temporary directory must be created");
         let kernel_path = assets_dir.path().join("vmlinux");
         let rootfs_path = assets_dir.path().join("rootfs.cpio.gz");
-        fs::write(&kernel_path, b"kernel").expect("写入内核占位文件必须成功");
-        fs::write(&rootfs_path, b"rootfs").expect("写入 rootfs 占位文件必须成功");
+        fs::write(&kernel_path, b"kernel").expect("kernel placeholder file must be written");
+        fs::write(&rootfs_path, b"rootfs").expect("rootfs placeholder file must be written");
 
         let config = microvm_config_from_assets_dir(assets_dir.path().to_path_buf(), 256)
-            .expect("构造 microVM 配置必须成功");
+            .expect("microVM config must be constructed successfully");
 
         assert_eq!(config.vcpu_count, 1);
         assert_eq!(config.memory_mb, 256);
@@ -270,49 +271,52 @@ mod tests {
 
     #[test]
     fn microvm_config_from_assets_dir_requires_rootfs() {
-        let assets_dir = tempdir().expect("临时目录必须创建成功");
+        let assets_dir = tempdir().expect("temporary directory must be created");
         let kernel_path = assets_dir.path().join("vmlinux");
-        fs::write(&kernel_path, b"kernel").expect("写入内核占位文件必须成功");
+        fs::write(&kernel_path, b"kernel").expect("kernel placeholder file must be written");
 
         let err = microvm_config_from_assets_dir(assets_dir.path().to_path_buf(), 256)
-            .expect_err("缺少 rootfs 时必须失败");
+            .expect_err("missing rootfs must fail");
 
         assert!(err.to_string().contains("missing rootfs"));
     }
 
     #[test]
     fn missing_sha256_sidecar_is_generated_on_first_use() {
-        let assets_dir = tempdir().expect("临时目录必须创建成功");
+        let assets_dir = tempdir().expect("temporary directory must be created");
         let kernel_path = assets_dir.path().join("vmlinux");
         let kernel_bytes = b"kernel";
-        fs::write(&kernel_path, kernel_bytes).expect("写入内核占位文件必须成功");
+        fs::write(&kernel_path, kernel_bytes).expect("kernel placeholder file must be written");
 
         let hash = verify_or_initialize_asset_sha256("kernel", &kernel_path, kernel_bytes)
-            .expect("缺少 sidecar 时必须自动生成 hash");
+            .expect("missing sidecar must generate hash automatically");
 
-        let sidecar_path = asset_sha256_sidecar_path(&kernel_path).expect("sidecar 路径必须可生成");
-        let sidecar = fs::read_to_string(sidecar_path).expect("sidecar 必须写入成功");
+        let sidecar_path =
+            asset_sha256_sidecar_path(&kernel_path).expect("sidecar path must be generated");
+        let sidecar =
+            fs::read_to_string(sidecar_path).expect("sidecar must be written successfully");
         assert_eq!(sidecar.trim(), hash);
     }
 
     #[test]
     fn sha256_sidecar_mismatch_is_rejected() {
-        let assets_dir = tempdir().expect("临时目录必须创建成功");
+        let assets_dir = tempdir().expect("temporary directory must be created");
         let rootfs_path = assets_dir.path().join("rootfs.cpio.gz");
-        fs::write(&rootfs_path, b"rootfs").expect("写入 rootfs 占位文件必须成功");
-        let sidecar_path = asset_sha256_sidecar_path(&rootfs_path).expect("sidecar 路径必须可生成");
+        fs::write(&rootfs_path, b"rootfs").expect("rootfs placeholder file must be written");
+        let sidecar_path =
+            asset_sha256_sidecar_path(&rootfs_path).expect("sidecar path must be generated");
         fs::write(
             &sidecar_path,
             "0000000000000000000000000000000000000000000000000000000000000000\n",
         )
-        .expect("写入 sidecar 必须成功");
+        .expect("sidecar must be written successfully");
 
         let err = verify_or_initialize_asset_sha256_hex(
             "rootfs",
             &rootfs_path,
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         )
-        .expect_err("hash 不匹配必须拒绝启动");
+        .expect_err("hash mismatch must reject startup");
 
         assert!(err.to_string().contains("tampering warning"));
     }

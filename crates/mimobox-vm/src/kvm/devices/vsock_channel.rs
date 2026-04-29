@@ -207,7 +207,7 @@ impl VsockCommandChannel {
         let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
         if fd < 0 {
             return Err(MicrovmError::Backend(format!(
-                "创建 AF_VSOCK socket 失败: {}",
+                "failed to create AF_VSOCK socket: {}",
                 Error::last_os_error()
             )));
         }
@@ -230,7 +230,7 @@ impl VsockCommandChannel {
         };
         if bind_result != 0 {
             return Err(MicrovmError::Backend(format!(
-                "绑定 host vsock 监听地址失败: {}",
+                "failed to bind host vsock listener address: {}",
                 Error::last_os_error()
             )));
         }
@@ -240,7 +240,7 @@ impl VsockCommandChannel {
         let listen_result = unsafe { libc::listen(listener.raw_fd(), LISTEN_BACKLOG) };
         if listen_result != 0 {
             return Err(MicrovmError::Backend(format!(
-                "监听 host vsock 端口失败: {}",
+                "failed to listen on host vsock port: {}",
                 Error::last_os_error()
             )));
         }
@@ -277,7 +277,7 @@ impl VsockCommandChannel {
             if ready == 0 {
                 return Err(MicrovmError::Io(Error::new(
                     ErrorKind::TimedOut,
-                    "等待 guest vsock 连接超时",
+                    "timed out waiting for guest vsock connection",
                 )));
             }
             if ready < 0 {
@@ -286,7 +286,7 @@ impl VsockCommandChannel {
                     continue;
                 }
                 return Err(MicrovmError::Backend(format!(
-                    "等待 guest vsock 连接失败: {err}"
+                    "failed waiting for guest vsock connection: {err}"
                 )));
             }
             break;
@@ -310,7 +310,7 @@ impl VsockCommandChannel {
                 continue;
             }
             return Err(MicrovmError::Backend(format!(
-                "accept guest vsock 连接失败: {err}"
+                "failed to accept guest vsock connection: {err}"
             )));
         }
     }

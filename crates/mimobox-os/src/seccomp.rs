@@ -7,7 +7,7 @@
 
 use mimobox_core::{SandboxError, SeccompProfile};
 
-// BPF 指令结构体（对应 Linux sock_filter）
+// BPF instruction structure corresponding to Linux sock_filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 struct SockFilter {
@@ -17,14 +17,14 @@ struct SockFilter {
     k: u32,
 }
 
-// BPF 程序结构体（对应 Linux sock_fprog）
+// BPF program structure corresponding to Linux sock_fprog.
 #[repr(C)]
 struct SockFprog {
     len: u16,
     filter: *const SockFilter,
 }
 
-// BPF 常量
+// BPF constants.
 const BPF_LD: u16 = 0x00;
 const BPF_W: u16 = 0x00;
 const BPF_ABS: u16 = 0x20;
@@ -37,36 +37,36 @@ const BPF_AND: u16 = 0x50;
 const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
-// Seccomp 返回值
-// TRAP 模式：向进程发送 SIGSYS 信号，允许注册信号处理器记录审计日志。
-// 对标 Firecracker/gVisor 的 TRAP 模式，提升可审计性和调试友好度。
-// 与 KILL_PROCESS 的区别：TRAP 允许进程在终止前执行信号处理器记录被阻止的 syscall 信息。
+// Seccomp return values.
+// TRAP mode: sends SIGSYS to the process and allows a signal handler to record audit logs.
+// Matches the Firecracker/gVisor TRAP mode to improve auditability and debugging.
+// Unlike KILL_PROCESS, TRAP lets the process run a signal handler before termination.
 const SECCOMP_RET_TRAP: u32 = 0x00030000;
 const SECCOMP_RET_ALLOW: u32 = 0x7FFF0000;
 
-// seccomp_data 偏移量
+// seccomp_data offsets.
 const SECCOMP_DATA_NR: u32 = 0; // offsetof(struct seccomp_data, nr)
 const SECCOMP_DATA_ARCH: u32 = 4; // offsetof(struct seccomp_data, arch)
 const SECCOMP_DATA_ARGS_BASE: u32 = 16; // offsetof(struct seccomp_data, args)
 const SECCOMP_DATA_ARG_SIZE: u32 = 8;
 const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
 
-// socket 参数约束
+// socket argument constraints.
 const AF_UNIX: u32 = 1;
 const AF_INET: u32 = 2;
-// AF_NETLINK(16) 被隐式拒绝：socket domain 白名单仅允许 AF_UNIX 和 AF_INET/AF_INET6，
-// 不在白名单中的 domain（包括 AF_NETLINK）均触发 SECCOMP_RET_TRAP。
+// AF_NETLINK(16) is implicitly denied: the socket domain allowlist permits only
+// AF_UNIX and AF_INET/AF_INET6, so domains outside the allowlist trigger TRAP.
 const SOCK_STREAM: u32 = 1;
 const SOCK_CLOEXEC: u32 = 0x80000;
 const SOCK_NONBLOCK: u32 = 0x800;
 const SOCK_ALLOWED_TYPE_MASK: u32 = SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK;
 
-// bind addrlen 约束：sizeof(struct sockaddr_storage) = 128
+// bind addrlen constraint: sizeof(struct sockaddr_storage) = 128.
 const BIND_MAX_ADDRLEN: u32 = 128;
-// listen backlog 约束：SOMAXCONN
+// listen backlog constraint: SOMAXCONN.
 const LISTEN_MAX_BACKLOG: u32 = 128;
 
-// ioctl request 白名单（x86_64）
+// ioctl request allowlist (x86_64).
 const TCGETS: u32 = 0x5401;
 const TCSETS: u32 = 0x5402;
 const TCSETSW: u32 = 0x5403;
@@ -83,13 +83,13 @@ const IOCTL_ALLOWED_REQUESTS: &[u32] = &[
     FIONREAD, TIOCNOTTY,
 ];
 
-// PRCTL 允许的操作（arg0 约束）
-// PR_CAPBSET_READ(23)：libcap/libselinux 检查 capability bounding set，只读操作
+// Allowed PRCTL operations (arg0 constraint).
+// PR_CAPBSET_READ(23): libcap/libselinux read-only capability bounding set check.
 const PR_CAPBSET_READ: u32 = 23;
 const PRCTL_ALLOWED_OPS: &[u32] = &[PR_CAPBSET_READ];
 
-// FUTEX 允许的操作（arg1 约束：futex_op 是第二个参数）
-// 仅允许常见的等待/唤醒操作，防止 FUTEX_REQUEUE 等可能导致内核资源耗尽的操作。
+// Allowed FUTEX operations (arg1 constraint: futex_op is the second argument).
+// Allows only common wait/wake operations to prevent REQUEUE-style resource exhaustion.
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
 const FUTEX_WAIT_PRIVATE: u32 = 128; // FUTEX_PRIVATE_FLAG | FUTEX_WAIT
@@ -103,18 +103,18 @@ const FUTEX_ALLOWED_OPS: &[u32] = &[
     FUTEX_WAIT_BITSET_PRIVATE,
 ];
 
-// clone namespace flags 约束
-// 包含 6 个 namespace flag：
+// clone namespace flags constraint.
+// Includes 6 namespace flags:
 // CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET|CLONE_NEWUSER|CLONE_NEWPID。
-// 排除 CLONE_NEWCGROUP：该位与 CLONE_CHILD_CLEARTID 冲突，避免误杀正常 clone 调用。
+// Excludes CLONE_NEWCGROUP: that bit conflicts with CLONE_CHILD_CLEARTID.
 const CLONE_NAMESPACE_MASK: u32 = 0x7C02_0000;
 
-// mprotect prot 约束（x86_64）
-// 拒绝为既有内存页追加执行权限，降低 JIT spraying / W^X 绕过风险。
+// mprotect prot constraint (x86_64).
+// Denies adding execute permissions to existing pages, reducing JIT spraying / W^X bypass risk.
 const PROT_EXEC: u32 = 0x4;
 
-// mmap flags 约束（x86_64）
-// args[3] = flags 参数需要检查
+// mmap flags constraint (x86_64).
+// args[3] = flags parameter to check.
 const MAP_SHARED: u32 = 0x01;
 const MAP_PRIVATE: u32 = 0x02;
 #[allow(dead_code)]
@@ -135,8 +135,8 @@ const MAP_HUGETLB: u32 = 0x40000;
 const MAP_LOCKED: u32 = 0x2000;
 const MAP_GROWSDOWN: u32 = 0x100;
 
-// fcntl cmd 白名单（Linux x86_64）
-// 5/6/7 是 F_GETLK/F_SETLK/F_SETLKW，不纳入白名单，避免文件锁相关副作用。
+// fcntl cmd allowlist (Linux x86_64).
+// 5/6/7 are F_GETLK/F_SETLK/F_SETLKW and are excluded to avoid file-lock side effects.
 const F_DUPFD: u32 = 0;
 const F_GETFD: u32 = 1;
 const F_SETFD: u32 = 2;
@@ -148,7 +148,7 @@ const FCNTL_ALLOWED_CMDS: &[u32] = &[
     F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_GETOWN, F_SETOWN,
 ];
 
-// madvise advice 白名单（Linux x86_64）
+// madvise advice allowlist (Linux x86_64).
 const MADV_NORMAL: u32 = 0;
 const MADV_RANDOM: u32 = 1;
 const MADV_SEQUENTIAL: u32 = 2;
@@ -170,7 +170,7 @@ const MADVISE_ALLOWED_ADVICE: &[u32] = &[
 
 const BPF_MAX_INSTRUCTIONS: usize = 4096;
 
-// prctl 常量
+// prctl constants.
 const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_SET_SECCOMP: i32 = 22;
 const SECCOMP_MODE_FILTER: i32 = 2;
@@ -533,13 +533,14 @@ const DENY_NETWORK_SYSCALLS: &[u32] = &[
 /// - Process personality: personality(135).
 /// - Kernel logs: syslog(103) — prevents information disclosure.
 ///
-/// 注意：Essential profile 中的 SOCKET/CONNECT 仅服务于 AF_UNIX IPC 兼容场景；
-/// 当 `deny_network=true` 时，最终 Seccomp allowlist 必须移除它们，避免沙箱进程
-/// 通过 AF_UNIX 连接宿主 D-Bus、systemd、X11 等服务。
+/// Note: `SOCKET`/`CONNECT` in the Essential profile are only for AF_UNIX IPC
+/// compatibility. When `deny_network=true`, the final seccomp allowlist must
+/// remove them to prevent sandboxed processes from connecting to host services
+/// such as D-Bus, systemd, and X11 through AF_UNIX.
 fn essential_syscalls() -> Vec<u32> {
     use syscall_nr::*;
     vec![
-        // I/O 基础
+        // Basic I/O.
         READ,
         WRITE,
         CLOSE,
@@ -551,7 +552,7 @@ fn essential_syscalls() -> Vec<u32> {
         PREADV,
         PWRITEV,
         SENDFILE,
-        // 文件操作（不含 symlink/chmod/chown）
+        // File operations (excluding symlink/chmod/chown).
         OPEN,
         OPENAT,
         STAT,
@@ -560,8 +561,8 @@ fn essential_syscalls() -> Vec<u32> {
         FSTATAT,
         NEWFSTATAT,
         STATX,
-        // SELinux 环境下 ls/stat/rm 等程序需要读取 xattr（如 security.selinux）。
-        // 这些 syscall 只读扩展属性，不修改文件系统状态。
+        // In SELinux environments, ls/stat/rm need to read xattrs such as security.selinux.
+        // These syscalls only read extended attributes and do not mutate filesystem state.
         GETXATTR,
         LGETXATTR,
         FGETXATTR,
@@ -570,8 +571,8 @@ fn essential_syscalls() -> Vec<u32> {
         FLISTXATTR,
         ACCESS,
         FACCESSAT,
-        // glibc 2.33+ 在 access(2) 路径上会优先尝试 faccessat2。
-        // 不放行时，/bin/sh 这类程序在启动阶段可能直接触发 seccomp SIGSYS。
+        // glibc 2.33+ prefers faccessat2 on the access(2) path.
+        // Without it, programs such as /bin/sh may trigger seccomp SIGSYS during startup.
         FACCESSAT2,
         READLINK,
         READLINKAT,
@@ -585,36 +586,37 @@ fn essential_syscalls() -> Vec<u32> {
         DUP3,
         PIPE,
         PIPE2,
-        // 内存管理
+        // Memory management.
         MMAP,
         MUNMAP,
         MPROTECT,
         BRK,
         MREMAP,
         MADVISE,
-        // 进程管理（不含 clone/fork/wait4 — 默认禁止子进程创建）
+        // Process management (excluding clone/fork/wait4; child creation is denied by default).
         EXECVE,
         EXIT,
         EXIT_GROUP,
         GETPID,
         GETPPID,
         GETTID,
-        // libcap/libselinux 程序在启动时使用 prctl(PR_CAPBSET_READ)
-        // 检查 capability bounding set，只读操作不构成安全风险。
+        // libcap/libselinux programs use prctl(PR_CAPBSET_READ) at startup to inspect
+        // the capability bounding set. This read-only operation does not add security risk.
         PRCTL,
         ARCH_PRCTL,
         SET_TID_ADDRESS,
         SET_ROBUST_LIST,
         GET_ROBUST_LIST,
-        // 信号（仅自身栈管理，不含 kill/tkill/tgkill）
+        // Signals (self stack management only; excludes kill/tkill/tgkill).
         RT_SIGACTION,
         RT_SIGPROCMASK,
-        // shell 信号处理返回必须，缺少时 wait4 + SIGCHLD 路径会触发 SIGSYS
+        // Required for shell signal-handler return; without it, wait4 + SIGCHLD can trigger SIGSYS.
         RT_SIGRETURN,
         SIGALTSTACK,
-        // 文件系统（不含 symlink/chmod）
-        // 终端 I/O：参数约束系统限制仅允许终端相关 request（TCGETS/TCSETS 等），
-        // 不允许任意设备 ioctl。ls/ps 等程序通过 isatty() → ioctl(TCGETS) 检查终端。
+        // Filesystem (excluding symlink/chmod).
+        // Terminal I/O: argument constraints allow only terminal-related requests
+        // (TCGETS/TCSETS, etc.) and deny arbitrary device ioctl calls.
+        // Programs such as ls/ps check terminals through isatty() -> ioctl(TCGETS).
         IOCTL,
         FCNTL,
         FSYNC,
@@ -629,14 +631,14 @@ fn essential_syscalls() -> Vec<u32> {
         RENAMEAT,
         LINKAT,
         UMASK,
-        // 用户/组（仅读取，不含 setuid/setgid/setgroups）
+        // User/group reads only (excluding setuid/setgid/setgroups).
         GETUID,
         GETGID,
         GETEUID,
         GETEGID,
         GETGROUPS,
         GETPGRP,
-        // 系统（不含 syslog/ioctl/prctl）
+        // System calls (excluding syslog/ioctl/prctl).
         UNAME,
         SELECT,
         POLL,
@@ -659,13 +661,14 @@ fn essential_syscalls() -> Vec<u32> {
         EPOLL_PWAIT,
         // futex
         FUTEX,
-        // 其他
+        // Miscellaneous.
         RSEQ,
         SPLICE,
         TEE,
         FADVISE64,
-        // 现代 Linux 发行版（Rocky/RHEL 9）的 NSS 会使用 unix socket 连接
-        // systemd-userdbd 进行用户/组名解析。参数约束系统自动限制为仅 AF_UNIX。
+        // NSS on modern Linux distributions (Rocky/RHEL 9) uses unix sockets to
+        // connect to systemd-userdbd for user/group name resolution. Argument
+        // constraints automatically limit this to AF_UNIX.
         SOCKET,
         CONNECT,
     ]
@@ -682,12 +685,12 @@ pub fn fork_allowed_syscalls() -> Vec<u32> {
     syscalls.extend_from_slice(&[
         CLONE,
         FORK,
-        // shell 执行外部命令时可能经由 vfork/posix_spawn 进入子进程路径。
+        // Shells may enter the child-process path through vfork/posix_spawn when running external commands.
         VFORK,
-        // clone3 的 flags 位于用户态指针，经典 seccomp-bpf 无法解引用检查；
-        // 为避免绕过 clone flags 约束，这里不放行 clone3。
+        // clone3 flags live behind a userspace pointer, which classic seccomp-bpf cannot dereference.
+        // Do not allow clone3 to avoid bypassing clone flag constraints.
         WAIT4,
-        // Rocky/RHEL 9 的 NSS/systemd-userdb 查找链会在事件循环中使用 timerfd。
+        // The NSS/systemd-userdb lookup chain on Rocky/RHEL 9 uses timerfd in its event loop.
         TIMERFD_CREATE,
         TIMERFD_SETTIME,
     ]);
@@ -715,7 +718,7 @@ fn allowed_syscalls_for_profile(profile: SeccompProfile, deny_network: bool) -> 
         }
     };
 
-    // 排序以优化 BPF 跳转，并确保去重后再按 deny_network 收窄权限。
+    // Sort to optimize BPF jumps, deduplicate, then narrow permissions by deny_network.
     allowed.sort_unstable();
     allowed.dedup();
 
@@ -829,7 +832,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         SeccompProfile::Network | SeccompProfile::NetworkWithFork
     );
 
-    // mmap(9) 的 flags 参数（args[3]）约束：必须含 MAP_PRIVATE 或 MAP_SHARED。
+    // mmap(9) flags argument (args[3]) constraint: must include MAP_PRIVATE or MAP_SHARED.
     if allowed.contains(&syscall_nr::MMAP) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::MMAP,
@@ -837,7 +840,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // mprotect(10) 的 prot 参数（args[2]）约束：拒绝 PROT_EXEC。
+    // mprotect(10) prot argument (args[2]) constraint: deny PROT_EXEC.
     if allowed.contains(&syscall_nr::MPROTECT) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::MPROTECT,
@@ -845,7 +848,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // 任何放行 socket 的 profile 都必须限制 domain/type；Network 模式额外允许 AF_INET。
+    // Any profile that allows socket must constrain domain/type; Network mode additionally allows AF_INET.
     if allowed.contains(&syscall_nr::SOCKET) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::SOCKET,
@@ -869,7 +872,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // connect(42) 的 addrlen 约束：与 bind 一致，高 32 位为 0，低 32 位 <= 128。
+    // connect(42) addrlen constraint: same as bind, high 32 bits are 0, low 32 bits <= 128.
     if is_network_profile && allowed.contains(&syscall_nr::CONNECT) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::CONNECT,
@@ -877,7 +880,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // sendto(44) 的 addrlen 约束（args[5]）：与 bind 一致，高 32 位为 0，低 32 位 <= 128。
+    // sendto(44) addrlen constraint (args[5]): same as bind, high 32 bits are 0, low 32 bits <= 128.
     if is_network_profile && allowed.contains(&syscall_nr::SENDTO) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::SENDTO,
@@ -885,7 +888,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // recvfrom(45) 的 addrlen 约束（args[5]）：与 sendto 一致，高 32 位为 0，低 32 位 <= 128。
+    // recvfrom(45) addrlen constraint (args[5]): same as sendto, high 32 bits are 0, low 32 bits <= 128.
     if is_network_profile && allowed.contains(&syscall_nr::RECVFROM) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::RECVFROM,
@@ -893,7 +896,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // 目前只有 fork profile 放行 ioctl；这里只允许终端启动和非阻塞查询所需 request。
+    // Currently only fork profiles allow ioctl; allow only requests needed for terminal startup and nonblocking queries.
     if allowed.contains(&syscall_nr::IOCTL) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::IOCTL,
@@ -901,7 +904,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // fcntl(72) 的 cmd 参数（args[1]）约束：只允许文件描述符/状态 flag 基础操作。
+    // fcntl(72) cmd argument (args[1]) constraint: allow only basic descriptor/status flag operations.
     if allowed.contains(&syscall_nr::FCNTL) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::FCNTL,
@@ -909,8 +912,8 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // prctl(157) 必须约束 arg0 为只读查询操作（如 PR_CAPBSET_READ），
-    // 防止攻击者执行 PR_SET_DUMPABLE 等修改安全属性的操作。
+    // prctl(157) must constrain arg0 to read-only query operations such as PR_CAPBSET_READ,
+    // preventing attackers from running security-attribute mutations such as PR_SET_DUMPABLE.
     if allowed.contains(&syscall_nr::PRCTL) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::PRCTL,
@@ -918,7 +921,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // futex(202) 只允许常见等待/唤醒操作，拒绝 REQUEUE/CMP_REQUEUE 等资源放大路径。
+    // futex(202) allows only common wait/wake operations and denies REQUEUE/CMP_REQUEUE resource amplification paths.
     if allowed.contains(&syscall_nr::FUTEX) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::FUTEX,
@@ -926,7 +929,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
         });
     }
 
-    // madvise(28) 的 advice 参数（args[2]）约束：拒绝 DONTDUMP 等隐藏内存内容路径。
+    // madvise(28) advice argument (args[2]) constraint: deny paths such as DONTDUMP that hide memory contents.
     if allowed.contains(&syscall_nr::MADVISE) {
         constraints.push(ConstrainedSyscall {
             nr: syscall_nr::MADVISE,
@@ -951,7 +954,7 @@ fn build_arg_constraints(profile: SeccompProfile, allowed: &[u32]) -> Vec<Constr
 fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(18);
 
-    // domain 是 int 参数。低 32 位必须命中白名单，高 32 位必须为 0。
+    // domain is an int argument. Low 32 bits must hit the allowlist and high 32 bits must be 0.
     block.push(load_abs(seccomp_arg_hi_offset(0)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -966,7 +969,7 @@ fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
         block.push(ret(SECCOMP_RET_TRAP));
     }
 
-    // type 必须是 SOCK_STREAM 加上 CLOEXEC/NONBLOCK 的任意组合。
+    // type must be SOCK_STREAM plus any CLOEXEC/NONBLOCK combination.
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -983,26 +986,27 @@ fn build_socket_arg_check_block(allow_inet: bool) -> Vec<SockFilter> {
     block
 }
 
-/// bind 系统调用的参数约束块。
+/// Argument constraint block for the `bind` system call.
 ///
 /// bind(sockfd, const struct sockaddr *addr, socklen_t addrlen)
-/// - args[0] = sockfd：文件描述符，无法在 seccomp 层验证有效性
-/// - args[1] = addr：指向 sockaddr 结构的指针，**BPF 无法解引用指针**，
-///   因此无法检查 sa_family、端口号、IP 地址等字段
-/// - args[2] = addrlen：地址结构长度，可约束上限
+/// - args[0] = sockfd: file descriptor; seccomp cannot validate that it is valid.
+/// - args[1] = addr: pointer to a sockaddr structure; **BPF cannot dereference pointers**,
+///   so fields such as sa_family, port, and IP address cannot be checked.
+/// - args[2] = addrlen: address structure length; this scalar can be bounded.
 ///
-/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
+/// Current constraint: addrlen <= sizeof(struct sockaddr_storage) = 128.
 ///
-/// 安全限制：由于 BPF 无法解引用 addr 指针，无法阻止 sandbox 内进程
-/// 绑定特权端口（<1024）或绑定 0.0.0.0 等通配地址。端口劫持防护
-/// 依赖 Landlock 网络规则或 host 侧网络命名空间隔离。
+/// Security limitation: because BPF cannot dereference the addr pointer, it
+/// cannot prevent sandboxed processes from binding privileged ports (<1024) or
+/// wildcard addresses such as 0.0.0.0. Port hijacking protection depends on
+/// Landlock network rules or host-side network namespace isolation.
 fn build_bind_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        // addrlen is a socklen_t argument; nonzero high 32 bits are treated as an invalid extension.
         load_abs(seccomp_arg_hi_offset(2)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
-        // 经典 BPF 无法解引用 addr 指针，只能约束 addrlen 这类标量参数。
+        // Classic BPF cannot dereference the addr pointer and can only constrain scalar arguments such as addrlen.
         load_abs(seccomp_arg_lo_offset(2)),
         jump_gt(BIND_MAX_ADDRLEN, 0, 1),
         ret(SECCOMP_RET_TRAP),
@@ -1010,16 +1014,16 @@ fn build_bind_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
-/// connect 系统调用的参数约束块。
+/// Argument constraint block for the `connect` system call.
 ///
 /// connect(sockfd, const struct sockaddr *addr, socklen_t addrlen)
-/// - args[2] = addrlen：地址结构长度，可约束上限
+/// - args[2] = addrlen: address structure length; this scalar can be bounded.
 ///
-/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
-/// 与 bind 约束一致，确保地址结构大小的合理性。
+/// Current constraint: addrlen <= sizeof(struct sockaddr_storage) = 128.
+/// This matches the `bind` constraint to keep address structure sizes bounded.
 fn build_connect_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        // addrlen is a socklen_t argument; nonzero high 32 bits are treated as an invalid extension.
         load_abs(seccomp_arg_hi_offset(2)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
@@ -1030,17 +1034,18 @@ fn build_connect_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
-/// sendto 系统调用的参数约束块。
+/// Argument constraint block for the `sendto` system call.
 ///
 /// sendto(sockfd, const void *buf, size_t len, int flags,
 ///        const struct sockaddr *dest_addr, socklen_t addrlen)
-/// - args[5] = addrlen：目标地址结构长度，可约束上限
+/// - args[5] = addrlen: target address structure length; this scalar can be bounded.
 ///
-/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
-/// 注意：sendto 的 addrlen 位于 args[5]（非 args[2]），这是与 bind/connect 的关键区别。
+/// Current constraint: addrlen <= sizeof(struct sockaddr_storage) = 128.
+/// Note: `sendto` stores addrlen in args[5], not args[2]; this is the key
+/// difference from `bind`/`connect`.
 fn build_sendto_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        // addrlen is a socklen_t argument; nonzero high 32 bits are treated as an invalid extension.
         load_abs(seccomp_arg_hi_offset(5)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
@@ -1051,17 +1056,18 @@ fn build_sendto_arg_check_block() -> Vec<SockFilter> {
     ]
 }
 
-/// recvfrom 系统调用的参数约束块。
+/// Argument constraint block for the `recvfrom` system call.
 ///
 /// recvfrom(sockfd, void *buf, size_t len, int flags,
 ///          struct sockaddr *src_addr, socklen_t addrlen)
-/// - args[5] = addrlen：源地址结构长度，可约束上限
+/// - args[5] = addrlen: source address structure length; this scalar can be bounded.
 ///
-/// 当前约束：addrlen <= sizeof(struct sockaddr_storage) = 128
-/// 注意：recvfrom 的 addrlen 位于 args[5]（非 args[2]），这是与 bind/connect 的关键区别。
+/// Current constraint: addrlen <= sizeof(struct sockaddr_storage) = 128.
+/// Note: `recvfrom` stores addrlen in args[5], not args[2]; this is the key
+/// difference from `bind`/`connect`.
 fn build_recvfrom_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // addrlen 是 socklen_t 参数；高 32 位非零视为非法扩展。
+        // addrlen is a socklen_t argument; nonzero high 32 bits are treated as an invalid extension.
         load_abs(seccomp_arg_hi_offset(5)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
@@ -1074,7 +1080,7 @@ fn build_recvfrom_arg_check_block() -> Vec<SockFilter> {
 
 fn build_listen_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // backlog 是 int 参数；高 32 位非零视为非法扩展。
+        // backlog is an int argument; nonzero high 32 bits are treated as an invalid extension.
         load_abs(seccomp_arg_hi_offset(1)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
@@ -1088,7 +1094,7 @@ fn build_listen_arg_check_block() -> Vec<SockFilter> {
 fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(IOCTL_ALLOWED_REQUESTS.len() + 5);
 
-    // request 是 ioctl 的第二个参数。只接受 x86_64 终端相关 request code。
+    // request is the second ioctl argument. Accept only x86_64 terminal-related request codes.
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -1107,7 +1113,7 @@ fn build_ioctl_arg_check_block() -> Vec<SockFilter> {
 fn build_prctl_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(PRCTL_ALLOWED_OPS.len() + 5);
 
-    // op 是 prctl 的第一个参数（arg0）。只允许 PR_CAPBSET_READ 等只读查询操作。
+    // op is the first prctl argument (arg0). Allow only read-only queries such as PR_CAPBSET_READ.
     block.push(load_abs(seccomp_arg_hi_offset(0)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -1126,7 +1132,7 @@ fn build_prctl_arg_check_block() -> Vec<SockFilter> {
 fn build_futex_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(FUTEX_ALLOWED_OPS.len() + 5);
 
-    // futex_op 是第二个参数（args[1]），高 32 位非零视为非法扩展。
+    // futex_op is the second argument (args[1]); nonzero high 32 bits are an invalid extension.
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -1145,7 +1151,7 @@ fn build_futex_arg_check_block() -> Vec<SockFilter> {
 fn build_fcntl_cmd_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(FCNTL_ALLOWED_CMDS.len() + 5);
 
-    // cmd 是 fcntl 的第二个参数（args[1]），高 32 位非零视为非法扩展。
+    // cmd is the second fcntl argument (args[1]); nonzero high 32 bits are an invalid extension.
     block.push(load_abs(seccomp_arg_hi_offset(1)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -1164,7 +1170,7 @@ fn build_fcntl_cmd_arg_check_block() -> Vec<SockFilter> {
 fn build_madvise_advice_arg_check_block() -> Vec<SockFilter> {
     let mut block = Vec::with_capacity(MADVISE_ALLOWED_ADVICE.len() + 5);
 
-    // advice 是 madvise 的第三个参数（args[2]），只允许无权限扩展语义的提示值。
+    // advice is the third madvise argument (args[2]); allow only hints without permission-expanding semantics.
     block.push(load_abs(seccomp_arg_hi_offset(2)));
     block.push(jump_eq(0, 1, 0));
     block.push(ret(SECCOMP_RET_TRAP));
@@ -1182,7 +1188,7 @@ fn build_madvise_advice_arg_check_block() -> Vec<SockFilter> {
 
 fn build_clone_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // flags 是 unsigned long；高 32 位不应携带额外 flag。
+        // flags is unsigned long; high 32 bits must not carry extra flags.
         load_abs(seccomp_arg_hi_offset(0)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
@@ -1195,7 +1201,7 @@ fn build_clone_arg_check_block() -> Vec<SockFilter> {
 
 fn build_mprotect_prot_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // prot 是第三个参数（args[2]）；命中 PROT_EXEC 即拒绝。
+        // prot is the third argument (args[2]); reject any PROT_EXEC hit.
         load_abs(seccomp_arg_lo_offset(2)),
         alu_and(PROT_EXEC),
         jump_eq(0, 1, 0),
@@ -1206,19 +1212,19 @@ fn build_mprotect_prot_arg_check_block() -> Vec<SockFilter> {
 
 fn build_mmap_flags_arg_check_block() -> Vec<SockFilter> {
     vec![
-        // flags 是 int 参数；高 32 位不应携带额外 flag。
+        // flags is an int argument; high 32 bits must not carry extra flags.
         load_abs(seccomp_arg_hi_offset(3)),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
-        // 加载 flags 低 32 位。
+        // Load the low 32 bits of flags.
         load_abs(seccomp_arg_lo_offset(3)),
-        // 拒绝可能锁定内存、申请大页或扩展栈映射的危险 flags。
+        // Reject dangerous flags that may lock memory, request huge pages, or grow stack mappings.
         alu_and(MAP_LOCKED | MAP_HUGETLB | MAP_GROWSDOWN),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_TRAP),
-        // 重新加载 flags 低 32 位，检查必须包含 MAP_PRIVATE 或 MAP_SHARED。
+        // Reload the low 32 bits of flags and check for MAP_PRIVATE or MAP_SHARED.
         load_abs(seccomp_arg_lo_offset(3)),
-        // 必须包含 MAP_PRIVATE 或 MAP_SHARED，否则拒绝 mmap。
+        // mmap must include MAP_PRIVATE or MAP_SHARED; otherwise reject it.
         alu_and(MAP_PRIVATE | MAP_SHARED),
         jump_eq(0, 1, 0),
         ret(SECCOMP_RET_ALLOW),
@@ -1262,7 +1268,7 @@ fn build_arg_check_block(constraint: SeccompArgConstraint) -> Vec<SockFilter> {
 fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec<SockFilter> {
     let mut prog = Vec::with_capacity(5 + allowed.len() * 2 + constraints.len() * 18);
 
-    // 架构校验必须在读取 syscall number 前执行，避免跨架构 syscall 号绕过。
+    // Architecture validation must run before reading the syscall number to prevent cross-arch syscall-number bypasses.
     prog.push(load_abs(SECCOMP_DATA_ARCH));
     prog.push(jump_eq(AUDIT_ARCH_X86_64, 1, 0));
     prog.push(ret(SECCOMP_RET_TRAP));
@@ -1273,7 +1279,7 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
             let block = build_arg_check_block(constraint);
             assert!(
                 block.len() <= u8::MAX as usize,
-                "BPF 参数约束块过长: syscall={syscall_nr}, len={}",
+                "BPF argument constraint block too long: syscall={syscall_nr}, len={}",
                 block.len()
             );
 
@@ -1289,7 +1295,7 @@ fn build_bpf_program(allowed: &[u32], constraints: &[ConstrainedSyscall]) -> Vec
 
     assert!(
         prog.len() <= BPF_MAX_INSTRUCTIONS,
-        "BPF 程序超过 seccomp 指令上限: {} > {}",
+        "BPF program exceeds seccomp instruction limit: {} > {}",
         prog.len(),
         BPF_MAX_INSTRUCTIONS
     );
@@ -1308,7 +1314,7 @@ pub fn apply_seccomp(profile: SeccompProfile, deny_network: bool) -> Result<(), 
     let constraints = build_arg_constraints(profile, &allowed);
     let prog = build_bpf_program(&allowed, &constraints);
 
-    // 设置 PR_SET_NO_NEW_PRIVS，防止子进程提权绕过 seccomp
+    // Set PR_SET_NO_NEW_PRIVS to prevent child privilege escalation from bypassing seccomp.
     // SAFETY: prctl is called in the child process with constant arguments and no raw pointers.
     let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret < 0 {
@@ -1317,9 +1323,9 @@ pub fn apply_seccomp(profile: SeccompProfile, deny_network: bool) -> Result<(), 
         ));
     }
 
-    // 安装 BPF 过滤器
-    // SAFETY: prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER) 会复制 BPF 程序到内核空间，
-    // prog 的内存在调用返回后不再被内核引用。IMPORTANT-06。
+    // Install the BPF filter.
+    // SAFETY: prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER) copies the BPF program into kernel space;
+    // prog memory is no longer referenced by the kernel after the call returns. IMPORTANT-06.
     let fprog = SockFprog {
         len: prog.len() as u16,
         filter: prog.as_ptr(),
@@ -1340,7 +1346,7 @@ pub fn apply_seccomp(profile: SeccompProfile, deny_network: bool) -> Result<(), 
         // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(SandboxError::SeccompFailed(format!(
-            "prctl(PR_SET_SECCOMP) 失败: errno={errno}"
+            "prctl(PR_SET_SECCOMP) failed: errno={errno}"
         )));
     }
 
@@ -1407,13 +1413,17 @@ mod tests {
                     .contains(&offset) =>
             {
                 let relative_offset = offset - SECCOMP_DATA_ARGS_BASE;
-                assert_eq!(relative_offset % 4, 0, "BPF 测试只支持 32 位对齐读取");
+                assert_eq!(
+                    relative_offset % 4,
+                    0,
+                    "BPF test supports only 32-bit aligned reads"
+                );
 
                 let arg_index = (relative_offset / SECCOMP_DATA_ARG_SIZE) as usize;
                 let word_index = ((relative_offset % SECCOMP_DATA_ARG_SIZE) / 4) as usize;
                 data.args[arg_index][word_index]
             }
-            _ => panic!("测试 BPF 解释器不支持 offset={offset}"),
+            _ => panic!("test BPF interpreter does not support offset={offset}"),
         }
     }
 
@@ -1424,7 +1434,7 @@ mod tests {
         for _ in 0..program.len() * 2 {
             let instruction = program
                 .get(pc)
-                .unwrap_or_else(|| panic!("BPF pc 越界: pc={pc}"));
+                .unwrap_or_else(|| panic!("BPF pc out of bounds: pc={pc}"));
 
             match instruction.code {
                 code if code == (BPF_LD | BPF_W | BPF_ABS) => {
@@ -1460,11 +1470,11 @@ mod tests {
                     pc += 1;
                 }
                 code if code == (BPF_RET | BPF_K) => return instruction.k,
-                code => panic!("测试 BPF 解释器不支持 code={code:#x}"),
+                code => panic!("test BPF interpreter does not support code={code:#x}"),
             }
         }
 
-        panic!("BPF 程序疑似死循环");
+        panic!("BPF program appears to be an infinite loop");
     }
 
     fn program_for_profile(profile: SeccompProfile) -> Vec<SockFilter> {
@@ -1479,11 +1489,11 @@ mod tests {
 
         assert!(
             !syscalls.contains(&SETSID),
-            "Essential profile 不应允许 setsid"
+            "Essential profile should not allow setsid"
         );
         assert!(
             !syscalls.contains(&SETPGID),
-            "Essential profile 不应允许 setpgid"
+            "Essential profile should not allow setpgid"
         );
     }
 
@@ -1493,11 +1503,11 @@ mod tests {
 
         assert!(
             !syscalls.contains(&SETSID),
-            "允许 fork 的 profile 也不应允许 setsid"
+            "fork-enabled profile should still not allow setsid"
         );
         assert!(
             !syscalls.contains(&SETPGID),
-            "允许 fork 的 profile 也不应允许 setpgid"
+            "fork-enabled profile should still not allow setpgid"
         );
     }
 
@@ -1507,15 +1517,15 @@ mod tests {
 
         assert!(
             !syscalls.contains(&TGKILL),
-            "允许 fork 的 profile 不应允许 tgkill"
+            "fork-enabled profile should not allow tgkill"
         );
         assert!(
             !syscalls.contains(&RT_SIGQUEUEINFO),
-            "允许 fork 的 profile 不应允许 rt_sigqueueinfo"
+            "fork-enabled profile should not allow rt_sigqueueinfo"
         );
         assert!(
             !syscalls.contains(&RT_TGSIGQUEUEINFO),
-            "允许 fork 的 profile 不应允许 rt_tgsigqueueinfo"
+            "fork-enabled profile should not allow rt_tgsigqueueinfo"
         );
     }
 
@@ -1525,7 +1535,7 @@ mod tests {
 
         assert!(
             !syscalls.contains(&CLONE3),
-            "clone3 的 clone_args 位于用户态指针中，经典 seccomp-bpf 无法安全约束"
+            "clone3 clone_args are behind a userspace pointer and cannot be safely constrained by classic seccomp-bpf"
         );
     }
 
@@ -1560,7 +1570,7 @@ mod tests {
             for syscall in network_syscalls {
                 assert!(
                     !allowed.contains(&syscall),
-                    "deny_network=true 时 {profile:?} 不应允许网络 syscall {syscall}"
+                    "deny_network=true should not allow network syscall {syscall} for {profile:?}"
                 );
             }
         }
@@ -1568,7 +1578,7 @@ mod tests {
         let allowed = allowed_syscalls_for_profile(SeccompProfile::Essential, false);
         assert!(
             allowed.contains(&SOCKET) && allowed.contains(&CONNECT),
-            "deny_network=false 时 Essential profile 应保持 AF_UNIX IPC 兼容行为"
+            "deny_network=false should preserve AF_UNIX IPC compatibility for the Essential profile"
         );
     }
 
@@ -1585,7 +1595,7 @@ mod tests {
         assert_eq!(
             run_bpf(&program, wrong_arch),
             SECCOMP_RET_TRAP,
-            "arch 不匹配时必须触发 SIGSYS"
+            "architecture mismatch must trigger SIGSYS"
         );
     }
 
@@ -1741,7 +1751,7 @@ mod tests {
     fn test_fcntl_constraint_blocks_dangerous_cmds() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // Linux x86_64 上 F_SETLK=6，文件锁命令不在白名单内。
+        // F_SETLK=6 on Linux x86_64; file-lock commands are not in the allowlist.
         let f_setlk = FakeSeccompData::new(FCNTL).with_arg(1, 6);
         assert_eq!(run_bpf(&program, f_setlk), SECCOMP_RET_TRAP);
 
@@ -1804,7 +1814,7 @@ mod tests {
     fn test_madvise_constraint_blocks_dangerous_advice() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // MADV_DONTDUMP=16 可能用于隐藏内存内容，必须拒绝。
+        // MADV_DONTDUMP=16 can be used to hide memory contents and must be denied.
         let dontdump = FakeSeccompData::new(MADVISE).with_arg(2, 16);
         assert_eq!(run_bpf(&program, dontdump), SECCOMP_RET_TRAP);
 
@@ -1891,7 +1901,7 @@ mod tests {
     fn test_mmap_constraint_blocks_no_private_nor_shared() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // flags=0（无 MAP_PRIVATE 也无 MAP_SHARED）-> TRAP
+        // flags=0 (neither MAP_PRIVATE nor MAP_SHARED) -> TRAP.
         let no_flags = FakeSeccompData::new(MMAP).with_arg(3, 0);
         assert_eq!(run_bpf(&program, no_flags), SECCOMP_RET_TRAP);
     }
@@ -1900,7 +1910,7 @@ mod tests {
     fn test_mmap_constraint_blocks_high_bits() {
         let program = program_for_profile(SeccompProfile::Essential);
 
-        // 高 32 位非零 -> TRAP
+        // Nonzero high 32 bits -> TRAP.
         let high_bits = FakeSeccompData::new(MMAP).with_arg(3, (1_u64 << 32) | MAP_PRIVATE as u64);
         assert_eq!(run_bpf(&program, high_bits), SECCOMP_RET_TRAP);
     }
@@ -1934,11 +1944,11 @@ mod tests {
     fn test_connect_constraint_allows_reasonable_addrlen() {
         let program = program_for_profile(SeccompProfile::Network);
 
-        // sockaddr_in 长度 = 16
+        // sockaddr_in length = 16.
         let sockaddr_in = FakeSeccompData::new(CONNECT).with_arg(2, 16);
         assert_eq!(run_bpf(&program, sockaddr_in), SECCOMP_RET_ALLOW);
 
-        // sockaddr_storage 最大长度 = 128
+        // sockaddr_storage maximum length = 128.
         let sockaddr_storage = FakeSeccompData::new(CONNECT).with_arg(2, BIND_MAX_ADDRLEN as u64);
         assert_eq!(run_bpf(&program, sockaddr_storage), SECCOMP_RET_ALLOW);
     }
@@ -1967,11 +1977,11 @@ mod tests {
     fn test_sendto_constraint_allows_reasonable_addrlen() {
         let program = program_for_profile(SeccompProfile::Network);
 
-        // sockaddr_in 长度 = 16（args[5]）
+        // sockaddr_in length = 16 (args[5]).
         let sockaddr_in = FakeSeccompData::new(SENDTO).with_arg(5, 16);
         assert_eq!(run_bpf(&program, sockaddr_in), SECCOMP_RET_ALLOW);
 
-        // sockaddr_storage 最大长度 = 128（args[5]）
+        // sockaddr_storage maximum length = 128 (args[5]).
         let sockaddr_storage = FakeSeccompData::new(SENDTO).with_arg(5, BIND_MAX_ADDRLEN as u64);
         assert_eq!(run_bpf(&program, sockaddr_storage), SECCOMP_RET_ALLOW);
     }
@@ -2000,11 +2010,11 @@ mod tests {
     fn test_recvfrom_constraint_allows_reasonable_addrlen() {
         let program = program_for_profile(SeccompProfile::Network);
 
-        // sockaddr_in 长度 = 16（args[5]）
+        // sockaddr_in length = 16 (args[5]).
         let sockaddr_in = FakeSeccompData::new(RECVFROM).with_arg(5, 16);
         assert_eq!(run_bpf(&program, sockaddr_in), SECCOMP_RET_ALLOW);
 
-        // sockaddr_storage 最大长度 = 128（args[5]）
+        // sockaddr_storage maximum length = 128 (args[5]).
         let sockaddr_storage = FakeSeccompData::new(RECVFROM).with_arg(5, BIND_MAX_ADDRLEN as u64);
         assert_eq!(run_bpf(&program, sockaddr_storage), SECCOMP_RET_ALLOW);
     }

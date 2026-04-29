@@ -21,26 +21,27 @@ use crate::vm_assets::resolve_vm_assets_dir;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use crate::kvm::{KvmBackend, restore_runtime_state};
 
-/// 返回适合外部错误消息展示的脱敏路径片段。
+/// Returns a sanitized path fragment suitable for external error messages.
 pub(crate) fn sanitize_path_display(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "<path>".to_string())
 }
 
-/// VM 安全配置策略，控制 guest kernel 的安全缓解措施。
+/// VM security profile that controls guest kernel security mitigations.
 ///
-/// `Secure`（默认）保留 Spectre/Meltdown 缓解和内核地址随机化，
-/// 适用于所有生产环境。`Performance` 关闭这些缓解以获得最佳性能，
-/// 仅用于可信环境中的基准测试。
+/// `Secure` (default) keeps Spectre/Meltdown mitigations and kernel address
+/// randomization enabled for production use. `Performance` disables those
+/// mitigations for maximum performance and is intended only for benchmarks in
+/// trusted environments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VmSecurityProfile {
-    /// 保留所有内核安全缓解（默认）。
+    /// Keeps all kernel security mitigations enabled (default).
     #[default]
     Secure,
-    /// 关闭 mitigations=off 和 nokaslr 以获得最佳性能。
-    /// 仅在完全可信环境中使用。
+    /// Disables kernel mitigations and KASLR for maximum performance.
+    /// Use only in fully trusted environments.
     Performance,
 }
 
@@ -62,7 +63,7 @@ pub struct MicrovmConfig {
     pub kernel_path: PathBuf,
     /// Path to the gzip-compressed guest rootfs image on the host.
     pub rootfs_path: PathBuf,
-    /// VM 安全配置策略，控制是否启用内核安全缓解措施。
+    /// VM security profile that controls whether kernel security mitigations are enabled.
     #[serde(default)]
     pub security_profile: VmSecurityProfile,
 }
@@ -599,7 +600,7 @@ impl MicrovmSandbox {
         debug!(
             vcpu_count = microvm_config.vcpu_count,
             memory_mb = microvm_config.memory_mb,
-            "初始化 microVM 沙箱"
+            "initializing microVM sandbox"
         );
         let backend = BackendHandle::create(base_config.clone(), microvm_config.clone())?;
 

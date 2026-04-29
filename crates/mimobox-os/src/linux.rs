@@ -48,7 +48,7 @@ fn create_pipe_cloexec() -> Result<(RawFd, RawFd), SandboxError> {
         // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(SandboxError::PipeError(format!(
-            "pipe2(O_CLOEXEC) 失败: errno={errno}"
+            "pipe2(O_CLOEXEC) failed: errno={errno}"
         )));
     }
     Ok((fds[0], fds[1]))
@@ -84,7 +84,7 @@ const NAMESPACE_FALLBACK_MARKER: &str = "unshare(full_flags) failed";
 const NAMESPACE_FAIL_CLOSED_EXIT_CODE: i32 = 128;
 const CONTAINER_MOUNT_UNAVAILABLE_MARKER: &str = "container_mount_unavailable";
 
-/// 检测 stderr 中是否包含 namespace 降级标记
+/// Detects whether stderr contains the namespace fallback marker.
 fn namespace_fallback_detected(stderr_buf: &[u8]) -> bool {
     let stderr = String::from_utf8_lossy(stderr_buf);
     stderr
@@ -95,7 +95,7 @@ fn namespace_fallback_detected(stderr_buf: &[u8]) -> bool {
 fn log_namespace_fallback_from_stderr(stderr_buf: &[u8]) {
     if namespace_fallback_detected(stderr_buf) {
         tracing::warn!(
-            "命名空间降级: unshare(full_flags) 失败，已回退到不含 user/pid namespace 的隔离模式"
+            "Namespace fallback: unshare(full_flags) failed, falling back to isolation without user/pid namespaces"
         );
     }
 }
@@ -133,22 +133,22 @@ unsafe fn reset_child_environment() -> Result<(), ()> {
     Ok(())
 }
 
-/// 实际应用的隔离级别报告
+/// Report describing the isolation level that was actually applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IsolationReport {
-    /// 是否成功启用 user namespace。
+    /// Whether the user namespace was successfully enabled.
     pub user_namespace: bool,
-    /// 是否成功启用 pid namespace。
+    /// Whether the PID namespace was successfully enabled.
     pub pid_namespace: bool,
-    /// 是否成功启用 network namespace。
+    /// Whether the network namespace was successfully enabled.
     pub network_namespace: bool,
-    /// 是否成功启用 mount namespace。
+    /// Whether the mount namespace was successfully enabled.
     pub mount_namespace: bool,
-    /// 是否成功启用 ipc namespace。
+    /// Whether the IPC namespace was successfully enabled.
     pub ipc_namespace: bool,
-    /// 是否成功启用 Landlock。
+    /// Whether Landlock was successfully enabled.
     pub landlock: bool,
-    /// 是否成功启用 seccomp。
+    /// Whether seccomp was successfully enabled.
     pub seccomp: bool,
 }
 
@@ -230,7 +230,9 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
     let limit_bytes = limit_mb
         .checked_mul(1024)
         .and_then(|value| value.checked_mul(1024))
-        .ok_or_else(|| format!("memory_limit_mb={limit_mb} 转换为字节时溢出"))?;
+        .ok_or_else(|| {
+            format!("memory_limit_mb={limit_mb} overflowed while converting to bytes")
+        })?;
     // IMPORTANT-03 修复：rlim_max 设为与 rlim_cur 相同，防止子进程提高内存限制
     let rlim = libc::rlimit {
         rlim_cur: limit_bytes,
@@ -242,7 +244,7 @@ fn set_memory_limit(limit_mb: u64) -> Result<(), String> {
         // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
         return Err(format!(
-            "setrlimit(RLIMIT_AS, {limit_mb}MB) 失败: errno={errno}"
+            "setrlimit(RLIMIT_AS, {limit_mb}MB) failed: errno={errno}"
         ));
     }
     Ok(())
@@ -333,7 +335,7 @@ fn configure_sandbox_cgroup(
 ) -> Result<Option<PathBuf>, SandboxError> {
     if !cgroup_v2_available(root) {
         tracing::warn!(
-            "cgroup v2 不可用，跳过 pids.max 进程数限制: root={}",
+            "cgroup v2 unavailable, skipping pids.max process limit: root={}",
             root.display()
         );
         return Ok(None);
@@ -342,7 +344,7 @@ fn configure_sandbox_cgroup(
     let cgroup_path = sandbox_cgroup_path(root, pid);
     if let Err(error) = fs::create_dir_all(&cgroup_path) {
         tracing::warn!(
-            "创建 cgroup 失败，跳过 pids.max 进程数限制: path={}, error={error}",
+            "Failed to create cgroup, skipping pids.max process limit: path={}, error={error}",
             cgroup_path.display()
         );
         if config.cpu_quota_us.is_some() {
@@ -354,7 +356,7 @@ fn configure_sandbox_cgroup(
     if let Err(error) = fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
         cleanup_cgroup(&cgroup_path);
         tracing::error!(
-            "写入 cgroup pids.max 失败，拒绝继续执行: path={}, max_processes={}, error={error}",
+            "Failed to write cgroup pids.max, refusing to continue: path={}, max_processes={}, error={error}",
             cgroup_path.display(),
             effective_max_processes(config)
         );
@@ -362,7 +364,7 @@ fn configure_sandbox_cgroup(
     }
 
     if config.cpu_quota_us.is_some() {
-        // 写入 cpu.max，格式为 "quota period"；"max period" 表示不限制。
+        // Write cpu.max as "quota period"; "max period" means unlimited.
         if let Err(error) = fs::write(cgroup_path.join("cpu.max"), format_cpu_max(config)) {
             cleanup_cgroup(&cgroup_path);
             return Err(error.into());
@@ -372,7 +374,7 @@ fn configure_sandbox_cgroup(
     if let Err(error) = fs::write(cgroup_path.join("cgroup.procs"), pid.to_string()) {
         cleanup_cgroup(&cgroup_path);
         tracing::warn!(
-            "写入 cgroup.procs 失败，跳过 pids.max 进程数限制: path={}, pid={pid}, error={error}",
+            "Failed to write cgroup.procs, skipping pids.max process limit: path={}, pid={pid}, error={error}",
             cgroup_path.display()
         );
         if config.cpu_quota_us.is_some() {
@@ -387,7 +389,10 @@ fn configure_sandbox_cgroup(
 #[cfg(target_os = "linux")]
 fn cleanup_cgroup(path: &Path) {
     if let Err(error) = fs::remove_dir(path) {
-        tracing::debug!("清理 cgroup 失败: path={}, error={error}", path.display());
+        tracing::debug!(
+            "Failed to clean up cgroup: path={}, error={error}",
+            path.display()
+        );
     }
 }
 
@@ -482,7 +487,7 @@ where
                 data.extend_from_slice(&chunk[..remaining]);
                 on_limit();
                 tracing::warn!(
-                    "{label} 输出超过 {} 字节上限，已截断并终止子进程组",
+                    "{label} output exceeded {} byte limit, truncated and terminated child process group",
                     OUTPUT_SIZE_LIMIT
                 );
                 return OutputCapture {
@@ -531,14 +536,14 @@ fn receive_output_capture(rx: Receiver<OutputCapture>, label: &'static str) -> O
         Err(error) => OutputCapture {
             data: Vec::new(),
             truncated: false,
-            read_error: Some(format!("{label} 读取线程异常退出: {error}")),
+            read_error: Some(format!("{label} reader thread exited abnormally: {error}")),
         },
     }
 }
 
 fn log_output_read_error(label: &'static str, capture: &OutputCapture) {
     if let Some(error) = &capture.read_error {
-        tracing::warn!("读取 {label} 失败: {error}");
+        tracing::warn!("Failed to read {label}: {error}");
     }
 }
 
@@ -617,7 +622,7 @@ fn apply_security_policies_and_exec(
             // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
             let errno = unsafe { *libc::__errno_location() };
             tracing::warn!(
-                "setrlimit(RLIMIT_NPROC, {}) 失败: errno={}，fork bomb 兜底防护未生效",
+                "setrlimit(RLIMIT_NPROC, {}) failed: errno={}, fork bomb fallback protection was not applied",
                 effective_max_processes(config),
                 errno,
             );
@@ -767,7 +772,7 @@ fn apply_security_policies_and_exec(
     // 4.5 SIGSYS handler（已移除）
     // 不在此处注册 SIGSYS handler，因为 execve() 会将所有自定义信号处理器重置为 SIG_DFL。
     // TRAP 模式的价值在于：进程以 SIGSYS 终止（exit_code=159），内核审计可记录。
-    // 详见上方 "SIGSYS handler 说明（已移除）" 注释。
+    // See the "SIGSYS handler notes (removed)" comment above.
 
     // 5. 应用 Seccomp-bpf 过滤（在 exec 之前最后应用）
     // 致命 #3 修复：Seccomp 在所有安全策略配置完成后、exec 之前立即应用
@@ -823,7 +828,7 @@ impl LinuxSandbox {
         }
     }
 
-    /// 返回最近一次执行的隔离级别报告
+    /// Returns the isolation-level report from the most recent execution.
     pub fn isolation_report(&self) -> IsolationReport {
         self.last_isolation_report
     }
@@ -1064,7 +1069,7 @@ impl Sandbox for LinuxSandbox {
         config.validate()?;
 
         tracing::info!(
-            "创建沙箱, seccomp={:?}, allow_fork={}, timeout={:?}s",
+            "Creating sandbox, seccomp={:?}, allow_fork={}, timeout={:?}s",
             config.seccomp_profile,
             config.allow_fork,
             config.timeout_secs
@@ -1088,7 +1093,7 @@ impl Sandbox for LinuxSandbox {
         self.cleanup_last_cgroup();
 
         // SECURITY: 只记录可执行文件基名和参数个数，避免把 argv 中的 token/路径写入日志。
-        tracing::info!("执行命令: {}", command_log_summary(cmd));
+        tracing::info!("Executing command: {}", command_log_summary(cmd));
         let start = Instant::now();
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
@@ -1218,7 +1223,7 @@ impl Sandbox for LinuxSandbox {
                     WaitStatus::Exited(_, code) => {
                         if code == NAMESPACE_FAIL_CLOSED_EXIT_CODE {
                             return Err(SandboxError::NamespaceFailed(
-                                "namespace 创建失败 (fail-closed)：user/pid namespace 不可用，拒绝降级执行"
+                                "namespace creation failed (fail-closed): user/pid namespaces are unavailable, refusing degraded execution"
                                     .to_string(),
                             ));
                         }
@@ -1229,7 +1234,7 @@ impl Sandbox for LinuxSandbox {
                             &stderr_buf,
                         );
                         tracing::info!(
-                            "子进程退出, code={}, elapsed={:.2}ms",
+                            "Child process exited, code={}, elapsed={:.2}ms",
                             code,
                             elapsed.as_secs_f64() * 1000.0
                         );
@@ -1250,12 +1255,12 @@ impl Sandbox for LinuxSandbox {
                         let code = -(sig as i32);
                         if timed_out {
                             tracing::warn!(
-                                "子进程因超时被终止 (SIGKILL), elapsed={:.2}ms",
+                                "Child process terminated due to timeout (SIGKILL), elapsed={:.2}ms",
                                 elapsed.as_secs_f64() * 1000.0
                             );
                         } else {
                             tracing::info!(
-                                "子进程被信号终止: {:?}, elapsed={:.2}ms",
+                                "Child process terminated by signal: {:?}, elapsed={:.2}ms",
                                 sig,
                                 elapsed.as_secs_f64() * 1000.0
                             );
@@ -1316,7 +1321,7 @@ impl Sandbox for LinuxSandbox {
         }
 
         tracing::info!(
-            "创建 Linux PTY 会话: {}",
+            "Creating Linux PTY session: {}",
             command_log_summary(&config.command)
         );
 
@@ -1426,8 +1431,10 @@ impl Sandbox for LinuxSandbox {
 
 /// # Safety
 ///
-/// 仅在 fork 后的子进程中调用，用于清除环境变量并设置 PTY 所需的子进程环境。
-/// 在 fork 后、exec 前调用是安全的，因为此时子进程为单线程状态，环境变量修改不会影响其他线程。
+/// Only called in the post-fork child process to clear environment variables
+/// and set the child environment required for PTY execution.
+/// Calling this after `fork` and before `exec` is safe because the child is
+/// single-threaded, so environment mutation cannot affect other threads.
 unsafe fn reset_child_environment_for_pty(config: &mimobox_core::PtyConfig) -> Result<(), ()> {
     // SAFETY: Called only in the forked child before exec; clearing its process environment is local.
     if unsafe { libc::clearenv() } != 0 {
@@ -1518,28 +1525,40 @@ mod tests {
     #[test]
     fn set_memory_limit_rejects_mib_to_bytes_overflow() {
         let error = set_memory_limit(u64::MAX)
-            .expect_err("memory_limit_mb 转换为 bytes 溢出时必须返回错误");
+            .expect_err("memory_limit_mb conversion to bytes must return an overflow error");
 
         assert!(error.contains("memory_limit_mb"));
-        assert!(error.contains("溢出"));
+        assert!(error.contains("overflowed"));
     }
 
     #[test]
     fn test_isolation_report_default_all_true() {
         let report = IsolationReport::default();
-        assert!(report.user_namespace, "默认 user_namespace 应为 true");
-        assert!(report.pid_namespace, "默认 pid_namespace 应为 true");
-        assert!(report.network_namespace, "默认 network_namespace 应为 true");
-        assert!(report.mount_namespace, "默认 mount_namespace 应为 true");
-        assert!(report.ipc_namespace, "默认 ipc_namespace 应为 true");
-        assert!(report.landlock, "默认 landlock 应为 true");
-        assert!(report.seccomp, "默认 seccomp 应为 true");
+        assert!(
+            report.user_namespace,
+            "default user_namespace should be true"
+        );
+        assert!(report.pid_namespace, "default pid_namespace should be true");
+        assert!(
+            report.network_namespace,
+            "default network_namespace should be true"
+        );
+        assert!(
+            report.mount_namespace,
+            "default mount_namespace should be true"
+        );
+        assert!(report.ipc_namespace, "default ipc_namespace should be true");
+        assert!(report.landlock, "default landlock should be true");
+        assert!(report.seccomp, "default seccomp should be true");
     }
 
     #[test]
     fn test_namespace_fallback_detected_with_marker() {
         let stderr = b"some output\nunshare(full_flags) failed: EPERM, retrying without user/pid ns\nmore output";
-        assert!(namespace_fallback_detected(stderr), "应检测到降级 marker");
+        assert!(
+            namespace_fallback_detected(stderr),
+            "should detect fallback marker"
+        );
     }
 
     #[test]
@@ -1547,7 +1566,7 @@ mod tests {
         let stderr = b"normal output without any fallback marker";
         assert!(
             !namespace_fallback_detected(stderr),
-            "不应检测到降级 marker"
+            "should not detect fallback marker"
         );
     }
 
@@ -1558,25 +1577,46 @@ mod tests {
 
         apply_namespace_fallback_to_report(&mut report, stderr);
 
-        assert!(!report.user_namespace, "降级后 user_namespace 应为 false");
-        assert!(!report.pid_namespace, "降级后 pid_namespace 应为 false");
+        assert!(
+            !report.user_namespace,
+            "user_namespace should be false after fallback"
+        );
+        assert!(
+            !report.pid_namespace,
+            "pid_namespace should be false after fallback"
+        );
         assert!(
             report.network_namespace,
-            "network namespace 不应被标记为降级"
+            "network namespace should not be marked as degraded"
         );
-        assert!(report.mount_namespace, "mount namespace 不应被标记为降级");
-        assert!(report.ipc_namespace, "ipc namespace 不应被标记为降级");
-        assert!(report.landlock, "Landlock 不应被 namespace 降级影响");
-        assert!(report.seccomp, "Seccomp 不应被 namespace 降级影响");
+        assert!(
+            report.mount_namespace,
+            "mount namespace should not be marked as degraded"
+        );
+        assert!(
+            report.ipc_namespace,
+            "ipc namespace should not be marked as degraded"
+        );
+        assert!(
+            report.landlock,
+            "Landlock should not be affected by namespace fallback"
+        );
+        assert!(
+            report.seccomp,
+            "Seccomp should not be affected by namespace fallback"
+        );
     }
 
     #[test]
     fn test_isolation_report_initial_state() {
         let config = SandboxConfig::default();
-        let sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let sb = LinuxSandbox::new(config).expect("failed to create sandbox");
         let report = sb.isolation_report();
-        assert!(report.user_namespace, "初始状态 user_namespace 应为 true");
-        assert!(report.pid_namespace, "初始状态 pid_namespace 应为 true");
+        assert!(
+            report.user_namespace,
+            "initial user_namespace should be true"
+        );
+        assert!(report.pid_namespace, "initial pid_namespace should be true");
     }
 
     fn assert_unsupported_operation<T>(operation: &str, result: Result<T, SandboxError>) {
@@ -1598,19 +1638,19 @@ mod tests {
 
     #[test]
     fn test_file_exists_unsupported() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         assert_unsupported_operation("file_exists", sb.file_exists("/tmp/mimobox_exists_test"));
     }
 
     #[test]
     fn test_remove_file_unsupported() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         assert_unsupported_operation("remove_file", sb.remove_file("/tmp/mimobox_remove_test"));
     }
 
     #[test]
     fn test_rename_unsupported() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         assert_unsupported_operation(
             "rename",
             sb.rename("/tmp/mimobox_rename_src", "/tmp/mimobox_rename_dst"),
@@ -1619,13 +1659,13 @@ mod tests {
 
     #[test]
     fn test_stat_unsupported() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         assert_unsupported_operation("stat", sb.stat("/tmp/mimobox_stat_test"));
     }
 
     #[test]
     fn test_list_dir_unsupported() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         assert_unsupported_operation("list_dir", sb.list_dir("/tmp"));
     }
 
@@ -1649,9 +1689,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_create_and_execute() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         let cmd = vec!["/bin/echo".to_string(), "hello test".to_string()];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         if result.exit_code == Some(125) {
             eprintln!(
@@ -1659,12 +1699,12 @@ mod tests {
             );
             return;
         }
-        assert!(!result.timed_out, "不应超时");
-        assert_eq!(result.exit_code, Some(0), "退出码应为 0");
+        assert!(!result.timed_out, "should not time out");
+        assert_eq!(result.exit_code, Some(0), "exit code should be 0");
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(
             stdout.contains("hello test"),
-            "stdout 应包含输出, 实际: {stdout}"
+            "stdout should contain output, actual: {stdout}"
         );
     }
 
@@ -1674,13 +1714,13 @@ mod tests {
     fn test_sandbox_exit_code() {
         let mut config = test_config();
         config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
         let cmd = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
             "exit 42".to_string(),
         ];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         if result.exit_code == Some(125) {
             eprintln!(
@@ -1688,7 +1728,7 @@ mod tests {
             );
             return;
         }
-        assert_eq!(result.exit_code, Some(42), "退出码应为 42");
+        assert_eq!(result.exit_code, Some(42), "exit code should be 42");
     }
 
     #[test]
@@ -1706,16 +1746,16 @@ mod tests {
             "/sbin".into(),
             "/proc".into(),
         ];
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
 
         let cmd = vec!["/bin/cat".to_string(), "/proc/net/dev".to_string()];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         let stdout = String::from_utf8_lossy(&result.stdout);
         // CLONE_NEWNET 下只有 loopback 接口
         assert!(
             stdout.contains("lo") || stdout.contains("Inter-"),
-            "网络应被隔离（仅有 lo）, stdout: {stdout}, exit: {:?}",
+            "network should be isolated (lo only), stdout: {stdout}, exit: {:?}",
             result.exit_code
         );
     }
@@ -1725,7 +1765,7 @@ mod tests {
     fn test_fs_isolation() {
         let mut config = test_config();
         config.allow_fork = true;
-        let mut sb = LinuxSandbox::new(config.clone()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config.clone()).expect("failed to create sandbox");
 
         // sh -c 用 /bin/echo 写入 /tmp（应成功，因为在 fs_readwrite 中）
         let cmd = vec![
@@ -1733,7 +1773,7 @@ mod tests {
             "-c".to_string(),
             "/bin/echo test > /tmp/mimobox_test_fs".to_string(),
         ];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
         if result.exit_code == Some(125) {
             eprintln!(
                 "skipping: execvp failed, CI environment may lack complete filesystem isolation"
@@ -1743,19 +1783,22 @@ mod tests {
         assert_eq!(
             result.exit_code,
             Some(0),
-            "写入 /tmp 失败: {:?}",
+            "writing to /tmp failed: {:?}",
             result.stderr
         );
 
         // 用 /bin/cat 读取验证
-        let mut sb2 = LinuxSandbox::new(config.clone()).expect("创建沙箱失败");
+        let mut sb2 = LinuxSandbox::new(config.clone()).expect("failed to create sandbox");
         let cmd2 = vec!["/bin/cat".to_string(), "/tmp/mimobox_test_fs".to_string()];
-        let result2 = sb2.execute(&cmd2).expect("读取失败");
+        let result2 = sb2.execute(&cmd2).expect("read failed");
         let stdout = String::from_utf8_lossy(&result2.stdout);
-        assert!(stdout.contains("test"), "应能读写 /tmp, stdout: {stdout}");
+        assert!(
+            stdout.contains("test"),
+            "should be able to read and write /tmp, stdout: {stdout}"
+        );
 
         // 清理
-        let mut sb3 = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb3 = LinuxSandbox::new(config).expect("failed to create sandbox");
         let _ = sb3.execute(&vec![
             "/bin/rm".to_string(),
             "-f".to_string(),
@@ -1777,21 +1820,21 @@ mod tests {
             "/sbin".into(),
         ];
         config.fs_readwrite = vec!["/tmp".into()];
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
 
         let cmd = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
             "echo test > /usr/mimobox_test_ro 2>&1; echo exit_code=$?".to_string(),
         ];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(
             stdout.contains("Permission denied")
                 || stdout.contains("Read-only")
                 || (stdout.contains("exit_code=") && !stdout.contains("exit_code=0")),
-            "写入 /usr 应被拒绝, stdout: {stdout}, exit: {:?}",
+            "writing to /usr should be denied, stdout: {stdout}, exit: {:?}",
             result.exit_code
         );
     }
@@ -1801,21 +1844,21 @@ mod tests {
         let mut config = test_config();
         config.allow_fork = false;
         config.seccomp_profile = SeccompProfile::Essential;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
 
-        // dash 对 `sh -c "单个外部命令"` 会直接 execve，不会先 fork。
+        // dash directly execve's `sh -c "single external command"` without forking first.
         // 两个外部命令可迫使 shell 为第一个命令 fork，从而验证 seccomp 拦截。
         let cmd = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
             "/bin/echo parent; /bin/echo child".to_string(),
         ];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         // seccomp 会 kill 尝试 fork 的进程
         assert!(
             result.exit_code != Some(0),
-            "fork 应被 seccomp 阻止, exit_code: {:?}",
+            "fork should be blocked by seccomp, exit_code: {:?}",
             result.exit_code
         );
     }
@@ -1824,10 +1867,10 @@ mod tests {
     fn test_timeout() {
         let mut config = test_config();
         config.timeout_secs = Some(1);
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
 
         let cmd = vec!["/bin/sleep".to_string(), "60".to_string()];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         if result.exit_code == Some(125) {
             eprintln!(
@@ -1835,7 +1878,7 @@ mod tests {
             );
             return;
         }
-        assert!(result.timed_out, "应超时");
+        assert!(result.timed_out, "should time out");
     }
 
     #[test]
@@ -1843,7 +1886,7 @@ mod tests {
         // 设置极低的内存限制
         let mut config = test_config();
         config.memory_limit_mb = Some(8);
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
 
         // 尝试分配大量内存（超过 8MB）
         let cmd = vec![
@@ -1853,13 +1896,13 @@ mod tests {
             "dd if=/dev/zero bs=1M count=32 2>/dev/null | cat > /dev/null; echo exit=$?"
                 .to_string(),
         ];
-        let result = sb.execute(&cmd).expect("执行失败");
+        let result = sb.execute(&cmd).expect("execution failed");
 
         // 应该因内存限制而失败或被 kill
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(
             result.exit_code != Some(0) || stdout.contains("exit="),
-            "内存限制应生效, exit_code: {:?}, stdout: {}",
+            "memory limit should be enforced, exit_code: {:?}, stdout: {}",
             result.exit_code,
             stdout
         );
@@ -1879,7 +1922,7 @@ mod tests {
         config.fs_readwrite = vec!["/tmp".into()];
         config.allow_fork = true;
         config.memory_limit_mb = None;
-        let mut sb = LinuxSandbox::new(config).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
         let mut session = sb
             .create_pty(mimobox_core::PtyConfig {
                 command: vec!["/bin/cat".to_string()],
@@ -1888,11 +1931,11 @@ mod tests {
                 cwd: None,
                 timeout: Some(Duration::from_secs(5)),
             })
-            .expect("创建 PTY 会话失败");
+            .expect("failed to create PTY session");
 
         session
             .send_input(b"hello-pty\n")
-            .expect("发送 PTY 输入失败");
+            .expect("failed to send PTY input");
 
         // 给 PTY 回显一点时间
         std::thread::sleep(Duration::from_millis(200));
@@ -1905,20 +1948,20 @@ mod tests {
         if !output_str.is_empty() {
             assert!(
                 output_str.contains("hello-pty"),
-                "PTY 输出应包含回显结果, 实际: {output_str}"
+                "PTY output should contain echo result, actual: {output_str}"
             );
         }
 
-        session.kill().expect("终止 PTY 会话失败");
+        session.kill().expect("failed to terminate PTY session");
         assert!(
-            session.wait().expect("等待 PTY 退出失败") < 0,
-            "基础回显测试结束后应返回信号退出码"
+            session.wait().expect("failed to wait for PTY exit") < 0,
+            "basic echo test should return a signal exit code after termination"
         );
     }
 
     #[test]
     fn test_pty_resize() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         let mut session = sb
             .create_pty(mimobox_core::PtyConfig {
                 command: vec!["/bin/cat".to_string()],
@@ -1927,17 +1970,17 @@ mod tests {
                 cwd: None,
                 timeout: Some(Duration::from_secs(5)),
             })
-            .expect("创建 PTY 会话失败");
+            .expect("failed to create PTY session");
 
         session
             .resize(mimobox_core::PtySize {
                 cols: 120,
                 rows: 40,
             })
-            .expect("调整 PTY 尺寸失败");
+            .expect("failed to resize PTY");
 
-        session.kill().expect("终止 PTY 会话失败");
-        let exit_code = session.wait().expect("等待 PTY 退出失败");
+        session.kill().expect("failed to terminate PTY session");
+        let exit_code = session.wait().expect("failed to wait for PTY exit");
         if exit_code == 125 {
             eprintln!(
                 "skipping: execvp failed, CI environment may lack \
@@ -1945,12 +1988,15 @@ mod tests {
             );
             return;
         }
-        assert!(exit_code < 0, "被终止的 PTY 应返回信号退出码");
+        assert!(
+            exit_code < 0,
+            "terminated PTY should return a signal exit code"
+        );
     }
 
     #[test]
     fn test_pty_kill() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         let mut session = sb
             .create_pty(mimobox_core::PtyConfig {
                 command: vec!["/bin/cat".to_string()],
@@ -1959,11 +2005,11 @@ mod tests {
                 cwd: None,
                 timeout: Some(Duration::from_secs(5)),
             })
-            .expect("创建 PTY 会话失败");
+            .expect("failed to create PTY session");
 
-        session.kill().expect("终止 PTY 会话失败");
+        session.kill().expect("failed to terminate PTY session");
 
-        let exit_code = session.wait().expect("等待 PTY 退出失败");
+        let exit_code = session.wait().expect("failed to wait for PTY exit");
         if exit_code == 125 {
             eprintln!(
                 "skipping: execvp failed, CI environment may lack \
@@ -1971,21 +2017,27 @@ mod tests {
             );
             return;
         }
-        assert!(exit_code < 0, "kill 后应返回信号退出码, 实际: {exit_code}");
+        assert!(
+            exit_code < 0,
+            "kill should return a signal exit code, actual: {exit_code}"
+        );
     }
 
     #[test]
     fn test_empty_command_error() {
-        let mut sb = LinuxSandbox::new(test_config()).expect("创建沙箱失败");
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
         let result = sb.execute(&[]);
-        assert!(result.is_err(), "空命令应返回错误");
+        assert!(result.is_err(), "empty command should return an error");
     }
 
     #[test]
     fn test_child_env_pairs_is_minimal_allowlist() {
         let names = child_env_pairs()
             .iter()
-            .map(|(name, _)| name.to_str().expect("环境变量名应为 UTF-8"))
+            .map(|(name, _)| {
+                name.to_str()
+                    .expect("environment variable name should be UTF-8")
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -1993,13 +2045,13 @@ mod tests {
             vec![
                 "PATH", "HOME", "TERM", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "TMPDIR"
             ],
-            "子进程环境变量应保持最小白名单"
+            "child environment variables should stay on the minimal allowlist"
         );
         assert!(
             !names
                 .iter()
                 .any(|name| matches!(*name, "LD_PRELOAD" | "BASH_ENV" | "ENV")),
-            "危险环境变量不应进入白名单"
+            "dangerous environment variables should not enter the allowlist"
         );
     }
 
@@ -2048,7 +2100,10 @@ fn waitpid_with_timeout(
             Ok((result?, false))
         }
         Err(RecvTimeoutError::Timeout) => {
-            tracing::warn!("子进程超时 ({:.1}s)，发送 SIGKILL", timeout.as_secs_f64());
+            tracing::warn!(
+                "Child process timeout ({:.1}s), sending SIGKILL",
+                timeout.as_secs_f64()
+            );
             // SECURITY: 以负 PID 发送 SIGKILL，确保整个沙箱进程组（含 re-exec 孙进程）被回收，
             // 避免 supervisor 超时后留下孤儿子进程或 zombie 清理链。
             kill_process_group(child.as_raw(), Signal::SIGKILL);

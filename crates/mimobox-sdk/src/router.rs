@@ -3,7 +3,7 @@ use crate::error::SdkError;
 #[cfg(not(all(feature = "vm", target_os = "linux")))]
 use mimobox_core::ErrorCode;
 
-/// 智能路由器：根据命令内容和信任级别自动选择最优隔离层级
+/// Smart router: automatically selects the best isolation layer by command and trust level.
 pub(crate) fn resolve_isolation(
     config: &Config,
     command: &str,
@@ -43,27 +43,27 @@ pub(crate) fn resolve_isolation(
     }
 }
 
-/// 自动路由逻辑
+/// Automatic routing logic.
 fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, SdkError> {
-    // TrustLevel::Untrusted 必须先于 Wasm 文件检测处理，避免 .wasm/.wat/.wast
-    // 通过轻量 Wasm 路由绕过 microVM 的 fail-closed 边界。
+    // TrustLevel::Untrusted must be handled before Wasm file detection to prevent .wasm/.wat/.wast
+    // from bypassing the microVM fail-closed boundary through lightweight routing.
     if trust_level == TrustLevel::Untrusted {
         return require_microvm_for_untrusted();
     }
 
-    // 优先检测 Wasm 文件
+    // Prefer Wasm file detection.
     if is_wasm_command(command) {
         #[cfg(feature = "wasm")]
         return Ok(IsolationLevel::Wasm);
 
         #[cfg(not(feature = "wasm"))]
         {
-            // Wasm 不可用，fallback 到 OS 级
-            tracing::debug!("Wasm 后端不可用，fallback 到 OS 级");
+            // Wasm is unavailable; fall back to OS level.
+            tracing::debug!("Wasm backend unavailable, falling back to OS level");
         }
     }
 
-    // 默认走 OS 级
+    // Default to OS level.
     #[cfg(feature = "os")]
     return Ok(IsolationLevel::Os);
 
@@ -88,8 +88,8 @@ fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
 }
 
 fn is_wasm_command(command: &str) -> bool {
-    // SECURITY: 只检查命令的第一个 token（可执行文件路径），避免参数中的 .wasm 后缀
-    // 导致错误路由。例如 "run module.wasm --arg" 不应被路由到 Wasm 后端。
+    // SECURITY: Only check the command first token (executable path), so a .wasm suffix in an argument
+    // does not cause incorrect routing. For example, "run module.wasm --arg" should not route to the Wasm backend.
     let first_token = command.split_whitespace().next().unwrap_or(command);
     first_token.ends_with(".wasm")
         || first_token.ends_with(".wat")
@@ -141,7 +141,7 @@ mod tests {
                     Some("Use IsolationLevel::Os as alternative")
                 );
             }
-            other => panic!("期望 fail-closed 的结构化错误，实际为: {other:?}"),
+            other => panic!("expected structured fail-closed error, got: {other:?}"),
         }
     }
 
@@ -168,8 +168,10 @@ mod tests {
                     Some("Use IsolationLevel::Os as alternative")
                 );
             }
-            Ok(IsolationLevel::Wasm) => panic!("Untrusted .wasm 不应路由到 Wasm 后端"),
-            other => panic!("期望 Untrusted .wasm fail-closed 或进入 MicroVm，实际为: {other:?}"),
+            Ok(IsolationLevel::Wasm) => panic!("Untrusted .wasm should not route to Wasm backend"),
+            other => {
+                panic!("expected Untrusted .wasm to fail closed or use MicroVm, got: {other:?}")
+            }
         }
     }
 

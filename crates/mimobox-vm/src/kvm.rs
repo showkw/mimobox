@@ -466,7 +466,7 @@ impl KvmBackend {
                     region_index,
                     len,
                     error = %err,
-                    "guest memory huge page 提示失败，继续使用默认页"
+                    "guest memory huge page hint failed; continuing with default pages"
                 );
             }
         }
@@ -487,7 +487,7 @@ impl KvmBackend {
         info!(
             vcpu_count = config.vcpu_count,
             memory_mb = config.memory_mb,
-            "创建 KVM microVM"
+            "creating KVM microVM"
         );
 
         let kvm_open_started_at = Instant::now();
@@ -513,7 +513,7 @@ impl KvmBackend {
             libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
         }
         crate::host_seccomp::apply_host_seccomp()
-            .map_err(|e| MicrovmError::Backend(format!("host seccomp 应用失败: {e}")))?;
+            .map_err(|e| MicrovmError::Backend(format!("failed to apply host seccomp: {e}")))?;
 
         let vm_arch_setup_started_at = Instant::now();
         #[cfg(target_arch = "x86_64")]
@@ -750,7 +750,7 @@ impl KvmBackend {
 
         result.map(|()| {
             let duration = started_at.elapsed();
-            info!(elapsed = ?duration, "readiness probe 完成");
+            info!(elapsed = ?duration, "readiness probe completed");
             duration
         })
     }
@@ -784,7 +784,7 @@ impl KvmBackend {
 
         result.map(|()| {
             let duration = started_at.elapsed();
-            info!(elapsed = ?duration, "guest /sandbox 清理完成");
+            info!(elapsed = ?duration, "guest /sandbox cleanup completed");
             duration
         })
     }
@@ -796,7 +796,7 @@ impl KvmBackend {
             Err(err) => {
                 warn!(
                     error = %err,
-                    "guest /sandbox 清理失败，继续清理 host 端回收状态"
+                    "guest /sandbox cleanup failed; continuing host-side recycle cleanup"
                 );
                 self.guest_ready = false;
                 false
@@ -824,36 +824,36 @@ impl KvmBackend {
             total = ?profile.create_vm_total,
             cold_start_total = ?profile.cold_start_total(),
             boot_wait = ?profile.boot_wait,
-            "[create_vm] 性能概览"
+            "[create_vm] performance overview"
         );
         info!(
             kvm_fd_open = ?profile.kvm_fd_open,
             kvm_create_vm = ?profile.kvm_create_vm,
             arch_setup = ?profile.vm_arch_setup,
-            "[create_vm] KVM 初始化耗时"
+            "[create_vm] KVM initialization timing"
         );
         info!(
             guest_memory_mmap = ?profile.guest_memory_mmap,
             kernel_elf_load = ?profile.kernel_elf_load,
             rootfs_write = ?profile.rootfs_write,
-            "[create_vm] guest 资源加载耗时"
+            "[create_vm] guest asset loading timing"
         );
         info!(
             kvm_set_user_memory_region = ?profile.kvm_set_user_memory_region,
             vcpu_creation = ?profile.vcpu_creation,
-            "[create_vm] 内存注册与 vCPU 创建耗时"
+            "[create_vm] memory registration and vCPU creation timing"
         );
         info!(
             vcpu_register_config = ?profile.vcpu_register_config,
             cpuid_config = ?profile.cpuid_config,
             boot_params = ?profile.boot_params,
-            "[create_vm] vCPU 与启动参数配置耗时"
+            "[create_vm] vCPU and boot parameter configuration timing"
         );
         info!(
             kernel = ?profile.kernel_asset_read,
             rootfs = ?profile.rootfs_asset_read,
             create_vm_misc = ?profile.create_vm_misc(),
-            "[create_vm] 资产读取与其他耗时"
+            "[create_vm] asset read and miscellaneous timing"
         );
     }
 
@@ -879,33 +879,33 @@ impl KvmBackend {
     pub(crate) fn emit_restore_profile_without_resume(&self, profile: &RestoreProfile) {
         info!(
             total_without_resume = ?profile.total_without_resume(),
-            "[snapshot-restore] 恢复性能概览"
+            "[snapshot-restore] restore performance overview"
         );
         info!(
             kvm_fd_open = ?profile.kvm_fd_open,
             kvm_create_vm = ?profile.kvm_create_vm,
             arch_setup = ?profile.vm_arch_setup,
-            "[snapshot-restore] KVM 初始化耗时"
+            "[snapshot-restore] KVM initialization timing"
         );
         info!(
             guest_memory_mmap = ?profile.guest_memory_mmap,
             kvm_set_user_memory_region = ?profile.kvm_set_user_memory_region,
             vcpu_creation = ?profile.vcpu_creation,
-            "[snapshot-restore] 内存注册与 vCPU 创建耗时"
+            "[snapshot-restore] memory registration and vCPU creation timing"
         );
         info!(
             memory_state_write = ?profile.memory_state_write,
             cpuid_config = ?profile.cpuid_config,
-            "[snapshot-restore] 内存状态与 CPUID 恢复耗时"
+            "[snapshot-restore] memory state and CPUID restore timing"
         );
         info!(
             vcpu_state_restore = ?profile.vcpu_state_restore,
             device_state_restore = ?profile.device_state_restore,
-            "[snapshot-restore] vCPU 与设备状态恢复耗时"
+            "[snapshot-restore] vCPU and device state restore timing"
         );
         info!(
-            resume_kvm_run = "待首个 KVM_RUN 实测",
-            "[snapshot-restore] KVM_RUN 恢复耗时待测"
+            resume_kvm_run = "pending first KVM_RUN measurement",
+            "[snapshot-restore] KVM_RUN restore timing pending"
         );
     }
 
@@ -921,7 +921,7 @@ impl KvmBackend {
         info!(
             resume_kvm_run = ?resume_kvm_run,
             total_with_resume = ?profile.total_with_resume(),
-            "[snapshot-restore] KVM_RUN 恢复完成"
+            "[snapshot-restore] KVM_RUN restore completed"
         );
     }
 
@@ -982,7 +982,7 @@ impl KvmBackend {
     pub fn load_kernel(&mut self) -> Result<(), MicrovmError> {
         debug!(
             bytes = self.kernel_bytes.len(),
-            "按 ELF 装载 guest 内核镜像"
+            "loading guest kernel image from ELF segments"
         );
 
         let entry_point = read_u64_at(&self.kernel_bytes, 24)?;
@@ -1236,7 +1236,7 @@ impl KvmBackend {
             match self.run_command_over_vsock(guest_command.as_bytes()) {
                 Ok(result) => Ok(result),
                 Err(err) => {
-                    warn!(error = %err, "vsock 命令通道执行失败，回退串口协议");
+                    warn!(error = %err, "vsock command channel failed; falling back to serial protocol");
                     self.drop_vsock_channel();
                     self.run_command_over_serial(
                         cmd,
@@ -1517,7 +1517,7 @@ impl KvmBackend {
                             method = request.method,
                             url = request.url,
                             error = %other,
-                            "处理 guest HTTP 代理请求失败"
+                            "failed to handle guest HTTP proxy request"
                         );
                         Ok(())
                     }
@@ -1713,7 +1713,7 @@ impl KvmBackend {
                         warn!(
                             error = %err,
                             timeout_ms = VSOCK_PROBE_TIMEOUT_MILLIS,
-                            "guest vsock 已连接但数据面探针失败，回退串口协议"
+                            "guest vsock connected but data-plane probe failed; falling back to serial protocol"
                         );
                         self.drop_vsock_channel();
                         return Ok(());
@@ -1723,7 +1723,7 @@ impl KvmBackend {
                 }
                 Err(MicrovmError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(err) => {
-                    warn!(error = %err, "建立 guest vsock 连接失败，回退串口协议");
+                    warn!(error = %err, "failed to establish guest vsock connection; falling back to serial protocol");
                     self.drop_vsock_channel();
                     return Ok(());
                 }
@@ -1743,12 +1743,12 @@ impl KvmBackend {
                     ));
                 }
                 Err(err) if watchdog.timed_out() => {
-                    warn!(error = %err, "等待 guest vsock 连接超时，回退串口协议");
+                    warn!(error = %err, "timed out waiting for guest vsock connection; falling back to serial protocol");
                     self.drop_vsock_channel();
                     return Ok(());
                 }
                 Err(err) => {
-                    warn!(error = %err, "推进 guest 进入 vsock 命令循环失败，回退串口协议");
+                    warn!(error = %err, "failed to advance guest into vsock command loop; falling back to serial protocol");
                     self.drop_vsock_channel();
                     return Ok(());
                 }
@@ -1850,7 +1850,7 @@ impl KvmBackend {
                     self.guest_ready = false;
                     self.lifecycle = KvmLifecycle::Destroyed;
                     let SerialResponseCollector::Command(response) = &mut response else {
-                        unreachable!("命令等待阶段必须使用命令响应收集器");
+                        unreachable!("command wait phase must use command response collector");
                     };
                     return Ok(GuestCommandResult {
                         stdout: std::mem::take(&mut response.stdout),
@@ -2247,7 +2247,7 @@ impl KvmBackend {
                         }
                     }
                     data.fill(0);
-                    debug!(addr, size = data.len(), "guest 触发 MMIO 读退出");
+                    debug!(addr, size = data.len(), "guest triggered MMIO read exit");
                     *last_exit_reason = Some(KvmExitReason::Io);
                     Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
                 }
@@ -2269,14 +2269,17 @@ impl KvmBackend {
                             if action == VsockMmioAction::Activated {
                                 debug!(
                                     addr,
-                                    "vsock 设备已激活（guest driver 设置 DRIVER_OK），开始激活 vhost 后端"
+                                    "vsock device activated (guest driver set DRIVER_OK); activating vhost backend"
                                 );
                                 let queues = vsock.queues();
                                 let cid = vsock.guest_cid();
                                 let features = vsock.acked_features();
                                 match activate_vhost_backend(queues, cid, features, guest_memory) {
                                     Ok(()) => {
-                                        info!(guest_cid = cid, "vhost-vsock 后端激活成功");
+                                        info!(
+                                            guest_cid = cid,
+                                            "vhost-vsock backend activated successfully"
+                                        );
                                         if vsock_channel.is_none() {
                                             match VsockCommandChannel::new() {
                                                 Ok(channel) => {
@@ -2286,7 +2289,7 @@ impl KvmBackend {
                                                     warn!(
                                                         guest_cid = cid,
                                                         error = %err,
-                                                        "创建 host vsock 命令通道失败，继续回退串口"
+                                                        "failed to create host vsock command channel; continuing serial fallback"
                                                     );
                                                 }
                                             }
@@ -2298,7 +2301,7 @@ impl KvmBackend {
                                         tracing::warn!(
                                             guest_cid = cid,
                                             error = %err,
-                                            "vhost-vsock 后端激活失败，降级为 MMIO 模拟"
+                                            "vhost-vsock backend activation failed; degrading to MMIO emulation"
                                         );
                                     }
                                 }
@@ -2307,7 +2310,7 @@ impl KvmBackend {
                             return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
                         }
                     }
-                    debug!(addr, size = data.len(), "guest 触发 MMIO 写退出");
+                    debug!(addr, size = data.len(), "guest triggered MMIO write exit");
                     *last_exit_reason = Some(KvmExitReason::Io);
                     Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
                 }
@@ -2338,7 +2341,7 @@ impl KvmBackend {
                         return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
                     }
                     if port == PCI_CONFIG_ADDRESS_REG {
-                        debug!(port, size = data.len(), "忽略 PCI 配置地址写");
+                        debug!(port, size = data.len(), "ignoring PCI config address write");
                         *last_exit_reason = Some(KvmExitReason::Io);
                         return Ok(RunLoopOutcome::Exit(KvmExitReason::Io));
                     }
@@ -2346,7 +2349,11 @@ impl KvmBackend {
                         *last_exit_reason = Some(KvmExitReason::Shutdown);
                         return Ok(RunLoopOutcome::Exit(KvmExitReason::Shutdown));
                     }
-                    debug!(port, size = data.len(), "忽略非串口 PIO 写退出");
+                    debug!(
+                        port,
+                        size = data.len(),
+                        "ignoring non-serial PIO write exit"
+                    );
                     *last_exit_reason = Some(KvmExitReason::Io);
                     Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
                 }
@@ -2368,7 +2375,11 @@ impl KvmBackend {
                         PCI_CONFIG_DATA_REG_START..=PCI_CONFIG_DATA_REG_END => data.fill(0xff),
                         _ => data.fill(0),
                     }
-                    debug!(port, size = data.len(), "响应非串口 PIO 读退出");
+                    debug!(
+                        port,
+                        size = data.len(),
+                        "responding to non-serial PIO read exit"
+                    );
                     *last_exit_reason = Some(KvmExitReason::Io);
                     Ok(RunLoopOutcome::Exit(KvmExitReason::Io))
                 }
@@ -2707,11 +2718,11 @@ mod tests {
         let command = vec!["/bin/echo".to_string(), "test".to_string()];
 
         let payload = encode_command_payload(&command, &HashMap::new(), None, None)
-            .expect("编码命令帧必须成功");
+            .expect("command frame encoding must succeed");
 
         assert!(payload.starts_with(b"EXEC:"));
         assert!(payload.ends_with(b"\n"));
-        let payload_str = String::from_utf8(payload).expect("payload 必须是合法 UTF-8");
+        let payload_str = String::from_utf8(payload).expect("payload must be valid UTF-8");
         // JSON format: {"cmd":"/bin/echo test"}
         assert!(
             payload_str.contains(r#""cmd""#),
@@ -2730,8 +2741,8 @@ mod tests {
 
         let mut buffer = b"PONG\n".to_vec();
         let frame = take_serial_frame(&mut buffer)
-            .expect("解析 PONG 行必须成功")
-            .expect("PONG 行必须被识别");
+            .expect("PONG line must parse successfully")
+            .expect("PONG line must be recognized");
         assert_eq!(frame, SerialFrame::Line("PONG".to_string()));
         assert!(buffer.is_empty(), "PONG 行被取出后缓冲区应清空");
     }
@@ -2742,7 +2753,7 @@ mod tests {
         let env = HashMap::from([("MY_VAR".to_string(), "value".to_string())]);
 
         let payload = build_guest_exec_payload(&command, &env, Some(10), Some("/sandbox"))
-            .expect("构建 EXEC 负载必须成功");
+            .expect("EXEC payload must be built successfully");
 
         assert!(
             payload.contains(r#""cmd""#),
@@ -2759,7 +2770,7 @@ mod tests {
         let path = "/sandbox/raw.bin";
         let data = b"hello\nworld\x00tail";
 
-        let payload = encode_fs_write_payload(path, data).expect("编码 FS:WRITE 必须成功");
+        let payload = encode_fs_write_payload(path, data).expect("FS:WRITE encoding must succeed");
         let header = format!("FS:WRITE:{}:{path}\n{}:", path.len(), data.len()).into_bytes();
 
         assert!(payload.starts_with(&header));
@@ -2778,8 +2789,8 @@ mod tests {
         buffer.push(b'\n');
 
         let frame = take_serial_frame(&mut buffer)
-            .expect("解析 FSRESULT 帧必须成功")
-            .expect("FSRESULT 帧必须被识别");
+            .expect("FSRESULT frame must parse successfully")
+            .expect("FSRESULT frame must be recognized");
 
         assert!(
             matches!(frame, SerialFrame::FsResult(ref result) if result.status == 0 && result.data == expected)
@@ -2795,8 +2806,8 @@ mod tests {
         buffer.push(b'\n');
 
         let frame = take_serial_frame(&mut buffer)
-            .expect("解析 STREAM:STDOUT 帧必须成功")
-            .expect("STREAM:STDOUT 帧必须被识别");
+            .expect("STREAM:STDOUT frame must parse successfully")
+            .expect("STREAM:STDOUT frame must be recognized");
 
         assert!(matches!(
             frame,
@@ -2810,8 +2821,8 @@ mod tests {
     fn test_take_serial_frame_parses_stream_start_and_end() {
         let mut start_buffer = b"STREAM:START:7\n".to_vec();
         let start_frame = take_serial_frame(&mut start_buffer)
-            .expect("解析 STREAM:START 帧必须成功")
-            .expect("STREAM:START 帧必须被识别");
+            .expect("STREAM:START frame must parse successfully")
+            .expect("STREAM:START frame must be recognized");
         assert_eq!(
             start_frame,
             SerialFrame::Stream(SerialProtocolResult::StreamStart(7))
@@ -2820,8 +2831,8 @@ mod tests {
 
         let mut end_buffer = b"STREAM:END:7:-9\n".to_vec();
         let end_frame = take_serial_frame(&mut end_buffer)
-            .expect("解析 STREAM:END 帧必须成功")
-            .expect("STREAM:END 帧必须被识别");
+            .expect("STREAM:END frame must parse successfully")
+            .expect("STREAM:END frame must be recognized");
         assert_eq!(
             end_frame,
             SerialFrame::Stream(SerialProtocolResult::StreamEnd(7, -9))
@@ -2836,8 +2847,8 @@ mod tests {
             format!("{SERIAL_HTTP_REQUEST_PREFIX}7:{}:{json}\n", json.len()).into_bytes();
 
         let frame = take_serial_frame(&mut buffer)
-            .expect("解析 HTTP:REQUEST 帧必须成功")
-            .expect("HTTP:REQUEST 帧必须被识别");
+            .expect("HTTP:REQUEST frame must parse successfully")
+            .expect("HTTP:REQUEST frame must be recognized");
 
         assert!(matches!(
             frame,
@@ -2855,7 +2866,7 @@ mod tests {
     #[test]
     fn test_encode_fs_read_payload_uses_length_prefixed_frame() {
         let path = "/sandbox/example.txt";
-        let payload = encode_fs_read_payload(path).expect("编码 FS:READ 必须成功");
+        let payload = encode_fs_read_payload(path).expect("FS:READ encoding must succeed");
         let expected = format!("FS:READ:{}:{path}\n", path.len()).into_bytes();
 
         assert_eq!(payload, expected);
@@ -2866,8 +2877,8 @@ mod tests {
         let mut response = CommandResponse::default();
 
         let result = parse_serial_line("EXIT:124", &mut response)
-            .expect("解析 EXIT 帧必须成功")
-            .expect("EXIT 帧必须产生命令结果");
+            .expect("EXIT frame must parse successfully")
+            .expect("EXIT frame must produce a command result");
 
         assert_eq!(result.exit_code, Some(124));
         assert!(!result.timed_out, "退出码 124 只能表示用户命令退出码");
@@ -2880,8 +2891,8 @@ mod tests {
         let mut response = CommandResponse::default();
 
         let result = parse_serial_line("EXIT:TIMEOUT", &mut response)
-            .expect("解析 EXIT:TIMEOUT 帧必须成功")
-            .expect("EXIT:TIMEOUT 帧必须产生命令结果");
+            .expect("EXIT:TIMEOUT frame must parse successfully")
+            .expect("EXIT:TIMEOUT frame must produce a command result");
 
         assert_eq!(result.exit_code, None);
         assert!(result.timed_out, "EXIT:TIMEOUT 必须映射为超时");
@@ -2893,20 +2904,20 @@ mod tests {
 
         assert!(
             parse_serial_line("OUTPUT:1:hello\\n", &mut response)
-                .expect("解析 stdout OUTPUT 帧必须成功")
+                .expect("stdout OUTPUT frame must parse successfully")
                 .is_none(),
             "stdout OUTPUT 帧不应直接结束命令"
         );
         assert!(
             parse_serial_line("OUTPUT:2:warn\\tline", &mut response)
-                .expect("解析 stderr OUTPUT 帧必须成功")
+                .expect("stderr OUTPUT frame must parse successfully")
                 .is_none(),
             "stderr OUTPUT 帧不应直接结束命令"
         );
 
         let result = parse_serial_line("EXIT:7", &mut response)
-            .expect("解析 EXIT 帧必须成功")
-            .expect("EXIT 帧必须产生命令结果");
+            .expect("EXIT frame must parse successfully")
+            .expect("EXIT frame must produce a command result");
 
         assert_eq!(result.exit_code, Some(7));
         assert_eq!(result.stdout, b"hello\n");
@@ -2919,14 +2930,14 @@ mod tests {
 
         assert!(
             parse_serial_line("OUTPUT:legacy\\nframe", &mut response)
-                .expect("解析旧格式 OUTPUT 帧必须成功")
+                .expect("legacy OUTPUT frame must parse successfully")
                 .is_none(),
             "旧格式 OUTPUT 帧不应直接结束命令"
         );
 
         let result = parse_serial_line("EXIT:0", &mut response)
-            .expect("解析 EXIT 帧必须成功")
-            .expect("EXIT 帧必须产生命令结果");
+            .expect("EXIT frame must parse successfully")
+            .expect("EXIT frame must produce a command result");
 
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, b"legacy\nframe");
@@ -3020,7 +3031,7 @@ mod tests {
         let signature = entries
             .iter()
             .find(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0)
-            .expect("必须保留 hypervisor 签名叶");
+            .expect("hypervisor signature leaf must be preserved");
         assert_eq!(signature.eax, CPUID_LEAF_TIMING_INFO);
         assert_eq!(signature.ebx, 1);
         assert_eq!(signature.ecx, 2);
@@ -3029,7 +3040,7 @@ mod tests {
         let timing = entries
             .iter()
             .find(|entry| entry.function == CPUID_LEAF_TIMING_INFO && entry.index == 0)
-            .expect("必须注入 timing leaf");
+            .expect("timing leaf must be injected");
         assert_eq!(timing.eax, 2_900_000);
         assert_eq!(timing.ebx, 0);
     }
@@ -3048,7 +3059,7 @@ mod tests {
         let signature = entries
             .iter()
             .find(|entry| entry.function == CPUID_LEAF_KVM_SIGNATURE && entry.index == 0)
-            .expect("缺失签名叶时必须自动补齐");
+            .expect("missing signature leaf must be added automatically");
         assert_eq!(signature.eax, CPUID_LEAF_TIMING_INFO);
         assert_eq!(signature.ebx, 0x4b4d_564b);
         assert_eq!(signature.ecx, 0x564b_4d56);

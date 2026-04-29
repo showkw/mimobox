@@ -181,7 +181,7 @@ impl RestorePoolInner {
                 state.in_use_count = state.in_use_count.saturating_sub(1);
             }
             Err(_) => {
-                warn!("回滚恢复池 in_use 计数失败：状态锁已中毒");
+                warn!("failed to roll back restore pool in_use count: state lock poisoned");
             }
         }
     }
@@ -221,7 +221,7 @@ impl RestorePoolInner {
         let should_replenish = match self.state.lock() {
             Ok(state) => state.idle.len() < self.pool_config.min_size,
             Err(_) => {
-                warn!("检查恢复池补充条件失败：状态锁已中毒");
+                warn!("failed to check restore pool replenishment condition: state lock poisoned");
                 return;
             }
         };
@@ -234,15 +234,15 @@ impl RestorePoolInner {
             Ok(slot) => match self.push_idle_slot(slot) {
                 Ok(true) => {}
                 Ok(false) => {}
-                Err(err) => warn!("回填空壳 VM 失败: {err}"),
+                Err(err) => warn!("failed to refill empty VM slot: {err}"),
             },
-            Err(err) => warn!("创建空壳 VM 失败，无法回填恢复池: {err}"),
+            Err(err) => warn!("failed to create empty VM slot; cannot refill restore pool: {err}"),
         }
     }
 
     fn release_backend(&self, mut backend: KvmBackend) {
         if let Err(err) = backend.shutdown() {
-            warn!("销毁恢复态 VM 失败: {err}");
+            warn!("failed to destroy restored VM: {err}");
         }
 
         match self.state.lock() {
@@ -250,7 +250,7 @@ impl RestorePoolInner {
                 state.in_use_count = state.in_use_count.saturating_sub(1);
             }
             Err(_) => {
-                warn!("释放恢复态 VM 失败：状态锁已中毒");
+                warn!("failed to release restored VM: state lock poisoned");
                 return;
             }
         }
@@ -265,14 +265,14 @@ impl Drop for RestorePoolInner {
         let idle = match self.state.lock() {
             Ok(mut state) => std::mem::take(&mut state.idle),
             Err(_) => {
-                warn!("RestorePool drop 时状态锁已中毒，无法清理 idle slot");
+                warn!("RestorePool drop: state lock poisoned; cannot clean idle slots");
                 return;
             }
         };
         let count = idle.len();
         drop(idle);
         if count > 0 {
-            tracing::debug!(count, "RestorePool drop 清理完成");
+            tracing::debug!(count, "RestorePool drop cleanup completed");
         }
     }
 }
@@ -398,7 +398,7 @@ impl RestorePool {
         match self.inner.state.lock() {
             Ok(state) => state.idle.len(),
             Err(_) => {
-                warn!("查询恢复池空闲槽位失败：状态锁已中毒");
+                warn!("failed to query restore pool idle slots: state lock poisoned");
                 0
             }
         }

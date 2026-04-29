@@ -12,7 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sandbox = Sandbox::with_config(config)?;
 
     println!("LLM Agent + mimobox sandbox demo");
-    println!("Enter a natural language request. The LLM will generate a shell command and run it in the sandbox. Type quit to exit.\n");
+    println!(
+        "Enter a natural language request. The LLM will generate a shell command and run it in the sandbox. Type quit to exit.\n"
+    );
 
     run_agent_loop(&mut sandbox)?;
 

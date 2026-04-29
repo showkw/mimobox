@@ -61,7 +61,9 @@ fn run_preset_tasks(sandbox: &mut Sandbox) -> Result<(), Box<dyn std::error::Err
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn run_interactive_loop(sandbox: &mut Sandbox) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\nInteractive mode. Commands are executed by the sandbox; type quit to exit. Example: /bin/echo hello");
+    println!(
+        "\nInteractive mode. Commands are executed by the sandbox; type quit to exit. Example: /bin/echo hello"
+    );
 
     loop {
         print!("agent> ");

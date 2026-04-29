@@ -166,7 +166,7 @@ impl PoolInner {
                 state.in_use_count = state.in_use_count.saturating_sub(1);
             }
             Err(_) => {
-                tracing::warn!("回滚 in_use 计数失败：预热池状态锁已中毒");
+                tracing::warn!("Failed to rollback in_use count: pool state lock poisoned");
             }
         }
     }
@@ -186,15 +186,17 @@ impl PoolInner {
                 state.in_use_count = state.in_use_count.saturating_sub(1);
             }
             Err(_) => {
-                tracing::warn!("回收沙箱失败：预热池状态锁已中毒，直接销毁沙箱");
-                Self::destroy_sandbox(sandbox, "状态锁已中毒");
+                tracing::warn!(
+                    "Failed to return sandbox: pool state lock poisoned, destroying sandbox"
+                );
+                Self::destroy_sandbox(sandbox, "state lock poisoned");
                 return;
             }
         }
 
         let evicted_entry = self.push_idle_after_release(sandbox);
         if let Some(entry) = evicted_entry {
-            Self::destroy_idle_entry(entry, "LRU 容量淘汰");
+            Self::destroy_idle_entry(entry, "LRU capacity eviction");
         }
     }
 
@@ -209,8 +211,10 @@ impl PoolInner {
                 state.should_health_check_on_recycle(Some(health_check_interval))
             }
             Err(_) => {
-                tracing::warn!("回收沙箱失败：预热池状态锁已中毒，直接销毁沙箱");
-                Self::destroy_sandbox(sandbox, "状态锁已中毒");
+                tracing::warn!(
+                    "Failed to return sandbox: pool state lock poisoned, destroying sandbox"
+                );
+                Self::destroy_sandbox(sandbox, "state lock poisoned");
                 return;
             }
         };
@@ -219,7 +223,7 @@ impl PoolInner {
             let is_healthy = match self.health_check(&mut sandbox) {
                 Ok(value) => value,
                 Err(err) => {
-                    tracing::warn!("沙箱健康检查失败，回收时直接驱逐: {err}");
+                    tracing::warn!("Sandbox health check failed, evicting on return: {err}");
                     false
                 }
             };
@@ -230,18 +234,20 @@ impl PoolInner {
                         state.evict_count += 1;
                     }
                     Err(_) => {
-                        tracing::warn!("记录健康检查驱逐失败：预热池状态锁已中毒");
+                        tracing::warn!(
+                            "Failed to record health-check eviction: pool state lock poisoned"
+                        );
                     }
                 }
 
-                Self::destroy_sandbox(sandbox, "健康检查失败");
+                Self::destroy_sandbox(sandbox, "health check failed");
                 return;
             }
         }
 
         let evicted_entry = self.push_idle_after_release(sandbox);
         if let Some(entry) = evicted_entry {
-            Self::destroy_idle_entry(entry, "LRU 容量淘汰");
+            Self::destroy_idle_entry(entry, "LRU capacity eviction");
         }
     }
 
@@ -291,8 +297,10 @@ impl PoolInner {
                 evicted_entry
             }
             Err(_) => {
-                tracing::warn!("回收沙箱失败：无法重新放回 idle 队列，直接销毁沙箱");
-                Self::destroy_sandbox(sandbox, "状态锁已中毒");
+                tracing::warn!(
+                    "Failed to return sandbox: unable to reinsert into idle queue, destroying sandbox"
+                );
+                Self::destroy_sandbox(sandbox, "state lock poisoned");
                 None
             }
         }
@@ -305,7 +313,7 @@ impl PoolInner {
 
     fn destroy_sandbox(sandbox: PlatformSandbox, reason: &str) {
         if let Err(err) = sandbox.destroy() {
-            tracing::warn!("销毁沙箱失败 ({reason}): {err}");
+            tracing::warn!("Failed to destroy sandbox ({reason}): {err}");
         }
     }
 
@@ -380,7 +388,7 @@ impl SandboxPool {
         let expired = self.inner.take_expired_idle()?;
 
         for entry in expired {
-            PoolInner::destroy_idle_entry(entry, "空闲超时");
+            PoolInner::destroy_idle_entry(entry, "idle timeout");
         }
 
         let current_idle = self.idle_len()?;
@@ -415,7 +423,7 @@ impl SandboxPool {
         }
 
         for sandbox in extra {
-            PoolInner::destroy_sandbox(sandbox, "预热超出容量");
+            PoolInner::destroy_sandbox(sandbox, "warm exceeded capacity");
         }
 
         Ok(inserted)
@@ -521,8 +529,8 @@ pub fn run_pool_benchmark(
     let pool = SandboxPool::new(config.clone(), pool_config)?;
     let warmed = pool.warm(pool_size.max(1))?;
 
-    println!("=== 预热池性能基准测试 ===");
-    println!("预热完成：requested={pool_size}, created={warmed}");
+    println!("=== Warm pool performance benchmark ===");
+    println!("Warm complete: requested={pool_size}, created={warmed}");
 
     let mut cold_acquire_times = Vec::with_capacity(iterations);
     let mut hot_acquire_times = Vec::with_capacity(iterations);
@@ -545,12 +553,12 @@ pub fn run_pool_benchmark(
     hot_acquire_times.sort_by(f64::total_cmp);
 
     println!(
-        "冷启动 acquire: p50={:.1}us p99={:.1}us",
+        "Cold-start acquire: p50={:.1}us p99={:.1}us",
         percentile_us(&cold_acquire_times, 0.50),
         percentile_us(&cold_acquire_times, 0.99)
     );
     println!(
-        "热获取 acquire: p50={:.1}us p99={:.1}us",
+        "Hot acquire: p50={:.1}us p99={:.1}us",
         percentile_us(&hot_acquire_times, 0.50),
         percentile_us(&hot_acquire_times, 0.99)
     );
@@ -602,9 +610,9 @@ mod tests {
             SandboxConfig::default(),
             test_pool_config(2, 4, Duration::from_secs(30), None),
         )
-        .expect("创建池失败");
+        .expect("failed to create pool");
 
-        assert_eq!(pool.idle_len().expect("读取空闲数量失败"), 2);
+        assert_eq!(pool.idle_len().expect("failed to read idle count"), 2);
     }
 
     #[test]
@@ -613,19 +621,19 @@ mod tests {
             SandboxConfig::default(),
             test_pool_config(0, 2, Duration::from_secs(30), None),
         )
-        .expect("创建池失败");
+        .expect("failed to create pool");
 
         {
-            let sandbox = pool.acquire().expect("首次 acquire 失败");
+            let sandbox = pool.acquire().expect("first acquire failed");
             drop(sandbox);
         }
 
         {
-            let sandbox = pool.acquire().expect("第二次 acquire 失败");
+            let sandbox = pool.acquire().expect("second acquire failed");
             drop(sandbox);
         }
 
-        let stats = pool.stats().expect("读取统计失败");
+        let stats = pool.stats().expect("failed to read stats");
         assert_eq!(stats.miss_count, 1);
         assert_eq!(stats.hit_count, 1);
         assert_eq!(stats.idle_count, 1);
@@ -638,18 +646,18 @@ mod tests {
             SandboxConfig::default(),
             test_pool_config(0, 2, Duration::from_secs(30), None),
         )
-        .expect("创建池失败");
-        pool.warm(2).expect("预热失败");
+        .expect("failed to create pool");
+        pool.warm(2).expect("warm failed");
 
-        let first = pool.acquire().expect("获取第一个沙箱失败");
-        let second = pool.acquire().expect("获取第二个沙箱失败");
-        let third = pool.acquire().expect("获取第三个沙箱失败");
+        let first = pool.acquire().expect("failed to acquire first sandbox");
+        let second = pool.acquire().expect("failed to acquire second sandbox");
+        let third = pool.acquire().expect("failed to acquire third sandbox");
 
         drop(first);
         drop(second);
         drop(third);
 
-        let stats = pool.stats().expect("读取统计失败");
+        let stats = pool.stats().expect("failed to read stats");
         assert_eq!(stats.idle_count, 2);
         assert_eq!(stats.evict_count, 1);
     }
@@ -660,15 +668,15 @@ mod tests {
             SandboxConfig::default(),
             test_pool_config(0, 2, Duration::from_millis(5), None),
         )
-        .expect("创建池失败");
-        pool.warm(1).expect("预热失败");
+        .expect("failed to create pool");
+        pool.warm(1).expect("warm failed");
 
         thread::sleep(Duration::from_millis(20));
 
-        let created = pool.warm(1).expect("维护预热失败");
+        let created = pool.warm(1).expect("maintenance warm failed");
         assert_eq!(created, 1);
 
-        let stats = pool.stats().expect("读取统计失败");
+        let stats = pool.stats().expect("failed to read stats");
         assert_eq!(stats.evict_count, 1);
         assert_eq!(stats.miss_count, 0);
         assert_eq!(stats.hit_count, 0);

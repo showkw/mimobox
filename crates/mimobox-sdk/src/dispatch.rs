@@ -59,7 +59,7 @@ pub(crate) trait HttpRequestForSdk {
     ) -> Result<HttpResponse, SdkError>;
 }
 
-// ── ExecuteForSdk: OS/Wasm 后端（使用 CoreSandbox trait） ──
+// ── ExecuteForSdk: OS/Wasm backends using the CoreSandbox trait ──
 
 #[cfg(all(feature = "os", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_os::LinuxSandbox {
@@ -138,7 +138,7 @@ impl_stream_execute_for_core_backend!(mimobox_os::MacOsSandbox);
 #[cfg(feature = "wasm")]
 impl_stream_execute_for_core_backend!(mimobox_wasm::WasmSandbox);
 
-// ── VM 后端 MicrovmSandbox 的 ExecuteForSdk（走 CoreSandbox trait） ──
+// ── ExecuteForSdk for VM backend MicrovmSandbox via CoreSandbox trait ──
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
@@ -149,9 +149,9 @@ impl ExecuteForSdk for mimobox_vm::MicrovmSandbox {
     }
 }
 
-// ── VM 池化/恢复类型 trait 实现：宏消除三种类型的重复 ──
+// ── Trait implementations for VM pooled/restored types: macros remove duplication across types ──
 
-/// VM 池化/恢复类型共享的 execute 实现（使用 start.elapsed() 而非后端自带计时）
+/// Shared execute implementation for VM pooled/restored types, using start.elapsed() instead of backend timing.
 #[cfg(all(feature = "vm", target_os = "linux"))]
 macro_rules! impl_execute_for_sdk_pooled {
     ($ty:ty) => {
@@ -177,7 +177,7 @@ impl_execute_for_sdk_pooled!(mimobox_vm::PooledVm);
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl_execute_for_sdk_pooled!(mimobox_vm::PooledRestoreVm);
 
-/// StreamExecuteForSdk 的 VM 类型共享实现
+/// Shared VM type implementation for StreamExecuteForSdk.
 #[cfg(all(feature = "vm", target_os = "linux"))]
 macro_rules! impl_stream_execute_for_sdk {
     ($ty:ty) => {
@@ -202,7 +202,7 @@ impl_stream_execute_for_sdk!(mimobox_vm::PooledVm);
 #[cfg(all(feature = "vm", target_os = "linux"))]
 impl_stream_execute_for_sdk!(mimobox_vm::PooledRestoreVm);
 
-/// HttpRequestForSdk 的 VM 类型共享实现
+/// Shared VM type implementation for HttpRequestForSdk.
 #[cfg(all(feature = "vm", target_os = "linux"))]
 macro_rules! impl_http_request_for_sdk {
     ($ty:ty) => {

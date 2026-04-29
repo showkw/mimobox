@@ -163,7 +163,7 @@ macro_rules! dispatch_vm {
 #[cfg(feature = "vm")]
 pub(crate) use dispatch_vm;
 
-// ── SdkExecOptions + 辅助函数 ──
+// -- SdkExecOptions and helpers --
 
 /// Per-command execution options for SDK execute APIs.
 #[derive(Debug, Clone, Default)]
@@ -203,7 +203,7 @@ fn build_fallback_command_args(
     command: &str,
     options: &SdkExecOptions,
 ) -> Result<Vec<String>, SdkError> {
-    // OS/Wasm 后端的超时来自 SandboxConfig；per-command timeout 仅 VM 后端支持。
+    // OS/Wasm backends take timeout from SandboxConfig; per-command timeout is VM-only.
     if options.timeout.is_some() {
         tracing::warn!(
             "per-command timeout is not supported by OS/Wasm backends;              using sandbox config timeout instead"
@@ -216,14 +216,14 @@ fn build_fallback_command_args(
         let mut wrapped = Vec::with_capacity(parsed_args.len() + options.env.len() + 6);
         wrapped.push("/bin/sh".to_string());
         wrapped.push("-c".to_string());
-        // SECURITY: 使用 positional 参数传递 cwd 和命令，避免 shell 注入。
+        // SECURITY: Pass cwd and command as positional parameters to avoid shell injection.
         wrapped.push(r#"cd "$1" && shift && exec "$@""#.to_string());
         wrapped.push("mimobox-cwd".to_string());
         wrapped.push(cwd.to_string());
         if options.env.is_empty() {
             wrapped.extend(parsed_args);
         } else {
-            // SECURITY: env 通过 /usr/bin/env 前缀传递，而非 shell 插值。
+            // SECURITY: Pass env through a /usr/bin/env prefix instead of shell interpolation.
             let mut env_prefixed = Vec::with_capacity(1 + options.env.len() + parsed_args.len());
             env_prefixed.push("/usr/bin/env".to_string());
             env_prefixed.extend(build_env_assignments(&options.env)?);
@@ -250,7 +250,7 @@ fn build_fallback_argv_args(
     args: &[String],
     options: &SdkExecOptions,
 ) -> Result<Vec<String>, SdkError> {
-    // OS/Wasm 后端的超时来自 SandboxConfig；per-command timeout 仅 VM 后端支持。
+    // OS/Wasm backends take timeout from SandboxConfig; per-command timeout is VM-only.
     if options.timeout.is_some() {
         tracing::warn!(
             "per-command timeout is not supported by OS/Wasm backends;              using sandbox config timeout instead"
@@ -314,7 +314,7 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
         .any(|c| matches!(c, Component::ParentDir))
     {
         return Err(SdkError::Config(
-            "invalid cwd: 包含路径遍历符 '..'".to_string(),
+            "invalid cwd: contains path traversal".to_string(),
         ));
     }
 
@@ -325,18 +325,20 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
         || cwd.contains('`')
     {
         return Err(SdkError::Config(
-            "invalid cwd: 包含 shell 元字符".to_string(),
+            "invalid cwd: contains shell metacharacters".to_string(),
         ));
     }
 
     if cwd.contains('\n') || cwd.contains('\r') {
-        return Err(SdkError::Config("invalid cwd: 包含换行符".to_string()));
+        return Err(SdkError::Config(
+            "invalid cwd: contains newline".to_string(),
+        ));
     }
 
     Ok(())
 }
 
-// ── 文件错误映射辅助函数 ──
+// -- File error mapping helpers --
 
 #[cfg(any(
     feature = "wasm",
@@ -400,7 +402,7 @@ pub(crate) fn map_os_core_file_error(
     }
 }
 
-// ── Sandbox 生命周期方法 ──
+// -- Sandbox lifecycle methods --
 
 impl Sandbox {
     /// Creates a sandbox with default configuration.
@@ -529,8 +531,8 @@ impl Sandbox {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto => {
                 if self.config.trust_level == TrustLevel::Untrusted {
-                    // Auto 模式不能把 Untrusted 探测初始化降级到 OS；
-                    // microVM 不可用时必须 fail-closed，而不是创建较弱后端。
+                    // Auto mode must not downgrade Untrusted probe initialization to OS;
+                    // fail closed when microVM is unavailable instead of creating a weaker backend.
                     #[cfg(all(feature = "vm", target_os = "linux"))]
                     {
                         IsolationLevel::MicroVm
@@ -588,7 +590,7 @@ impl Sandbox {
         self.destroy_inner()
     }
 
-    // ── 私有辅助方法 ──
+    // -- Private helper methods --
 
     /// Returns the initialized backend instance, or a unified error if it is missing.
     pub(crate) fn require_inner(&mut self) -> Result<&mut SandboxInner, SdkError> {
@@ -707,8 +709,8 @@ impl Sandbox {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto => {
                 if self.config.trust_level == TrustLevel::Untrusted {
-                    // PTY 目前依赖 OS 级后端；Untrusted 不能静默降级到 OS，
-                    // 而 microVM 暂不支持 PTY，因此这里直接拒绝以保持 fail-closed。
+                    // PTY currently depends on the OS backend. Untrusted must not silently
+                    // downgrade to OS, and microVM does not support PTY yet, so reject fail-closed.
                     return Err(SdkError::sandbox(
                         ErrorCode::UnsupportedPlatform,
                         "PTY sessions require OS-level backend, which is not allowed for Untrusted code",
@@ -842,7 +844,7 @@ impl Drop for Sandbox {
                     warn!(
                         attempt = attempt + 1,
                         error = %error,
-                        "Sandbox drop 自动清理失败，重试中"
+                        "Sandbox drop auto-cleanup failed, retrying"
                     );
                     std::thread::sleep(std::time::Duration::from_millis(
                         100 * u64::from(attempt + 1),
@@ -852,7 +854,7 @@ impl Drop for Sandbox {
                     tracing::error!(
                         attempts = MAX_ATTEMPTS,
                         error = %error,
-                        "Sandbox drop 自动清理在多次重试后仍然失败"
+                        "Sandbox drop auto-cleanup still failing after multiple retries"
                     );
                 }
             }
@@ -881,23 +883,23 @@ mod tests {
 
     #[test]
     fn test_sdk_exec_rejects_empty_argv() {
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
         let empty: [&str; 0] = [];
 
         match sandbox.exec(&empty) {
             Err(SdkError::Config(message)) => {
                 assert_eq!(message, "argv must not be empty");
             }
-            Err(other) => panic!("期望 Config 错误，实际为: {other}"),
-            Ok(_) => panic!("空 argv 不应执行成功"),
+            Err(other) => panic!("expected Config error, got: {other}"),
+            Ok(_) => panic!("empty argv should not execute successfully"),
         }
 
         match sandbox.stream_exec(&empty) {
             Err(SdkError::Config(message)) => {
                 assert_eq!(message, "argv must not be empty");
             }
-            Err(other) => panic!("期望 Config 错误，实际为: {other}"),
-            Ok(_) => panic!("空 argv 不应流式执行成功"),
+            Err(other) => panic!("expected Config error, got: {other}"),
+            Ok(_) => panic!("empty argv should not stream successfully"),
         }
     }
 
@@ -910,7 +912,8 @@ mod tests {
             ..Default::default()
         };
 
-        let wrapped = build_fallback_argv_args(&args, &options).expect("构造 argv fallback 失败");
+        let wrapped =
+            build_fallback_argv_args(&args, &options).expect("argv fallback construction failed");
 
         assert_eq!(
             wrapped,
@@ -938,7 +941,7 @@ mod tests {
             .insert("TOKEN".to_string(), "value; $(rm -rf /)".to_string());
 
         let wrapped = build_fallback_command_args("/bin/echo 'hello; rm -rf /'", &options)
-            .expect("构造 command fallback 失败");
+            .expect("command fallback construction failed");
 
         assert_eq!(
             wrapped,
@@ -977,8 +980,10 @@ mod tests {
                 );
                 assert_eq!(suggestion.as_deref(), Some(expected_suggestion));
             }
-            Err(other) => panic!("期望 OS 文件 API 返回 UnsupportedPlatform，实际为: {other}"),
-            Ok(_) => panic!("期望 OS 文件 API 被拒绝，实际却成功"),
+            Err(other) => {
+                panic!("expected OS file API to return UnsupportedPlatform, got: {other}")
+            }
+            Ok(_) => panic!("expected OS file API to be rejected, but it succeeded"),
         }
     }
 
@@ -993,7 +998,7 @@ mod tests {
             return false;
         };
 
-        eprintln!("跳过 SDK macOS Seatbelt 运行时测试: {reason}");
+        eprintln!("skipping SDK macOS Seatbelt runtime test: {reason}");
         true
     }
 
@@ -1012,7 +1017,7 @@ mod tests {
                         return Some("sandbox-exec not found in current environment".to_string());
                     }
                     Err(error) => {
-                        panic!("执行 sandbox-exec 最小探测失败: {error}");
+                        panic!("minimal sandbox-exec probe failed: {error}");
                     }
                 };
 
@@ -1074,7 +1079,7 @@ mod tests {
 
     #[test]
     fn with_config_defers_backend_creation_until_first_execute() {
-        let sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
 
         assert!(!inner_is_initialized(&sandbox));
         assert_eq!(active_isolation(&sandbox), None);
@@ -1120,7 +1125,7 @@ mod tests {
     #[cfg(feature = "vm")]
     #[test]
     fn default_auto_config_does_not_prepare_vm_pool() {
-        let sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
 
         assert!(!vm_pool_is_initialized(&sandbox));
     }
@@ -1131,7 +1136,7 @@ mod tests {
         let config = Config::builder()
             .isolation(IsolationLevel::MicroVm)
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
         assert!(should_prepare_vm_pool(&config));
@@ -1146,7 +1151,7 @@ mod tests {
         let config = Config::builder()
             .trust_level(TrustLevel::Untrusted)
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
         assert!(should_prepare_vm_pool(&config));
@@ -1157,11 +1162,15 @@ mod tests {
 
     #[test]
     fn destroy_uninitialized_sandbox_succeeds() {
-        let sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
 
         let result = sandbox.destroy();
 
-        assert!(result.is_ok(), "销毁未初始化沙箱应成功: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "destroying an uninitialized sandbox should succeed: {:?}",
+            result
+        );
     }
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
@@ -1170,8 +1179,8 @@ mod tests {
         let config = Config::builder()
             .trust_level(TrustLevel::Untrusted)
             .build()
-            .expect("配置校验失败");
-        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
+            .expect("config validation failed");
+        let mut sandbox = Sandbox::with_config(config).expect("sandbox creation failed");
 
         let result = sandbox.wait_ready(Duration::from_millis(1));
 
@@ -1189,7 +1198,9 @@ mod tests {
                 );
             }
             other => {
-                panic!("期望 Untrusted wait_ready 在无 microVM 时 fail-closed，实际为: {other:?}")
+                panic!(
+                    "expected Untrusted wait_ready to fail closed without microVM, got: {other:?}"
+                )
             }
         }
     }
@@ -1201,16 +1212,18 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
-        // 先执行一次命令，确保后端完成懒初始化。
-        sandbox.execute("/bin/echo hello").expect("执行命令失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
+        // Execute once so the backend completes lazy initialization.
+        sandbox
+            .execute("/bin/echo hello")
+            .expect("command execution failed");
         assert!(inner_is_initialized(&sandbox));
 
         let destroyed = Sandbox::with_config(Config::default())
-            .expect("创建沙箱失败")
+            .expect("sandbox creation failed")
             .destroy();
 
-        assert!(destroyed.is_ok(), "destroy 应成功: {:?}", destroyed);
+        assert!(destroyed.is_ok(), "destroy should succeed: {:?}", destroyed);
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1221,13 +1234,16 @@ mod tests {
         }
 
         let result = std::panic::catch_unwind(|| {
-            let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
-            sandbox.execute("/bin/echo test").expect("执行命令失败");
-            // 不主动 destroy，验证 Drop 自动清理路径不会 panic。
+            let mut sandbox =
+                Sandbox::with_config(Config::default()).expect("sandbox creation failed");
+            sandbox
+                .execute("/bin/echo test")
+                .expect("command execution failed");
+            // Do not call destroy explicitly; verify Drop auto-cleanup does not panic.
             drop(sandbox);
         });
 
-        assert!(result.is_ok(), "Drop 自动清理不应 panic");
+        assert!(result.is_ok(), "Drop auto-cleanup should not panic");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1240,39 +1256,39 @@ mod tests {
         }
 
         let sandbox = Arc::new(Mutex::new(
-            Sandbox::with_config(Config::default()).expect("创建沙箱失败"),
+            Sandbox::with_config(Config::default()).expect("sandbox creation failed"),
         ));
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 let sandbox = Arc::clone(&sandbox);
                 std::thread::spawn(move || {
-                    let mut sandbox = sandbox.lock().expect("Mutex 不应 poisoned");
+                    let mut sandbox = sandbox.lock().expect("Mutex should not be poisoned");
                     let result = sandbox
                         .execute(&format!("/bin/echo thread-{i}"))
-                        .expect("并发 execute 不应失败");
+                        .expect("concurrent execute should not fail");
                     let stdout = String::from_utf8_lossy(&result.stdout);
                     assert!(
                         stdout.contains(&format!("thread-{i}")),
-                        "线程 {i} stdout 应包含标识，实际: {stdout}"
+                        "thread {i} stdout should contain marker, got: {stdout}"
                     );
-                    assert_eq!(result.exit_code, Some(0), "退出码应为 0");
+                    assert_eq!(result.exit_code, Some(0), "exit code should be 0");
                 })
             })
             .collect();
 
         for handle in handles {
-            handle.join().expect("线程不应 panic");
+            handle.join().expect("thread should not panic");
         }
 
         let sandbox = match Arc::try_unwrap(sandbox) {
             Ok(sandbox) => sandbox,
-            Err(_) => panic!("所有引用应已释放"),
+            Err(_) => panic!("all references should have been released"),
         };
         sandbox
             .into_inner()
-            .expect("Mutex 不应 poisoned")
+            .expect("Mutex should not be poisoned")
             .destroy()
-            .expect("销毁沙箱失败");
+            .expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1282,16 +1298,16 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
         let mut session = sandbox
             .create_pty("/bin/echo ready")
-            .expect("创建 PTY 会话失败");
+            .expect("PTY session creation failed");
 
         assert_eq!(active_isolation(&sandbox), Some(IsolationLevel::Os));
-        assert_eq!(session.wait().expect("等待 PTY 退出失败"), 0);
+        assert_eq!(session.wait().expect("waiting for PTY exit failed"), 0);
 
         drop(session);
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[test]
@@ -1299,8 +1315,8 @@ mod tests {
         let config = Config::builder()
             .trust_level(TrustLevel::Untrusted)
             .build()
-            .expect("配置校验失败");
-        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
+            .expect("config validation failed");
+        let mut sandbox = Sandbox::with_config(config).expect("sandbox creation failed");
 
         let result = sandbox.create_pty("/bin/sh");
 
@@ -1320,14 +1336,14 @@ mod tests {
                     Some("Use TrustLevel::SemiTrusted or Trusted for PTY access")
                 );
             }
-            other => panic!("期望 Untrusted + Auto + PTY fail-closed，实际为: {other:?}"),
+            other => panic!("expected Untrusted + Auto + PTY to fail closed, got: {other:?}"),
         }
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_list_dir_returns_unsupported_on_os_backend() {
-        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
 
         let result = sandbox.list_dir("/tmp");
 
@@ -1336,13 +1352,13 @@ mod tests {
             "list_dir",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_list_dir_nonexistent_returns_error() {
-        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
 
         let result = sandbox.list_dir("/nonexistent/path");
 
@@ -1351,16 +1367,16 @@ mod tests {
             "list_dir",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_list_dir_file_path_returns_error() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let file_path = temp_dir.path().join("not-a-directory.txt");
-        std::fs::write(&file_path, "test").expect("写入测试文件失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        std::fs::write(&file_path, "test").expect("test file write failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.list_dir(&file_path.to_string_lossy());
 
@@ -1369,14 +1385,14 @@ mod tests {
             "list_dir",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_list_dir_empty_directory_returns_empty() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.list_dir(&temp_dir.path().to_string_lossy());
 
@@ -1385,16 +1401,16 @@ mod tests {
             "list_dir",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_file_exists_returns_unsupported_on_os_backend() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let file_path = temp_dir.path().join("exists.txt");
-        std::fs::write(&file_path, "test").expect("写入测试文件失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        std::fs::write(&file_path, "test").expect("test file write failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.file_exists(&file_path.to_string_lossy());
 
@@ -1403,16 +1419,16 @@ mod tests {
             "file_exists",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_remove_file_removes_file() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let file_path = temp_dir.path().join("remove.txt");
-        std::fs::write(&file_path, "test").expect("写入测试文件失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        std::fs::write(&file_path, "test").expect("test file write failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.remove_file(&file_path.to_string_lossy());
 
@@ -1423,20 +1439,20 @@ mod tests {
         );
         assert!(
             file_path.exists(),
-            "remove_file 被拒绝后测试文件应继续存在: {}",
+            "test file should still exist after remove_file is rejected: {}",
             file_path.display()
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_rename_moves_file() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let source_path = temp_dir.path().join("source.txt");
         let target_path = temp_dir.path().join("target.txt");
-        std::fs::write(&source_path, "test").expect("写入测试文件失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        std::fs::write(&source_path, "test").expect("test file write failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.rename(
             &source_path.to_string_lossy(),
@@ -1448,18 +1464,24 @@ mod tests {
             "rename",
             "Use microVM backend for isolated file operations",
         );
-        assert!(source_path.exists(), "rename 被拒绝后源文件应继续存在");
-        assert!(!target_path.exists(), "rename 被拒绝后目标文件不应存在");
-        sandbox.destroy().expect("销毁沙箱失败");
+        assert!(
+            source_path.exists(),
+            "source file should still exist after rename is rejected"
+        );
+        assert!(
+            !target_path.exists(),
+            "target file should not exist after rename is rejected"
+        );
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_stat_returns_file_metadata() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let file_path = temp_dir.path().join("stat.txt");
-        std::fs::write(&file_path, "stat").expect("写入测试文件失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        std::fs::write(&file_path, "stat").expect("test file write failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox.stat(&file_path.to_string_lossy());
 
@@ -1468,15 +1490,15 @@ mod tests {
             "stat",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_read_write_file_roundtrip_on_os_backend() {
-        let temp_dir = tempfile::TempDir::new().expect("创建临时目录失败");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory creation failed");
         let file_path = temp_dir.path().join("roundtrip.txt");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let write_result = sandbox.write_file(&file_path.to_string_lossy(), b"sdk-roundtrip");
         let read_result = sandbox.read_file(&file_path.to_string_lossy());
@@ -1493,9 +1515,9 @@ mod tests {
         );
         assert!(
             !file_path.exists(),
-            "write_file 被拒绝后不应在宿主文件系统创建文件"
+            "write_file should not create a file on the host filesystem after rejection"
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1505,20 +1527,20 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
         let mut env = HashMap::new();
         env.insert("MIMOBOX_SDK_ENV_TEST".to_string(), "works".to_string());
 
         let result = sandbox
             .execute_with_env("/usr/bin/env", env)
-            .expect("execute_with_env 应成功");
+            .expect("execute_with_env should succeed");
         let stdout = String::from_utf8_lossy(&result.stdout);
 
         assert!(
             stdout.contains("MIMOBOX_SDK_ENV_TEST=works"),
-            "stdout 应包含注入的环境变量，实际: {stdout}"
+            "stdout should contain injected environment variable, got: {stdout}"
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1528,15 +1550,15 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox
             .execute_with_timeout("/bin/echo sdk-timeout", Duration::from_secs(5))
-            .expect("execute_with_timeout 应成功");
+            .expect("execute_with_timeout should succeed");
 
         assert_eq!(result.exit_code, Some(0));
         assert!(String::from_utf8_lossy(&result.stdout).contains("sdk-timeout"));
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1546,19 +1568,20 @@ mod tests {
             return;
         }
 
-        let temp_dir = tempfile::TempDir::new_in("/tmp").expect("创建临时目录失败");
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let temp_dir =
+            tempfile::TempDir::new_in("/tmp").expect("temporary directory creation failed");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox
             .execute_with_cwd("/bin/pwd", &temp_dir.path().to_string_lossy())
-            .expect("execute_with_cwd 应成功");
+            .expect("execute_with_cwd should succeed");
         let stdout = String::from_utf8_lossy(&result.stdout);
 
         assert!(
             stdout.contains(temp_dir.path().to_string_lossy().as_ref()),
-            "stdout 应包含 cwd，实际: {stdout}"
+            "stdout should contain cwd, got: {stdout}"
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1568,11 +1591,11 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let receiver = sandbox
             .stream_execute("/bin/echo sdk-stream")
-            .expect("stream_execute 应成功");
+            .expect("stream_execute should succeed");
         let events: Vec<_> = receiver.iter().collect();
 
         assert!(
@@ -1581,15 +1604,15 @@ mod tests {
                 StreamEvent::Stdout(data)
                     if String::from_utf8_lossy(data).contains("sdk-stream")
             )),
-            "stream_execute 应返回 stdout 事件: {events:?}"
+            "stream_execute should return a stdout event: {events:?}"
         );
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Exit(0))),
-            "stream_execute 应返回 Exit(0) 事件: {events:?}"
+            "stream_execute should return an Exit(0) event: {events:?}"
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1599,15 +1622,15 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let result = sandbox
             .exec(&["/bin/echo", "hello", "world"])
-            .expect("exec 应成功");
+            .expect("exec should succeed");
 
         assert_eq!(result.exit_code, Some(0));
         assert!(String::from_utf8_lossy(&result.stdout).contains("hello world"));
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -1617,11 +1640,11 @@ mod tests {
             return;
         }
 
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         let receiver = sandbox
             .stream_exec(&["/bin/echo", "hello"])
-            .expect("stream_exec 应成功");
+            .expect("stream_exec should succeed");
         let events: Vec<_> = receiver.iter().collect();
 
         assert!(
@@ -1629,21 +1652,21 @@ mod tests {
                 event,
                 StreamEvent::Stdout(data) if String::from_utf8_lossy(data).contains("hello")
             )),
-            "stream_exec 应返回 stdout 事件: {events:?}"
+            "stream_exec should return a stdout event: {events:?}"
         );
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Exit(0))),
-            "stream_exec 应返回 Exit(0) 事件: {events:?}"
+            "stream_exec should return an Exit(0) event: {events:?}"
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn test_sdk_file_api_rejects_path_traversal() {
-        let mut sandbox = Sandbox::new().expect("创建沙箱失败");
+        let mut sandbox = Sandbox::new().expect("sandbox creation failed");
 
         assert_os_file_operation_unsupported(
             sandbox.file_exists("/../etc/passwd"),
@@ -1655,7 +1678,7 @@ mod tests {
             "remove_file",
             "Use microVM backend for isolated file operations",
         );
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
@@ -1664,15 +1687,15 @@ mod tests {
         let config = Config::builder()
             .isolation(IsolationLevel::MicroVm)
             .build()
-            .expect("配置校验失败");
-        let mut sandbox = Sandbox::with_config(config).expect("创建沙箱失败");
+            .expect("config validation failed");
+        let mut sandbox = Sandbox::with_config(config).expect("sandbox creation failed");
 
         let result = sandbox.create_pty("/bin/sh");
 
         match result {
             Err(SdkError::BackendUnavailable("microvm")) => {}
-            Err(other) => panic!("期望 microVM 后端不可用，实际为: {other}"),
-            Ok(_) => panic!("期望 PTY 在 microVM 配置下被拒绝，实际却创建成功"),
+            Err(other) => panic!("expected microVM backend to be unavailable, got: {other}"),
+            Ok(_) => panic!("expected PTY to be rejected under microVM config, but it succeeded"),
         }
     }
 
@@ -1688,12 +1711,12 @@ mod tests {
             .kernel_path(microvm_config.kernel_path.clone())
             .rootfs_path(microvm_config.rootfs_path.clone())
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let mut microvm = mimobox_vm::MicrovmSandbox::new_with_base(
             mimobox_core::SandboxConfig::default(),
             microvm_config,
         )
-        .expect("创建 microVM 沙箱必须成功");
+        .expect("microVM sandbox creation must succeed");
         let pty_config = PtyConfig {
             command: vec!["/bin/sh".to_string()],
             size: PtySize::default(),
@@ -1706,8 +1729,10 @@ mod tests {
             Err(mimobox_core::SandboxError::UnsupportedOperation(message)) => {
                 assert!(message.contains("microVM"));
             }
-            Err(other) => panic!("期望 microVM PTY 返回 UnsupportedOperation，实际为: {other}"),
-            Ok(_) => panic!("期望 microVM PTY 被拒绝，实际却创建成功"),
+            Err(other) => {
+                panic!("expected microVM PTY to return UnsupportedOperation, got: {other}")
+            }
+            Ok(_) => panic!("expected microVM PTY to be rejected, but it succeeded"),
         }
 
         let mut sandbox = Sandbox::from_initialized_inner(SandboxInner::MicroVm(microvm), config);
@@ -1719,12 +1744,12 @@ mod tests {
                 assert!(message.contains("microVM"));
             }
             Err(other) => panic!(
-                "期望 SDK 将 UnsupportedOperation 映射为 UnsupportedPlatform，实际为: {other}"
+                "expected SDK to map UnsupportedOperation to UnsupportedPlatform, got: {other}"
             ),
-            Ok(_) => panic!("期望 SDK PTY 在 microVM 下被拒绝，实际却创建成功"),
+            Ok(_) => panic!("expected SDK PTY to be rejected under microVM, but it succeeded"),
         }
 
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -1739,66 +1764,71 @@ mod tests {
             .kernel_path(microvm_config.kernel_path.clone())
             .rootfs_path(microvm_config.rootfs_path.clone())
             .build()
-            .expect("配置校验失败");
-        let mut sandbox = Sandbox::with_config(config).expect("创建 pooled VM 沙箱失败");
+            .expect("config validation failed");
+        let mut sandbox = Sandbox::with_config(config).expect("pooled VM sandbox creation failed");
         let source_path = "/sandbox/sdk-file-api.txt";
         let target_path = "/sandbox/sdk-file-api-renamed.txt";
 
         sandbox
             .write_file(source_path, b"pooled")
-            .expect("pooled VM 写文件必须成功");
+            .expect("pooled VM file write must succeed");
         assert!(
             sandbox
                 .file_exists(source_path)
-                .expect("pooled VM file_exists 必须成功"),
-            "写入后的文件必须存在"
+                .expect("pooled VM file_exists must succeed"),
+            "file must exist after write"
         );
 
-        let stat = sandbox.stat(source_path).expect("pooled VM stat 必须成功");
-        assert!(stat.is_file, "stat 应标记为普通文件: {stat:?}");
+        let stat = sandbox
+            .stat(source_path)
+            .expect("pooled VM stat must succeed");
+        assert!(
+            stat.is_file,
+            "stat should mark it as a regular file: {stat:?}"
+        );
         assert_eq!(stat.size, 6);
 
         let entries = sandbox
             .list_dir("/sandbox/")
-            .expect("pooled VM list_dir 必须成功");
+            .expect("pooled VM list_dir must succeed");
         assert!(
             entries.iter().any(|entry| entry.name == "sdk-file-api.txt"),
-            "list_dir 应包含写入文件: {entries:?}"
+            "list_dir should include the written file: {entries:?}"
         );
 
         sandbox
             .rename(source_path, target_path)
-            .expect("pooled VM rename 必须成功");
+            .expect("pooled VM rename must succeed");
         assert!(
             !sandbox
                 .file_exists(source_path)
-                .expect("rename 后检查源路径必须成功"),
-            "rename 后源路径不应存在"
+                .expect("checking source path after rename must succeed"),
+            "source path should not exist after rename"
         );
         assert!(
             sandbox
                 .file_exists(target_path)
-                .expect("rename 后检查目标路径必须成功"),
-            "rename 后目标路径应存在"
+                .expect("checking target path after rename must succeed"),
+            "target path should exist after rename"
         );
 
         sandbox
             .remove_file(target_path)
-            .expect("pooled VM remove_file 必须成功");
+            .expect("pooled VM remove_file must succeed");
         assert!(
             !sandbox
                 .file_exists(target_path)
-                .expect("remove_file 后检查路径必须成功"),
-            "remove_file 后目标路径不应存在"
+                .expect("checking path after remove_file must succeed"),
+            "target path should not exist after remove_file"
         );
 
-        sandbox.destroy().expect("销毁沙箱失败");
+        sandbox.destroy().expect("sandbox destroy failed");
     }
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     #[test]
     fn list_dir_vm_backend_unavailable_on_current_platform() {
-        // 非 Linux+KVM 平台，VM 后端不可用；实际 VM list_dir 测试在 Linux + vm feature 下运行。
+        // VM backend is unavailable on non-Linux+KVM platforms; the real VM list_dir test runs on Linux with the vm feature.
     }
 
     #[cfg(all(
@@ -1808,10 +1838,10 @@ mod tests {
     ))]
     #[test]
     fn auto_routing_reinitializes_backend_for_wasm_commands() {
-        let mut sandbox = Sandbox::with_config(Config::default()).expect("创建沙箱失败");
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
         sandbox
             .ensure_backend("/bin/echo hello")
-            .expect("初始化 OS 后端失败");
+            .expect("OS backend initialization failed");
         assert!(has_os_backend(&sandbox));
         assert_eq!(active_isolation(&sandbox), Some(IsolationLevel::Os));
 
@@ -1819,13 +1849,14 @@ mod tests {
             "/tmp/mimobox-sdk-auto-route-{}.wasm",
             std::process::id()
         ));
-        std::fs::write(&script_path, "#!/bin/sh\necho routed-via-os\n").expect("写入测试脚本失败");
+        std::fs::write(&script_path, "#!/bin/sh\necho routed-via-os\n")
+            .expect("test script write failed");
         make_executable(&script_path);
 
         let command = script_path.to_string_lossy().into_owned();
         sandbox
             .ensure_backend(&command)
-            .expect("切换到 Wasm 后端失败");
+            .expect("switching to Wasm backend failed");
 
         let _ = std::fs::remove_file(&script_path);
 
@@ -1837,9 +1868,10 @@ mod tests {
     fn make_executable(path: &std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
 
-        let metadata = std::fs::metadata(path).expect("读取测试脚本元数据失败");
+        let metadata = std::fs::metadata(path).expect("reading test script metadata failed");
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("设置测试脚本权限失败");
+        std::fs::set_permissions(path, permissions)
+            .expect("setting test script permissions failed");
     }
 }

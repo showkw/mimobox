@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn parse_list_dir_output_returns_core_entries() {
         let entries = parse_list_dir_output("file\t5\t0\ta.txt\ndir\t0\t0\td\nsymlink\t7\t1\tl\n")
-            .expect("解析目录输出必须成功");
+            .expect("directory output must parse successfully");
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].name, "a.txt");
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn parse_stat_output_returns_file_stat() {
         let stat = parse_stat_output("/sandbox/a.txt", "file\t4\t81a4\t1700000000\n")
-            .expect("解析 stat 输出必须成功");
+            .expect("stat output must parse successfully");
 
         assert_eq!(stat.path, "/sandbox/a.txt");
         assert!(stat.is_file);

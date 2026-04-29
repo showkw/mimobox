@@ -50,7 +50,7 @@ mod pty;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxSandbox;
 
-/// 实际应用的隔离级别报告
+/// Report describing the isolation level that was actually applied.
 #[cfg(target_os = "linux")]
 pub use linux::IsolationReport;
 

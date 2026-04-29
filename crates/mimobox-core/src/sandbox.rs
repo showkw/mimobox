@@ -26,22 +26,22 @@ fn is_plain_ip_domain(domain: &str) -> bool {
             .all(|character| character.is_ascii_digit() || character == '.')
 }
 
-/// HTTP 方法枚举，用于 HTTP ACL 规则匹配。
+/// HTTP method enum used for HTTP ACL rule matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HttpMethod {
-    /// HTTP GET 方法。
+    /// HTTP GET method.
     Get,
-    /// HTTP POST 方法。
+    /// HTTP POST method.
     Post,
-    /// HTTP PUT 方法。
+    /// HTTP PUT method.
     Put,
-    /// HTTP DELETE 方法。
+    /// HTTP DELETE method.
     Delete,
-    /// HTTP PATCH 方法。
+    /// HTTP PATCH method.
     Patch,
-    /// HTTP HEAD 方法。
+    /// HTTP HEAD method.
     Head,
-    /// 匹配任意 HTTP 方法。
+    /// Matches any HTTP method.
     Any,
 }
 
@@ -57,7 +57,7 @@ impl FromStr for HttpMethod {
             "PATCH" => Ok(Self::Patch),
             "HEAD" => Ok(Self::Head),
             "*" => Ok(Self::Any),
-            _ => Err(format!("不支持的 HTTP 方法: {method}")),
+            _ => Err(format!("unsupported HTTP method: {method}")),
         }
     }
 }
@@ -76,32 +76,32 @@ impl fmt::Display for HttpMethod {
     }
 }
 
-/// HTTP ACL 规则，定义 method + host + path 的匹配条件。
+/// HTTP ACL rule defining method + host + path match conditions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HttpAclRule {
-    /// HTTP 方法匹配条件。
+    /// HTTP method match condition.
     pub method: HttpMethod,
-    /// 主机名匹配条件，支持 `*` 和 `*.example.com`。
+    /// Hostname match condition, supporting `*` and `*.example.com`.
     pub host: String,
-    /// 路径匹配条件，支持 `/*` 和 `/prefix/*`。
+    /// Path match condition, supporting `/*` and `/prefix/*`.
     pub path: String,
 }
 
 impl HttpAclRule {
-    /// 解析 `METHOD host/path` 格式的 HTTP ACL 规则。
+    /// Parse an HTTP ACL rule in `METHOD host/path` format.
     pub fn parse(rule: &str) -> Result<Self, String> {
         let mut parts = rule.split_whitespace();
         let method = parts
             .next()
-            .ok_or_else(|| "HTTP ACL 规则不能为空".to_string())?
+            .ok_or_else(|| "HTTP ACL rule cannot be empty".to_string())?
             .parse::<HttpMethod>()?;
         let target = parts
             .next()
-            .ok_or_else(|| "HTTP ACL 规则缺少 host/path".to_string())?;
+            .ok_or_else(|| "HTTP ACL rule missing host/path".to_string())?;
         let explicit_path = parts.next();
 
         if parts.next().is_some() {
-            return Err("HTTP ACL 规则格式无效，请使用 METHOD host/path".to_string());
+            return Err("invalid HTTP ACL rule format, use METHOD host/path".to_string());
         }
 
         let (host, path) = match explicit_path {
@@ -109,7 +109,7 @@ impl HttpAclRule {
             None => split_acl_target(target),
         };
         if host.is_empty() {
-            return Err("HTTP ACL 规则 host 不能为空".to_string());
+            return Err("HTTP ACL rule host cannot be empty".to_string());
         }
 
         Ok(Self {
@@ -119,7 +119,7 @@ impl HttpAclRule {
         })
     }
 
-    /// 判断当前规则是否匹配指定 HTTP 请求。
+    /// Returns whether this rule matches the given HTTP request.
     pub fn matches(&self, method: HttpMethod, host: &str, path: &str) -> bool {
         self.matches_method(method)
             && matches_acl_host(&self.host, host)
@@ -131,17 +131,17 @@ impl HttpAclRule {
     }
 }
 
-/// HTTP ACL 策略，包含 allow 和 deny 规则列表。
+/// HTTP ACL policy containing allow and deny rule lists.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HttpAclPolicy {
-    /// 允许通过的 HTTP ACL 规则列表。
+    /// HTTP ACL rules that allow requests.
     pub allow: Vec<HttpAclRule>,
-    /// 拒绝通过的 HTTP ACL 规则列表。
+    /// HTTP ACL rules that deny requests.
     pub deny: Vec<HttpAclRule>,
 }
 
 impl HttpAclPolicy {
-    /// 按 deny-first 语义评估请求是否允许通过。
+    /// Evaluate whether a request is allowed with deny-first semantics.
     pub fn evaluate(&self, method: HttpMethod, host: &str, path: &str) -> bool {
         if self
             .deny
@@ -160,7 +160,7 @@ impl HttpAclPolicy {
             .any(|rule| rule.matches(method, host, path))
     }
 
-    /// 校验 HTTP ACL 规则配置是否合法。
+    /// Validate that HTTP ACL rule configuration is legal.
     pub fn validate(&self) -> Result<(), String> {
         for rule in self.allow.iter().chain(&self.deny) {
             validate_acl_rule(rule)?;
@@ -170,11 +170,11 @@ impl HttpAclPolicy {
     }
 }
 
-/// 规范化 HTTP 路径，消除常见路径绕过形式。
+/// Normalize HTTP paths to remove common path bypass forms.
 pub fn normalize_path(path: &str) -> String {
-    // SAFETY: reqwest::Url::parse() 已经对 path 做了 percent-decode。
-    // 这里的第二次解码处理 URL 中仍然包含编码段的场景（例如来自非标准 URL 源或规则定义）。
-    // 双重解码在此处是安全的，因为规则路径和请求路径都经过统一处理。
+    // SAFETY: reqwest::Url::parse() has already percent-decoded the path.
+    // This second decode handles paths that still contain encoded segments, such as non-standard URL sources or rule definitions.
+    // Double decoding is safe here because rule paths and request paths are normalized uniformly.
     let decoded = percent_decode_path(path);
     let mut segments = Vec::new();
 
@@ -204,22 +204,22 @@ fn split_acl_target(target: &str) -> (&str, &str) {
 
 fn validate_acl_rule(rule: &HttpAclRule) -> Result<(), String> {
     if rule.host.is_empty() {
-        return Err("host 不能为空".to_string());
+        return Err("host cannot be empty".to_string());
     }
 
     if rule.host.chars().any(char::is_whitespace) {
-        return Err(format!("host 不能包含空白字符: {}", rule.host));
+        return Err(format!("host cannot contain whitespace: {}", rule.host));
     }
 
     if has_invalid_acl_host_wildcard(&rule.host) {
         return Err(format!(
-            "host 通配符格式无效: {}，仅支持 * 或 *.example.com",
+            "invalid host wildcard format: {}, only * or *.example.com are supported",
             rule.host
         ));
     }
 
     if !rule.path.starts_with('/') {
-        return Err(format!("path 必须以 / 开头: {}", rule.path));
+        return Err(format!("path must start with /: {}", rule.path));
     }
 
     Ok(())
@@ -357,9 +357,9 @@ pub enum ErrorCode {
     InvalidConfig,
     /// The current platform or backend does not support this capability.
     UnsupportedPlatform,
-    /// 沙箱内存超限被杀（OOM killer 或 cgroups memory.limit）。
+    /// Sandbox killed after exceeding the memory limit (OOM killer or cgroups memory.limit).
     MemoryLimitExceeded,
-    /// 沙箱 CPU 配额耗尽（cgroups cpu.stat throttle）。
+    /// Sandbox exhausted its CPU quota (cgroups cpu.stat throttle).
     CpuLimitExceeded,
     /// HTTP proxy request denied by ACL rule.
     HttpDeniedAcl,
@@ -396,36 +396,36 @@ impl ErrorCode {
     }
 }
 
-/// 文件类型枚举，用于目录条目的类型区分。
+/// File type enum used to distinguish directory entry types.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileType {
-    /// 普通文件。
+    /// Regular file.
     File,
-    /// 目录。
+    /// Directory.
     Dir,
-    /// 符号链接。
+    /// Symbolic link.
     Symlink,
-    /// 其他类型（设备、管道等）。
+    /// Other type, such as device or pipe.
     Other,
 }
 
-/// 目录条目，表示 list_dir 返回的单个条目。
+/// Directory entry representing one item returned by list_dir.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirEntry {
-    /// 文件名。
+    /// File name.
     pub name: String,
-    /// 文件类型。
+    /// File type.
     pub file_type: FileType,
-    /// 文件大小（字节）。
+    /// File size in bytes.
     pub size: u64,
-    /// 是否为符号链接。
+    /// Whether this entry is a symbolic link.
     pub is_symlink: bool,
 }
 
 impl DirEntry {
-    /// 创建目录条目。
+    /// Create a directory entry.
     pub fn new(name: String, file_type: FileType, size: u64, is_symlink: bool) -> Self {
         Self {
             name,
@@ -436,26 +436,26 @@ impl DirEntry {
     }
 }
 
-/// 文件元信息，stat 方法返回的类型。
+/// File metadata returned by stat.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileStat {
-    /// 文件路径。
+    /// File path.
     pub path: String,
-    /// 是否为目录。
+    /// Whether the path is a directory.
     pub is_dir: bool,
-    /// 是否为普通文件。
+    /// Whether the path is a regular file.
     pub is_file: bool,
-    /// 文件大小（字节）。
+    /// File size in bytes.
     pub size: u64,
-    /// 文件权限模式（Unix mode）。
+    /// File permission mode (Unix mode).
     pub mode: u32,
-    /// 最后修改时间（毫秒时间戳），可能不可用。
+    /// Last modified time as a millisecond timestamp, if available.
     pub modified_ms: Option<u64>,
 }
 
 impl FileStat {
-    /// 创建文件元信息。
+    /// Create file metadata.
     pub fn new(
         path: String,
         is_dir: bool,
@@ -475,16 +475,16 @@ impl FileStat {
     }
 }
 
-/// Namespace 降级行为控制策略。
+/// Namespace degradation behavior control policy.
 ///
-/// 当 Linux namespace 创建失败时（如缺少 CAP_SYS_ADMIN），决定如何处理。
-/// 默认为 [`NamespaceDegradation::FailClosed`]，确保安全边界不被静默削弱。
+/// Defines how to handle Linux namespace creation failures, such as missing CAP_SYS_ADMIN.
+/// Defaults to [`NamespaceDegradation::FailClosed`] so security boundaries are not weakened silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum NamespaceDegradation {
-    /// 任何 namespace 创建失败都返回错误（默认，生产环境推荐）。
+    /// Return an error for any namespace creation failure (default, recommended for production).
     #[default]
     FailClosed,
-    /// 失败时 warn 但继续执行（仅用于开发/CI 环境中 namespace 支持不完整的场景）。
+    /// Warn but continue on failure, only for development/CI environments with incomplete namespace support.
     AllowDegradation,
 }
 
@@ -500,7 +500,7 @@ pub const MAX_MEMORY_LIMIT_MB: u64 = 32 * 1024;
 /// implementations, including filesystem permissions, network policy,
 /// resource limits, and controlled HTTP proxy whitelist.
 ///
-/// 默认拒绝所有文件系统访问，由各后端和 SDK Config 按需填充最小权限集。
+/// Denies all filesystem access by default; backends and SDK Config fill the minimum permissions needed.
 ///
 /// # Examples
 ///
@@ -529,13 +529,13 @@ pub struct SandboxConfig {
     /// `None` lets the Linux backend use its secure default.
     #[serde(default)]
     pub max_processes: Option<u32>,
-    /// CPU 时间配额（微秒），配合 `cpu_period_us` 使用。
+    /// CPU time quota in microseconds, used with `cpu_period_us`.
     ///
-    /// 例如 quota=50000, period=100000 表示最多使用 50% CPU。
-    /// 设为 `None` 表示不限制。
+    /// For example, quota=50000 and period=100000 allows up to 50% CPU.
+    /// Set to `None` for no limit.
     #[serde(default)]
     pub cpu_quota_us: Option<u64>,
-    /// CPU 周期（微秒），默认 100000（100ms）。
+    /// CPU period in microseconds, defaulting to 100000 (100ms).
     #[serde(default = "default_cpu_period_us")]
     pub cpu_period_us: u64,
     /// Timeout in seconds.
@@ -548,11 +548,11 @@ pub struct SandboxConfig {
     /// HTTP proxy domain allowlist, including wildcards such as `*.openai.com`.
     /// These domains remain reachable through the controlled proxy even when `deny_network = true`.
     pub allowed_http_domains: Vec<String>,
-    /// Namespace 降级行为控制。默认 FailClosed（任何 namespace 创建失败都返回错误）。
+    /// Namespace degradation behavior. Defaults to FailClosed (any namespace creation failure returns an error).
     #[serde(default)]
     pub namespace_degradation: NamespaceDegradation,
-    /// HTTP ACL 策略，控制 host 侧 HTTP 代理的 method/host/path 粒度访问控制。
-    /// 未配置时（allow 和 deny 都为空），保持现有行为。
+    /// HTTP ACL policy controlling method/host/path access for the host-side HTTP proxy.
+    /// When unset (both allow and deny are empty), existing behavior is preserved.
     #[serde(default)]
     pub http_acl: HttpAclPolicy,
 }
@@ -590,50 +590,50 @@ impl SandboxConfig {
         self
     }
 
-    /// 校验配置合法性，返回不合理项的描述。
+    /// Validate configuration and return descriptions of invalid settings.
     pub fn validate(&self) -> Result<(), SandboxError> {
-        // deny_network 只表示禁止沙箱内直连网络；allowed_http_domains 表示
-        // host 侧受控 HTTP 代理白名单，两者可以同时存在。
+        // deny_network only blocks direct network access inside the sandbox; allowed_http_domains is
+        // the host-side controlled HTTP proxy whitelist, so both may coexist.
 
-        // memory_limit_mb=Some(0) 无意义。
+        // memory_limit_mb=Some(0) has no meaningful semantics.
         if self.memory_limit_mb == Some(0) {
-            return Err(
-                SandboxError::new("memory_limit_mb=0 无效，请设为正整数或 None")
-                    .suggestion("memory_limit_mb 最小值为 1"),
-            );
+            return Err(SandboxError::new(
+                "memory_limit_mb=0 invalid, set a positive integer or None",
+            )
+            .suggestion("memory_limit_mb minimum is 1"));
         }
         if let Some(memory_limit_mb) = self.memory_limit_mb
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
             return Err(SandboxError::new(format!(
-                "memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB，请设为合理值"
+                "memory_limit_mb={memory_limit_mb} exceeds maximum {MAX_MEMORY_LIMIT_MB} MB, set a reasonable value"
             ))
             .suggestion(format!(
-                "memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}"
+                "memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}"
             )));
         }
 
         if self.max_processes == Some(0) {
-            return Err(
-                SandboxError::new("max_processes=0 无效，请设为正整数或 None")
-                    .suggestion("max_processes 最小值为 1，或设置为 None 使用后端默认值"),
-            );
+            return Err(SandboxError::new(
+                "max_processes=0 invalid, set a positive integer or None",
+            )
+            .suggestion("max_processes minimum is 1, or set to None for backend default"));
         }
 
-        // timeout_secs 允许关闭，但显式设置时不能超过 24 小时。
+        // timeout_secs may be disabled, but explicit values must not exceed 24 hours.
         if let Some(timeout_secs) = self.timeout_secs {
             const MAX_TIMEOUT_SECS: u64 = 86_400;
             if timeout_secs == 0 {
-                return Err(
-                    SandboxError::new("timeout_secs=0 无效，请设为正整数或 None")
-                        .suggestion("timeout 不能为 0，推荐 30 秒"),
-                );
+                return Err(SandboxError::new(
+                    "timeout_secs=0 invalid, set a positive integer or None",
+                )
+                .suggestion("timeout must be > 0, recommended 30s"));
             }
             if timeout_secs > MAX_TIMEOUT_SECS {
                 return Err(SandboxError::new(format!(
-                    "timeout_secs={timeout_secs} 超过最大值 86400（24小时），请设为合理值"
+                    "timeout_secs={timeout_secs} exceeds maximum 86400 (24 hours), set a reasonable value"
                 ))
-                .suggestion("timeout_secs 最大值为 86400（24小时）"));
+                .suggestion("timeout_secs maximum is 86400 (24 hours)"));
             }
         }
 
@@ -646,22 +646,24 @@ impl SandboxConfig {
                 || is_plain_ip_domain(domain)
             {
                 return Err(SandboxError::new(format!(
-                    "allowed_http_domains 包含无效域名: {domain}"
+                    "allowed_http_domains contains invalid domain: {domain}"
                 ))
                 .suggestion(
-                    "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+                    "Use standard domain format, e.g. example.com or *.example.com; IP addresses not supported",
                 ));
             }
         }
 
         if self.cpu_period_us == 0 {
-            return Err(SandboxError::new("cpu_period_us=0 无效，请设为正整数")
-                .suggestion("cpu_period_us 最小值为 1，推荐 100000"));
+            return Err(
+                SandboxError::new("cpu_period_us=0 invalid, set a positive integer")
+                    .suggestion("cpu_period_us minimum is 1, recommended 100000"),
+            );
         }
 
         if let Err(msg) = self.http_acl.validate() {
-            return Err(SandboxError::new(format!("http_acl 配置无效: {msg}"))
-                .suggestion("请检查 HTTP ACL 规则格式"));
+            return Err(SandboxError::new(format!("http_acl config invalid: {msg}"))
+                .suggestion("Check HTTP ACL rule format"));
         }
 
         Ok(())
@@ -885,19 +887,19 @@ pub trait PtySession {
     fn wait(&mut self) -> Result<i32, SandboxError>;
 }
 
-/// 执行失败的结构化分类。
+/// Structured classification of execution failures.
 ///
-/// 底层后端直接传递失败类型，避免 SDK 层靠字符串猜测。
+/// Low-level backends pass failure types directly so the SDK does not infer them from strings.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionFailureKind {
-    /// 未知/未分类的执行失败。
+    /// Unknown or unclassified execution failure.
     Unknown,
-    /// 内存超限（OOM killer、cgroups memory.limit、Wasm memory grow 失败）。
+    /// Memory limit exceeded (OOM killer, cgroups memory.limit, or Wasm memory grow failure).
     Oom,
-    /// CPU 配额耗尽（cgroups cpu throttle、Wasm fuel 耗尽）。
+    /// CPU quota exhausted (cgroups CPU throttling or Wasm fuel exhaustion).
     CpuLimit,
-    /// 进程被信号终止（SIGKILL/SIGTERM 等，非超时也非资源限制）。
+    /// Process terminated by signal (SIGKILL/SIGTERM, not timeout or resource limit).
     Killed,
 }
 
@@ -939,9 +941,9 @@ pub enum SandboxError {
     /// Command execution or protocol handling fails.
     #[error("command execution failed: {message}")]
     ExecutionFailed {
-        /// 结构化失败分类。
+        /// Structured failure classification.
         kind: ExecutionFailureKind,
-        /// 人类可读的错误描述。
+        /// Human-readable error description.
         message: String,
     },
 
@@ -1103,7 +1105,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 列出指定路径下的目录条目。
+    /// List directory entries under the specified path.
     fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
         let _ = path;
         Err(SandboxError::new(
@@ -1111,7 +1113,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 检查指定路径的文件是否存在。
+    /// Check whether a file exists at the specified path.
     fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError> {
         let _ = path;
         Err(SandboxError::UnsupportedOperation(
@@ -1119,9 +1121,9 @@ pub trait Sandbox {
         ))
     }
 
-    /// 删除指定路径的文件或空目录。
+    /// Delete a file or empty directory at the specified path.
     ///
-    /// 注意：不支持递归删除（安全考虑）。
+    /// Note: recursive deletion is not supported for safety.
     fn remove_file(&mut self, path: &str) -> Result<(), SandboxError> {
         let _ = path;
         Err(SandboxError::UnsupportedOperation(
@@ -1129,7 +1131,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 重命名/移动文件。
+    /// Rename or move a file.
     fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError> {
         let _ = from;
         let _ = to;
@@ -1138,7 +1140,7 @@ pub trait Sandbox {
         ))
     }
 
-    /// 返回文件的元信息。
+    /// Return file metadata.
     fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError> {
         let _ = path;
         Err(SandboxError::UnsupportedOperation(
@@ -1193,7 +1195,7 @@ mod tests {
     };
 
     fn parse_acl_rule(rule: &str) -> HttpAclRule {
-        HttpAclRule::parse(rule).expect("HTTP ACL 规则解析必须成功")
+        HttpAclRule::parse(rule).expect("HTTP ACL rule parse must succeed")
     }
 
     fn acl_policy(allow: &[&str], deny: &[&str]) -> HttpAclPolicy {
@@ -1403,7 +1405,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_serde_rule_path_normalized() {
-        // 通过 serde 构造的 HttpAclRule，path 包含未规范化的路径。
+        // HttpAclRule constructed through serde may contain an unnormalized path.
         let policy = HttpAclPolicy {
             allow: vec![],
             deny: vec![HttpAclRule {
@@ -1413,7 +1415,7 @@ mod tests {
             }],
         };
 
-        // 即使 rule.path 未规范化，evaluate 也应正确匹配。
+        // evaluate should still match correctly even when rule.path is unnormalized.
         assert!(!policy.evaluate(HttpMethod::Get, "any", "/secret/data"));
     }
 
@@ -1454,7 +1456,7 @@ mod tests {
 
         config
             .validate()
-            .expect("受控 HTTP 代理白名单不应打开沙箱直连网络");
+            .expect("controlled HTTP proxy whitelist should not enable direct sandbox networking");
     }
 
     #[test]
@@ -1464,11 +1466,11 @@ mod tests {
 
         let error = config
             .validate()
-            .expect_err("超过全局上限的 memory_limit_mb 必须被拒绝");
+            .expect_err("memory_limit_mb above the global maximum must be rejected");
 
         assert_eq!(
             error.suggestion_text(),
-            Some("memory_limit_mb 最大值为 32768")
+            Some("memory_limit_mb maximum is 32768")
         );
         let (error, _) = error.into_base_and_suggestion();
         assert!(
@@ -1480,15 +1482,19 @@ mod tests {
     fn sandbox_snapshot_round_trip_preserves_bytes() {
         let original = vec![0x4d, 0x4d, 0x42, 0x58, 0x01, 0x02];
 
-        let snapshot =
-            SandboxSnapshot::from_owned_bytes(original.clone()).expect("快照创建必须成功");
+        let snapshot = SandboxSnapshot::from_owned_bytes(original.clone())
+            .expect("snapshot creation must succeed");
 
         assert_eq!(
-            snapshot.as_bytes().expect("内存快照必须可读取字节"),
+            snapshot
+                .as_bytes()
+                .expect("memory snapshot bytes must be readable"),
             original.as_slice()
         );
         assert_eq!(
-            snapshot.to_bytes().expect("内存快照必须可复制字节"),
+            snapshot
+                .to_bytes()
+                .expect("memory snapshot bytes must be copyable"),
             original
         );
         assert_eq!(snapshot.size(), 6);
@@ -1496,7 +1502,7 @@ mod tests {
 
     #[test]
     fn sandbox_snapshot_rejects_empty_bytes() {
-        let error = SandboxSnapshot::from_bytes(&[]).expect_err("空快照必须被拒绝");
+        let error = SandboxSnapshot::from_bytes(&[]).expect_err("empty snapshot must be rejected");
 
         assert!(error.to_string().contains("must not be empty"));
     }
@@ -1505,7 +1511,7 @@ mod tests {
     fn sandbox_snapshot_file_mode_exposes_metadata_only() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("系统时间必须晚于 UNIX_EPOCH")
+            .expect("system time must be later than UNIX_EPOCH")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "mimobox-sandbox-snapshot-{}-{}.bin",
@@ -1513,28 +1519,33 @@ mod tests {
             unique
         ));
 
-        fs::write(&path, b"file-backed-snapshot").expect("测试快照文件写入必须成功");
+        fs::write(&path, b"file-backed-snapshot").expect("test snapshot file write must succeed");
 
-        let snapshot = SandboxSnapshot::from_file(path.clone()).expect("文件快照创建必须成功");
+        let snapshot =
+            SandboxSnapshot::from_file(path.clone()).expect("file snapshot creation must succeed");
 
         assert_eq!(snapshot.memory_file_path(), Some(path.as_path()));
         assert_eq!(snapshot.size(), b"file-backed-snapshot".len());
         assert!(matches!(
-            snapshot.as_bytes().expect_err("文件快照不应暴露内存字节"),
+            snapshot
+                .as_bytes()
+                .expect_err("file snapshot should not expose memory bytes"),
             SandboxError::InvalidSnapshot
         ));
         assert_eq!(
-            snapshot.to_bytes().expect("文件快照必须可读回字节"),
+            snapshot
+                .to_bytes()
+                .expect("file snapshot bytes must be readable"),
             b"file-backed-snapshot"
         );
         assert_eq!(
             snapshot
                 .clone()
                 .into_bytes()
-                .expect("文件快照必须可转移为字节"),
+                .expect("file snapshot must be convertible into bytes"),
             b"file-backed-snapshot"
         );
 
-        fs::remove_file(path).expect("测试快照文件清理必须成功");
+        fs::remove_file(path).expect("test snapshot file cleanup must succeed");
     }
 }

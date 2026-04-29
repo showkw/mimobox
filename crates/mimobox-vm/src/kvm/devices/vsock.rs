@@ -320,15 +320,15 @@ impl VsockMmioDevice {
                     debug!(
                         offset,
                         guest_cid = self.guest_cid,
-                        "vsock MMIO config 读: guest_cid"
+                        "vsock MMIO config read: guest_cid"
                     );
                     return;
                 }
-                debug!(offset, "vsock MMIO 读: config 空间越界偏移");
+                debug!(offset, "vsock MMIO read: config-space offset out of range");
                 return;
             }
             _ => {
-                debug!(offset, "vsock MMIO 读: 未识别偏移量");
+                debug!(offset, "vsock MMIO read: unknown offset");
                 return;
             }
         };
@@ -348,7 +348,7 @@ impl VsockMmioDevice {
         match offset {
             VIRTIO_MMIO_DEVICE_FEATURES_SEL => {
                 self.features_select = read_u32_from_slice(data);
-                debug!(select = self.features_select, "vsock feature select 写入");
+                debug!(select = self.features_select, "vsock feature select write");
                 VsockMmioAction::None
             }
             VIRTIO_MMIO_DRIVER_FEATURES => {
@@ -364,7 +364,7 @@ impl VsockMmioDevice {
                 self.driver_features_select = read_u32_from_slice(data);
                 debug!(
                     select = self.driver_features_select,
-                    "vsock driver feature select 写入"
+                    "vsock driver feature select write"
                 );
                 VsockMmioAction::None
             }
@@ -372,9 +372,9 @@ impl VsockMmioDevice {
                 let val = read_u32_from_slice(data) as u16;
                 if (val as usize) < NUM_QUEUES {
                     self.queue_select = val;
-                    debug!(queue = val, "vsock queue select 写入");
+                    debug!(queue = val, "vsock queue select write");
                 } else {
-                    debug!(queue = val, "vsock queue select 越界，忽略");
+                    debug!(queue = val, "vsock queue select out of range, ignoring");
                 }
                 VsockMmioAction::None
             }
@@ -383,7 +383,7 @@ impl VsockMmioDevice {
                 let qi = self.queue_select;
                 if let Some(queue) = self.selected_queue_mut() {
                     queue.size = val;
-                    debug!(queue_index = qi, size = val, "vsock queue size 写入");
+                    debug!(queue_index = qi, size = val, "vsock queue size write");
                 }
                 VsockMmioAction::None
             }
@@ -395,7 +395,7 @@ impl VsockMmioDevice {
                     debug!(
                         queue_index = qi,
                         ready = queue.ready,
-                        "vsock queue ready 写入"
+                        "vsock queue ready write"
                     );
                 }
                 VsockMmioAction::None
@@ -423,7 +423,7 @@ impl VsockMmioDevice {
                         status = val,
                         guest_cid = self.guest_cid,
                         acked_features = self.acked_features,
-                        "vsock 设备已激活: guest driver 设置 DRIVER_OK"
+                        "vsock device activated: guest driver set DRIVER_OK"
                     );
                     return VsockMmioAction::Activated;
                 }
@@ -433,7 +433,7 @@ impl VsockMmioDevice {
                     self.activated = false;
                     self.device_status = 0;
                     self.config_generation = self.config_generation.wrapping_add(1);
-                    debug!("vsock 设备已重置");
+                    debug!("vsock device reset");
                 }
 
                 VsockMmioAction::None
@@ -481,7 +481,7 @@ impl VsockMmioDevice {
                 VsockMmioAction::None
             }
             _ => {
-                debug!(offset, "vsock MMIO 写: 未识别偏移量");
+                debug!(offset, "vsock MMIO write: unknown offset");
                 VsockMmioAction::None
             }
         }
@@ -611,7 +611,7 @@ pub(in crate::kvm) fn activate_vhost_backend(
         guest_cid,
         acked_features,
         ?queues,
-        "vhost-vsock 后端激活成功"
+        "vhost-vsock backend activated successfully"
     );
     Ok(())
 }

@@ -190,7 +190,9 @@ pub(crate) fn initialize_default_vm_pool(
     match mimobox_vm::VmPool::new_with_base(sandbox_config, microvm_config, pool_config) {
         Ok(pool) => Ok(Some(Arc::new(pool))),
         Err(error) => {
-            tracing::warn!("初始化 microVM 预热池失败，回退到冷启动路径: {error}");
+            tracing::warn!(
+                "Failed to initialize microVM warm pool, falling back to cold start: {error}"
+            );
             Ok(None)
         }
     }
@@ -314,7 +316,7 @@ pub(crate) fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
         MicrovmError::AssetIntegrity(message) => SdkError::sandbox(
             ErrorCode::SandboxCreateFailed,
             message,
-            Some("VM kernel/rootfs 资产文件完整性校验失败，可能被篡改".to_string()),
+            Some("VM kernel/rootfs asset integrity check failed, possible tampering".to_string()),
         ),
         MicrovmError::Io(error) => SdkError::sandbox(
             ErrorCode::SandboxCreateFailed,

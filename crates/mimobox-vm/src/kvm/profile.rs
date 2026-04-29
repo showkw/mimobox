@@ -327,11 +327,11 @@ pub(in crate::kvm) fn parse_guest_boot_time_line(
         return false;
     };
     let Some((stage, raw_ns)) = payload.split_once(':') else {
-        debug!(line, "忽略格式非法的 guest BOOT_TIME 行");
+        debug!(line, "ignoring malformed guest BOOT_TIME line");
         return true;
     };
     let Ok(timestamp_ns) = raw_ns.parse::<u64>() else {
-        debug!(line, "忽略时间戳非法的 guest BOOT_TIME 行");
+        debug!(line, "ignoring guest BOOT_TIME line with invalid timestamp");
         return true;
     };
 

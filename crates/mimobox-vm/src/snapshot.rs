@@ -32,7 +32,7 @@ pub(crate) struct SnapshotStateFile {
     pub(crate) microvm_config: MicrovmConfig,
     /// Base64-encoded vCPU and device runtime state.
     pub(crate) vcpu_state_base64: String,
-    /// `memory.bin` 的 SHA-256 摘要，使用小写十六进制编码。
+    /// SHA-256 digest of `memory.bin`, encoded as lowercase hexadecimal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) memory_hash: Option<String>,
 }
@@ -230,7 +230,7 @@ fn verify_memory_hash(
 ) -> Result<(), MicrovmError> {
     let expected_hash = expected_hash.ok_or_else(|| {
         MicrovmError::SnapshotFormat(format!(
-            "文件快照缺少 memory_hash，拒绝 restore: {}",
+            "file snapshot missing memory_hash; refusing restore: {}",
             sanitize_path_display(memory_path)
         ))
     })?;
@@ -334,7 +334,7 @@ struct LoadedSnapshotState {
     memory_hash: Option<String>,
 }
 
-/// 读取文件快照元数据并校验 `memory.bin` 完整性，但不在内存中保留 guest memory。
+/// Reads file snapshot metadata and verifies `memory.bin` integrity without keeping guest memory in memory.
 #[allow(dead_code)]
 pub(crate) fn load_state_from_memory_file(
     memory_path: &Path,

@@ -129,7 +129,7 @@ impl SerialDevice {
             UART_REG_MODEM_STATUS => self.modem_status,
             UART_REG_SCRATCH => self.scratch,
             other => Err(MicrovmError::Backend(format!(
-                "未实现的串口读寄存器: {other:#x}"
+                "unimplemented serial read register: {other:#x}"
             )))?,
         };
 
@@ -177,7 +177,7 @@ impl SerialDevice {
                 Ok(None)
             }
             other => Err(MicrovmError::Backend(format!(
-                "未实现的串口写寄存器: {other:#x}"
+                "unimplemented serial write register: {other:#x}"
             ))),
         }
     }
@@ -293,7 +293,7 @@ pub(in crate::kvm) fn encode_fs_write_payload(
 ) -> Result<Vec<u8>, MicrovmError> {
     if data.len() > MAX_FS_TRANSFER_BYTES {
         Err(MicrovmError::InvalidConfig(format!(
-            "FS:WRITE 数据超过 10MB 限制: {} bytes",
+            "FS:WRITE data exceeds 10 MB limit: {} bytes",
             data.len()
         )))?
     }
@@ -452,7 +452,7 @@ fn clear_oversized_frame_buffer(frame_buffer: &mut Vec<u8>) -> bool {
     }
 
     tracing::warn!(
-        "串口帧缓冲区超过最大限制，清空缓冲区: len={}, max={}",
+        "serial frame buffer exceeded maximum size, clearing buffer: len={}, max={}",
         frame_buffer.len(),
         MAX_FRAME_BUFFER_SIZE
     );
@@ -511,7 +511,7 @@ fn decode_guest_output(payload: &str) -> Result<Vec<u8>, MicrovmError> {
             }
             other => {
                 return Err(MicrovmError::Backend(format!(
-                    "guest OUTPUT 帧包含未知转义: \\{}",
+                    "guest OUTPUT frame contains unknown escape: \\{}",
                     char::from(other)
                 )));
             }
@@ -528,7 +528,7 @@ fn parse_hex_digit(value: u8) -> Result<u8, MicrovmError> {
         b'a'..=b'f' => Ok(value - b'a' + 10),
         b'A'..=b'F' => Ok(value - b'A' + 10),
         other => Err(MicrovmError::Backend(format!(
-            "guest OUTPUT 帧包含非法十六进制字符: {}",
+            "guest OUTPUT frame contains invalid hex character: {}",
             char::from(other)
         ))),
     }
@@ -567,7 +567,7 @@ fn try_take_fs_result_frame(
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest FSRESULT 状态字段后缺少分隔符: {}",
+                "guest FSRESULT status field missing separator: {}",
                 char::from(*other)
             )));
         }
@@ -588,7 +588,7 @@ fn try_take_fs_result_frame(
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest FSRESULT 数据长度字段后缺少冒号: {}",
+                "guest FSRESULT data length field missing colon: {}",
                 char::from(*other)
             )));
         }
@@ -644,7 +644,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             }
             Some(other) => {
                 return Err(MicrovmError::Backend(format!(
-                    "guest STREAM:START id 字段后缺少换行: {}",
+                    "guest STREAM:START id field missing newline: {}",
                     char::from(*other)
                 )));
             }
@@ -667,7 +667,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             Some(b':') => {}
             Some(other) => {
                 return Err(MicrovmError::Backend(format!(
-                    "guest STREAM:END id 字段后缺少冒号: {}",
+                    "guest STREAM:END id field missing colon: {}",
                     char::from(*other)
                 )));
             }
@@ -689,7 +689,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             }
             Some(other) => {
                 return Err(MicrovmError::Backend(format!(
-                    "guest STREAM:END 退出码字段后缺少换行: {}",
+                    "guest STREAM:END exit code field missing newline: {}",
                     char::from(*other)
                 )));
             }
@@ -704,7 +704,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
         };
         let stream_id = u32::try_from(stream_id).map_err(|_| {
             MicrovmError::Backend(format!(
-                "guest STREAM:TIMEOUT id 超出 u32 范围: {stream_id}"
+                "guest STREAM:TIMEOUT id exceeds u32 range: {stream_id}"
             ))
         })?;
         match bytes.get(delimiter_index) {
@@ -716,7 +716,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
             }
             Some(other) => {
                 return Err(MicrovmError::Backend(format!(
-                    "guest STREAM:TIMEOUT id 字段后缺少换行: {}",
+                    "guest STREAM:TIMEOUT id field missing newline: {}",
                     char::from(*other)
                 )));
             }
@@ -745,7 +745,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest STREAM id 字段后缺少冒号: {}",
+                "guest STREAM id field missing colon: {}",
                 char::from(*other)
             )));
         }
@@ -766,7 +766,7 @@ fn try_take_stream_frame(frame_buffer: &mut Vec<u8>) -> Result<Option<SerialFram
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest STREAM 数据长度字段后缺少冒号: {}",
+                "guest STREAM data length field missing colon: {}",
                 char::from(*other)
             )));
         }
@@ -826,7 +826,7 @@ fn try_take_http_request_frame(
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest HTTP:REQUEST id 字段后缺少冒号: {}",
+                "guest HTTP:REQUEST id field missing colon: {}",
                 char::from(*other)
             )));
         }
@@ -847,7 +847,7 @@ fn try_take_http_request_frame(
         Some(b':') => {}
         Some(other) => {
             return Err(MicrovmError::Backend(format!(
-                "guest HTTP:REQUEST 长度字段后缺少冒号: {}",
+                "guest HTTP:REQUEST length field missing colon: {}",
                 char::from(*other)
             )));
         }

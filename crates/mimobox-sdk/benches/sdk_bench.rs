@@ -56,7 +56,10 @@ fn bench_sandbox_create_destroy(c: &mut Criterion) {
             let total_start = Instant::now();
 
             for _ in 0..iters {
-                let mut sandbox = must(Sandbox::with_config(os_config()), "failed to create OS sandbox");
+                let mut sandbox = must(
+                    Sandbox::with_config(os_config()),
+                    "failed to create OS sandbox",
+                );
                 let result = must(
                     sandbox.execute(black_box("/bin/echo hello")),
                     "failed to execute echo",
@@ -75,7 +78,10 @@ fn bench_sandbox_create_destroy(c: &mut Criterion) {
 fn bench_sandbox_execute(c: &mut Criterion) {
     c.bench_function("bench_sandbox_execute", |b| {
         b.iter_custom(|iters| {
-            let mut sandbox = must(Sandbox::with_config(os_config()), "failed to create OS sandbox");
+            let mut sandbox = must(
+                Sandbox::with_config(os_config()),
+                "failed to create OS sandbox",
+            );
             let total_start = Instant::now();
 
             for _ in 0..iters {

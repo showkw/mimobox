@@ -143,16 +143,16 @@ impl Drop for VmPoolInner {
         let idle = match self.state.lock() {
             Ok(mut state) => std::mem::take(&mut state.idle),
             Err(_) => {
-                tracing::warn!("VmPool drop 时状态锁已中毒，无法清理 idle VM");
+                tracing::warn!("VmPool drop: state lock poisoned; cannot clean idle VMs");
                 return;
             }
         };
         let count = idle.len();
         for entry in idle {
-            destroy_idle_entry(entry, "VmPool drop 清理");
+            destroy_idle_entry(entry, "VmPool drop cleanup");
         }
         if count > 0 {
-            tracing::debug!(count, "VmPool drop 清理完成");
+            tracing::debug!(count, "VmPool drop cleanup completed");
         }
     }
 }
@@ -168,7 +168,9 @@ impl VmPoolInner {
                 state.in_use_count = state.in_use_count.saturating_sub(1);
             }
             Err(_) => {
-                tracing::warn!("回滚 in_use 计数失败：VM 预热池状态锁已中毒");
+                tracing::warn!(
+                    "failed to roll back in_use count: VM warm pool state lock poisoned"
+                );
             }
         }
     }
@@ -219,8 +221,10 @@ impl VmPoolInner {
                 evicted
             }
             Err(_) => {
-                tracing::warn!("回收 VM 失败：无法重新放回 idle 队列，直接销毁 VM");
-                destroy_backend(backend, "状态锁已中毒");
+                tracing::warn!(
+                    "failed to recycle VM: cannot return it to idle queue; destroying VM"
+                );
+                destroy_backend(backend, "state lock poisoned");
                 None
             }
         }
@@ -230,7 +234,9 @@ impl VmPoolInner {
         let should_replenish = match self.state.lock() {
             Ok(state) => state.idle.len() < self.pool_config.min_size,
             Err(_) => {
-                tracing::warn!("检查是否需要补充 VM 失败：状态锁已中毒");
+                tracing::warn!(
+                    "failed to check whether VM replenishment is needed: state lock poisoned"
+                );
                 return;
             }
         };
@@ -243,11 +249,11 @@ impl VmPoolInner {
             Ok(backend) => {
                 let evicted = self.push_idle_after_release(backend);
                 if let Some(entry) = evicted {
-                    destroy_idle_entry(entry, "补充 VM 时触发容量淘汰");
+                    destroy_idle_entry(entry, "capacity eviction during VM replenishment");
                 }
             }
             Err(err) => {
-                tracing::warn!("补充预热 VM 失败: {err}");
+                tracing::warn!("failed to replenish warm VM: {err}");
             }
         }
     }
@@ -259,15 +265,15 @@ impl VmPoolInner {
                 state.should_health_check_on_recycle(self.pool_config.health_check_interval)
             }
             Err(_) => {
-                tracing::warn!("回收 VM 失败：状态锁已中毒，直接销毁 VM");
-                destroy_backend(backend, "状态锁已中毒");
+                tracing::warn!("failed to recycle VM: state lock poisoned; destroying VM");
+                destroy_backend(backend, "state lock poisoned");
                 return;
             }
         };
 
         if !backend_is_reusable(&backend) {
             self.mark_evict();
-            destroy_backend(backend, "VM 已异常，无法复用");
+            destroy_backend(backend, "VM is unhealthy and cannot be reused");
             self.replenish_if_needed();
             return;
         }
@@ -277,14 +283,14 @@ impl VmPoolInner {
                 Ok(true) => {}
                 Ok(false) => {
                     self.mark_evict();
-                    destroy_backend(backend, "健康检查失败");
+                    destroy_backend(backend, "health check failed");
                     self.replenish_if_needed();
                     return;
                 }
                 Err(err) => {
-                    tracing::warn!("VM 健康检查失败，回收时直接驱逐: {err}");
+                    tracing::warn!("VM health check failed during recycle; evicting: {err}");
                     self.mark_evict();
-                    destroy_backend(backend, "健康检查异常");
+                    destroy_backend(backend, "health check error");
                     self.replenish_if_needed();
                     return;
                 }
@@ -294,14 +300,14 @@ impl VmPoolInner {
         let guest_cleaned = clear_backend_artifacts(&mut backend);
         if !guest_cleaned || !backend_is_reusable(&backend) {
             self.mark_evict();
-            destroy_backend(backend, "VM guest 清理失败，无法安全复用");
+            destroy_backend(backend, "VM guest cleanup failed; cannot safely reuse");
             self.replenish_if_needed();
             return;
         }
 
         let evicted = self.push_idle_after_release(backend);
         if let Some(entry) = evicted {
-            destroy_idle_entry(entry, "LRU 容量淘汰");
+            destroy_idle_entry(entry, "LRU capacity eviction");
         }
     }
 
@@ -311,7 +317,7 @@ impl VmPoolInner {
                 state.evict_count += 1;
             }
             Err(_) => {
-                tracing::warn!("记录驱逐计数失败：VM 预热池状态锁已中毒");
+                tracing::warn!("failed to record eviction count: VM warm pool state lock poisoned");
             }
         }
     }
@@ -383,7 +389,7 @@ impl VmPool {
         #[cfg(feature = "boot-profile")]
         let expired_idle_cleanup = expired_cleanup_started_at.elapsed();
         for entry in expired {
-            destroy_idle_entry(entry, "空闲超时");
+            destroy_idle_entry(entry, "idle timeout");
         }
 
         #[cfg(feature = "boot-profile")]
@@ -428,7 +434,7 @@ impl VmPool {
             backend_prepare = ?backend_prepare,
             reused = reused_hit,
             total = ?acquire_started_at.elapsed(),
-            "[pool.acquire] 性能概览"
+            "[pool.acquire] performance overview"
         );
 
         Ok(PooledVm {
@@ -444,7 +450,7 @@ impl VmPool {
     pub fn warm(&self, count: usize) -> Result<usize, PoolError> {
         let expired = self.inner.take_expired_idle()?;
         for entry in expired {
-            destroy_idle_entry(entry, "空闲超时");
+            destroy_idle_entry(entry, "idle timeout");
         }
 
         let target_idle_size = count.min(self.inner.pool_config.max_size);
@@ -479,7 +485,7 @@ impl VmPool {
         }
 
         for backend in extra {
-            destroy_backend(backend, "预热超出容量");
+            destroy_backend(backend, "prewarm exceeds capacity");
         }
 
         Ok(inserted)
@@ -529,7 +535,7 @@ impl PooledVm {
         tracing::info!(
             total = ?execute_started_at.elapsed(),
             success = result.is_ok(),
-            "[pool.execute] 性能概览"
+            "[pool.execute] performance overview"
         );
         result
     }
@@ -647,7 +653,7 @@ impl Drop for PooledVm {
         #[cfg(feature = "boot-profile")]
         tracing::info!(
             total = ?drop_started_at.elapsed(),
-            "[pool.drop] 性能概览"
+            "[pool.drop] performance overview"
         );
     }
 }
@@ -677,12 +683,12 @@ fn create_backend(
     let exit_reason = backend.boot()?;
     if exit_reason != KvmExitReason::Io || !backend.is_guest_ready() {
         return Err(MicrovmError::Backend(format!(
-            "预热 VM 后 guest 未进入 READY 状态: {exit_reason:?}"
+            "prewarmed VM guest did not enter READY state: {exit_reason:?}"
         )));
     }
     if !backend.clear_pool_artifacts() {
         return Err(MicrovmError::Backend(
-            "预热 VM guest 清理失败，无法安全放入池".into(),
+            "prewarmed VM guest cleanup failed; cannot safely add to pool".into(),
         ));
     }
     Ok(backend)
@@ -716,7 +722,7 @@ fn health_check_backend(
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 fn destroy_backend(mut backend: Backend, reason: &str) {
     if let Err(err) = backend.shutdown() {
-        tracing::warn!("销毁 VM 失败 ({reason}): {err}");
+        tracing::warn!("failed to destroy VM ({reason}): {err}");
     }
 }
 

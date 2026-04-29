@@ -285,7 +285,7 @@ pub(super) fn restore_vcpu_msrs(
     let written = vcpu.set_msrs(&msrs).map_err(to_backend_error)?;
     if written != entries.len() {
         return Err(MicrovmError::Backend(format!(
-            "恢复 MSR 仅写入 {written}/{} 项",
+            "only wrote {written}/{} restore MSR entries",
             entries.len()
         )));
     }
@@ -373,7 +373,7 @@ pub(super) fn encode_e820_entry(
 }
 
 pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), MicrovmError> {
-    let len = u32_from_len(bytes.len(), "字节块长度超过 u32 上限")?;
+    let len = u32_from_len(bytes.len(), "byte block length exceeds u32 limit")?;
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     Ok(())
@@ -383,7 +383,7 @@ pub(super) fn append_msr_entries(
     out: &mut Vec<u8>,
     entries: &[kvm_msr_entry],
 ) -> Result<(), MicrovmError> {
-    let len = u32_from_len(entries.len(), "MSR 条目数量超过 u32 上限")?;
+    let len = u32_from_len(entries.len(), "MSR entry count exceeds u32 limit")?;
     out.extend_from_slice(&len.to_le_bytes());
     for entry in entries {
         append_pod(out, entry);
@@ -448,7 +448,7 @@ pub(super) fn exit_reason_from_u8(value: u8) -> Result<Option<KvmExitReason>, Mi
         3 => Ok(Some(KvmExitReason::Shutdown)),
         4 => Ok(Some(KvmExitReason::InternalError)),
         other => Err(MicrovmError::SnapshotFormat(format!(
-            "未知 KVM 退出原因编码: {other}"
+            "unknown KVM exit reason code: {other}"
         ))),
     }
 }

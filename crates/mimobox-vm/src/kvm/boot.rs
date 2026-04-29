@@ -133,7 +133,7 @@ impl KvmBackend {
             if !inject_hypervisor_timing_cpuid(&mut entries, tsc_khz, 0) {
                 debug!(
                     entry_count = entries.len(),
-                    tsc_khz, "CPUID 条目已满，跳过注入 timing leaf"
+                    tsc_khz, "CPUID table is full, skipping timing leaf injection"
                 );
             }
         }
@@ -154,7 +154,7 @@ impl KvmBackend {
             Ok(0) => None,
             Ok(tsc_khz) => Some(tsc_khz),
             Err(err) => {
-                debug!(error = %err, "读取 vCPU TSC 频率失败，跳过 timing leaf");
+                debug!(error = %err, "failed to read vCPU TSC frequency, skipping timing leaf");
                 None
             }
         }
@@ -406,7 +406,7 @@ fn configure_boot_msrs(vcpu: &VcpuFd, is_bootstrap_processor: bool) -> Result<()
     let written = vcpu.set_msrs(&msrs).map_err(to_backend_error)?;
     if written != entries.len() {
         return Err(MicrovmError::Backend(format!(
-            "启动 MSR 仅写入 {written}/{} 项",
+            "only wrote {written}/{} boot MSR entries",
             entries.len()
         )));
     }

@@ -153,7 +153,7 @@ pub struct Config {
     pub allowed_http_domains: Vec<String>,
     /// Whether to allow child process creation (fork/clone) inside the sandbox.
     pub allow_fork: bool,
-    /// Namespace 降级行为控制。默认 FailClosed。
+    /// Namespace degradation policy. Defaults to FailClosed.
     pub namespace_degradation: NamespaceDegradation,
     /// microVM vCPU count. Only affects the microVM backend.
     pub vm_vcpu_count: u8,
@@ -163,13 +163,13 @@ pub struct Config {
     pub kernel_path: Option<PathBuf>,
     /// Custom microVM rootfs path. Falls back to `~/.mimobox/assets/rootfs.cpio.gz` if unset.
     pub rootfs_path: Option<PathBuf>,
-    /// VM 安全配置策略，控制 guest kernel 是否启用 Spectre/Meltdown 缓解和 KASLR。
-    /// 默认 `Secure`（保留安全缓解）。设为 `Performance` 可关闭缓解以获得最佳性能，
-    /// 但仅在完全可信环境中使用。
+    /// VM security profile controlling guest kernel Spectre/Meltdown mitigations and KASLR.
+    /// Defaults to `Secure` with mitigations preserved. Set to `Performance` for best
+    /// performance only in fully trusted environments.
     #[cfg(feature = "vm")]
     pub vm_security_profile: mimobox_vm::VmSecurityProfile,
-    /// HTTP ACL 策略，控制 host 侧 HTTP 代理的 method/host/path 粒度访问控制。
-    /// 与 allowed_http_domains 互为补充：allowed_http_domains 自动转换为 ANY host /* allow 规则。
+    /// HTTP ACL policy controlling method/host/path access for the host-side HTTP proxy.
+    /// Complements allowed_http_domains: entries are converted to ANY host /* allow rules.
     pub http_acl: mimobox_core::HttpAclPolicy,
 }
 
@@ -223,7 +223,7 @@ impl Config {
     ///     .isolation(IsolationLevel::Os)
     ///     .timeout(Duration::from_secs(10))
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.isolation, IsolationLevel::Os);
     /// ```
@@ -231,19 +231,19 @@ impl Config {
         ConfigBuilder::default()
     }
 
-    /// 校验 SDK 配置，避免非法配置进入后端。
+    /// Validate SDK config before it reaches backend implementations.
     pub(crate) fn validate(&self) -> Result<(), SdkError> {
         if self.vm_vcpu_count == 0 {
             return Err(invalid_config(
-                "vm_vcpu_count=0 无效",
-                "vcpu_count 最小值为 1",
+                "vm_vcpu_count must be at least 1",
+                "vcpu_count minimum is 1",
             ));
         }
 
         if self.vm_memory_mb == 0 {
             return Err(invalid_config(
-                "vm_memory_mb=0 无效",
-                "vm_memory_mb 最小值为 1，推荐 256 MB",
+                "vm_memory_mb must be at least 1, recommended 256 MB",
+                "vm_memory_mb minimum is 1, recommended 256 MB",
             ));
         }
 
@@ -251,15 +251,15 @@ impl Config {
             && timeout.is_zero()
         {
             return Err(invalid_config(
-                "timeout=0 无效",
-                "timeout 不能为 0，推荐 30 秒",
+                "timeout cannot be zero",
+                "timeout must be > 0, recommended 30s",
             ));
         }
 
         if self.memory_limit_mb == Some(0) {
             return Err(invalid_config(
-                "memory_limit_mb=0 无效",
-                "memory_limit_mb 最小值为 1",
+                "memory_limit_mb must be at least 1",
+                "memory_limit_mb minimum is 1",
             ));
         }
 
@@ -267,26 +267,28 @@ impl Config {
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
             return Err(invalid_config(
-                format!("memory_limit_mb={memory_limit_mb} 超过最大值 {MAX_MEMORY_LIMIT_MB} MB"),
-                format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
+                format!(
+                    "memory_limit_mb={memory_limit_mb} exceeds maximum {MAX_MEMORY_LIMIT_MB} MB"
+                ),
+                format!("memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}, recommended 256-512 MB"),
             ));
         }
 
         if self.max_processes == Some(0) {
             return Err(invalid_config(
-                "max_processes=0 无效",
-                "max_processes 最小值为 1，或设置为 None 使用后端默认值",
+                "max_processes must be at least 1, or set to None for backend default",
+                "max_processes minimum is 1, or set to None for backend default",
             ));
         }
 
         if self.cpu_period_us == 0 {
             return Err(invalid_config(
-                "cpu_period_us=0 无效",
-                "cpu_period_us 最小值为 1，推荐 100000",
+                "cpu_period_us must be at least 1, recommended 100000",
+                "cpu_period_us minimum is 1, recommended 100000",
             ));
         }
 
-        // SECURITY: Untrusted 代码不允许开放全部网络，必须使用 DenyAll 或 AllowDomains
+        // SECURITY: Untrusted code must not open full network access; use DenyAll or AllowDomains.
         if self.trust_level == TrustLevel::Untrusted
             && matches!(self.network, NetworkPolicy::AllowAll)
         {
@@ -296,7 +298,7 @@ impl Config {
             ));
         }
 
-        // SECURITY: Untrusted 代码必须有超时限制，防止资源耗尽
+        // SECURITY: Untrusted code must have a timeout to prevent resource exhaustion.
         if self.trust_level == TrustLevel::Untrusted && self.timeout.is_none() {
             return Err(invalid_config(
                 "Untrusted trust level requires a timeout",
@@ -304,7 +306,7 @@ impl Config {
             ));
         }
 
-        // SECURITY: Untrusted 代码必须有内存限制，防止 OOM 攻击
+        // SECURITY: Untrusted code must have a memory limit to prevent OOM attacks.
         if self.trust_level == TrustLevel::Untrusted && self.memory_limit_mb.is_none() {
             return Err(invalid_config(
                 "Untrusted trust level requires a memory limit",
@@ -314,8 +316,8 @@ impl Config {
 
         if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
             return Err(invalid_config(
-                "network=DenyAll 但 allowed_http_domains 非空，配置冲突",
-                "使用 NetworkPolicy::AllowDomains 或清空 allowed_http_domains",
+                "network=DenyAll but allowed_http_domains is non-empty, config conflict",
+                "Use NetworkPolicy::AllowDomains or clear allowed_http_domains",
             ));
         }
 
@@ -325,13 +327,13 @@ impl Config {
 
         validate_microvm_artifact_paths(self)?;
 
-        // NetworkPolicy::AllowAll 与 http_acl 互斥（fail-closed）
+        // NetworkPolicy::AllowAll is mutually exclusive with http_acl (fail-closed).
         if matches!(self.network, NetworkPolicy::AllowAll)
             && (!self.http_acl.allow.is_empty() || !self.http_acl.deny.is_empty())
         {
             return Err(invalid_config(
-                "network=AllowAll 与 http_acl 互斥，不能同时配置",
-                "使用 NetworkPolicy::AllowDomains 替代 AllowAll，或移除 http_acl 配置",
+                "network=AllowAll conflicts with http_acl, cannot be used together",
+                "Use NetworkPolicy::AllowDomains instead of AllowAll, or remove http_acl config",
             ));
         }
 
@@ -369,7 +371,7 @@ impl Config {
         config.namespace_degradation = self.namespace_degradation;
         config.http_acl = self.http_acl.clone();
 
-        // 将 allowed_http_domains 自动转换为 http_acl allow 规则（向后兼容）
+        // Convert allowed_http_domains into http_acl allow rules for backward compatibility.
         let domains = resolve_allowed_http_domains(self);
         for domain in &domains {
             let already_covered = config.http_acl.allow.iter().any(|rule| {
@@ -456,8 +458,8 @@ fn validate_http_domain(domain: &str) -> Result<(), SdkError> {
         || is_plain_ip_domain(domain)
     {
         return Err(invalid_config(
-            format!("allowed_http_domains 包含无效域名 '{domain}'"),
-            "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+            format!("allowed_http_domains contains invalid domain '{domain}'"),
+            "Use standard domain format, e.g. example.com or *.example.com; IP addresses not supported",
         ));
     }
 
@@ -481,12 +483,12 @@ fn validate_optional_path_exists(label: &str, path: Option<&Path>) -> Result<(),
     match path.try_exists() {
         Ok(true) => Ok(()),
         Ok(false) => Err(invalid_config(
-            format!("{label} 路径不存在: {}", path.display()),
-            "请确保路径存在",
+            format!("{label} path does not exist: {}", path.display()),
+            "Please ensure the path exists",
         )),
         Err(error) => Err(invalid_config(
-            format!("{label} 路径无法访问: {} ({error})", path.display()),
-            "请检查路径权限并确保路径存在",
+            format!("{label} path inaccessible: {} ({error})", path.display()),
+            "Please check path permissions and ensure it exists",
         )),
     }
 }
@@ -521,8 +523,8 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
 
     u32::try_from(effective_memory_mb).map_err(|_| {
         invalid_config(
-            format!("microVM guest 内存超出 u32 范围: {effective_memory_mb} MB"),
-            "请减小 vm_memory_mb 或 memory_limit_mb",
+            format!("microVM guest memory exceeds u32 range: {effective_memory_mb} MB"),
+            "Please reduce vm_memory_mb or memory_limit_mb",
         )
     })
 }
@@ -544,7 +546,7 @@ fn resolve_vm_memory_mb(config: &Config) -> Result<u32, SdkError> {
 ///     .memory_limit_mb(256)
 ///     .allowed_http_domains(["api.openai.com"])
 ///     .build()
-///     .expect("配置校验失败");
+///     .expect("config validation failed");
 ///
 /// assert_eq!(config.isolation, IsolationLevel::MicroVm);
 /// ```
@@ -564,7 +566,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .isolation(IsolationLevel::Wasm)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.isolation, IsolationLevel::Wasm);
     /// ```
@@ -586,7 +588,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .trust_level(TrustLevel::Untrusted)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.trust_level, TrustLevel::Untrusted);
     /// ```
@@ -605,7 +607,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .network(NetworkPolicy::AllowDomains(vec!["api.openai.com".to_string()]))
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
     /// ```
@@ -627,7 +629,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .timeout(Duration::from_secs(10))
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.timeout, Some(Duration::from_secs(10)));
     /// ```
@@ -649,7 +651,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .memory_limit_mb(256)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.memory_limit_mb, Some(256));
     /// ```
@@ -694,7 +696,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .fs_readonly(["/usr", "/lib"])
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.fs_readonly.len(), 2);
     /// ```
@@ -713,7 +715,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .fs_readwrite(["/tmp", "/workspace"])
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.fs_readwrite.len(), 2);
     /// ```
@@ -744,7 +746,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .allow_fork(true)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert!(config.allow_fork);
     /// ```
@@ -753,9 +755,9 @@ impl ConfigBuilder {
         self
     }
 
-    /// Set Linux namespace 降级行为。
+    /// Set Linux namespace degradation behavior.
     ///
-    /// 默认 `FailClosed`，任何 namespace 创建失败都会拒绝继续执行。
+    /// Defaults to `FailClosed`; any namespace creation failure rejects execution.
     pub fn namespace_degradation(mut self, policy: NamespaceDegradation) -> Self {
         self.inner.namespace_degradation = policy;
         self
@@ -774,7 +776,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .allowed_http_domains(["api.openai.com", "*.openai.com"])
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.allowed_http_domains.len(), 2);
     /// ```
@@ -789,18 +791,18 @@ impl ConfigBuilder {
         self
     }
 
-    /// 设置 HTTP ACL allow 规则（追加模式）。
+    /// Set HTTP ACL allow rules in append mode.
     ///
-    /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败会 fail-closed 返回错误，避免误配置被静默跳过。
+    /// Each rule is a string in 'METHOD host/path' format.
+    /// Parse failures return fail-closed errors so misconfigurations are not ignored.
     pub fn http_acl_allow_str(mut self, rules: &[&str]) -> Result<Self, SdkError> {
         for rule_str in rules {
             match mimobox_core::HttpAclRule::parse(rule_str) {
                 Ok(rule) => self.inner.http_acl.allow.push(rule),
                 Err(err) => {
-                    // SECURITY: fail-closed - 无效 ACL 规则直接报错，不静默跳过。
+                    // SECURITY: fail-closed invalid ACL rules instead of silently skipping them.
                     return Err(SdkError::Config(format!(
-                        "HTTP ACL allow 规则解析失败: {} - {}",
+                        "HTTP ACL allow rule parse failed: {} - {}",
                         rule_str, err
                     )));
                 }
@@ -814,7 +816,7 @@ impl ConfigBuilder {
         Ok(self)
     }
 
-    /// 设置 HTTP ACL allow 规则（从已解析的规则列表）。
+    /// Set HTTP ACL allow rules from already parsed rules.
     pub fn http_acl_allow(mut self, rules: Vec<mimobox_core::HttpAclRule>) -> Self {
         self.inner.http_acl.allow.extend(rules);
         if matches!(self.inner.network, NetworkPolicy::DenyAll)
@@ -825,18 +827,18 @@ impl ConfigBuilder {
         self
     }
 
-    /// 设置 HTTP ACL deny 规则（追加模式）。
+    /// Set HTTP ACL deny rules in append mode.
     ///
-    /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败会 fail-closed 返回错误，避免误配置被静默跳过。
+    /// Each rule is a string in 'METHOD host/path' format.
+    /// Parse failures return fail-closed errors so misconfigurations are not ignored.
     pub fn http_acl_deny_str(mut self, rules: &[&str]) -> Result<Self, SdkError> {
         for rule_str in rules {
             match mimobox_core::HttpAclRule::parse(rule_str) {
                 Ok(rule) => self.inner.http_acl.deny.push(rule),
                 Err(err) => {
-                    // SECURITY: fail-closed - 无效 ACL 规则直接报错，不静默跳过。
+                    // SECURITY: fail-closed invalid ACL rules instead of silently skipping them.
                     return Err(SdkError::Config(format!(
-                        "HTTP ACL deny 规则解析失败: {} - {}",
+                        "HTTP ACL deny rule parse failed: {} - {}",
                         rule_str, err
                     )));
                 }
@@ -845,7 +847,7 @@ impl ConfigBuilder {
         Ok(self)
     }
 
-    /// 设置 HTTP ACL deny 规则（从已解析的规则列表）。
+    /// Set HTTP ACL deny rules from already parsed rules.
     pub fn http_acl_deny(mut self, rules: Vec<mimobox_core::HttpAclRule>) -> Self {
         self.inner.http_acl.deny.extend(rules);
         self
@@ -863,7 +865,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .vm_vcpu_count(4)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.vm_vcpu_count, 4);
     /// ```
@@ -884,7 +886,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .vm_memory_mb(512)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.vm_memory_mb, 512);
     /// ```
@@ -905,7 +907,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .kernel_path("/opt/mimobox/vmlinux")
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.kernel_path, Some(std::path::PathBuf::from("/opt/mimobox/vmlinux")));
     /// ```
@@ -926,7 +928,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.rootfs_path, Some(std::path::PathBuf::from("/opt/mimobox/rootfs.cpio.gz")));
     /// ```
@@ -950,7 +952,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .vm_security_profile(VmSecurityProfile::Performance)
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.vm_security_profile, VmSecurityProfile::Performance);
     /// ```
@@ -969,7 +971,7 @@ impl ConfigBuilder {
     /// let config = Config::builder()
     ///     .no_timeout()
     ///     .build()
-    ///     .expect("配置校验失败");
+    ///     .expect("config validation failed");
     ///
     /// assert_eq!(config.timeout, None);
     /// ```
@@ -985,7 +987,7 @@ impl ConfigBuilder {
     /// ```
     /// use mimobox_sdk::Config;
     ///
-    /// let config = Config::builder().build().expect("配置校验失败");
+    /// let config = Config::builder().build().expect("config validation failed");
     /// assert_eq!(config.isolation, mimobox_sdk::IsolationLevel::Auto);
     /// ```
     pub fn build(self) -> Result<Config, SdkError> {
@@ -1010,8 +1012,8 @@ mod tests {
                 assert_eq!(code, ErrorCode::InvalidConfig);
                 assert_eq!(suggestion.as_deref(), Some(expected_suggestion));
             }
-            Err(other) => panic!("期望 InvalidConfig 错误，实际为: {other}"),
-            Ok(_) => panic!("非法配置不应构建成功"),
+            Err(other) => panic!("expected InvalidConfig error, got: {other}"),
+            Ok(_) => panic!("invalid config should not build successfully"),
         }
     }
 
@@ -1034,7 +1036,7 @@ mod tests {
             .vm_vcpu_count(4)
             .vm_memory_mb(768)
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(config.vm_vcpu_count, 4);
         assert_eq!(config.vm_memory_mb, 768);
@@ -1046,7 +1048,7 @@ mod tests {
             .kernel_path("/opt/mimobox/vmlinux")
             .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(
             config.kernel_path,
@@ -1063,7 +1065,7 @@ mod tests {
         let config = Config::builder()
             .network(NetworkPolicy::AllowDomains(vec!["example.com".to_string()]))
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert!(config.to_sandbox_config().deny_network);
         assert_eq!(
@@ -1078,7 +1080,7 @@ mod tests {
             .network(NetworkPolicy::AllowAll)
             .allow_fork(true)
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let sandbox_config = config.to_sandbox_config();
 
         assert!(!sandbox_config.deny_network);
@@ -1128,7 +1130,7 @@ mod tests {
             .trust_level(TrustLevel::Trusted)
             .network(NetworkPolicy::AllowAll)
             .build()
-            .expect("Trusted 配置应允许 AllowAll 网络策略");
+            .expect("Trusted config should allow AllowAll network policy");
 
         assert!(matches!(config.network, NetworkPolicy::AllowAll));
     }
@@ -1138,13 +1140,13 @@ mod tests {
         let config = Config::builder()
             .timeout(Duration::from_millis(1_500))
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(2));
 
         let config = Config::builder()
             .timeout(Duration::from_millis(1))
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
     }
 
@@ -1153,7 +1155,7 @@ mod tests {
         let config = Config::builder()
             .allowed_http_domains(["api.openai.com", "*.openai.com"])
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let sandbox_config = config.to_sandbox_config();
 
         assert_eq!(
@@ -1171,7 +1173,7 @@ mod tests {
             ]))
             .allowed_http_domains(["api.openai.com", "*.openai.com"])
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let sandbox_config = config.to_sandbox_config();
 
         assert_eq!(
@@ -1188,21 +1190,21 @@ mod tests {
     fn builder_rejects_zero_memory_limit() {
         let result = Config::builder().memory_limit_mb(0).build();
 
-        assert_invalid_config_suggestion(result, "memory_limit_mb 最小值为 1");
+        assert_invalid_config_suggestion(result, "memory_limit_mb minimum is 1");
     }
 
     #[test]
     fn builder_rejects_zero_timeout() {
         let result = Config::builder().timeout(Duration::ZERO).build();
 
-        assert_invalid_config_suggestion(result, "timeout 不能为 0，推荐 30 秒");
+        assert_invalid_config_suggestion(result, "timeout must be > 0, recommended 30s");
     }
 
     #[test]
     fn builder_rejects_zero_vcpu_count() {
         let result = Config::builder().vm_vcpu_count(0).build();
 
-        assert_invalid_config_suggestion(result, "vcpu_count 最小值为 1");
+        assert_invalid_config_suggestion(result, "vcpu_count minimum is 1");
     }
 
     #[test]
@@ -1213,7 +1215,7 @@ mod tests {
 
         assert_invalid_config_suggestion(
             result,
-            &format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
+            &format!("memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}, recommended 256-512 MB"),
         );
     }
 
@@ -1222,7 +1224,7 @@ mod tests {
         let config = Config::builder()
             .max_processes(32)
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(config.to_sandbox_config().max_processes, Some(32));
     }
@@ -1232,7 +1234,7 @@ mod tests {
         let config = Config::builder()
             .sandbox_tmp_dir("/tmp/mimobox-private")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(
             config.to_sandbox_config().fs_readwrite,
@@ -1246,7 +1248,7 @@ mod tests {
             .fs_readwrite(["/workspace"])
             .sandbox_tmp_dir("/tmp/mimobox-private")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(
             config.to_sandbox_config().fs_readwrite,
@@ -1263,7 +1265,7 @@ mod tests {
 
         assert_invalid_config_suggestion(
             result,
-            "max_processes 最小值为 1，或设置为 None 使用后端默认值",
+            "max_processes minimum is 1, or set to None for backend default",
         );
     }
 
@@ -1275,7 +1277,7 @@ mod tests {
 
         assert_invalid_config_suggestion(
             result,
-            "请使用标准域名格式，如 example.com 或 *.example.com，不支持 IP 地址",
+            "Use standard domain format, e.g. example.com or *.example.com; IP addresses not supported",
         );
     }
 
@@ -1288,7 +1290,7 @@ mod tests {
             .kernel_path(missing_path)
             .build();
 
-        assert_invalid_config_suggestion(result, "请确保路径存在");
+        assert_invalid_config_suggestion(result, "Please ensure the path exists");
     }
 
     #[test]
@@ -1298,7 +1300,7 @@ mod tests {
                 "*.example.com".to_string(),
             ]))
             .build()
-            .expect("AllowDomains 应允许受控代理白名单");
+            .expect("AllowDomains should allow controlled proxy whitelist");
 
         assert_eq!(
             config.to_sandbox_config().allowed_http_domains,
@@ -1310,9 +1312,9 @@ mod tests {
     fn builder_http_acl_allow_str_parses_rules() {
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/models", "POST api.openai.com/v1/*"])
-            .expect("ACL allow 规则应解析成功")
+            .expect("ACL allow rule should parse successfully")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(config.http_acl.allow.len(), 2);
         assert_eq!(
@@ -1335,9 +1337,9 @@ mod tests {
                 "api.openai.com".to_string(),
             ]))
             .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
-            .expect("ACL deny 规则应解析成功")
+            .expect("ACL deny rule should parse successfully")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(config.http_acl.deny.len(), 1);
         assert_eq!(
@@ -1358,7 +1360,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("HTTP ACL allow 规则解析失败")
+                .contains("HTTP ACL allow rule parse failed")
         );
     }
 
@@ -1367,7 +1369,7 @@ mod tests {
         let result = Config::builder()
             .network(NetworkPolicy::AllowAll)
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
-            .expect("ACL allow 规则应解析成功")
+            .expect("ACL allow rule should parse successfully")
             .build();
 
         assert!(result.is_err());
@@ -1380,10 +1382,10 @@ mod tests {
         let config = Config::builder()
             .allowed_http_domains(["api.openai.com", "*.openai.com"])
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let sandbox_config = config.to_sandbox_config();
 
-        // allowed_http_domains 应自动转换为 http_acl allow 规则
+        // allowed_http_domains should be automatically converted to http_acl allow rules
         assert!(sandbox_config.http_acl.allow.iter().any(|rule| {
             rule.host == "api.openai.com"
                 && rule.path == "/*"
@@ -1398,11 +1400,11 @@ mod tests {
 
     #[test]
     fn http_acl_backward_compatible_with_allowed_http_domains() {
-        // 仅使用 allowed_http_domains，不配置 http_acl，代码行为不变
+        // Using only allowed_http_domains without configuring http_acl preserves behavior
         let config = Config::builder()
             .allowed_http_domains(["api.openai.com"])
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
         let sandbox_config = config.to_sandbox_config();
 
         assert_eq!(
@@ -1420,12 +1422,12 @@ mod tests {
 
     #[test]
     fn http_acl_allow_str_auto_sets_allow_domains_network() {
-        // http_acl_allow_str 设置规则时自动切换 network 策略
+        // http_acl_allow_str switches the network policy automatically when setting rules
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
-            .expect("ACL allow 规则应解析成功")
+            .expect("ACL allow rule should parse successfully")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert!(matches!(config.network, NetworkPolicy::AllowDomains(_)));
     }
@@ -1434,11 +1436,11 @@ mod tests {
     fn builder_chain_http_acl_allow_and_deny() {
         let config = Config::builder()
             .http_acl_allow_str(&["GET api.openai.com/v1/*"])
-            .expect("ACL allow 规则应解析成功")
+            .expect("ACL allow rule should parse successfully")
             .http_acl_deny_str(&["* api.openai.com/v1/admin/*"])
-            .expect("ACL deny 规则应解析成功")
+            .expect("ACL deny rule should parse successfully")
             .build()
-            .expect("配置校验失败");
+            .expect("config validation failed");
 
         assert_eq!(config.http_acl.allow.len(), 1);
         assert_eq!(config.http_acl.deny.len(), 1);
@@ -1448,7 +1450,9 @@ mod tests {
     #[test]
     fn microvm_config_uses_default_artifact_paths_when_not_overridden() {
         let config = Config::default();
-        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
         let defaults = mimobox_vm::MicrovmConfig::default();
 
         assert_eq!(microvm_config.kernel_path, defaults.kernel_path);
@@ -1467,8 +1471,10 @@ mod tests {
             .kernel_path("/srv/mimobox/vmlinux")
             .rootfs_path("/srv/mimobox/rootfs.cpio.gz")
             .build()
-            .expect("配置校验失败");
-        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+            .expect("config validation failed");
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
 
         assert_eq!(microvm_config.vcpu_count, 4);
         assert_eq!(microvm_config.memory_mb, 768);
@@ -1491,8 +1497,10 @@ mod tests {
             .vm_memory_mb(768)
             .memory_limit_mb(256)
             .build()
-            .expect("配置校验失败");
-        let microvm_config = config.to_microvm_config().expect("构造 microVM 配置失败");
+            .expect("config validation failed");
+        let microvm_config = config
+            .to_microvm_config()
+            .expect("microVM config construction failed");
 
         assert_eq!(microvm_config.memory_mb, 256);
     }
@@ -1507,7 +1515,7 @@ mod tests {
 
         assert_invalid_config_suggestion(
             result,
-            &format!("memory_limit_mb 最大值为 {MAX_MEMORY_LIMIT_MB}，推荐 256-512 MB"),
+            &format!("memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}, recommended 256-512 MB"),
         );
     }
 }

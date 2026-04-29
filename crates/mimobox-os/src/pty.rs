@@ -220,7 +220,7 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    tracing::debug!("PTY reader 退出: {error}");
+                    tracing::debug!("PTY reader exited: {error}");
                     break;
                 }
             }
@@ -236,7 +236,7 @@ fn spawn_wait_thread(
 ) {
     std::thread::spawn(move || {
         let exit_code = wait_for_child(child_pid).unwrap_or_else(|error| {
-            tracing::warn!("等待 PTY 子进程退出失败: {error}");
+            tracing::warn!("Failed to wait for PTY child process: {error}");
             -1
         });
         exited.store(true, Ordering::SeqCst);

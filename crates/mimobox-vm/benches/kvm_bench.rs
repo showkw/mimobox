@@ -118,7 +118,11 @@ fn bench_snapshot_restore(c: &mut Criterion) {
                     backend.run_command(black_box(command.as_slice())),
                     "command execution after snapshot restore failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "restored echo command must succeed");
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "restored echo command must succeed"
+                );
                 black_box(result);
 
                 must(backend.shutdown(), "failed to shut down restored VM");
@@ -160,7 +164,11 @@ fn bench_restore_pool(c: &mut Criterion) {
                     restored.execute(black_box(command.as_slice())),
                     "restore pool command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "restore pool echo command must succeed");
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "restore pool echo command must succeed"
+                );
                 black_box(result);
 
                 drop(restored);
@@ -198,7 +206,10 @@ fn bench_command_execution(c: &mut Criterion) {
             }
 
             let elapsed = total_start.elapsed();
-            must(backend.shutdown(), "failed to shut down command execution VM");
+            must(
+                backend.shutdown(),
+                "failed to shut down command execution VM",
+            );
             elapsed
         });
     });
@@ -215,7 +226,10 @@ fn bench_pool_hot_path(c: &mut Criterion) {
         max_idle_duration: Duration::from_secs(60),
         health_check_interval: None,
     };
-    let pool = must(VmPool::new(config, pool_config), "failed to create warm pool");
+    let pool = must(
+        VmPool::new(config, pool_config),
+        "failed to create warm pool",
+    );
     let command = guest_cmd(&["/bin/echo", "hello"]);
 
     c.bench_function("bench_pool_hot_path", |b| {
@@ -228,7 +242,11 @@ fn bench_pool_hot_path(c: &mut Criterion) {
                     pooled.execute(black_box(command.as_slice())),
                     "warm pool command execution failed",
                 );
-                assert_eq!(result.exit_code, Some(0), "warm pool echo command must succeed");
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "warm pool echo command must succeed"
+                );
                 black_box(result);
                 drop(pooled);
             }
