@@ -253,15 +253,16 @@ fn normalize_acl_host(host: &str) -> String {
 }
 
 fn matches_acl_path(rule_path: &str, path: &str) -> bool {
+    let rule_path = normalize_path(rule_path);
     let path = normalize_path(path);
 
-    match rule_path {
+    match rule_path.as_str() {
         "*" | "/*" => true,
-        _ if rule_path.ends_with('*') => {
-            let prefix = rule_path.trim_end_matches('*');
+        s if s.ends_with('*') => {
+            let prefix = s.trim_end_matches('*');
             path.starts_with(prefix)
         }
-        _ => rule_path == path,
+        s => s == path.as_str(),
     }
 }
 
@@ -1398,6 +1399,22 @@ mod tests {
         let policy = acl_policy(&["* * /*"], &["* */admin/*"]);
 
         assert!(!policy.evaluate(HttpMethod::Get, "any", "//admin/settings"));
+    }
+
+    #[test]
+    fn test_evaluate_serde_rule_path_normalized() {
+        // 通过 serde 构造的 HttpAclRule，path 包含未规范化的路径。
+        let policy = HttpAclPolicy {
+            allow: vec![],
+            deny: vec![HttpAclRule {
+                method: HttpMethod::Any,
+                host: "*".to_string(),
+                path: "/admin/../secret/*".to_string(),
+            }],
+        };
+
+        // 即使 rule.path 未规范化，evaluate 也应正确匹配。
+        assert!(!policy.evaluate(HttpMethod::Get, "any", "/secret/data"));
     }
 
     #[test]

@@ -888,6 +888,52 @@ impl PyPtySession {
             "PtySession(closed)".to_string()
         }
     }
+
+    /// 自动清理（Python GC 回收时调用）。
+    ///
+    /// 不如 kill() 或 with 语句可靠（异常可能被吞掉），但作为防止孤儿进程的最后防线。
+    fn __del__(&mut self) {
+        if self.inner.is_none() {
+            return;
+        }
+
+        if !python_interpreter_initialized() {
+            // Python 解释器未初始化或已关闭，直接泄漏底层 PtySession。
+            // 这比在无 GIL 环境下操作更安全，且只在进程退出时发生。
+            if let Some(session) = self.inner.take() {
+                std::mem::forget(session);
+                log_cleanup_warning(
+                    "PtySession.__del__ cleanup skipped: Python interpreter not initialized or already shut down",
+                );
+            }
+            return;
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Python::with_gil(|py| {
+                if python_is_finalizing(py) {
+                    if let Some(session) = self.inner.take() {
+                        std::mem::forget(session);
+                        log_cleanup_warning(
+                            "PtySession.__del__ cleanup skipped: Python interpreter is finalizing",
+                        );
+                    }
+                    return;
+                }
+
+                if let Some(session) = self.inner.as_mut() {
+                    let mut wrapper = UngilPtySessionMut(session);
+                    let _ = py.allow_threads(move || wrapper.kill());
+                }
+            });
+        }));
+
+        if result.is_err() {
+            log_cleanup_warning(
+                "PtySession.__del__ cleanup failed: could not acquire GIL or panicked",
+            );
+        }
+    }
 }
 
 impl PyPtySession {
