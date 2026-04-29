@@ -19,11 +19,11 @@
 
 ## Source Code
 
-- crates/mimobox-core/ — Sandbox trait, Config, Error types
-- crates/mimobox-os/ — OS-level sandbox (Landlock, Seccomp, Namespaces)
+- crates/mimobox-core/ — Sandbox trait, Config, Error types, HTTP ACL rules (HttpAclRule, HttpMethod, HttpAclPolicy)
+- crates/mimobox-os/ — OS-level sandbox (Landlock, Seccomp, Namespaces), PTY sessions
 - crates/mimobox-wasm/ — Wasm sandbox (Wasmtime, WASI Preview 2)
-- crates/mimobox-vm/ — microVM sandbox (KVM, snapshot/restore, fork)
-- crates/mimobox-sdk/ — Unified SDK with smart routing
-- crates/mimobox-mcp/ — MCP Server (10 tools, rmcp)
-- crates/mimobox-python/ — Python bindings (PyO3)
-- crates/mimobox-cli/ — CLI entry point
+- crates/mimobox-vm/ — microVM sandbox (KVM, snapshot/restore, fork, HTTP proxy with ACL enforcement)
+- crates/mimobox-sdk/ — Unified SDK with smart routing, PTY sessions, HTTP ACL config
+- crates/mimobox-mcp/ — MCP Server (11 tools, rmcp)
+- crates/mimobox-python/ — Python bindings (PyO3): Sandbox, FileSystem, Process, PtySession, SnapshotOps, Network, HTTP ACL
+- crates/mimobox-cli/ — CLI entry point (run, code, shell, ls, cat, write, snapshot, restore, bench, doctor, mcp-init)
