@@ -809,6 +809,28 @@ impl PyPtySession {
         slf
     }
 
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        Ok(slf)
+    }
+
+    fn __exit__(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let obj = slf.into_pyobject(py).expect("PyRef conversion cannot fail");
+        let mut borrowed = obj
+            .try_borrow_mut()
+            .map_err(|_| PyRuntimeError::new_err("PtySession is currently borrowed"))?;
+        if let Some(session) = borrowed.inner.as_mut() {
+            let mut session = UngilPtySessionMut(session);
+            let _ = py.allow_threads(move || session.kill());
+        }
+        Ok(false)
+    }
+
     /// Returns the next PTY event, blocking briefly without holding the GIL.
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if self.done {
@@ -820,20 +842,19 @@ impl PyPtySession {
                 return self.convert_next_event(py, event);
             }
 
-            let event = {
+            let result = {
                 let Some(session) = self.inner.as_mut() else {
                     self.done = true;
                     return Ok(None);
                 };
-                session.output().try_recv()
+                let session = UngilPtySessionMut(session);
+                py.allow_threads(move || session.recv_timeout(Duration::from_millis(50)))
             };
 
-            match event {
+            match result {
                 Ok(event) => return self.convert_next_event(py, event),
-                Err(mpsc::TryRecvError::Empty) => {
-                    py.allow_threads(|| std::thread::sleep(Duration::from_millis(10)));
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.done = true;
                     return Ok(None);
                 }
@@ -1275,7 +1296,15 @@ impl PySandbox {
         self.inner
             .as_ref()
             .and_then(|s| s.active_isolation())
-            .map(|level| format!("{level:?}").to_lowercase())
+            .map(|level| {
+                match level {
+                    IsolationLevel::Os => "os",
+                    IsolationLevel::Wasm => "wasm",
+                    IsolationLevel::MicroVm => "microvm",
+                    IsolationLevel::Auto => "auto",
+                }
+                .to_string()
+            })
     }
 
     /// Return whether the sandbox is currently ready.
@@ -1940,15 +1969,13 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
         SdkError::Config(message) => PyValueError::new_err(message),
         SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
         SdkError::Io(err) => match err.kind() {
-            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(format!(
-                "{}. Use sandbox.files.list('/') to see available files",
-                err
-            )),
-            std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(format!(
-                "{}. Check file permissions; grant write access via the fs_readwrite parameter when creating the Sandbox",
-                err
-            )),
-            _ => PyRuntimeError::new_err(err.to_string()),
+            std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(
+                "File not found inside the sandbox. Use sandbox.files.list('/') or sandbox.list_dir('/') to see available files",
+            ),
+            std::io::ErrorKind::PermissionDenied => {
+                PyPermissionError::new_err("Permission denied inside the sandbox")
+            }
+            _ => PyRuntimeError::new_err(format!("I/O error: {:?}", err.kind())),
         },
         SdkError::Sandbox {
             code,
