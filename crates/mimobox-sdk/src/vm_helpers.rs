@@ -206,6 +206,11 @@ pub(crate) fn map_http_proxy_error(error: mimobox_vm::HttpProxyError) -> SdkErro
             message,
             Some("ensure target domain is in allowed_http_domains whitelist".to_string()),
         ),
+        HttpProxyError::DeniedAcl(message) => SdkError::sandbox(
+            ErrorCode::HttpDeniedAcl,
+            message,
+            Some("HTTP request denied by ACL policy, check http_acl config".to_string()),
+        ),
         HttpProxyError::DnsRebind(message) => SdkError::sandbox(
             ErrorCode::HttpDeniedHost,
             message,

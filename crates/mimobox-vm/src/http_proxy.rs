@@ -5,11 +5,12 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use mimobox_core::SandboxConfig;
+use mimobox_core::{HttpAclPolicy, HttpMethod, SandboxConfig, normalize_path};
 use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -114,6 +115,12 @@ pub enum HttpProxyError {
         /// Hostname rejected by the configured allowlist.
         String,
     ),
+    /// HTTP request denied by ACL policy.
+    #[error("HTTP ACL denied: {0}")]
+    DeniedAcl(
+        /// ACL denial detail including method/host/path.
+        String,
+    ),
     /// Request exceeded its timeout.
     #[error("HTTP request timed out")]
     Timeout,
@@ -157,6 +164,7 @@ impl HttpProxyError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::DeniedHost(_) => "DENIED_HOST",
+            Self::DeniedAcl(_) => "DENIED_ACL",
             Self::Timeout => "TIMEOUT",
             Self::BodyTooLarge => "BODY_TOO_LARGE",
             Self::ConnectFail(_) => "CONNECT_FAIL",
@@ -297,6 +305,7 @@ pub fn execute_http_request(
     let url = reqwest::Url::parse(&request.url)
         .map_err(|err| HttpProxyError::InvalidUrl(err.to_string()))?;
     validate_http_request(config, &url)?;
+    validate_acl(&config.http_acl, &request.method, &url)?;
     let verified_ip = validate_dns_resolution(&url)?;
     let host = url
         .host_str()
@@ -402,6 +411,31 @@ fn validate_http_request(config: &SandboxConfig, url: &reqwest::Url) -> Result<(
         .host_str()
         .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
     validate_host(config, host)
+}
+
+fn validate_acl(
+    acl_policy: &HttpAclPolicy,
+    method_str: &str,
+    url: &reqwest::Url,
+) -> Result<(), HttpProxyError> {
+    if acl_policy.allow.is_empty() && acl_policy.deny.is_empty() {
+        return Ok(());
+    }
+
+    let normalized_path = normalize_path(url.path());
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpProxyError::InvalidUrl("URL missing host".into()))?;
+    let method = HttpMethod::from_str(method_str)
+        .map_err(|err| HttpProxyError::InvalidUrl(format!("invalid HTTP method: {err}")))?;
+
+    if acl_policy.evaluate(method, host, &normalized_path) {
+        return Ok(());
+    }
+
+    Err(HttpProxyError::DeniedAcl(format!(
+        "{method_str} {host}{normalized_path}"
+    )))
 }
 
 fn validate_host(config: &SandboxConfig, host: &str) -> Result<(), HttpProxyError> {
@@ -559,11 +593,80 @@ fn map_reqwest_error(err: reqwest::Error) -> HttpProxyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mimobox_core::HttpAclRule;
 
     fn config(domains: &[&str]) -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.allowed_http_domains = domains.iter().map(|item| (*item).to_string()).collect();
         config
+    }
+
+    fn parse_acl_rule(rule: &str) -> HttpAclRule {
+        HttpAclRule::parse(rule).expect("HTTP ACL 规则必须合法")
+    }
+
+    fn acl_policy(allow: &[&str], deny: &[&str]) -> HttpAclPolicy {
+        HttpAclPolicy {
+            allow: allow.iter().map(|rule| parse_acl_rule(rule)).collect(),
+            deny: deny.iter().map(|rule| parse_acl_rule(rule)).collect(),
+        }
+    }
+
+    fn test_url(path: &str) -> reqwest::Url {
+        reqwest::Url::parse(&format!("https://api.openai.com{path}")).expect("URL 必须合法")
+    }
+
+    #[test]
+    fn test_acl_empty_policy_allows_all() {
+        let policy = HttpAclPolicy::default();
+        let url = test_url("/admin/secret");
+
+        assert!(validate_acl(&policy, "GET", &url).is_ok());
+        assert!(validate_acl(&policy, "OPTIONS", &url).is_ok());
+    }
+
+    #[test]
+    fn test_acl_deny_rule_blocks_request() {
+        let policy = acl_policy(&[], &["GET api.openai.com/private/*"]);
+        let url = test_url("/private/secret");
+
+        let err = validate_acl(&policy, "GET", &url).expect_err("deny 规则必须阻止请求");
+
+        assert!(matches!(
+            err,
+            HttpProxyError::DeniedAcl(detail) if detail == "GET api.openai.com/private/secret"
+        ));
+    }
+
+    #[test]
+    fn test_acl_allow_rule_permits_request() {
+        let policy = acl_policy(&["GET api.openai.com/v1/*"], &[]);
+        let url = test_url("/v1/models");
+
+        assert!(validate_acl(&policy, "GET", &url).is_ok());
+    }
+
+    #[test]
+    fn test_acl_deny_takes_priority_over_allow() {
+        let policy = acl_policy(&["* * /*"], &["GET api.openai.com/admin/*"]);
+        let url = test_url("/admin/settings");
+
+        let err = validate_acl(&policy, "GET", &url).expect_err("deny 必须优先于 allow");
+
+        assert!(matches!(err, HttpProxyError::DeniedAcl(_)));
+    }
+
+    #[test]
+    fn test_acl_path_normalization_blocks_traversal() {
+        let policy = acl_policy(&["* * /*"], &["GET api.openai.com/admin/*"]);
+        let url = test_url("/public/../admin/settings");
+
+        let err = validate_acl(&policy, "GET", &url).expect_err("路径规范化后必须命中 deny");
+
+        assert!(matches!(
+            err,
+            HttpProxyError::DeniedAcl(detail) if detail == "GET api.openai.com/admin/settings"
+        ));
     }
 
     #[test]
