@@ -349,6 +349,26 @@ class Sandbox:
         """
         ...
 
+    def stream_exec(self, argv: List[str]) -> StreamIterator:
+        """Execute an argv-style command and return a streaming iterator of events.
+
+        Arguments are passed directly to execve-style execution without
+        shell parsing.  This is the safe alternative to ``stream_execute()``
+        for user-controlled input.
+
+        Args:
+            argv: Command and arguments list. Must be non-empty.
+
+        Returns:
+            A ``StreamIterator`` yielding ``StreamEvent`` objects for stdout,
+            stderr chunks and the final exit event.
+
+        Raises:
+            ValueError: If argv is empty.
+            SandboxError: If the sandbox is destroyed or execution fails.
+        """
+        ...
+
     def wait_ready(self, timeout_secs: Optional[float] = ...) -> None:
         """Wait until the sandbox is ready to accept commands.
 
@@ -360,6 +380,16 @@ class Sandbox:
 
         Raises:
             SandboxError: If the sandbox is destroyed or the timeout expires.
+        """
+        ...
+
+    @property
+    def active_isolation(self) -> Optional[str]:
+        """Return the isolation level of the currently active backend.
+
+        Returns ``None`` before the first operation triggers backend
+        initialization.  Useful for querying the result of ``Auto``
+        routing after the first execute.
         """
         ...
 

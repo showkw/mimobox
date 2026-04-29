@@ -902,6 +902,32 @@ impl PySandbox {
         })
     }
 
+    /// Execute an argv-style command and return a streaming iterator of events.
+    ///
+    /// Arguments are passed directly to execve-style execution without shell parsing.
+    /// This is the safe alternative to ``stream_execute()`` for user-controlled input.
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - Command and arguments list. Must be non-empty.
+    ///
+    /// # Returns
+    ///
+    /// A ``StreamIterator`` yielding ``StreamEvent`` objects for stdout,
+    /// stderr chunks and the final exit event.
+    fn stream_exec(&mut self, py: Python<'_>, argv: Vec<String>) -> PyResult<PyStreamIterator> {
+        if argv.is_empty() {
+            return Err(PyValueError::new_err("argv must not be empty"));
+        }
+        let sandbox = self.inner_mut()?;
+        let receiver = py
+            .allow_threads(|| sandbox.stream_exec(&argv))
+            .map_err(|e| map_sdk_error(e, py))?;
+        Ok(PyStreamIterator {
+            receiver: Some(receiver),
+        })
+    }
+
     /// Wait until the sandbox is ready to accept commands.
     #[pyo3(signature = (timeout_secs=None))]
     fn wait_ready(&mut self, py: Python<'_>, timeout_secs: Option<f64>) -> PyResult<()> {
@@ -909,6 +935,18 @@ impl PySandbox {
         let timeout = parse_python_timeout(timeout_secs.unwrap_or(30.0))?;
         py.allow_threads(|| sandbox.wait_ready(timeout))
             .map_err(|e| map_sdk_error(e, py))
+    }
+
+    /// Returns the isolation level of the currently active backend.
+    ///
+    /// Returns ``None`` before the first operation triggers backend initialization.
+    /// Useful for querying the result of ``Auto`` routing after the first execute.
+    #[getter]
+    fn active_isolation(&self) -> Option<String> {
+        self.inner
+            .as_ref()
+            .and_then(|s| s.active_isolation())
+            .map(|level| format!("{level:?}").to_lowercase())
     }
 
     /// Return whether the sandbox is currently ready.
