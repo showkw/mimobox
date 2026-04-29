@@ -172,6 +172,9 @@ impl HttpAclPolicy {
 
 /// 规范化 HTTP 路径，消除常见路径绕过形式。
 pub fn normalize_path(path: &str) -> String {
+    // SAFETY: reqwest::Url::parse() 已经对 path 做了 percent-decode。
+    // 这里的第二次解码处理 URL 中仍然包含编码段的场景（例如来自非标准 URL 源或规则定义）。
+    // 双重解码在此处是安全的，因为规则路径和请求路径都经过统一处理。
     let decoded = percent_decode_path(path);
     let mut segments = Vec::new();
 

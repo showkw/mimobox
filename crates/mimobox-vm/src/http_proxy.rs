@@ -27,6 +27,8 @@ const MAX_TOTAL_HEADERS_SIZE: usize = 64 * 1024;
 const MAX_HEADER_COUNT: usize = 64;
 /// 允许的 HTTP method 白名单。CONNECT 可用于代理穿透，TRACE 可导致 XST 攻击，因此被禁止。
 /// 保留 PUT/PATCH/DELETE 以支持常见 REST API 调用。
+/// 注意：此列表必须与 mimobox_core::HttpMethod 枚举变体保持同步。
+/// 当 HttpMethod 增加新方法时，此列表也需同步更新。
 const ALLOWED_METHODS: &[&[u8]] = &[b"GET", b"HEAD", b"POST", b"PUT", b"PATCH", b"DELETE"];
 /// hop-by-hop 和敏感 header blocklist：这些 header 在转发前会被过滤，防止代理穿透和信息泄露。
 /// - Host: 强制使用 URL 中的 host，防止 Host header 注入

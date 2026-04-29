@@ -742,11 +742,12 @@ impl ConfigBuilder {
     /// 设置 HTTP ACL allow 规则（追加模式）。
     ///
     /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败在 build() 阶段返回错误。
+    /// 解析失败会记录 warn 并跳过该规则。
     pub fn http_acl_allow_str(mut self, rules: &[&str]) -> Self {
         for rule_str in rules {
-            if let Ok(rule) = mimobox_core::HttpAclRule::parse(rule_str) {
-                self.inner.http_acl.allow.push(rule);
+            match mimobox_core::HttpAclRule::parse(rule_str) {
+                Ok(rule) => self.inner.http_acl.allow.push(rule),
+                Err(err) => tracing::warn!("HTTP ACL allow 规则解析失败: {} - {}", rule_str, err),
             }
         }
         if matches!(self.inner.network, NetworkPolicy::DenyAll)
@@ -771,11 +772,12 @@ impl ConfigBuilder {
     /// 设置 HTTP ACL deny 规则（追加模式）。
     ///
     /// 每条规则为 'METHOD host/path' 格式的字符串。
-    /// 解析失败在 build() 阶段返回错误。
+    /// 解析失败会记录 warn 并跳过该规则。
     pub fn http_acl_deny_str(mut self, rules: &[&str]) -> Self {
         for rule_str in rules {
-            if let Ok(rule) = mimobox_core::HttpAclRule::parse(rule_str) {
-                self.inner.http_acl.deny.push(rule);
+            match mimobox_core::HttpAclRule::parse(rule_str) {
+                Ok(rule) => self.inner.http_acl.deny.push(rule),
+                Err(err) => tracing::warn!("HTTP ACL deny 规则解析失败: {} - {}", rule_str, err),
             }
         }
         self
@@ -1202,6 +1204,23 @@ mod tests {
         );
         assert_eq!(config.http_acl.deny[0].host, "api.openai.com");
         assert_eq!(config.http_acl.deny[0].path, "/v1/admin/*");
+    }
+
+    #[test]
+    fn http_acl_allow_str_invalid_rule_warns_but_other_rules_work() {
+        // 无效规则（拼错的 method）应被跳过，但其他合法规则应正常生效
+        let config = Config::builder()
+            .http_acl_allow_str(&["GETT api.openai.com/v1/*", "GET api.openai.com/v2/*"])
+            .build()
+            .expect("配置校验失败");
+
+        // 只有一条合法规则被加入
+        assert_eq!(config.http_acl.allow.len(), 1);
+        assert_eq!(
+            config.http_acl.allow[0].method,
+            mimobox_core::HttpMethod::Get
+        );
+        assert_eq!(config.http_acl.allow[0].path, "/v2/*");
     }
 
     #[test]
