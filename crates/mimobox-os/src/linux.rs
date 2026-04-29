@@ -878,12 +878,7 @@ impl LinuxSandbox {
                 loop {
                     // SAFETY: getdents64 系统调用，使用栈缓冲区，无 malloc
                     let nread = unsafe {
-                        libc::syscall(
-                            libc::SYS_getdents64,
-                            dir_fd,
-                            buf.as_mut_ptr(),
-                            buf.len(),
-                        )
+                        libc::syscall(libc::SYS_getdents64, dir_fd, buf.as_mut_ptr(), buf.len())
                     };
                     if nread <= 0 {
                         break;
@@ -906,7 +901,8 @@ impl LinuxSandbox {
                         let name_bytes = &buf[name_start..name_end];
                         if let Ok(name_str) = core::str::from_utf8(name_bytes) {
                             if let Ok(fd) = name_str.parse::<RawFd>() {
-                                if fd > 2 && fd != dir_fd
+                                if fd > 2
+                                    && fd != dir_fd
                                     && !preserve_fds[..preserve_count].contains(&fd)
                                 {
                                     // SAFETY: fd 来自 getdents64 枚举，且已排除 stdio、dir_fd 与保留 fd。
@@ -1003,12 +999,7 @@ impl LinuxSandbox {
                 loop {
                     // SAFETY: getdents64 系统调用，使用栈缓冲区，无 malloc
                     let nread = unsafe {
-                        libc::syscall(
-                            libc::SYS_getdents64,
-                            dir_fd,
-                            buf.as_mut_ptr(),
-                            buf.len(),
-                        )
+                        libc::syscall(libc::SYS_getdents64, dir_fd, buf.as_mut_ptr(), buf.len())
                     };
                     if nread <= 0 {
                         break;
