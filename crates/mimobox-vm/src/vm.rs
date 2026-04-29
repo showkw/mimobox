@@ -15,9 +15,7 @@ use crate::snapshot::MicrovmSnapshot;
 use crate::snapshot::load_state_from_memory_file;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use crate::snapshot::{
-    FILE_SNAPSHOT_VERSION, SnapshotStateFile, create_snapshot_dir, memory_sha256_hex,
-};
+use crate::snapshot::{FILE_SNAPSHOT_VERSION, SnapshotStateFile, memory_sha256_hex};
 use crate::vm_assets::resolve_vm_assets_dir;
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
@@ -698,9 +696,13 @@ impl MicrovmSandbox {
             use base64::Engine as _;
 
             let (memory, vcpu_state) = self.backend.snapshot_parts()?;
-            let snapshot_dir = create_snapshot_dir()?;
-            let memory_path = snapshot_dir.join("memory.bin");
-            let state_path = snapshot_dir.join("state.json");
+            let snapshot_root = crate::snapshot::snapshot_root_dir()?;
+            // 使用 tempfile::TempDir 替代手动创建目录，crash 时自动清理临时快照文件
+            let temp_dir = tempfile::tempdir_in(&snapshot_root).map_err(|e| {
+                MicrovmError::SnapshotFormat(format!("failed to create temp dir: {e}"))
+            })?;
+            let memory_path = temp_dir.path().join("memory.bin");
+            let state_path = temp_dir.path().join("state.json");
 
             let fork_result = (|| {
                 std::fs::write(&memory_path, &memory)?;
@@ -721,7 +723,10 @@ impl MicrovmSandbox {
                 Self::restore_from_file_snapshot(&memory_path)
             })();
 
-            let _ = std::fs::remove_dir_all(snapshot_dir);
+            // 成功或失败都清理临时目录：成功时 close()，失败时 Drop 自动清理
+            if fork_result.is_ok() {
+                let _ = temp_dir.close();
+            }
             fork_result
         }
     }

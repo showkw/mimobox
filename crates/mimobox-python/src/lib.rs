@@ -198,7 +198,7 @@ impl From<DirEntry> for PyDirEntry {
     }
 }
 
-/// 文件元信息，由 Sandbox.stat() 返回。
+/// File metadata returned by Sandbox.stat().
 #[pyclass(name = "FileStat")]
 #[derive(Debug, Clone)]
 struct PyFileStat {
@@ -258,14 +258,14 @@ impl PySnapshot {
         Ok(Self { inner: snapshot })
     }
 
-    /// 从文件化快照创建 Snapshot 实例。
+    /// Create a Snapshot instance from a file-based snapshot on disk.
     ///
-    /// 直接从磁盘文件路径构造快照引用，无需将整个文件读入内存。
-    /// 适用于之前通过 `to_bytes()` 保存到磁盘的大快照文件。
+    /// Constructs a snapshot reference directly from a file path on disk, without reading the entire file into memory.
+    /// Suitable for large snapshot files previously saved via to_bytes().
     ///
     /// # Arguments
     ///
-    /// * `path` - 快照文件的磁盘路径（如之前 `to_bytes()` 保存的 `.bin` 文件）。
+    /// * `path` - Disk path to the snapshot file (e.g. a .bin file previously saved by to_bytes()).
     ///
     /// # Returns
     ///
@@ -442,9 +442,9 @@ impl From<StreamEvent> for PyStreamEvent {
     }
 }
 
-/// 文件系统子模块（sandbox.fs）。
+/// Filesystem sub-module (sandbox.fs).
 ///
-/// 聚合文件操作 API，通过代理模式调用 PySandbox 的已有方法。
+/// Aggregates file operation APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "FileSystem")]
 struct PyFileSystem {
     sandbox: Py<PyAny>,
@@ -452,53 +452,53 @@ struct PyFileSystem {
 
 #[pymethods]
 impl PyFileSystem {
-    /// 读取文件内容。
+    /// Read file contents.
     fn read(&self, py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
         let result = self.sandbox.call_method1(py, "read_file", (path,))?;
         result.extract(py)
     }
 
-    /// 写入文件。
+    /// Write to a file.
     fn write(&self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = extract_bytes_data(data)?;
         self.sandbox.call_method1(py, "write_file", (path, bytes))?;
         Ok(())
     }
 
-    /// 列出目录内容。
+    /// List directory contents.
     fn list(&self, py: Python<'_>, path: &str) -> PyResult<Vec<PyDirEntry>> {
         let result = self.sandbox.call_method1(py, "list_dir", (path,))?;
         result.extract(py)
     }
 
-    /// 检查文件是否存在。
+    /// Check if a file exists.
     fn exists(&self, py: Python<'_>, path: &str) -> PyResult<bool> {
         let result = self.sandbox.call_method1(py, "file_exists", (path,))?;
         result.extract(py)
     }
 
-    /// 删除文件。
+    /// Delete a file.
     fn remove(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         self.sandbox.call_method1(py, "remove_file", (path,))?;
         Ok(())
     }
 
-    /// 重命名或移动文件。
+    /// Rename or move a file.
     fn rename(&self, py: Python<'_>, from: &str, to: &str) -> PyResult<()> {
         self.sandbox.call_method1(py, "rename", (from, to))?;
         Ok(())
     }
 
-    /// 返回文件元信息。
+    /// Return file metadata.
     fn stat(&self, py: Python<'_>, path: &str) -> PyResult<PyFileStat> {
         let result = self.sandbox.call_method1(py, "stat", (path,))?;
         result.extract(py)
     }
 }
 
-/// 进程子模块（sandbox.process）。
+/// Process sub-module (sandbox.process).
 ///
-/// 聚合命令执行 API，通过代理模式调用 PySandbox 的已有方法。
+/// Aggregates command execution APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "Process")]
 struct PyProcess {
     sandbox: Py<PyAny>,
@@ -506,7 +506,7 @@ struct PyProcess {
 
 #[pymethods]
 impl PyProcess {
-    /// 执行 shell 命令或 argv 命令。
+    /// Execute a shell command or argv-style command.
     #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
     fn run(
         &self,
@@ -533,7 +533,7 @@ impl PyProcess {
         }
     }
 
-    /// 执行代码片段。
+    /// Execute a code snippet.
     #[pyo3(signature = (language, code, *, env=None, timeout=None, cwd=None))]
     fn run_code(
         &self,
@@ -561,15 +561,15 @@ impl PyProcess {
         result.extract(py)
     }
 
-    /// 流式执行命令。
+    /// Execute a command with streaming output.
     fn stream(&self, py: Python<'_>, command: &str) -> PyResult<Py<PyAny>> {
         self.sandbox.call_method1(py, "stream_execute", (command,))
     }
 }
 
-/// 快照子模块（sandbox.snapshot）。
+/// Snapshot sub-module (sandbox.snapshot).
 ///
-/// 聚合快照操作 API，通过代理模式调用 PySandbox 的已有方法。
+/// Aggregates snapshot operation APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "SnapshotOps")]
 struct PySnapshotOps {
     sandbox: Py<PyAny>,
@@ -577,26 +577,26 @@ struct PySnapshotOps {
 
 #[pymethods]
 impl PySnapshotOps {
-    /// 兼容旧 API：允许 sandbox.snapshot() 继续捕获快照。
+    /// Legacy API compatibility: allows sandbox.snapshot() to continue capturing snapshots.
     fn __call__(&self, py: Python<'_>) -> PyResult<PySnapshot> {
         self.capture(py)
     }
 
-    /// 捕获当前沙箱状态的快照。
+    /// Capture a snapshot of the current sandbox state.
     fn capture(&self, py: Python<'_>) -> PyResult<PySnapshot> {
         let result = self.sandbox.call_method0(py, "_capture_snapshot")?;
         result.extract(py)
     }
 
-    /// 基于当前实例派生一个独立沙箱。
+    /// Derive an independent sandbox from the current instance.
     fn fork(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.sandbox.call_method0(py, "fork")
     }
 }
 
-/// 网络子模块（sandbox.network）。
+/// Network sub-module (sandbox.network).
 ///
-/// 聚合 HTTP 请求 API，通过代理模式调用 PySandbox 的已有方法。
+/// Aggregates HTTP request APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "Network")]
 struct PyNetwork {
     sandbox: Py<PyAny>,
@@ -604,7 +604,7 @@ struct PyNetwork {
 
 #[pymethods]
 impl PyNetwork {
-    /// 发起 HTTPS 请求（通过 host 代理）。
+    /// Send an HTTPS request (via host proxy).
     #[pyo3(signature = (method, url, headers=None, body=None))]
     fn request(
         &self,
@@ -730,7 +730,7 @@ impl PySandbox {
         Ok(sandbox)
     }
 
-    /// 返回文件系统子模块。
+    /// Return the filesystem sub-module.
     #[getter]
     fn fs(slf: PyRef<'_, Self>) -> PyFileSystem {
         PyFileSystem {
@@ -738,7 +738,7 @@ impl PySandbox {
         }
     }
 
-    /// 返回进程子模块。
+    /// Return the process sub-module.
     #[getter]
     fn process(slf: PyRef<'_, Self>) -> PyProcess {
         PyProcess {
@@ -746,7 +746,7 @@ impl PySandbox {
         }
     }
 
-    /// 返回快照子模块。
+    /// Return the snapshot sub-module.
     #[getter]
     #[pyo3(name = "snapshot")]
     fn snapshot_ops(slf: PyRef<'_, Self>) -> PySnapshotOps {
@@ -755,7 +755,7 @@ impl PySandbox {
         }
     }
 
-    /// 返回网络子模块。
+    /// Return the network sub-module.
     #[getter]
     fn network(slf: PyRef<'_, Self>) -> PyNetwork {
         PyNetwork {
@@ -938,7 +938,7 @@ impl PySandbox {
         Ok(entries.into_iter().map(PyDirEntry::from).collect())
     }
 
-    /// 检查指定路径的文件是否存在。
+    /// Check if a file exists at the specified path.
     fn file_exists(&mut self, py: Python<'_>, path: &str) -> PyResult<bool> {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
@@ -946,7 +946,7 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))
     }
 
-    /// 删除指定路径的文件或空目录。
+    /// Delete the file or empty directory at the specified path.
     fn remove_file(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
@@ -954,7 +954,7 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))
     }
 
-    /// 重命名/移动文件。
+    /// Rename or move a file.
     fn rename(&mut self, py: Python<'_>, from: &str, to: &str) -> PyResult<()> {
         let sandbox = self.inner_mut()?;
         let from = from.to_string();
@@ -963,7 +963,7 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))
     }
 
-    /// 返回文件元信息。
+    /// Return file metadata.
     fn stat(&mut self, py: Python<'_>, path: &str) -> PyResult<PyFileStat> {
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
@@ -1164,23 +1164,26 @@ impl PySandbox {
         Ok(false)
     }
 
-    /// 自动清理资源（Python GC 时调用）。
+    /// Automatic cleanup (called by Python GC).
     ///
-    /// 不如 close() 可靠（异常可能被吞），但作为最后防线防止 sandbox 泄漏。
+    /// Less reliable than close() (exceptions may be swallowed), but serves as a last-resort guard against sandbox leaks.
     fn __del__(&mut self) {
         if self.inner.is_none() {
             return;
         }
 
         if !python_interpreter_initialized() {
-            self.skip_destroy_unraisable("__del__", "Python 解释器未初始化或已经关闭");
+            self.skip_destroy_unraisable(
+                "__del__",
+                "Python interpreter not initialized or already shut down",
+            );
             return;
         }
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             Python::with_gil(|py| {
                 if python_is_finalizing(py) {
-                    self.skip_destroy_unraisable("__del__", "Python 解释器正在 finalizing");
+                    self.skip_destroy_unraisable("__del__", "Python interpreter is finalizing");
                     return;
                 }
 
@@ -1189,7 +1192,10 @@ impl PySandbox {
         }));
 
         if result.is_err() {
-            self.skip_destroy_unraisable("__del__", "无法获取 Python GIL 或清理过程发生 panic");
+            self.skip_destroy_unraisable(
+                "__del__",
+                "failed to acquire Python GIL or cleanup panicked",
+            );
         }
     }
 }
@@ -1241,24 +1247,24 @@ fn cleanup_active_sandboxes(py: Python<'_>) {
 }
 
 fn cleanup_registered_sandbox(py: Python<'_>, entry: SandboxRegistryEntry) {
-    // SAFETY: registry 条目会在 PySandbox::drop 中先于 Python 对象释放被移除。
-    // atexit handler 持有 GIL，重建 borrowed reference 时存活对象不会并发释放。
+    // SAFETY: Registry entries are removed in PySandbox::drop before Python object deallocation.
+    // The atexit handler holds the GIL, so live objects are not concurrently deallocated during borrowed reference reconstruction.
     let Some(sandbox_any) =
         (unsafe { Bound::<PyAny>::from_borrowed_ptr_or_opt(py, entry.object_ptr()) })
     else {
-        log_cleanup_warning("Sandbox atexit cleanup skipped: registry 条目为空");
+        log_cleanup_warning("Sandbox atexit cleanup skipped: registry entry is empty");
         return;
     };
 
     let Ok(sandbox_obj) = sandbox_any.downcast_into::<PySandbox>() else {
-        log_cleanup_warning("Sandbox atexit cleanup skipped: registry 条目类型不匹配");
+        log_cleanup_warning("Sandbox atexit cleanup skipped: registry entry type mismatch");
         return;
     };
 
     match sandbox_obj.try_borrow_mut() {
         Ok(mut sandbox) => sandbox.destroy_inner_unraisable(py, "atexit"),
         Err(_) => {
-            log_cleanup_warning("Sandbox atexit cleanup skipped: sandbox 当前正在被借用");
+            log_cleanup_warning("Sandbox atexit cleanup skipped: sandbox is currently borrowed");
         }
     }
 }
@@ -1272,7 +1278,7 @@ fn register_atexit_handler(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn python_interpreter_initialized() -> bool {
-    // SAFETY: Py_IsInitialized 是进程级状态查询，不要求持有 GIL。
+    // SAFETY: Py_IsInitialized is a process-level state query that does not require the GIL.
     unsafe { pyo3::ffi::Py_IsInitialized() != 0 }
 }
 
@@ -1293,10 +1299,14 @@ fn destroy_sandbox_unraisable(py: Python<'_>, sandbox: RustSandbox, context: &st
     match result {
         Ok(Ok(())) => {}
         Ok(Err(_err)) => {
-            log_cleanup_warning(&format!("Sandbox.{context} cleanup failed: 错误详情已抑制"));
+            log_cleanup_warning(&format!(
+                "Sandbox.{context} cleanup failed: error details suppressed"
+            ));
         }
         Err(_panic) => {
-            log_cleanup_warning(&format!("Sandbox.{context} cleanup panicked: panic 已抑制"));
+            log_cleanup_warning(&format!(
+                "Sandbox.{context} cleanup panicked: panic suppressed"
+            ));
         }
     }
 }
@@ -1312,13 +1322,13 @@ impl PySandbox {
         }
     }
 
-    /// 故意泄漏 sandbox 以避免 GIL 死锁。
+    /// Intentionally leak the sandbox to avoid GIL deadlock.
     ///
-    /// 当 Python 解释器正在关闭（is_finalizing）或 GIL 不可获取时，
-    /// 正常 Drop 可能触发 Python C API 调用导致死锁。
-    /// mem::forget 会泄漏底层 Rust 资源，但这是两害相权取其轻：
-    /// - 泄漏一个沙箱的内存（~KB 级）优于进程级死锁
-    /// - atexit handler 会在进程退出前尝试清理所有活跃沙箱
+    /// When the Python interpreter is shutting down (is_finalizing) or the GIL is unavailable,
+    /// a normal Drop could trigger Python C API calls leading to deadlock.
+    /// mem::forget leaks the underlying Rust resource, but this is the lesser of two evils:
+    /// - Leaking one sandbox's memory (~KB) is preferable to a process-level deadlock
+    /// - The atexit handler attempts to clean up all active sandboxes before process exit
     fn skip_destroy_unraisable(&mut self, context: &str, reason: &str) {
         if let Some(sandbox) = self.inner.take() {
             std::mem::forget(sandbox);
@@ -1473,7 +1483,7 @@ fn parse_python_network_policy(value: &str) -> Result<NetworkPolicy, String> {
         "allow_domains" | "allowdomains" | "domains" => Ok(NetworkPolicy::AllowDomains(Vec::new())),
         "allow_all" | "allowall" | "all" => Ok(NetworkPolicy::AllowAll),
         other => Err(format!(
-            "未知的网络策略值 '{other}'。提示：可选值为 deny_all、allow_domains、allow_all"
+            "Unknown network policy value: \"{other}\". Valid values: deny_all, allow_domains, allow_all"
         )),
     }
 }
@@ -1485,30 +1495,33 @@ fn normalize_python_enum_value(value: &str) -> String {
 fn parse_config_timeout_secs(timeout_secs: f64) -> Result<Duration, String> {
     if !timeout_secs.is_finite() || timeout_secs <= 0.0 {
         return Err(
-            "timeout_secs 必须为有限正数。提示：请传入正数，如 timeout_secs=30".to_string(),
+            "timeout_secs must be a finite positive number (e.g. timeout_secs=30)".to_string(),
         );
     }
 
     if timeout_secs > MAX_PYTHON_TIMEOUT_SECS {
         return Err(format!(
-            "timeout_secs 不能超过 {MAX_PYTHON_TIMEOUT_SECS:.0}。提示：最大超时 86400 秒（24小时），请减小该值"
+            "timeout_secs must not exceed {MAX_PYTHON_TIMEOUT_SECS:.0} (max: 86400 seconds / 24 hours)"
         ));
     }
 
-    Duration::try_from_secs_f64(timeout_secs)
-        .map_err(|_| "timeout_secs 超出支持的范围。提示：请使用 0 到 86400 之间的值".to_string())
+    Duration::try_from_secs_f64(timeout_secs).map_err(|_| {
+        "timeout_secs out of supported range (must be between 0 and 86400)".to_string()
+    })
 }
 
-/// 构造带 code 和 suggestion 属性的 PyO3 异常。
+/// Construct a PyO3 exception with code and suggestion attributes.
 ///
-/// 在异常实例上设置 `code` 和 `suggestion` 属性，便于 Python 侧程序化访问错误详情。
+/// Sets code and suggestion attributes on the exception instance for programmatic error inspection on the Python side.
 fn make_exception_with_attrs(
     err_type: &Bound<'_, PyType>,
     message: String,
     code: Option<&str>,
     suggestion: Option<&str>,
 ) -> PyErr {
-    let instance = err_type.call1((message,)).expect("构造异常实例失败");
+    let instance = err_type
+        .call1((message,))
+        .expect("failed to construct exception instance");
     if let Some(c) = code {
         instance.setattr("code", c).ok();
     }
@@ -1524,11 +1537,11 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
         SdkError::BackendUnavailable(msg) => PyNotImplementedError::new_err(msg),
         SdkError::Io(err) => match err.kind() {
             std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(format!(
-                "{}. 提示：使用 sandbox.files.list('/') 查看可用文件",
+                "{}. Use sandbox.files.list('/') to see available files",
                 err
             )),
             std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(format!(
-                "{}. 提示：检查文件权限，创建 Sandbox 时通过 fs_readwrite 参数授予写权限",
+                "{}. Check file permissions; grant write access via the fs_readwrite parameter when creating the Sandbox",
                 err
             )),
             _ => PyRuntimeError::new_err(err.to_string()),
@@ -1625,7 +1638,10 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
                     suggestion_str,
                 ),
                 _ => {
-                    tracing::warn!("未识别的 ErrorCode 变体，降级为 SandboxError", code = ?code);
+                    tracing::warn!(
+                        "Unrecognized ErrorCode variant, falling back to SandboxError",
+                        code = ?code
+                    );
                     make_exception_with_attrs(
                         &py.get_type::<SandboxError>(),
                         message,
@@ -1642,18 +1658,18 @@ fn map_sdk_error(error: SdkError, py: Python<'_>) -> PyErr {
 fn parse_python_timeout(timeout: f64) -> PyResult<Duration> {
     if !timeout.is_finite() || timeout <= 0.0 {
         return Err(PyValueError::new_err(
-            "timeout 必须为有限正数。提示：请传入正数，如 timeout=30.0",
+            "timeout must be a finite positive number (e.g. timeout=30.0)",
         ));
     }
 
     if timeout > MAX_PYTHON_TIMEOUT_SECS {
         return Err(PyValueError::new_err(format!(
-            "timeout 不能超过 {MAX_PYTHON_TIMEOUT_SECS:.0}。提示：最大超时 86400 秒（24小时），请减小该值"
+            "timeout must not exceed {MAX_PYTHON_TIMEOUT_SECS:.0} (max: 86400 seconds / 24 hours)"
         )));
     }
 
     Duration::try_from_secs_f64(timeout).map_err(|_| {
-        PyValueError::new_err("timeout 超出支持的范围。提示：请使用 0 到 86400 之间的值")
+        PyValueError::new_err("timeout out of supported range (must be between 0 and 86400)")
     })
 }
 
@@ -1704,7 +1720,7 @@ mod tests {
             ]),
             ..Default::default()
         })
-        .expect("构造 Python 配置失败");
+        .expect("failed to build Python config");
 
         assert_eq!(config.isolation, IsolationLevel::MicroVm);
         assert_eq!(
@@ -1723,7 +1739,7 @@ mod tests {
             network: Some("allow_all"),
             ..Default::default()
         })
-        .expect("构造 Python 安全配置失败");
+        .expect("failed to build Python security config");
 
         assert_eq!(config.memory_limit_mb, Some(256));
         assert_eq!(config.timeout, Some(Duration::from_millis(5_500)));
@@ -1761,7 +1777,8 @@ mod tests {
 
     #[test]
     fn parse_python_timeout_accepts_max_value() {
-        let timeout = parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS).expect("最大 timeout 应可接受");
+        let timeout =
+            parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS).expect("max timeout should be accepted");
 
         assert_eq!(timeout, Duration::from_secs(86_400));
     }
@@ -1772,7 +1789,7 @@ mod tests {
 
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();
-        assert!(message.contains("timeout 不能超过 86400"));
+        assert!(message.contains("timeout must not exceed 86400"));
     }
 
     #[test]
@@ -1780,16 +1797,19 @@ mod tests {
         assert!(build_cwd_command("pwd", "../work").is_err());
         assert!(build_cwd_command("pwd", "a/../work").is_err());
 
-        let command = build_cwd_command("pwd", "release.../work").expect("合法 cwd 不应被拒绝");
+        let command =
+            build_cwd_command("pwd", "release.../work").expect("valid cwd should not be rejected");
         assert_eq!(command, "cd release.../work && pwd");
     }
 
     #[test]
     fn cwd_command_shell_quotes_and_handles_leading_dash() {
-        let spaced = build_cwd_command("pwd", "/tmp/work dir").expect("含空格 cwd 应可转义");
+        let spaced =
+            build_cwd_command("pwd", "/tmp/work dir").expect("cwd with spaces should be escapable");
         assert_eq!(spaced, "cd '/tmp/work dir' && pwd");
 
-        let dashed = build_cwd_command("pwd", "-workspace").expect("前导短横线 cwd 应可处理");
+        let dashed = build_cwd_command("pwd", "-workspace")
+            .expect("cwd with leading dash should be handled");
         assert_eq!(dashed, "cd ./-workspace && pwd");
     }
 
@@ -1842,7 +1862,10 @@ mod tests {
 
         Python::with_gil(|py| {
             assert_eq!(
-                stdout.stdout(py).expect("stdout bytes 必须存在").as_bytes(),
+                stdout
+                    .stdout(py)
+                    .expect("stdout bytes must exist")
+                    .as_bytes(),
                 b"out"
             );
         });
@@ -1856,22 +1879,24 @@ mod tests {
         pyo3::prepare_freethreaded_python();
 
         Python::with_gil(|_py| {
-            let config = build_python_config(PythonConfigOptions::default()).expect("构建配置失败");
-            let mut sandbox = RustSandbox::with_config(config).expect("创建 Rust 沙箱失败");
+            let config = build_python_config(PythonConfigOptions::default())
+                .expect("failed to build config");
+            let mut sandbox =
+                RustSandbox::with_config(config).expect("failed to create Rust sandbox");
             let result = sandbox
                 .execute("/bin/echo hello_from_python")
-                .expect("执行命令失败");
+                .expect("failed to execute command");
 
             let py_result = PyExecuteResult::from(result);
             assert!(
                 py_result.stdout.contains("hello_from_python"),
-                "stdout 应包含预期输出，实际: {}",
+                "stdout should contain expected output, got: {}",
                 py_result.stdout
             );
-            assert_eq!(py_result.exit_code, 0, "退出码应为 0");
-            assert!(!py_result.timed_out, "不应超时");
+            assert_eq!(py_result.exit_code, 0, "exit code should be 0");
+            assert!(!py_result.timed_out, "should not have timed out");
 
-            sandbox.destroy().expect("销毁沙箱失败");
+            sandbox.destroy().expect("failed to destroy sandbox");
         });
     }
 
@@ -1881,16 +1906,20 @@ mod tests {
         pyo3::prepare_freethreaded_python();
 
         Python::with_gil(|py| {
-            let config = build_python_config(PythonConfigOptions::default()).expect("构建配置失败");
-            let sandbox = RustSandbox::with_config(config).expect("创建 Rust 沙箱失败");
+            let config = build_python_config(PythonConfigOptions::default())
+                .expect("failed to build config");
+            let sandbox = RustSandbox::with_config(config).expect("failed to create Rust sandbox");
             let mut py_sandbox = PySandbox {
                 inner: Some(sandbox),
             };
-            py_sandbox.close(py).expect("关闭 Sandbox 失败");
+            py_sandbox.close(py).expect("failed to close Sandbox");
 
             let result = py_sandbox.execute(py, "/bin/echo should_fail", None, None, None);
 
-            assert!(result.is_err(), "close 后 execute 应返回错误");
+            assert!(
+                result.is_err(),
+                "execute after close should return an error"
+            );
         });
     }
 
@@ -1898,15 +1927,15 @@ mod tests {
     fn python_snapshot_round_trip_preserves_bytes() {
         pyo3::prepare_freethreaded_python();
 
-        let snapshot =
-            RustSnapshot::from_bytes(b"snapshot-bytes").expect("从字节构造 Python 快照必须成功");
+        let snapshot = RustSnapshot::from_bytes(b"snapshot-bytes")
+            .expect("constructing Python snapshot from bytes must succeed");
         let py_snapshot = PySnapshot { inner: snapshot };
 
         Python::with_gil(|py| {
             assert_eq!(
                 py_snapshot
                     .to_bytes(py)
-                    .expect("Python 快照导出字节必须成功")
+                    .expect("Python snapshot byte export must succeed")
                     .as_bytes(),
                 b"snapshot-bytes"
             );

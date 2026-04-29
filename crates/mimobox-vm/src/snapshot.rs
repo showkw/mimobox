@@ -262,18 +262,13 @@ fn verify_memory_hash_file(
     verify_memory_hash(memory_path, &actual_hash, expected_hash)
 }
 
-fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
+pub(crate) fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
     let home_dir = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         MicrovmError::SnapshotFormat(
             "HOME environment variable missing, cannot locate snapshot directory".into(),
         )
     })?;
-    Ok(home_dir.join(".mimobox").join("snapshots"))
-}
-
-/// Creates a unique directory under the per-user microVM snapshot root.
-pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
-    let root_dir = snapshot_root_dir()?;
+    let root_dir = home_dir.join(".mimobox").join("snapshots");
     fs::create_dir_all(&root_dir)?;
     // 快照根目录仅限当前用户访问，防止其他用户读取 guest 内存映像
     #[cfg(unix)]
@@ -282,6 +277,12 @@ pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
         fs::set_permissions(&root_dir, fs::Permissions::from_mode(0o700))
             .map_err(MicrovmError::Io)?;
     }
+    Ok(root_dir)
+}
+
+/// Creates a unique directory under the per-user microVM snapshot root.
+pub(crate) fn create_snapshot_dir() -> Result<PathBuf, MicrovmError> {
+    let root_dir = snapshot_root_dir()?;
 
     for _ in 0..32 {
         let timestamp = SystemTime::now()

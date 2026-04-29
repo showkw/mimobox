@@ -508,6 +508,9 @@ fn is_non_public_ipv4(ipv4: Ipv4Addr) -> bool {
         || (a == 198 && matches!(b, 18 | 19))
 }
 
+/// Body reading is guarded by the client-level timeout set in
+/// [`execute_http_request`]. The reqwest blocking client will return an error
+/// when the overall request timeout fires, preventing slow trickle attacks.
 fn read_response_body(
     response: &mut reqwest::blocking::Response,
     max_response_bytes: usize,
