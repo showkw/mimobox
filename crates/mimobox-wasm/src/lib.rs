@@ -1071,7 +1071,15 @@ fn build_wasi_ctx(
     builder.env("SANDBOX", "wasm");
 
     // 注入用户配置的持久环境变量（优先级高于内置最小环境）
+    // 防御性校验：跳过无效 key/value（完整校验由 SDK Config::validate 完成）
     for (key, value) in &config.env_vars {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+            warn!(
+                "Skipping invalid env var: key={:?}, value={:?} (empty key, contains '=' or NUL)",
+                key, value
+            );
+            continue;
+        }
         builder.env(key, value);
     }
 

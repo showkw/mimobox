@@ -127,7 +127,7 @@ class Snapshot:
 
 
 class SandboxInfo:
-    """当前进程内已注册沙箱的快照信息。"""
+    """Snapshot information of registered sandboxes in the current process."""
 
     id: str
     is_ready: bool
@@ -280,7 +280,7 @@ class Sandbox:
         http_acl_allow: Optional list of HTTP ACL allow rules in 'METHOD host/path' format.
             Supports glob patterns like 'GET api.openai.com/v1/*'.
         http_acl_deny: Optional list of HTTP ACL deny rules. Deny rules take precedence over allow.
-        env_vars: 创建沙箱时设置的持久环境变量，会应用到后续所有命令。
+        env_vars: Persistent environment variables set at sandbox creation, applied to all subsequent commands.
     """
 
     def __init__(
@@ -300,12 +300,12 @@ class Sandbox:
 
     @property
     def id(self) -> Optional[str]:
-        """返回 Rust SDK 沙箱的全局唯一 ID；关闭后返回 ``None``。"""
+        """Return the globally unique ID of the Rust SDK sandbox; returns None after closing."""
         ...
 
     @classmethod
     def list(cls) -> List[SandboxInfo]:
-        """列出当前进程内已注册的 Rust SDK 沙箱。"""
+        """List all registered Rust SDK sandboxes in the current process."""
         ...
 
     @property

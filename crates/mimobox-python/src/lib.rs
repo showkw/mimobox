@@ -2188,9 +2188,10 @@ fn make_exception_with_attrs(
     code: Option<&str>,
     suggestion: Option<&str>,
 ) -> PyErr {
-    let instance = err_type
-        .call1((message,))
-        .expect("failed to construct exception instance");
+    let instance = match err_type.call1((message,)) {
+        Ok(inst) => inst,
+        Err(e) => return e,
+    };
     if let Some(c) = code {
         instance.setattr("code", c).ok();
     }
@@ -2207,10 +2208,10 @@ fn make_process_error(
     code: Option<&str>,
     suggestion: Option<&str>,
 ) -> PyErr {
-    let instance = py
-        .get_type::<SandboxProcessError>()
-        .call1((message,))
-        .expect("failed to construct exception instance");
+    let instance = match py.get_type::<SandboxProcessError>().call1((message,)) {
+        Ok(inst) => inst,
+        Err(e) => return e,
+    };
     if let Some(c) = code {
         instance.setattr("code", c).ok();
     }
