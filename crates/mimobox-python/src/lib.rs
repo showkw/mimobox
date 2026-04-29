@@ -505,7 +505,7 @@ impl From<CorePtyEvent> for PyPtyEvent {
 /// Aggregates file operation APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "FileSystem")]
 struct PyFileSystem {
-    sandbox: Py<PyAny>,
+    sandbox: Py<PySandbox>,
 }
 
 #[pymethods]
@@ -578,7 +578,7 @@ impl PyFileSystem {
 /// Aggregates command execution APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "Process")]
 struct PyProcess {
-    sandbox: Py<PyAny>,
+    sandbox: Py<PySandbox>,
 }
 
 #[pymethods]
@@ -649,7 +649,7 @@ impl PyProcess {
 /// Aggregates snapshot operation APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "SnapshotOps")]
 struct PySnapshotOps {
-    sandbox: Py<PyAny>,
+    sandbox: Py<PySandbox>,
 }
 
 #[pymethods]
@@ -676,7 +676,7 @@ impl PySnapshotOps {
 /// Aggregates HTTP request APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "Network")]
 struct PyNetwork {
-    sandbox: Py<PyAny>,
+    sandbox: Py<PySandbox>,
 }
 
 #[pymethods]
@@ -703,7 +703,7 @@ impl PyNetwork {
 /// Aggregates interactive terminal APIs via proxy pattern, delegating to PySandbox methods.
 #[pyclass(name = "Pty")]
 struct PyPty {
-    sandbox: Py<PyAny>,
+    sandbox: Py<PySandbox>,
 }
 
 #[pymethods]
@@ -722,7 +722,7 @@ impl PyPty {
     ) -> PyResult<PyPtySession> {
         let command = parse_pty_command(command)?;
         let cwd = cwd.map(str::to_string);
-        let sandbox = self.sandbox.bind(py).downcast::<PySandbox>()?;
+        let sandbox = self.sandbox.bind(py);
         let mut sandbox = sandbox.try_borrow_mut()?;
         sandbox._create_pty_with_config(
             py,
@@ -1065,7 +1065,7 @@ impl PySandbox {
     #[getter]
     fn fs(slf: PyRef<'_, Self>) -> PyFileSystem {
         PyFileSystem {
-            sandbox: Py::<PySandbox>::from(slf).into_any(),
+            sandbox: slf.into(),
         }
     }
 
@@ -1073,7 +1073,7 @@ impl PySandbox {
     #[getter]
     fn process(slf: PyRef<'_, Self>) -> PyProcess {
         PyProcess {
-            sandbox: Py::<PySandbox>::from(slf).into_any(),
+            sandbox: slf.into(),
         }
     }
 
@@ -1082,7 +1082,7 @@ impl PySandbox {
     #[pyo3(name = "snapshot")]
     fn snapshot_ops(slf: PyRef<'_, Self>) -> PySnapshotOps {
         PySnapshotOps {
-            sandbox: Py::<PySandbox>::from(slf).into_any(),
+            sandbox: slf.into(),
         }
     }
 
@@ -1090,7 +1090,7 @@ impl PySandbox {
     #[getter]
     fn network(slf: PyRef<'_, Self>) -> PyNetwork {
         PyNetwork {
-            sandbox: Py::<PySandbox>::from(slf).into_any(),
+            sandbox: slf.into(),
         }
     }
 
@@ -1098,7 +1098,7 @@ impl PySandbox {
     #[getter]
     fn pty(slf: PyRef<'_, Self>) -> PyPty {
         PyPty {
-            sandbox: Py::<PySandbox>::from(slf).into_any(),
+            sandbox: slf.into(),
         }
     }
 
