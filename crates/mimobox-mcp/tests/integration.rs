@@ -31,6 +31,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<CallToolResult> {
     Ok(result)
 }
 
+#[cfg(target_os = "linux")]
 async fn call_tool_with_client(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     name: &str,

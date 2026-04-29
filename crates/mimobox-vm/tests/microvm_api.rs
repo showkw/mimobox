@@ -72,7 +72,9 @@ fn microvm_config_requires_kernel_and_rootfs_paths_on_supported_backend() {
         };
         let result = MicrovmSandbox::new(bad_config);
         assert!(result.is_err(), "invalid config (vcpu_count=0) must fail");
-        let msg = result.unwrap_err().to_string();
+        let msg = result
+            .expect_err("invalid config must produce an error")
+            .to_string();
         assert!(
             msg.contains("vcpu_count")
                 || msg.contains("kernel_path")

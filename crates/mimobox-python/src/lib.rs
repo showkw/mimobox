@@ -2546,7 +2546,9 @@ mod tests {
         let result = parse_python_timeout(MAX_PYTHON_TIMEOUT_SECS + 0.001);
 
         assert!(result.is_err());
-        let message = result.unwrap_err().to_string();
+        let message = result
+            .expect_err("timeout above maximum must be rejected")
+            .to_string();
         assert!(message.contains("timeout must not exceed 86400"));
     }
 

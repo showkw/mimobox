@@ -97,7 +97,6 @@ fn is_wasm_command(command: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -115,7 +114,10 @@ mod tests {
     fn shell_command_routes_to_os() {
         let result = auto_route(TrustLevel::Trusted, "/bin/echo hello");
         #[cfg(feature = "os")]
-        assert_eq!(result.unwrap(), IsolationLevel::Os);
+        assert_eq!(
+            result.expect("trusted shell command should route to OS"),
+            IsolationLevel::Os
+        );
     }
 
     #[test]
@@ -123,7 +125,10 @@ mod tests {
         let result = auto_route(TrustLevel::Untrusted, "python script.py");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
-        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+        assert_eq!(
+            result.expect("untrusted command should route to MicroVm"),
+            IsolationLevel::MicroVm
+        );
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
         match result {
@@ -150,7 +155,10 @@ mod tests {
         let result = auto_route(TrustLevel::Untrusted, "module.wasm");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
-        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+        assert_eq!(
+            result.expect("untrusted Wasm command should route to MicroVm"),
+            IsolationLevel::MicroVm
+        );
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
         match result {
@@ -184,7 +192,10 @@ mod tests {
         let result = resolve_isolation(&config, "python script.py");
 
         #[cfg(all(feature = "vm", target_os = "linux"))]
-        assert_eq!(result.unwrap(), IsolationLevel::MicroVm);
+        assert_eq!(
+            result.expect("explicit MicroVm should resolve when backend is available"),
+            IsolationLevel::MicroVm
+        );
 
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
         assert!(matches!(

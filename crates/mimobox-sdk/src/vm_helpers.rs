@@ -357,7 +357,6 @@ pub(crate) fn map_restore_pool_error(error: mimobox_vm::RestorePoolError) -> Sdk
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -376,59 +375,60 @@ mod tests {
     fn build_code_command_maps_languages_correctly() {
         assert!(
             build_code_command("bash", "echo 1")
-                .unwrap()
+                .expect("bash code command should build")
                 .starts_with("bash -c ")
         );
         assert!(
             build_code_command("sh", "echo 1")
-                .unwrap()
+                .expect("sh code command should build")
                 .starts_with("sh -c ")
         );
         assert!(
             build_code_command("shell", "echo 1")
-                .unwrap()
+                .expect("shell code command should build")
                 .starts_with("sh -c ")
         );
         assert!(
             build_code_command("python", "print(1)")
-                .unwrap()
+                .expect("python code command should build")
                 .starts_with("python3 -c ")
         );
         assert!(
             build_code_command("python3", "print(1)")
-                .unwrap()
+                .expect("python3 code command should build")
                 .starts_with("python3 -c ")
         );
         assert!(
             build_code_command("py", "print(1)")
-                .unwrap()
+                .expect("py code command should build")
                 .starts_with("python3 -c ")
         );
         assert!(
             build_code_command("node", "console.log(1)")
-                .unwrap()
+                .expect("node code command should build")
                 .starts_with("node -e ")
         );
         assert!(
             build_code_command("js", "console.log(1)")
-                .unwrap()
+                .expect("js code command should build")
                 .starts_with("node -e ")
         );
         assert!(
             build_code_command("javascript", "console.log(1)")
-                .unwrap()
+                .expect("javascript code command should build")
                 .starts_with("node -e ")
         );
         assert!(
             build_code_command("nodejs", "console.log(1)")
-                .unwrap()
+                .expect("nodejs code command should build")
                 .starts_with("node -e ")
         );
     }
 
     #[test]
     fn build_code_command_rejects_unknown_language() {
-        let err = build_code_command("ruby", "puts 1").unwrap_err();
+        let err = build_code_command("ruby", "puts 1")
+            .expect_err("unsupported language must be rejected");
         assert!(matches!(
             err,
             SdkError::Sandbox {

@@ -1584,7 +1584,6 @@ fn to_error(error: impl Into<String>) -> Json<ErrorResponse> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mimobox_sdk::ErrorCode;
@@ -1596,21 +1595,24 @@ mod tests {
     fn test_parse_isolation_none_defaults_to_auto() {
         let result = parse_isolation_level(None);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), IsolationLevel::Auto);
+        assert_eq!(
+            result.expect("missing isolation should default to Auto"),
+            IsolationLevel::Auto
+        );
     }
 
     #[test]
     fn test_parse_isolation_explicit_values() {
         assert_eq!(
-            parse_isolation_level(Some("os")).unwrap(),
+            parse_isolation_level(Some("os")).expect("os isolation should parse"),
             IsolationLevel::Os
         );
         assert_eq!(
-            parse_isolation_level(Some("wasm")).unwrap(),
+            parse_isolation_level(Some("wasm")).expect("wasm isolation should parse"),
             IsolationLevel::Wasm
         );
         assert_eq!(
-            parse_isolation_level(Some("microvm")).unwrap(),
+            parse_isolation_level(Some("microvm")).expect("microvm isolation should parse"),
             IsolationLevel::MicroVm
         );
     }
@@ -1620,7 +1622,7 @@ mod tests {
         let aliases = ["micro_vm", "micro-vm", "vm"];
         for alias in aliases {
             assert_eq!(
-                parse_isolation_level(Some(alias)).unwrap(),
+                parse_isolation_level(Some(alias)).expect("microVM alias should parse"),
                 IsolationLevel::MicroVm,
                 "alias '{alias}' should resolve to MicroVm"
             );
@@ -1630,19 +1632,20 @@ mod tests {
     #[test]
     fn test_parse_isolation_case_insensitive() {
         assert_eq!(
-            parse_isolation_level(Some("AUTO")).unwrap(),
+            parse_isolation_level(Some("AUTO")).expect("AUTO isolation should parse"),
             IsolationLevel::Auto
         );
         assert_eq!(
-            parse_isolation_level(Some("Os")).unwrap(),
+            parse_isolation_level(Some("Os")).expect("mixed-case Os isolation should parse"),
             IsolationLevel::Os
         );
         assert_eq!(
-            parse_isolation_level(Some("WASM")).unwrap(),
+            parse_isolation_level(Some("WASM")).expect("uppercase WASM isolation should parse"),
             IsolationLevel::Wasm
         );
         assert_eq!(
-            parse_isolation_level(Some("MICROVM")).unwrap(),
+            parse_isolation_level(Some("MICROVM"))
+                .expect("uppercase MICROVM isolation should parse"),
             IsolationLevel::MicroVm
         );
     }
@@ -1716,7 +1719,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             result
-                .unwrap_err()
+                .expect_err("zero timeout must be rejected")
                 .contains("timeout_ms=0 is not valid, must be positive")
         );
     }
@@ -1726,7 +1729,11 @@ mod tests {
         let excessive = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
         let result = validate_timeout_ms(Some(excessive));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("timeout_ms"));
+        assert!(
+            result
+                .expect_err("timeout above maximum must be rejected")
+                .contains("timeout_ms")
+        );
     }
 
     #[test]
@@ -1734,7 +1741,11 @@ mod tests {
         let excessive = MAX_SANDBOX_TIMEOUT_SECS * 1000 + 999;
         let result = validate_timeout_ms(Some(excessive));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("timeout_ms"));
+        assert!(
+            result
+                .expect_err("non-multiple timeout above maximum must be rejected")
+                .contains("timeout_ms")
+        );
     }
 
     #[test]
@@ -1752,7 +1763,11 @@ mod tests {
         let result = validate_execute_command_size(Some(&command), None);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("command"));
+        assert!(
+            result
+                .expect_err("oversized command must be rejected")
+                .contains("command")
+        );
     }
 
     #[test]
@@ -1761,7 +1776,11 @@ mod tests {
         let result = validate_execute_command_size(None, Some(&argv));
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("argv[0]"));
+        assert!(
+            result
+                .expect_err("oversized argv item must be rejected")
+                .contains("argv[0]")
+        );
     }
 
     #[test]
@@ -1776,7 +1795,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             result
-                .unwrap_err()
+                .expect_err("oversized argv total must be rejected")
                 .contains("argv total length is too large")
         );
     }
@@ -1789,7 +1808,11 @@ mod tests {
         assert!(validate_execute_code_size(&max_code).is_ok());
         let result = validate_execute_code_size(&excessive_code);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("code"));
+        assert!(
+            result
+                .expect_err("oversized code must be rejected")
+                .contains("code")
+        );
     }
 
     #[test]
@@ -1800,7 +1823,11 @@ mod tests {
         assert!(validate_path_size(&max_path).is_ok());
         let result = validate_path_size(&excessive_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("path"));
+        assert!(
+            result
+                .expect_err("oversized path must be rejected")
+                .contains("path")
+        );
     }
 
     #[test]
@@ -1808,7 +1835,11 @@ mod tests {
         let result = validate_mcp_guest_path("");
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must not be empty"));
+        assert!(
+            result
+                .expect_err("empty guest path must be rejected")
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -1816,7 +1847,11 @@ mod tests {
         let result = validate_mcp_guest_path("sandbox/file.txt");
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be absolute"));
+        assert!(
+            result
+                .expect_err("relative guest path must be rejected")
+                .contains("must be absolute")
+        );
     }
 
     #[test]
@@ -1824,7 +1859,11 @@ mod tests {
         let result = validate_mcp_guest_path("/sandbox/file\0.txt");
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("NUL"));
+        assert!(
+            result
+                .expect_err("guest path with NUL must be rejected")
+                .contains("NUL")
+        );
     }
 
     #[test]
@@ -1837,7 +1876,11 @@ mod tests {
             let result = validate_mcp_guest_path(path);
 
             assert!(result.is_err(), "{path:?} should be rejected");
-            assert!(result.unwrap_err().contains("newline"));
+            assert!(
+                result
+                    .expect_err("guest path with newline must be rejected")
+                    .contains("newline")
+            );
         }
     }
 
@@ -1851,7 +1894,11 @@ mod tests {
             let result = validate_mcp_guest_path(path);
 
             assert!(result.is_err(), "{path} should be rejected");
-            assert!(result.unwrap_err().contains("path traversal"));
+            assert!(
+                result
+                    .expect_err("guest path traversal must be rejected")
+                    .contains("path traversal")
+            );
         }
     }
 
@@ -1861,7 +1908,11 @@ mod tests {
             let result = validate_mcp_guest_path(path);
 
             assert!(result.is_err(), "{path} should be rejected");
-            assert!(result.unwrap_err().contains("/sandbox/"));
+            assert!(
+                result
+                    .expect_err("guest path outside sandbox must be rejected")
+                    .contains("/sandbox/")
+            );
         }
     }
 
@@ -1873,8 +1924,8 @@ mod tests {
 
     #[test]
     fn test_parse_isolation_none_same_as_auto_string() {
-        let from_none = parse_isolation_level(None).unwrap();
-        let from_auto = parse_isolation_level(Some("auto")).unwrap();
+        let from_none = parse_isolation_level(None).expect("missing isolation should parse");
+        let from_auto = parse_isolation_level(Some("auto")).expect("auto isolation should parse");
         assert_eq!(from_none, from_auto);
     }
 
@@ -1883,7 +1934,8 @@ mod tests {
     #[test]
     fn test_build_code_command_python_aliases() {
         for lang in ["python", "python3", "py"] {
-            let cmd = build_code_command(Some(lang), "print(1)").unwrap();
+            let cmd = build_code_command(Some(lang), "print(1)")
+                .expect("Python code command should build");
             assert!(
                 cmd.starts_with("python3 -c "),
                 "language='{lang}' should generate python3 command, got: {cmd}"
@@ -1894,7 +1946,8 @@ mod tests {
     #[test]
     fn test_build_code_command_node_aliases() {
         for lang in ["node", "javascript", "js", "nodejs"] {
-            let cmd = build_code_command(Some(lang), "console.log(1)").unwrap();
+            let cmd = build_code_command(Some(lang), "console.log(1)")
+                .expect("Node code command should build");
             assert!(
                 cmd.starts_with("node -e "),
                 "language='{lang}' should generate node command, got: {cmd}"
@@ -1904,16 +1957,19 @@ mod tests {
 
     #[test]
     fn test_build_code_command_bash_default() {
-        let cmd = build_code_command(None, "hello").unwrap();
+        let cmd =
+            build_code_command(None, "hello").expect("default bash code command should build");
         assert_eq!(cmd, "bash -c 'hello'");
     }
 
     #[test]
     fn test_build_code_command_sh_and_shell() {
-        let cmd_sh = build_code_command(Some("sh"), "echo hi").unwrap();
+        let cmd_sh =
+            build_code_command(Some("sh"), "echo hi").expect("sh code command should build");
         assert!(cmd_sh.starts_with("sh -c "));
 
-        let cmd_shell = build_code_command(Some("shell"), "echo hi").unwrap();
+        let cmd_shell =
+            build_code_command(Some("shell"), "echo hi").expect("shell code command should build");
         assert!(cmd_shell.starts_with("sh -c "));
     }
 
@@ -1921,7 +1977,11 @@ mod tests {
     fn test_build_code_command_unsupported_language() {
         let result = build_code_command(Some("ruby"), "puts 1");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("ruby"));
+        assert!(
+            result
+                .expect_err("unsupported language must be rejected")
+                .contains("ruby")
+        );
     }
 
     // ── shell_single_quote ─────────────────────────────────────────────

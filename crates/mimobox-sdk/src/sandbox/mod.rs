@@ -225,8 +225,8 @@ impl SdkExecOptions {
     }
 }
 
-/// 合并 config 级别环境变量与 per-command 环境变量。
-/// per-command env 覆盖 config env_vars。
+/// Merge config-level environment variables with per-command environment variables.
+/// Per-command env overrides config env_vars.
 pub(crate) fn merge_env_vars(
     config_env: &HashMap<String, String>,
     command_env: &HashMap<String, String>,
@@ -559,30 +559,30 @@ impl Sandbox {
         self.active_isolation
     }
 
-    /// 返回当前 SDK 沙箱实例的全局唯一 ID。
+    /// Return the globally unique ID of the current SDK sandbox instance.
     pub fn id(&self) -> uuid::Uuid {
         self.id
     }
 
-    /// 返回当前进程内仍然注册的所有 SDK 沙箱实例。
+    /// Return all SDK sandbox instances still registered in the current process.
     pub fn list() -> Vec<SandboxInfo> {
         registry::list()
     }
 
-    /// 返回创建沙箱时配置的持久环境变量。
+    /// Return the persistent environment variables configured when the sandbox was created.
     pub fn env_vars(&self) -> &std::collections::HashMap<String, String> {
         &self.config.env_vars
     }
 
-    /// 返回最近一次执行的资源使用指标。
+    /// Return the resource usage metrics from the most recent execution.
     ///
-    /// 指标在 execute() 返回时自动采样并缓存。
-    /// 如果尚未执行过命令，返回 Default 的 SandboxMetrics（所有字段为 None）。
+    /// Metrics are sampled and cached automatically when execute() returns.
+    /// If no command has run yet, returns the default SandboxMetrics with all fields set to None.
     pub fn metrics(&self) -> SandboxMetrics {
         self.cached_metrics.clone().unwrap_or_default()
     }
 
-    /// 返回当前 SDK 沙箱实例的注册表信息快照。
+    /// Return a registry information snapshot for the current SDK sandbox instance.
     pub fn info(&self) -> SandboxInfo {
         registry::get(self.id).unwrap_or_else(|| SandboxInfo {
             id: self.id,

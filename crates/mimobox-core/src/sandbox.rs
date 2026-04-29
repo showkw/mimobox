@@ -26,8 +26,9 @@ fn is_plain_ip_domain(domain: &str) -> bool {
             .all(|character| character.is_ascii_digit() || character == '.')
 }
 
-// 这些变量会影响动态加载器或 shell 启动流程，持久注入时必须 fail-closed。
-const BLOCKED_ENV_VARS: &[&str] = &[
+/// Environment variables blocked from persistent sandbox injection because they
+/// can affect dynamic loaders or shell startup behavior.
+pub const BLOCKED_ENV_VARS: &[&str] = &[
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "BASH_ENV",

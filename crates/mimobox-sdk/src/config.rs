@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::SdkError;
-use mimobox_core::{MAX_MEMORY_LIMIT_MB, NamespaceDegradation, SandboxConfig, SeccompProfile};
+use mimobox_core::{
+    BLOCKED_ENV_VARS, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, SandboxConfig, SeccompProfile,
+};
 
 /// Isolation level selection strategy.
 ///
@@ -171,8 +173,8 @@ pub struct Config {
     /// HTTP ACL policy controlling method/host/path access for the host-side HTTP proxy.
     /// Complements allowed_http_domains: entries are converted to ANY host /* allow rules.
     pub http_acl: mimobox_core::HttpAclPolicy,
-    /// 创建沙箱时的持久环境变量，对所有后续命令生效。
-    /// 合并优先级（低到高）：后端内置最小环境 < env_vars < per-command env。
+    /// Persistent environment variables applied when the sandbox is created.
+    /// Merge priority from low to high: backend minimal environment < env_vars < per-command env.
     pub env_vars: std::collections::HashMap<String, String>,
 }
 
@@ -472,29 +474,18 @@ fn validate_http_domain(domain: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// 安全关键环境变量列表（大小写不敏感检查）。
-/// 这些变量可能被利用来绕过沙箱隔离或注入恶意代码。
-const BLOCKED_ENV_VARS: &[&str] = &[
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "BASH_ENV",
-    "ENV",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-];
-
 fn validate_env_vars(env_vars: &std::collections::HashMap<String, String>) -> Result<(), SdkError> {
     for (key, value) in env_vars {
         if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
             return Err(invalid_config(
-                format!("env_vars 包含非法 key: '{key}'"),
-                "环境变量名不能包含 =、NUL、空格，且不能为空",
+                format!("env_vars contains invalid key: '{key}'"),
+                "Environment variable names must be non-empty and must not contain '=', NUL, or spaces",
             ));
         }
         if value.contains('\0') {
             return Err(invalid_config(
-                format!("env_vars key '{key}' 的 value 包含 NUL 字节"),
-                "环境变量值不能包含 NUL 字节",
+                format!("env_vars value for key '{key}' contains NUL byte"),
+                "Environment variable values must not contain NUL bytes",
             ));
         }
         if let Some(blocked) = BLOCKED_ENV_VARS
@@ -502,8 +493,8 @@ fn validate_env_vars(env_vars: &std::collections::HashMap<String, String>) -> Re
             .find(|blocked| key.eq_ignore_ascii_case(blocked))
         {
             return Err(invalid_config(
-                format!("env_vars 包含安全关键变量: '{key}'"),
-                format!("禁止设置安全关键环境变量: {blocked}"),
+                format!("env_vars contains blocked security-sensitive key: '{key}'"),
+                format!("Security-sensitive environment variable is not allowed: {blocked}"),
             ));
         }
     }
@@ -1024,18 +1015,18 @@ impl ConfigBuilder {
         self
     }
 
-    /// 添加一个创建沙箱时的持久环境变量。
+    /// Add a persistent environment variable applied when the sandbox is created.
     ///
-    /// 合并优先级（低到高）：后端内置最小环境 < env_vars < per-command env。
-    /// 安全关键变量（LD_PRELOAD 等）会在 build() 时被拒绝。
+    /// Merge priority from low to high: backend minimal environment < env_vars < per-command env.
+    /// Security-sensitive variables such as LD_PRELOAD are rejected during build().
     pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner.env_vars.insert(key.into(), value.into());
         self
     }
 
-    /// 批量设置创建沙箱时的持久环境变量。
+    /// Set persistent environment variables applied when the sandbox is created.
     ///
-    /// 安全关键变量（LD_PRELOAD 等）会在 build() 时被拒绝。
+    /// Security-sensitive variables such as LD_PRELOAD are rejected during build().
     pub fn env_vars(mut self, vars: std::collections::HashMap<String, String>) -> Self {
         self.inner.env_vars = vars;
         self
@@ -1489,7 +1480,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             result
-                .unwrap_err()
+                .expect_err("invalid HTTP ACL allow rule must fail")
                 .to_string()
                 .contains("HTTP ACL allow rule parse failed")
         );
@@ -1504,7 +1495,7 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("AllowAll with HTTP ACL must be rejected");
         assert!(err.to_string().contains("AllowAll"));
     }
 
@@ -1571,8 +1562,20 @@ mod tests {
             .build()
             .expect("env_var should pass validation");
 
-        assert_eq!(config.env_vars.get("KEY").unwrap(), "VALUE");
-        assert_eq!(config.env_vars.get("KEY2").unwrap(), "VALUE2");
+        assert_eq!(
+            config
+                .env_vars
+                .get("KEY")
+                .expect("KEY env var should exist"),
+            "VALUE"
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("KEY2")
+                .expect("KEY2 env var should exist"),
+            "VALUE2"
+        );
     }
 
     #[test]
