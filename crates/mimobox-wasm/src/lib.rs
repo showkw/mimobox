@@ -1217,6 +1217,22 @@ impl Sandbox for WasmSandbox {
                         Err(e) => {
                             if let Some(exit) = find_exit_code(&e) {
                                 Some(exit)
+                            } else if is_fuel_exhausted(&store) || is_epoch_interrupt(&e) {
+                                warn!(
+                                    "Execution timed out (fuel exhausted or epoch deadline exceeded)"
+                                );
+                                let elapsed = start.elapsed();
+                                let stdout =
+                                    truncate_output(stdout_reader.contents().to_vec(), "stdout");
+                                let stderr =
+                                    truncate_output(stderr_reader.contents().to_vec(), "stderr");
+                                return Ok(SandboxResult {
+                                    stdout,
+                                    stderr,
+                                    exit_code: None,
+                                    elapsed,
+                                    timed_out: true,
+                                });
                             } else if is_memory_trap(&e) {
                                 warn!("Wasm memory limit exceeded (OOM)");
                                 return Err(SandboxError::ExecutionFailed {

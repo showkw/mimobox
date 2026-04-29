@@ -26,7 +26,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use mimobox_sdk::{
     Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, Sandbox,
-    SdkError,
+    SdkError, TrustLevel,
 };
 use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::JsonSchema;
@@ -64,6 +64,10 @@ const MAX_MCP_PATH_BYTES: usize = 4096;
 const MAX_SANDBOXES: usize = 64;
 /// MCP sandbox 和命令执行最大超时 3600 秒（1 小时），防止客户端占用资源过久。
 const MAX_SANDBOX_TIMEOUT_SECS: u64 = 3600;
+/// 临时 MCP sandbox 默认超时，避免未显式设置时以 Untrusted 模式创建失败。
+const DEFAULT_EPHEMERAL_TIMEOUT_MS: u64 = 30_000;
+/// 临时 MCP sandbox 默认内存上限，满足 Untrusted 必须设置内存限制的要求。
+const DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB: u64 = 256;
 
 #[derive(Clone)]
 pub struct MimoboxServer {
@@ -911,8 +915,13 @@ impl MimoboxServer {
         }
 
         let command = command.to_string();
+        let timeout_ms = Some(timeout_ms.unwrap_or(DEFAULT_EPHEMERAL_TIMEOUT_MS));
         let result = tokio::task::spawn_blocking(move || {
-            let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
+            let mut sandbox = create_sandbox_with_options(
+                IsolationLevel::Auto,
+                timeout_ms,
+                Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            )?;
             let result = sandbox.execute(&command);
             if let Err(err) = sandbox.destroy() {
                 error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
@@ -963,8 +972,13 @@ impl MimoboxServer {
         }
 
         let argv = argv.to_vec();
+        let timeout_ms = Some(timeout_ms.unwrap_or(DEFAULT_EPHEMERAL_TIMEOUT_MS));
         let result = tokio::task::spawn_blocking(move || {
-            let mut sandbox = create_sandbox_with_options(IsolationLevel::Auto, timeout_ms, None)?;
+            let mut sandbox = create_sandbox_with_options(
+                IsolationLevel::Auto,
+                timeout_ms,
+                Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            )?;
             let result = sandbox.exec(&argv);
             if let Err(err) = sandbox.destroy() {
                 error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
@@ -1004,7 +1018,9 @@ fn create_sandbox_with_options(
     validate_create_sandbox_memory_limit(memory_limit_mb)?;
     validate_timeout_ms(timeout_ms).map_err(SdkError::Config)?;
 
-    let mut builder = Config::builder().isolation(isolation);
+    let mut builder = Config::builder()
+        .isolation(isolation)
+        .trust_level(TrustLevel::Untrusted);
     if let Some(timeout_ms) = timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout_ms));
     }

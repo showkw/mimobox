@@ -9,6 +9,10 @@ use tracing::warn;
 
 const ASSET_MANIFEST_URL: &str =
     "https://github.com/showkw/mimobox/releases/latest/download/asset-manifest.json";
+const ALLOWED_ASSET_URL_PREFIXES: &[&str] = &[
+    "https://github.com/showkw/mimobox/",
+    "https://github.com/showkw/mimobox",
+];
 
 #[derive(Debug, Deserialize)]
 struct AssetManifest {
@@ -184,11 +188,27 @@ fn validate_asset_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_asset_url(url: &str) -> Result<(), String> {
+    // SECURITY: 限制资产下载 URL 必须来自官方仓库，防止中间人替换。
+    if !ALLOWED_ASSET_URL_PREFIXES
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+    {
+        return Err(format!(
+            "asset URL rejected (not from official repository): {url}"
+        ));
+    }
+
+    Ok(())
+}
+
 fn download_asset(
     client: &reqwest::blocking::Client,
     asset: &VmAsset,
     temporary_path: &Path,
 ) -> Result<bool, String> {
+    validate_asset_url(&asset.url)?;
+
     let mut response = match client.get(&asset.url).send() {
         Ok(response) => response,
         Err(error) => {
@@ -281,7 +301,29 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{sha256_sidecar_path, write_sha256_sidecar_best_effort};
+    use super::{sha256_sidecar_path, validate_asset_url, write_sha256_sidecar_best_effort};
+
+    #[test]
+    fn accepts_official_asset_urls() {
+        assert!(
+            validate_asset_url(
+                "https://github.com/showkw/mimobox/releases/latest/download/rootfs.ext4"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_non_official_asset_urls() {
+        let result = validate_asset_url("https://example.com/rootfs.ext4");
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("asset URL rejected (not from official repository)")
+        );
+    }
 
     #[test]
     fn writes_sha256_sidecar_next_to_asset() {
