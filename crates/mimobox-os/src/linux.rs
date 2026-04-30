@@ -1021,6 +1021,11 @@ fn apply_security_policies_and_exec(
                         }
                         Err(Errno::EINTR) => continue,
                         Err(error) => {
+                            if error == Errno::ECHILD {
+                                // 孙进程已被回收（PID namespace 容器环境中可能发生），
+                                // 中间进程安全退出，父进程通过 timed_out 标志判断超时。
+                                unsafe { libc::_exit(0) }
+                            }
                             // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
                             unsafe {
                                 write_error(2, &format!("intermediate waitpid failed: {error}"));
