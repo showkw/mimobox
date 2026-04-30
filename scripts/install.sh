@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO="showkw/mimobox"
 VERSION="latest"
+WITH_MCP=""
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="mimobox"
 TMP_FILE="${TMPDIR:-/tmp}/mimobox-install.$$"
@@ -46,7 +47,7 @@ die() {
 }
 
 cleanup() {
-  rm -f "$TMP_FILE" "$TMP_CHECKSUM"
+  rm -f "$TMP_FILE" "$TMP_CHECKSUM" "${TMPDIR:-/tmp}/mimobox-mcp-install.92917"
 }
 
 usage() {
@@ -58,6 +59,7 @@ Download and install mimobox CLI from GitHub Releases.
 Options:
   --help              Show this help message
   --version VERSION   Install a specific version instead of latest
+  --with-mcp          Also install mimobox-mcp if available
 
 Environment variables:
   INSTALL_DIR         Installation directory (default: /usr/local/bin)
@@ -66,6 +68,7 @@ Examples:
   bash scripts/install.sh
   INSTALL_DIR=/opt/bin bash scripts/install.sh
   bash scripts/install.sh --version v0.1.0
+  bash scripts/install.sh --with-mcp
 EOF
 }
 
@@ -80,6 +83,10 @@ parse_args() {
         [ "$#" -ge 2 ] || die "--version requires a version argument"
         VERSION="$2"
         shift 2
+        ;;
+      --with-mcp)
+        WITH_MCP=1
+        shift
         ;;
       *)
         die "Unknown argument: $1. Use --help for usage"
@@ -250,6 +257,59 @@ verify() {
   die "Post-install verification failed: could not run '$DEST --version' or '$DEST version'"
 }
 
+install_mcp() {
+  MCP_BIN_NAME="mimobox-mcp"
+  MCP_TMP_FILE="${TMPDIR:-/tmp}/mimobox-mcp-install.92917"
+
+  if [ "$VERSION" = "latest" ]; then
+    MCP_DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/mimobox-mcp-$TARGET"
+  else
+    MCP_DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/mimobox-mcp-$TARGET"
+  fi
+
+  info "Downloading mimobox-mcp: $MCP_DOWNLOAD_URL"
+
+  if command -v curl >/dev/null 2>&1; then
+    http_code=$(curl -fSL -w '%{http_code}' -o "$MCP_TMP_FILE" "$MCP_DOWNLOAD_URL" 2>/dev/null) || true
+    if [ "$http_code" = "404" ] || [ "$http_code" = "000" ]; then
+      warn "mimobox-mcp binary not available for $TARGET. You can download it manually from GitHub Releases."
+      return 0
+    elif [ "$http_code" != "200" ]; then
+      warn "Failed to download mimobox-mcp for $TARGET. You can download it manually from GitHub Releases."
+      rm -f "$MCP_TMP_FILE"
+      return 0
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! wget -O "$MCP_TMP_FILE" "$MCP_DOWNLOAD_URL" 2>/dev/null; then
+      warn "mimobox-mcp binary not available for $TARGET. You can download it manually from GitHub Releases."
+      return 0
+    fi
+  else
+    warn "curl or wget is required to download mimobox-mcp. Skipping MCP installation."
+    return 0
+  fi
+
+  if [ ! -s "$MCP_TMP_FILE" ]; then
+    warn "Downloaded mimobox-mcp file is empty. Skipping MCP installation."
+    rm -f "$MCP_TMP_FILE"
+    return 0
+  fi
+
+  MCP_DEST="$INSTALL_DIR/$MCP_BIN_NAME"
+  chmod +x "$MCP_TMP_FILE"
+
+  if [ -w "$INSTALL_DIR" ]; then
+    cp "$MCP_TMP_FILE" "$MCP_DEST"
+  else
+    command -v sudo >/dev/null 2>&1 || { warn "Cannot install mimobox-mcp: target directory not writable and sudo not found"; rm -f "$MCP_TMP_FILE"; return 0; }
+    sudo cp "$MCP_TMP_FILE" "$MCP_DEST"
+    sudo chmod +x "$MCP_DEST"
+  fi
+
+  rm -f "$MCP_TMP_FILE"
+  success "mimobox-mcp installed to $MCP_DEST"
+}
+
 main() {
   setup_colors
   trap cleanup EXIT INT TERM
@@ -264,6 +324,11 @@ main() {
   verify_checksum
   install_binary
   verify
+
+  # Install mimobox-mcp if requested
+  if [ -n "${WITH_MCP:-}" ]; then
+    install_mcp
+  fi
 }
 
 main "$@"
