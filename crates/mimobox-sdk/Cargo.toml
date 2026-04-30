@@ -101,3 +101,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [[bench]]
 name = "sdk_bench"
 harness = false
+
+[[bench]]
+name = "bench_realworkload_os"
+harness = false

@@ -41,3 +41,7 @@ workspace = true
 all-features = true
 default-target = "x86_64-unknown-linux-gnu"
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[bench]]
+name = "bench_realworkload_wasm"
+harness = false
