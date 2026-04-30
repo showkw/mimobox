@@ -265,10 +265,10 @@ impl OsPtySession {
     }
 
     fn run_cleanup(&self) {
-        let Ok(mut cleanup) = self.cleanup.lock() else {
-            tracing::warn!("PTY cleanup mutex poisoned; skipping cleanup callback");
-            return;
-        };
+        let mut cleanup = self.cleanup.lock().unwrap_or_else(|error| {
+            tracing::warn!("PTY cleanup mutex poisoned; recovering to run cleanup callback");
+            error.into_inner()
+        });
         if let Some(cleanup) = cleanup.take() {
             cleanup();
         }
@@ -330,22 +330,33 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
         let mut total_bytes: usize = 0;
+        let mut truncated = false;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if truncated {
+                        continue;
+                    }
+
                     if output_tx
                         .send(PtyEvent::Output(buffer[..n].to_vec()))
                         .is_err()
                     {
                         break;
                     }
-                    total_bytes += n;
+                    total_bytes = total_bytes.saturating_add(n);
                     if total_bytes >= PTY_OUTPUT_SIZE_LIMIT {
-                        let _ = output_tx.send(PtyEvent::Output(
-                            b"\n[mimobox] PTY output exceeded 4MB limit, truncated\n".to_vec(),
-                        ));
-                        break;
+                        truncated = true;
+                        if output_tx
+                            .send(PtyEvent::Output(
+                                b"\n[mimobox] PTY output exceeded 4MB limit, truncated\n".to_vec(),
+                            ))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,

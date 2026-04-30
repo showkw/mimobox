@@ -698,11 +698,19 @@ fn wait_for_parent_start_signal(fd: RawFd) -> Result<(), ()> {
 }
 
 fn kill_process_group(pid: libc::pid_t, signal: Signal) {
-    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal);
+    if let Err(error) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pid), signal) {
+        if error != nix::errno::Errno::ESRCH {
+            tracing::warn!("Failed to send {signal:?} to process group {pid}: {error}");
+        }
+    }
 }
 
 fn kill_process(pid: libc::pid_t, signal: Signal) {
-    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal);
+    if let Err(error) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
+        if error != nix::errno::Errno::ESRCH {
+            tracing::warn!("Failed to send {signal:?} to process {pid}: {error}");
+        }
+    }
 }
 
 fn set_nonblocking(fd: RawFd) {

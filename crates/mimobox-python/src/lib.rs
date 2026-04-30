@@ -140,6 +140,34 @@ impl PyExecuteResult {
     }
 }
 
+fn stream_events_from_execute_result(result: ExecuteResult) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+
+    if !result.stdout.is_empty() {
+        events.push(StreamEvent::Stdout(result.stdout));
+    }
+    if !result.stderr.is_empty() {
+        events.push(StreamEvent::Stderr(result.stderr));
+    }
+    if result.timed_out {
+        events.push(StreamEvent::TimedOut);
+    } else {
+        events.push(StreamEvent::Exit(result.exit_code.unwrap_or(-1)));
+    }
+
+    events
+}
+
+fn stream_receiver_from_execute_result(result: ExecuteResult) -> mpsc::Receiver<StreamEvent> {
+    let (sender, receiver) = mpsc::channel();
+    for event in stream_events_from_execute_result(result) {
+        if sender.send(event).is_err() {
+            break;
+        }
+    }
+    receiver
+}
+
 /// 沙箱运行时资源使用指标。
 ///
 /// 所有资源字段都是可选值，因为不同后端支持的指标不同。
@@ -1493,15 +1521,35 @@ impl PySandbox {
         timeout: Option<f64>,
         cwd: Option<&str>,
     ) -> PyResult<PyStreamIterator> {
-        let _env = validate_optional_python_env_vars(env)?;
-        let _parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
+        let env = validate_optional_python_env_vars(env)?;
+        let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
 
         let receiver = if let Some(dir) = cwd {
             validate_python_cwd(dir)?;
             let argv = parse_python_command(command)?;
             let sandbox = self.inner_mut()?;
-            py.allow_threads(|| sandbox.stream_exec(&argv))
-                .map_err(|e| map_sdk_error(e, py))?
+            let options = mimobox_sdk::SdkExecOptions {
+                env: env.unwrap_or_default(),
+                timeout: parsed_timeout,
+                cwd: Some(dir.to_string()),
+            };
+            let result = py
+                .allow_threads(|| sandbox.exec_with_options(&argv, options))
+                .map_err(|e| map_sdk_error(e, py))?;
+            stream_receiver_from_execute_result(result)
+        } else if env.is_some() || parsed_timeout.is_some() {
+            let sandbox = self.inner_mut()?;
+            let result = py
+                .allow_threads(|| match (env, parsed_timeout) {
+                    (Some(env), Some(timeout)) => {
+                        sandbox.execute_with_env_and_timeout(command, env, timeout)
+                    }
+                    (Some(env), None) => sandbox.execute_with_env(command, env),
+                    (None, Some(timeout)) => sandbox.execute_with_timeout(command, timeout),
+                    (None, None) => sandbox.execute(command),
+                })
+                .map_err(|e| map_sdk_error(e, py))?;
+            stream_receiver_from_execute_result(result)
         } else {
             let sandbox = self.inner_mut()?;
             let command = command.to_string();
