@@ -54,9 +54,13 @@ pub(crate) fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError>
 
 /// Parses the command value.
 pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
-    shlex::split(command).ok_or_else(|| {
+    let args = shlex::split(command).ok_or_else(|| {
         SdkError::Config("command parsing failed: mismatched shell-style quotes".to_string())
-    })
+    })?;
+    if args.is_empty() {
+        return Err(SdkError::Config("command must not be empty".to_string()));
+    }
+    Ok(args)
 }
 
 /// Builds the code command value.
