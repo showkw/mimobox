@@ -503,6 +503,34 @@ impl PyStreamEvent {
     fn timed_out(&self) -> bool {
         self.timed_out
     }
+
+    fn __repr__(&self) -> String {
+        match self.event_type.as_str() {
+            "stdout" => {
+                let text = self
+                    .stdout
+                    .as_ref()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .unwrap_or_default();
+                format!("StreamEvent(stdout={text})")
+            }
+            "stderr" => {
+                let text = self
+                    .stderr
+                    .as_ref()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .unwrap_or_default();
+                format!("StreamEvent(stderr={text})")
+            }
+            "exit" => format!(
+                "StreamEvent(exit_code={})",
+                self.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "None".to_string())
+            ),
+            other => format!("StreamEvent(type={other})"),
+        }
+    }
 }
 
 impl From<StreamEvent> for PyStreamEvent {
