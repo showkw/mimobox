@@ -1,4 +1,4 @@
-# basic.py — Minimal example: create sandbox, execute command, print result, destroy
+# basic.py — Minimal example: create sandbox, execute command, print result, close
 #
 # Demonstrates the most basic Sandbox usage: without context manager, manual lifecycle management.
 
@@ -18,6 +18,6 @@ print(f"timed_out: {result.timed_out}")
 if result.elapsed is not None:
     print(f"elapsed:   {result.elapsed:.3f}s")
 
-# Manual destroy (must clean up yourself when not using with statement)
-sandbox.__exit__(None, None, None)
-print("sandbox destroyed")
+# Manual cleanup: close() is the recommended cleanup method when not using a with statement.
+sandbox.close()
+print("sandbox closed")
