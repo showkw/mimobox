@@ -135,15 +135,16 @@ fn prepare_child_env_vars(
     let mut prepared = Vec::with_capacity(env_vars.len());
     for (key, value) in env_vars {
         if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
-            return Err(SandboxError::new(format!(
-                "invalid environment variable name: {key}"
-            )));
+            return Err(SandboxError::Config {
+                message: format!("invalid environment variable name: {key}"),
+            });
         }
-        let key = CString::new(key.as_str()).map_err(|_| {
-            SandboxError::new(format!("environment variable name contains NUL: {key}"))
+        let key = CString::new(key.as_str()).map_err(|_| SandboxError::Config {
+            message: format!("environment variable name contains NUL: {key}"),
         })?;
-        let value = CString::new(value.as_str())
-            .map_err(|_| SandboxError::new("environment variable value contains NUL byte"))?;
+        let value = CString::new(value.as_str()).map_err(|_| SandboxError::Config {
+            message: "environment variable value contains NUL byte".to_string(),
+        })?;
         prepared.push((key, value));
     }
     Ok(prepared)
@@ -153,8 +154,9 @@ fn validate_pty_user_env_vars(
     env_vars: &std::collections::HashMap<String, String>,
 ) -> Result<(), SandboxError> {
     for (key, value) in env_vars {
-        validate_sandbox_env_var(key, value)
-            .map_err(|message| SandboxError::new(format!("PTY env config invalid: {message}")))?;
+        validate_sandbox_env_var(key, value).map_err(|message| SandboxError::Config {
+            message: format!("PTY env config invalid: {message}"),
+        })?;
     }
     Ok(())
 }
@@ -1432,7 +1434,9 @@ impl Sandbox for LinuxSandbox {
         self.cached_metrics = None;
 
         if cmd.is_empty() {
-            return Err(SandboxError::new("command must not be empty"));
+            return Err(SandboxError::Config {
+                message: "command must not be empty".to_string(),
+            });
         }
 
         #[cfg(target_os = "linux")]
@@ -1683,12 +1687,15 @@ impl Sandbox for LinuxSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::new("PTY command must not be empty"));
+            return Err(SandboxError::Config {
+                message: "PTY command must not be empty".to_string(),
+            });
         }
         if config.timeout.is_some_and(|timeout| timeout.is_zero()) {
-            return Err(SandboxError::new(
-                "PTY timeout must be greater than zero; use None for no timeout",
-            )
+            return Err(SandboxError::Config {
+                message: "PTY timeout must be greater than zero; use None for no timeout"
+                    .to_string(),
+            }
             .suggestion("Set PtyConfig.timeout to None for an unbounded PTY session"));
         }
 

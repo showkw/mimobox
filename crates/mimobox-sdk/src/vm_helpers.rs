@@ -89,11 +89,25 @@ pub(crate) fn build_code_command(language: &str, code: &str) -> Result<String, S
 /// Maps the pty create error value.
 pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
+        mimobox_core::SandboxError::Unsupported => SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            "sandbox backend not supported on current platform",
+            Some("set isolation to `Os` or use default Auto".to_string()),
+        ),
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
             message,
             Some("set isolation to `Os` or use default Auto".to_string()),
         ),
+        mimobox_core::SandboxError::Config { message } => {
+            SdkError::sandbox(ErrorCode::InvalidConfig, message, None)
+        }
+        mimobox_core::SandboxError::SecurityPolicy { message } => {
+            SdkError::sandbox(ErrorCode::SecurityPolicyViolation, message, None)
+        }
+        mimobox_core::SandboxError::ResourceExhausted { message } => {
+            SdkError::sandbox(ErrorCode::ResourceExhausted, message, None)
+        }
         other => SdkError::sandbox(
             ErrorCode::SandboxCreateFailed,
             other.to_string(),
@@ -105,6 +119,11 @@ pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkErro
 /// Maps the pty session error value.
 pub(crate) fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
+        mimobox_core::SandboxError::Unsupported => SdkError::sandbox(
+            ErrorCode::UnsupportedPlatform,
+            "sandbox backend not supported on current platform",
+            Some("set isolation to `Os` or use default Auto".to_string()),
+        ),
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
             message,
@@ -115,6 +134,15 @@ pub(crate) fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkErr
             "PTY session execution timed out",
             Some("increase Config.timeout or PtyConfig.timeout".to_string()),
         ),
+        mimobox_core::SandboxError::Config { message } => {
+            SdkError::sandbox(ErrorCode::InvalidConfig, message, None)
+        }
+        mimobox_core::SandboxError::SecurityPolicy { message } => {
+            SdkError::sandbox(ErrorCode::SecurityPolicyViolation, message, None)
+        }
+        mimobox_core::SandboxError::ResourceExhausted { message } => {
+            SdkError::sandbox(ErrorCode::ResourceExhausted, message, None)
+        }
         other => SdkError::sandbox(
             ErrorCode::SandboxDestroyed,
             other.to_string(),
@@ -132,6 +160,13 @@ pub(crate) fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> Sdk
             Some(
                 "for file-mode snapshots, prefer from_snapshot()/restore() or to_bytes()"
                     .to_string(),
+            ),
+        ),
+        mimobox_core::SandboxError::Config { message } => SdkError::sandbox(
+            ErrorCode::InvalidConfig,
+            message,
+            Some(
+                "ensure snapshot data is non-empty and from a mimobox microVM snapshot".to_string(),
             ),
         ),
         mimobox_core::SandboxError::ExecutionFailed { message, .. } => SdkError::sandbox(

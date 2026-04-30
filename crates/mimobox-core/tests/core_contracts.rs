@@ -149,10 +149,7 @@ fn sandbox_error_display_and_source_behave_as_expected() {
     let (base_error, suggestion) = suggested_error.into_base_and_suggestion();
     assert!(matches!(
         base_error,
-        SandboxError::ExecutionFailed {
-            kind: ExecutionFailureKind::Unknown,
-            message,
-        } if message == "bad config"
+        SandboxError::Other { message } if message == "bad config"
     ));
     assert_eq!(suggestion.as_deref(), Some("修正配置后重试"));
 

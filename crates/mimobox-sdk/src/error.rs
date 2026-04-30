@@ -94,18 +94,51 @@ impl SdkError {
     /// Maps a core configuration error to a structured SDK invalid-config error.
     pub fn from_core_config_error(err: mimobox_core::SandboxError) -> Self {
         let (err, suggestion) = err.into_base_and_suggestion();
-        Self::sandbox(ErrorCode::InvalidConfig, err.to_string(), suggestion)
+        match err {
+            mimobox_core::SandboxError::Config { message }
+            | mimobox_core::SandboxError::Other { message } => {
+                Self::sandbox(ErrorCode::InvalidConfig, message, suggestion)
+            }
+            mimobox_core::SandboxError::SecurityPolicy { message } => {
+                Self::sandbox(ErrorCode::SecurityPolicyViolation, message, suggestion)
+            }
+            mimobox_core::SandboxError::ResourceExhausted { message } => {
+                Self::sandbox(ErrorCode::ResourceExhausted, message, suggestion)
+            }
+            other => Self::sandbox(ErrorCode::InvalidConfig, other.to_string(), suggestion),
+        }
     }
 
     /// Maps an execution-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_execute_error(err: mimobox_core::SandboxError) -> Self {
         let (err, core_suggestion) = err.into_base_and_suggestion();
         match err {
+            mimobox_core::SandboxError::Unsupported => Self::Sandbox {
+                code: ErrorCode::UnsupportedPlatform,
+                message: "sandbox backend not supported on current platform".into(),
+                suggestion: core_suggestion
+                    .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
+            },
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
                 suggestion: core_suggestion
                     .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
+            },
+            mimobox_core::SandboxError::Config { message } => Self::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::SecurityPolicy { message } => Self::Sandbox {
+                code: ErrorCode::SecurityPolicyViolation,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::ResourceExhausted { message } => Self::Sandbox {
+                code: ErrorCode::ResourceExhausted,
+                message,
+                suggestion: core_suggestion,
             },
             mimobox_core::SandboxError::Timeout => Self::Sandbox {
                 code: ErrorCode::CommandTimeout,
@@ -146,6 +179,16 @@ impl SdkError {
                     suggestion: core_suggestion.or(Some(suggestion)),
                 }
             }
+            mimobox_core::SandboxError::Other { message } => Self::Sandbox {
+                code: ErrorCode::CommandKilled,
+                message,
+                suggestion: core_suggestion.or_else(|| {
+                    Some(
+                        "Check sandbox logs and backend diagnostics for the unclassified failure."
+                            .to_string(),
+                    )
+                }),
+            },
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
@@ -163,11 +206,32 @@ impl SdkError {
     pub fn from_sandbox_create_error(err: mimobox_core::SandboxError) -> Self {
         let (err, core_suggestion) = err.into_base_and_suggestion();
         match err {
+            mimobox_core::SandboxError::Unsupported => Self::Sandbox {
+                code: ErrorCode::UnsupportedPlatform,
+                message: "sandbox backend not supported on current platform".into(),
+                suggestion: core_suggestion
+                    .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
+            },
             mimobox_core::SandboxError::UnsupportedOperation(message) => Self::Sandbox {
                 code: ErrorCode::UnsupportedPlatform,
                 message,
                 suggestion: core_suggestion
                     .or_else(|| Some("set isolation to `Os` or use default Auto".into())),
+            },
+            mimobox_core::SandboxError::Config { message } => Self::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::SecurityPolicy { message } => Self::Sandbox {
+                code: ErrorCode::SecurityPolicyViolation,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::ResourceExhausted { message } => Self::Sandbox {
+                code: ErrorCode::ResourceExhausted,
+                message,
+                suggestion: core_suggestion,
             },
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
@@ -185,15 +249,42 @@ impl SdkError {
     /// Maps a destroy-phase `SandboxError` to an SDK error.
     pub fn from_sandbox_destroy_error(err: mimobox_core::SandboxError) -> Self {
         let (err, core_suggestion) = err.into_base_and_suggestion();
-        Self::Sandbox {
-            code: ErrorCode::SandboxDestroyed,
-            message: err.to_string(),
-            suggestion: core_suggestion.or_else(|| {
-                Some(
-                "Create a new sandbox instance. Sandbox objects cannot be reused after close()."
-                    .to_string(),
-            )
-            }),
+        match err {
+            mimobox_core::SandboxError::Config { message } => Self::Sandbox {
+                code: ErrorCode::InvalidConfig,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::SecurityPolicy { message } => Self::Sandbox {
+                code: ErrorCode::SecurityPolicyViolation,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::ResourceExhausted { message } => Self::Sandbox {
+                code: ErrorCode::ResourceExhausted,
+                message,
+                suggestion: core_suggestion,
+            },
+            mimobox_core::SandboxError::Other { message } => Self::Sandbox {
+                code: ErrorCode::SandboxDestroyed,
+                message,
+                suggestion: core_suggestion.or_else(|| {
+                    Some(
+                        "Create a new sandbox instance. Sandbox objects cannot be reused after close()."
+                            .to_string(),
+                    )
+                }),
+            },
+            other => Self::Sandbox {
+                code: ErrorCode::SandboxDestroyed,
+                message: other.to_string(),
+                suggestion: core_suggestion.or_else(|| {
+                    Some(
+                        "Create a new sandbox instance. Sandbox objects cannot be reused after close()."
+                            .to_string(),
+                    )
+                }),
+            },
         }
     }
 
@@ -305,6 +396,64 @@ mod tests {
         match error {
             SdkError::Sandbox { code, .. } => {
                 assert_eq!(code, ErrorCode::CpuLimitExceeded);
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_maps_to_invalid_config() {
+        let error = SdkError::from_sandbox_execute_error(SandboxError::Config {
+            message: "bad config".to_string(),
+        });
+
+        match error {
+            SdkError::Sandbox { code, message, .. } => {
+                assert_eq!(code, ErrorCode::InvalidConfig);
+                assert_eq!(message, "bad config");
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn security_policy_maps_to_security_policy_violation() {
+        let error = SdkError::from_sandbox_create_error(SandboxError::SecurityPolicy {
+            message: "policy denied".to_string(),
+        });
+
+        match error {
+            SdkError::Sandbox { code, message, .. } => {
+                assert_eq!(code, ErrorCode::SecurityPolicyViolation);
+                assert_eq!(message, "policy denied");
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resource_exhausted_maps_to_resource_exhausted() {
+        let error = SdkError::from_core_config_error(SandboxError::ResourceExhausted {
+            message: "pool exhausted".to_string(),
+        });
+
+        match error {
+            SdkError::Sandbox { code, message, .. } => {
+                assert_eq!(code, ErrorCode::ResourceExhausted);
+                assert_eq!(message, "pool exhausted");
+            }
+            other => panic!("expected sandbox error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_maps_to_phase_fallback() {
+        let error = SdkError::from_sandbox_destroy_error(SandboxError::new("already gone"));
+
+        match error {
+            SdkError::Sandbox { code, message, .. } => {
+                assert_eq!(code, ErrorCode::SandboxDestroyed);
+                assert_eq!(message, "already gone");
             }
             other => panic!("expected sandbox error, got {other:?}"),
         }

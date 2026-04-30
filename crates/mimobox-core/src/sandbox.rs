@@ -81,14 +81,15 @@ fn validate_persistent_env_vars(
 fn validate_sandbox_paths(label: &str, paths: &[PathBuf]) -> Result<(), SandboxError> {
     for path in paths {
         if path.as_os_str().is_empty() {
-            return Err(SandboxError::new(format!("{label} contains empty path"))
-                .suggestion("Remove empty sandbox filesystem paths"));
+            return Err(SandboxError::Config {
+                message: format!("{label} contains empty path"),
+            }
+            .suggestion("Remove empty sandbox filesystem paths"));
         }
         if path.to_str().is_none() {
-            return Err(SandboxError::new(format!(
-                "{label} contains non-UTF-8 path: {}",
-                path.display()
-            ))
+            return Err(SandboxError::Config {
+                message: format!("{label} contains non-UTF-8 path: {}", path.display()),
+            }
             .suggestion("Use UTF-8 filesystem paths for sandbox filesystem rules"));
         }
     }
@@ -424,6 +425,10 @@ pub enum ErrorCode {
     SandboxCreateFailed,
     /// The provided configuration is invalid.
     InvalidConfig,
+    /// A sandbox security policy rejected the requested operation.
+    SecurityPolicyViolation,
+    /// Sandbox or backend resource capacity was exhausted.
+    ResourceExhausted,
     /// The current platform or backend does not support this capability.
     UnsupportedPlatform,
     /// Sandbox killed after exceeding the memory limit (OOM killer or cgroups memory.limit).
@@ -456,6 +461,8 @@ impl ErrorCode {
             Self::SandboxDestroyed => "sandbox_destroyed",
             Self::SandboxCreateFailed => "sandbox_create_failed",
             Self::InvalidConfig => "invalid_config",
+            Self::SecurityPolicyViolation => "security_policy_violation",
+            Self::ResourceExhausted => "resource_exhausted",
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::MemoryLimitExceeded => "memory_limit_exceeded",
             Self::CpuLimitExceeded => "cpu_limit_exceeded",
@@ -671,26 +678,28 @@ impl SandboxConfig {
 
         // memory_limit_mb=Some(0) has no meaningful semantics.
         if self.memory_limit_mb == Some(0) {
-            return Err(SandboxError::new(
-                "memory_limit_mb=0 invalid, set a positive integer or None",
-            )
+            return Err(SandboxError::Config {
+                message: "memory_limit_mb=0 invalid, set a positive integer or None".to_string(),
+            }
             .suggestion("memory_limit_mb minimum is 1"));
         }
         if let Some(memory_limit_mb) = self.memory_limit_mb
             && memory_limit_mb > MAX_MEMORY_LIMIT_MB
         {
-            return Err(SandboxError::new(format!(
-                "memory_limit_mb={memory_limit_mb} exceeds maximum {MAX_MEMORY_LIMIT_MB} MB, set a reasonable value"
-            ))
+            return Err(SandboxError::Config {
+                message: format!(
+                    "memory_limit_mb={memory_limit_mb} exceeds maximum {MAX_MEMORY_LIMIT_MB} MB, set a reasonable value"
+                ),
+            }
             .suggestion(format!(
                 "memory_limit_mb maximum is {MAX_MEMORY_LIMIT_MB}"
             )));
         }
 
         if self.max_processes == Some(0) {
-            return Err(SandboxError::new(
-                "max_processes=0 invalid, set a positive integer or None",
-            )
+            return Err(SandboxError::Config {
+                message: "max_processes=0 invalid, set a positive integer or None".to_string(),
+            }
             .suggestion("max_processes minimum is 1, or set to None for backend default"));
         }
 
@@ -701,15 +710,17 @@ impl SandboxConfig {
         if let Some(timeout_secs) = self.timeout_secs {
             const MAX_TIMEOUT_SECS: u64 = 86_400;
             if timeout_secs == 0 {
-                return Err(SandboxError::new(
-                    "timeout_secs=0 invalid, set a positive integer or None",
-                )
+                return Err(SandboxError::Config {
+                    message: "timeout_secs=0 invalid, set a positive integer or None".to_string(),
+                }
                 .suggestion("timeout must be > 0, recommended 30s"));
             }
             if timeout_secs > MAX_TIMEOUT_SECS {
-                return Err(SandboxError::new(format!(
-                    "timeout_secs={timeout_secs} exceeds maximum 86400 (24 hours), set a reasonable value"
-                ))
+                return Err(SandboxError::Config {
+                    message: format!(
+                        "timeout_secs={timeout_secs} exceeds maximum 86400 (24 hours), set a reasonable value"
+                    ),
+                }
                 .suggestion("timeout_secs maximum is 86400 (24 hours)"));
             }
         }
@@ -722,9 +733,9 @@ impl SandboxConfig {
                 || has_invalid_domain_wildcard(domain)
                 || is_plain_ip_domain(domain)
             {
-                return Err(SandboxError::new(format!(
-                    "allowed_http_domains contains invalid domain: {domain}"
-                ))
+                return Err(SandboxError::Config {
+                    message: format!("allowed_http_domains contains invalid domain: {domain}"),
+                }
                 .suggestion(
                     "Use standard domain format, e.g. example.com or *.example.com; IP addresses not supported",
                 ));
@@ -732,20 +743,24 @@ impl SandboxConfig {
         }
 
         if self.cpu_period_us == 0 {
-            return Err(
-                SandboxError::new("cpu_period_us=0 invalid, set a positive integer")
-                    .suggestion("cpu_period_us minimum is 1, recommended 100000"),
-            );
+            return Err(SandboxError::Config {
+                message: "cpu_period_us=0 invalid, set a positive integer".to_string(),
+            }
+            .suggestion("cpu_period_us minimum is 1, recommended 100000"));
         }
 
         if let Err(msg) = self.http_acl.validate() {
-            return Err(SandboxError::new(format!("http_acl config invalid: {msg}"))
-                .suggestion("Check HTTP ACL rule format"));
+            return Err(SandboxError::Config {
+                message: format!("http_acl config invalid: {msg}"),
+            }
+            .suggestion("Check HTTP ACL rule format"));
         }
 
         if let Err(msg) = validate_persistent_env_vars(&self.env_vars) {
-            return Err(SandboxError::new(format!("env_vars config invalid: {msg}"))
-                .suggestion("Remove unsafe or malformed persistent environment variables"));
+            return Err(SandboxError::Config {
+                message: format!("env_vars config invalid: {msg}"),
+            }
+            .suggestion("Remove unsafe or malformed persistent environment variables"));
         }
 
         Ok(())
@@ -835,7 +850,9 @@ impl SandboxSnapshot {
     /// Creates a snapshot from raw bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SandboxError> {
         if data.is_empty() {
-            return Err(SandboxError::new("snapshot data must not be empty"));
+            return Err(SandboxError::Config {
+                message: "snapshot data must not be empty".to_string(),
+            });
         }
 
         Ok(Self {
@@ -846,7 +863,9 @@ impl SandboxSnapshot {
     /// Creates a snapshot from owned bytes without an extra copy.
     pub fn from_owned_bytes(data: Vec<u8>) -> Result<Self, SandboxError> {
         if data.is_empty() {
-            return Err(SandboxError::new("snapshot data must not be empty"));
+            return Err(SandboxError::Config {
+                message: "snapshot data must not be empty".to_string(),
+            });
         }
 
         Ok(Self {
@@ -1076,6 +1095,34 @@ pub enum SandboxError {
         message: String,
     },
 
+    /// 配置错误（参数校验失败等）。
+    #[error("configuration error: {message}")]
+    Config {
+        /// Human-readable error description.
+        message: String,
+    },
+
+    /// 安全策略违规。
+    #[error("security policy violation: {message}")]
+    SecurityPolicy {
+        /// Human-readable error description.
+        message: String,
+    },
+
+    /// 资源耗尽（内存、CPU、连接池等）。
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted {
+        /// Human-readable error description.
+        message: String,
+    },
+
+    /// 通用错误，用于不适合归类到其他变体的场景。
+    #[error("{message}")]
+    Other {
+        /// Human-readable error description.
+        message: String,
+    },
+
     /// The snapshot content or access mode is invalid.
     #[error("invalid sandbox snapshot")]
     InvalidSnapshot,
@@ -1109,10 +1156,9 @@ pub enum SandboxError {
 }
 
 impl SandboxError {
-    /// Constructs a command execution error with no suggestion.
+    /// Constructs a generic sandbox error with no suggestion.
     pub fn new(message: impl Into<String>) -> Self {
-        Self::ExecutionFailed {
-            kind: ExecutionFailureKind::Unknown,
+        Self::Other {
             message: message.into(),
         }
     }
@@ -1220,8 +1266,8 @@ pub trait Sandbox {
     /// Reads file content from inside the sandbox.
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
         let _ = path;
-        Err(SandboxError::new(
-            "file reading not supported by current backend",
+        Err(SandboxError::UnsupportedOperation(
+            "file reading not supported by current backend".to_string(),
         ))
     }
 
@@ -1229,16 +1275,16 @@ pub trait Sandbox {
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError> {
         let _ = path;
         let _ = data;
-        Err(SandboxError::new(
-            "file writing not supported by current backend",
+        Err(SandboxError::UnsupportedOperation(
+            "file writing not supported by current backend".to_string(),
         ))
     }
 
     /// List directory entries under the specified path.
     fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError> {
         let _ = path;
-        Err(SandboxError::new(
-            "list_dir not supported by current backend",
+        Err(SandboxError::UnsupportedOperation(
+            "list_dir not supported by current backend".to_string(),
         ))
     }
 
@@ -1608,7 +1654,7 @@ mod tests {
         );
         let (error, _) = error.into_base_and_suggestion();
         assert!(
-            matches!(error, SandboxError::ExecutionFailed { message, .. } if message.contains("memory_limit_mb"))
+            matches!(error, SandboxError::Config { message } if message.contains("memory_limit_mb"))
         );
     }
 
@@ -1826,6 +1872,11 @@ mod tests {
             (ErrorCode::SandboxDestroyed, "sandbox_destroyed"),
             (ErrorCode::SandboxCreateFailed, "sandbox_create_failed"),
             (ErrorCode::InvalidConfig, "invalid_config"),
+            (
+                ErrorCode::SecurityPolicyViolation,
+                "security_policy_violation",
+            ),
+            (ErrorCode::ResourceExhausted, "resource_exhausted"),
             (ErrorCode::UnsupportedPlatform, "unsupported_platform"),
             (ErrorCode::MemoryLimitExceeded, "memory_limit_exceeded"),
             (ErrorCode::CpuLimitExceeded, "cpu_limit_exceeded"),

@@ -716,7 +716,9 @@ fn normalize_sbpl_path(path: &str) -> String {
 /// are rejected to prevent Seatbelt policy string injection.
 fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
     if path.is_empty() {
-        return Err(SandboxError::new("path must not be empty"));
+        return Err(SandboxError::Config {
+            message: "path must not be empty".to_string(),
+        });
     }
 
     for (i, byte) in path.bytes().enumerate() {
@@ -725,10 +727,12 @@ fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
             b'/' | b'.' | b'_' | b'-' | b'+' | b'@' => {}
             _ => {
                 let ch = path[i..].chars().next().unwrap_or('?');
-                return Err(SandboxError::new(format!(
-                    "path contains unsafe character for SBPL: {:?} (byte position {i}). Only alphanumeric, /, ., _, -, +, @ are allowed in sandbox paths.",
-                    ch
-                )));
+                return Err(SandboxError::Config {
+                    message: format!(
+                        "path contains unsafe character for SBPL: {:?} (byte position {i}). Only alphanumeric, /, ., _, -, +, @ are allowed in sandbox paths.",
+                        ch
+                    ),
+                });
             }
         }
     }
@@ -766,8 +770,9 @@ fn push_normalized_sbpl_subpath(paths: &mut Vec<String>, path: &str) -> Result<(
 
 fn validate_pty_user_env_vars(env_vars: &HashMap<String, String>) -> Result<(), SandboxError> {
     for (key, value) in env_vars {
-        validate_sandbox_env_var(key, value)
-            .map_err(|message| SandboxError::new(format!("PTY env config invalid: {message}")))?;
+        validate_sandbox_env_var(key, value).map_err(|message| SandboxError::Config {
+            message: format!("PTY env config invalid: {message}"),
+        })?;
     }
     Ok(())
 }
@@ -816,21 +821,15 @@ impl MacOsSandbox {
         push_sbpl_subpath(&mut read_paths, "/tmp")?;
 
         for path in &config.fs_readonly {
-            let path = path.to_str().ok_or_else(|| {
-                SandboxError::new(format!(
-                    "fs_readonly contains non-UTF-8 path: {}",
-                    path.display()
-                ))
+            let path = path.to_str().ok_or_else(|| SandboxError::Config {
+                message: format!("fs_readonly contains non-UTF-8 path: {}", path.display()),
             })?;
             push_normalized_sbpl_subpath(&mut read_paths, path)?;
         }
 
         for path in &config.fs_readwrite {
-            let path = path.to_str().ok_or_else(|| {
-                SandboxError::new(format!(
-                    "fs_readwrite contains non-UTF-8 path: {}",
-                    path.display()
-                ))
+            let path = path.to_str().ok_or_else(|| SandboxError::Config {
+                message: format!("fs_readwrite contains non-UTF-8 path: {}", path.display()),
             })?;
             push_normalized_sbpl_subpath(&mut read_paths, path)?;
         }
@@ -839,11 +838,8 @@ impl MacOsSandbox {
 
         let mut write_paths: Vec<String> = Vec::new();
         for path in &config.fs_readwrite {
-            let path = path.to_str().ok_or_else(|| {
-                SandboxError::new(format!(
-                    "fs_readwrite contains non-UTF-8 path: {}",
-                    path.display()
-                ))
+            let path = path.to_str().ok_or_else(|| SandboxError::Config {
+                message: format!("fs_readwrite contains non-UTF-8 path: {}", path.display()),
             })?;
             push_normalized_sbpl_subpath(&mut write_paths, path)?;
         }
@@ -944,7 +940,9 @@ impl Sandbox for MacOsSandbox {
         self.cached_metrics = None;
 
         if cmd.is_empty() {
-            return Err(SandboxError::new("command must not be empty"));
+            return Err(SandboxError::Config {
+                message: "command must not be empty".to_string(),
+            });
         }
 
         // SECURITY: 日志仅记录程序基名和参数个数，避免 argv 中的 token、URL、路径泄露。
@@ -1089,7 +1087,7 @@ impl Sandbox for MacOsSandbox {
             .or_else(|| exit_status.signal().map(|signal| -signal));
 
         if let Some(reason) = detect_seatbelt_backend_failure(exit_code, &stderr_buf) {
-            return Err(SandboxError::new(reason));
+            return Err(SandboxError::SecurityPolicy { message: reason });
         }
 
         tracing::info!(
@@ -1112,12 +1110,15 @@ impl Sandbox for MacOsSandbox {
         config: mimobox_core::PtyConfig,
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
-            return Err(SandboxError::new("PTY command must not be empty"));
+            return Err(SandboxError::Config {
+                message: "PTY command must not be empty".to_string(),
+            });
         }
         if config.timeout.is_some_and(|timeout| timeout.is_zero()) {
-            return Err(SandboxError::new(
-                "PTY timeout must be greater than zero; use None for no timeout",
-            )
+            return Err(SandboxError::Config {
+                message: "PTY timeout must be greater than zero; use None for no timeout"
+                    .to_string(),
+            }
             .suggestion("Set PtyConfig.timeout to None for an unbounded PTY session"));
         }
         tracing::info!(

@@ -67,8 +67,8 @@ mod pool_tests {
 
                 match sandbox.execute(&true_command()) {
                     Ok(_) => None,
-                    Err(SandboxError::ExecutionFailed { message, .. })
-                        if message.contains("Seatbelt 策略应用失败") =>
+                    Err(SandboxError::SecurityPolicy { message })
+                        if message.contains("Seatbelt") =>
                     {
                         Some(message)
                     }

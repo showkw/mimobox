@@ -129,11 +129,14 @@ fn memory_limit_bytes(memory_limit_mb: Option<u64>) -> Result<usize, SandboxErro
 /// Converts timeout seconds into Wasmtime epoch deadline ticks.
 fn epoch_deadline_ticks_from_timeout(timeout_secs: Option<u64>) -> Result<u64, SandboxError> {
     match timeout_secs {
-        Some(secs) => secs.checked_mul(EPOCH_TICKS_PER_SECOND).ok_or_else(|| {
-            SandboxError::new(format!(
-                "timeout_secs={secs} is too large; converting to epoch ticks would overflow"
-            ))
-        }),
+        Some(secs) => {
+            secs.checked_mul(EPOCH_TICKS_PER_SECOND)
+                .ok_or_else(|| SandboxError::Config {
+                    message: format!(
+                        "timeout_secs={secs} is too large; converting to epoch ticks would overflow"
+                    ),
+                })
+        }
         None => Ok(DEFAULT_EPOCH_DEADLINE_TICKS),
     }
 }
@@ -266,39 +269,48 @@ fn file_fingerprint(meta: &Metadata) -> Option<(u64, u64)> {
 }
 
 fn open_and_validate_wasm_file(wasm_path: &Path) -> Result<(Metadata, Vec<u8>), SandboxError> {
-    let mut file = std::fs::File::open(wasm_path)
-        .map_err(|_| SandboxError::new("Wasm file does not exist"))?;
-    let wasm_meta = file
-        .metadata()
-        .map_err(|e| SandboxError::new(format!("Failed to stat Wasm file: {}", e)))?;
+    let mut file = std::fs::File::open(wasm_path).map_err(|_| SandboxError::Config {
+        message: "Wasm file does not exist".to_string(),
+    })?;
+    let wasm_meta = file.metadata().map_err(|e| SandboxError::Config {
+        message: format!("Failed to stat Wasm file: {}", e),
+    })?;
 
     if !wasm_meta.file_type().is_file() {
-        return Err(SandboxError::new("Wasm path is not a regular file"));
+        return Err(SandboxError::Config {
+            message: "Wasm path is not a regular file".to_string(),
+        });
     }
     if wasm_meta.nlink() > 1 {
-        return Err(SandboxError::new(
-            "Wasm file must not be a hard link (nlink > 1)",
-        ));
+        return Err(SandboxError::Config {
+            message: "Wasm file must not be a hard link (nlink > 1)".to_string(),
+        });
     }
     if wasm_meta.len() > MAX_WASM_FILE_SIZE {
-        return Err(SandboxError::new(format!(
-            "Wasm file too large: {} bytes (limit {} bytes)",
-            wasm_meta.len(),
-            MAX_WASM_FILE_SIZE
-        )));
+        return Err(SandboxError::Config {
+            message: format!(
+                "Wasm file too large: {} bytes (limit {} bytes)",
+                wasm_meta.len(),
+                MAX_WASM_FILE_SIZE
+            ),
+        });
     }
 
     let mut file_data = Vec::with_capacity(wasm_meta.len() as usize);
     let mut bounded_reader = (&mut file).take(MAX_WASM_FILE_SIZE + 1);
     bounded_reader
         .read_to_end(&mut file_data)
-        .map_err(|e| SandboxError::new(format!("Failed to read Wasm file: {}", e)))?;
+        .map_err(|e| SandboxError::Config {
+            message: format!("Failed to read Wasm file: {}", e),
+        })?;
     if file_data.len() as u64 > MAX_WASM_FILE_SIZE {
-        return Err(SandboxError::new(format!(
-            "Wasm file too large: {} bytes (limit {} bytes)",
-            file_data.len(),
-            MAX_WASM_FILE_SIZE
-        )));
+        return Err(SandboxError::Config {
+            message: format!(
+                "Wasm file too large: {} bytes (limit {} bytes)",
+                file_data.len(),
+                MAX_WASM_FILE_SIZE
+            ),
+        });
     }
 
     Ok((wasm_meta, file_data))
@@ -778,14 +790,8 @@ fn compile_module_from_bytes(
 ) -> Result<Module, SandboxError> {
     // SECURITY: 调用方在读取字节后立刻使用同一份不可变切片编译，
     // 避免“先读取算哈希、再按路径重新打开编译”的 TOCTOU 竞态。
-    Module::from_binary(engine, bytes).map_err(|e| {
-        let message = format!("Failed to load Wasm module ({:?}): {}", wasm_path, e);
-        let kind = if message.to_lowercase().contains("fuel") {
-            ExecutionFailureKind::CpuLimit
-        } else {
-            ExecutionFailureKind::Unknown
-        };
-        SandboxError::ExecutionFailed { kind, message }
+    Module::from_binary(engine, bytes).map_err(|e| SandboxError::Config {
+        message: format!("Failed to load Wasm module ({:?}): {}", wasm_path, e),
     })
 }
 
@@ -1140,8 +1146,8 @@ fn build_wasi_ctx(
     if config.deny_network {
         info!("WASI network denied by SandboxConfig; no sockets are preopened");
     } else {
-        return Err(SandboxError::new(
-            "Wasm backend does not support network access. Tip: use 'os' or 'microvm' isolation for network support, or set NetworkPolicy::DenyAll",
+        return Err(SandboxError::UnsupportedOperation(
+            "Wasm backend does not support network access. Tip: use 'os' or 'microvm' isolation for network support, or set NetworkPolicy::DenyAll".to_string(),
         ));
     }
 
@@ -1186,7 +1192,9 @@ impl Sandbox for WasmSandbox {
         self.cached_metrics = None;
 
         if cmd.is_empty() {
-            return Err(SandboxError::new("Command is empty"));
+            return Err(SandboxError::Config {
+                message: "Command is empty".to_string(),
+            });
         }
 
         let wasm_path = Path::new(&cmd[0]);
@@ -1261,9 +1269,12 @@ impl Sandbox for WasmSandbox {
         store.set_epoch_deadline(epoch_deadline_ticks);
 
         // 8. 实例化模块
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| SandboxError::new(format!("Failed to instantiate Wasm module: {}", e)))?;
+        let instance =
+            linker
+                .instantiate(&mut store, &module)
+                .map_err(|e| SandboxError::Config {
+                    message: format!("Failed to instantiate Wasm module: {}", e),
+                })?;
 
         // 9. 调用 _start 函数（WASI Command 模式）
         // WASI Command 通过 _start 进入，正常退出时调用 proc_exit(code)，
@@ -1347,9 +1358,10 @@ impl Sandbox for WasmSandbox {
                         }
                     },
                     Err(_) => {
-                        return Err(SandboxError::new(
-                            "Wasm module has no _start or main export function",
-                        ));
+                        return Err(SandboxError::Config {
+                            message: "Wasm module has no _start or main export function"
+                                .to_string(),
+                        });
                     }
                 }
             }
