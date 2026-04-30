@@ -179,16 +179,26 @@ impl SdkError {
                     suggestion: core_suggestion.or(Some(suggestion)),
                 }
             }
-            mimobox_core::SandboxError::Other { message } => Self::Sandbox {
-                code: ErrorCode::CommandKilled,
-                message,
-                suggestion: core_suggestion.or_else(|| {
-                    Some(
-                        "Check sandbox logs and backend diagnostics for the unclassified failure."
-                            .to_string(),
-                    )
-                }),
-            },
+            mimobox_core::SandboxError::Other { message } => {
+                let msg_lower = message.to_lowercase();
+                let code = if msg_lower.contains("timeout") || msg_lower.contains("timed out") {
+                    ErrorCode::CommandTimeout
+                } else {
+                    ErrorCode::SandboxCreateFailed
+                };
+                let suggestion = match code {
+                    ErrorCode::CommandTimeout => {
+                        "Increase Config.timeout or per-command timeout".to_string()
+                    }
+                    _ => "Check sandbox logs and backend diagnostics for the unclassified failure."
+                        .to_string(),
+                };
+                Self::Sandbox {
+                    code,
+                    message,
+                    suggestion: core_suggestion.or(Some(suggestion)),
+                }
+            }
             other => Self::Sandbox {
                 code: ErrorCode::SandboxCreateFailed,
                 message: other.to_string(),
