@@ -1644,6 +1644,16 @@ mod tests {
     use mimobox_sdk::ErrorCode;
     use std::time::Duration;
 
+    fn make_env_vars(
+        entries: impl IntoIterator<Item = (String, String)>,
+    ) -> HashMap<String, String> {
+        entries.into_iter().collect()
+    }
+
+    fn single_char_key(index: u8) -> String {
+        char::from(b'A' + index).to_string()
+    }
+
     // ── parse_isolation_level ──────────────────────────────────────────
 
     #[test]
@@ -1801,6 +1811,186 @@ mod tests {
                 .expect_err("non-multiple timeout above maximum must be rejected")
                 .contains("timeout_ms")
         );
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_accepts_empty_map() {
+        let env_vars = HashMap::new();
+
+        assert!(validate_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_accepts_max_entries() {
+        let env_vars = make_env_vars(
+            (0..MAX_ENV_VARS).map(|index| (format!("KEY_{index}"), "value".to_string())),
+        );
+
+        assert!(validate_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_rejects_entry_count_above_limit() {
+        let env_vars =
+            make_env_vars((0..=MAX_ENV_VARS).map(|index| (format!("KEY_{index}"), String::new())));
+
+        let result = validate_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("entry count above limit must be rejected")
+                .contains("maximum")
+        );
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_accepts_key_at_limit() {
+        let env_vars = make_env_vars([(
+            String::from("K").repeat(MAX_ENV_KEY_BYTES),
+            "value".to_string(),
+        )]);
+
+        assert!(validate_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_rejects_key_above_limit() {
+        let env_vars = make_env_vars([(
+            String::from("K").repeat(MAX_ENV_KEY_BYTES + 1),
+            "value".to_string(),
+        )]);
+
+        let result = validate_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("key above byte limit must be rejected")
+                .contains("env_vars key")
+        );
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_accepts_value_at_limit() {
+        let env_vars = make_env_vars([(
+            "MIMOBOX_VALUE".to_string(),
+            String::from("v").repeat(MAX_ENV_VALUE_BYTES),
+        )]);
+
+        assert!(validate_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_rejects_value_above_limit() {
+        let env_vars = make_env_vars([(
+            "MIMOBOX_VALUE".to_string(),
+            String::from("v").repeat(MAX_ENV_VALUE_BYTES + 1),
+        )]);
+
+        let result = validate_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("value above byte limit must be rejected")
+                .contains("env_vars[MIMOBOX_VALUE]")
+        );
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_accepts_total_size_at_limit() {
+        let env_vars = make_env_vars((0u8..8).map(|index| {
+            let value_len = if index == 7 {
+                MAX_ENV_VALUE_BYTES - 8
+            } else {
+                MAX_ENV_VALUE_BYTES
+            };
+            (single_char_key(index), String::from("v").repeat(value_len))
+        }));
+
+        assert_eq!(
+            env_vars
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>(),
+            MAX_ENV_TOTAL_BYTES
+        );
+        assert!(validate_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_vars_quota_rejects_total_size_above_limit() {
+        let env_vars = make_env_vars((0u8..8).map(|index| {
+            (
+                single_char_key(index),
+                String::from("v").repeat(MAX_ENV_VALUE_BYTES),
+            )
+        }));
+
+        let result = validate_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("total env size above limit must be rejected")
+                .contains("total size")
+        );
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_env_vars_count_before_backend_creation() {
+        let env_vars =
+            make_env_vars((0..=MAX_ENV_VARS).map(|index| (format!("KEY_{index}"), String::new())));
+
+        let result = create_sandbox_with_options(
+            IsolationLevel::Auto,
+            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            Some(env_vars),
+        );
+
+        assert!(
+            matches!(result, Err(SdkError::Config(message)) if message.contains("env_vars contains"))
+        );
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_invalid_env_var_key_before_backend_creation() {
+        let env_vars = make_env_vars([("MIMOBOX=TOKEN".to_string(), "value".to_string())]);
+
+        let result = create_sandbox_with_options(
+            IsolationLevel::Auto,
+            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            Some(env_vars),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("invalid env key must reject create_sandbox"),
+            Err(error) => format_sdk_error(error),
+        };
+
+        assert!(error.contains("invalid key"));
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_env_var_nul_value_before_backend_creation() {
+        let env_vars = make_env_vars([("MIMOBOX_TOKEN".to_string(), "value\0tail".to_string())]);
+
+        let result = create_sandbox_with_options(
+            IsolationLevel::Auto,
+            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            Some(env_vars),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("env value containing NUL must reject create_sandbox"),
+            Err(error) => format_sdk_error(error),
+        };
+
+        assert!(error.contains("NUL"));
     }
 
     #[test]

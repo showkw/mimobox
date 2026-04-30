@@ -1568,7 +1568,7 @@ mod tests {
     use mimobox_core::{MAX_MEMORY_LIMIT_MB, Sandbox};
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use wasmtime::{Instance, Store};
+    use wasmtime::{Instance, Linker, Module, Store, StoreLimitsBuilder};
 
     fn test_config() -> SandboxConfig {
         let mut config = SandboxConfig::default();
@@ -1581,6 +1581,95 @@ mod tests {
         config.allow_fork = false;
         config.allowed_http_domains = vec![];
         config
+    }
+
+    fn config_with_env_vars(entries: impl IntoIterator<Item = (String, String)>) -> SandboxConfig {
+        let mut config = test_config();
+        config.env_vars = entries.into_iter().collect();
+        config
+    }
+
+    fn dump_wasi_env_entries(config: &SandboxConfig) -> Vec<String> {
+        let engine = Engine::default();
+        let module = Module::new(
+            &engine,
+            r#"
+                (module
+                  (import "wasi_snapshot_preview1" "environ_sizes_get"
+                    (func $environ_sizes_get (param i32 i32) (result i32)))
+                  (import "wasi_snapshot_preview1" "environ_get"
+                    (func $environ_get (param i32 i32) (result i32)))
+                  (import "wasi_snapshot_preview1" "fd_write"
+                    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                  (memory (export "memory") 1)
+                  (func (export "_start")
+                    i32.const 0
+                    i32.const 4
+                    call $environ_sizes_get
+                    drop
+                    i32.const 8
+                    i32.const 4096
+                    call $environ_get
+                    drop
+                    i32.const 1024
+                    i32.const 4096
+                    i32.store
+                    i32.const 1028
+                    i32.const 4
+                    i32.load
+                    i32.store
+                    i32.const 1
+                    i32.const 1024
+                    i32.const 1
+                    i32.const 1032
+                    call $fd_write
+                    drop))
+            "#,
+        )
+        .expect("WASI env dump module should compile");
+
+        let stdout_pipe = MemoryOutputPipe::new(OUTPUT_MAX_CAPACITY);
+        let stdout_reader = stdout_pipe.clone();
+        let stderr_pipe = MemoryOutputPipe::new(OUTPUT_MAX_CAPACITY);
+        let wasi_ctx = build_wasi_ctx(
+            config,
+            &["env-dump.wasm".to_string()],
+            None,
+            stdout_pipe,
+            stderr_pipe,
+        )
+        .expect("WASI context should build");
+        let memory_limit = memory_limit_bytes(config.memory_limit_mb)
+            .expect("test memory limit should convert to bytes");
+        let limits = StoreLimitsBuilder::new().memory_size(memory_limit).build();
+        let mut store = Store::new(
+            &engine,
+            StoreData {
+                wasi: wasi_ctx,
+                limits,
+            },
+        );
+        store.limiter(|data| &mut data.limits);
+
+        let mut linker: Linker<StoreData> = Linker::new(&engine);
+        p1::add_to_linker_sync(&mut linker, |data| &mut data.wasi)
+            .expect("WASI Preview 1 linker should register");
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("WASI env dump module should instantiate");
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .expect("_start export should exist");
+        start
+            .call(&mut store, ())
+            .expect("WASI env dump module should run");
+
+        let output = stdout_reader.contents();
+        String::from_utf8_lossy(&output)
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
     }
 
     #[test]
@@ -1626,6 +1715,167 @@ mod tests {
         assert!(
             err.to_string().contains("memory_limit_mb"),
             "错误信息必须指向 memory_limit_mb: {err}"
+        );
+    }
+
+    #[test]
+    fn test_max_wasm_file_size_constant_is_50_mib() {
+        assert_eq!(MAX_WASM_FILE_SIZE, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_compile_timeout_constant_is_30_seconds() {
+        assert_eq!(COMPILE_TIMEOUT_SECS, 30);
+    }
+
+    #[test]
+    fn test_wasm_config_validation_accepts_safe_env_vars() {
+        let config = config_with_env_vars([
+            ("MIMOBOX_TOKEN".to_string(), "value".to_string()),
+            ("APP_MODE".to_string(), "test".to_string()),
+        ]);
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_empty_env_key() {
+        let config = config_with_env_vars([("".to_string(), "value".to_string())]);
+
+        let err = config
+            .validate()
+            .expect_err("empty env key must be rejected");
+
+        assert!(err.to_string().contains("env_vars config invalid"));
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_env_key_with_equals() {
+        let config = config_with_env_vars([("MIMOBOX=TOKEN".to_string(), "value".to_string())]);
+
+        let err = config
+            .validate()
+            .expect_err("env key containing '=' must be rejected");
+
+        assert!(err.to_string().contains("invalid key"));
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_env_key_with_nul() {
+        let config = config_with_env_vars([("MIMOBOX\0TOKEN".to_string(), "value".to_string())]);
+
+        let err = config
+            .validate()
+            .expect_err("env key containing NUL must be rejected");
+
+        assert!(err.to_string().contains("invalid key"));
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_env_value_with_nul() {
+        let config =
+            config_with_env_vars([("MIMOBOX_TOKEN".to_string(), "value\0tail".to_string())]);
+
+        let err = config
+            .validate()
+            .expect_err("env value containing NUL must be rejected");
+
+        assert!(err.to_string().contains("NUL byte"));
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_blocked_baseline_env_key() {
+        let config = config_with_env_vars([("home".to_string(), "/tmp".to_string())]);
+
+        let err = config
+            .validate()
+            .expect_err("baseline env keys must be blocked case-insensitively");
+
+        assert!(err.to_string().contains("blocked security key"));
+    }
+
+    #[test]
+    fn test_wasm_config_validation_rejects_overlong_env_key() {
+        let config = config_with_env_vars([(
+            "K".repeat(mimobox_core::MAX_ENV_KEY_BYTES + 1),
+            "v".to_string(),
+        )]);
+
+        let err = config
+            .validate()
+            .expect_err("overlong env key must be rejected");
+
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn test_wasm_sandbox_new_rejects_invalid_env_vars_before_backend_use() {
+        let config = config_with_env_vars([("LD_PRELOAD".to_string(), "/tmp/lib.so".to_string())]);
+
+        let err = match WasmSandbox::new(config) {
+            Ok(_) => panic!("blocked env key must reject Wasm sandbox"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("env_vars config invalid"));
+    }
+
+    #[test]
+    fn test_build_wasi_ctx_injects_user_env_vars() {
+        let config = config_with_env_vars([
+            ("MIMOBOX_TOKEN".to_string(), "value".to_string()),
+            ("APP_MODE".to_string(), "test".to_string()),
+        ]);
+
+        let env_entries = dump_wasi_env_entries(&config);
+
+        assert!(
+            env_entries
+                .iter()
+                .any(|entry| entry == "MIMOBOX_TOKEN=value")
+        );
+        assert!(env_entries.iter().any(|entry| entry == "APP_MODE=test"));
+    }
+
+    #[test]
+    fn test_build_wasi_ctx_keeps_minimal_baseline_env_vars() {
+        let env_entries = dump_wasi_env_entries(&test_config());
+
+        for expected in [
+            "HOME=/home/sandbox",
+            "PATH=/usr/bin:/bin",
+            "TERM=dumb",
+            "SANDBOX=wasm",
+        ] {
+            assert!(
+                env_entries.iter().any(|entry| entry == expected),
+                "missing baseline env entry: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_wasi_ctx_skips_invalid_env_vars_defensively() {
+        let config = config_with_env_vars([
+            ("".to_string(), "value".to_string()),
+            ("BAD=KEY".to_string(), "value".to_string()),
+            ("BAD_NUL_VALUE".to_string(), "value\0tail".to_string()),
+            ("SAFE_KEY".to_string(), "safe".to_string()),
+        ]);
+
+        let env_entries = dump_wasi_env_entries(&config);
+
+        assert!(env_entries.iter().any(|entry| entry == "SAFE_KEY=safe"));
+        assert!(!env_entries.iter().any(|entry| entry == "=value"));
+        assert!(
+            !env_entries
+                .iter()
+                .any(|entry| entry.starts_with("BAD=KEY="))
+        );
+        assert!(
+            !env_entries
+                .iter()
+                .any(|entry| entry.starts_with("BAD_NUL_VALUE="))
         );
     }
 

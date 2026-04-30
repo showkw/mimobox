@@ -2498,6 +2498,16 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn make_python_env_vars(
+        entries: impl IntoIterator<Item = (String, String)>,
+    ) -> HashMap<String, String> {
+        entries.into_iter().collect()
+    }
+
+    fn single_char_key(index: u8) -> String {
+        char::from(b'A' + index).to_string()
+    }
+
     #[test]
     fn python_config_builder_accepts_microvm_and_http_domains() {
         let config = build_python_config(PythonConfigOptions {
@@ -2548,6 +2558,171 @@ mod tests {
         .expect("failed to build Python config with env vars");
 
         assert_eq!(config.env_vars, env_vars);
+    }
+
+    #[test]
+    fn python_env_vars_quota_accepts_empty_map() {
+        let env_vars = HashMap::new();
+
+        assert!(validate_python_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn python_env_vars_quota_accepts_max_entries() {
+        let env_vars = make_python_env_vars(
+            (0..MAX_PYTHON_ENV_VARS).map(|index| (format!("KEY_{index}"), "value".to_string())),
+        );
+
+        assert!(validate_python_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn python_env_vars_quota_rejects_entry_count_above_limit() {
+        let env_vars = make_python_env_vars(
+            (0..=MAX_PYTHON_ENV_VARS).map(|index| (format!("KEY_{index}"), String::new())),
+        );
+
+        let result = validate_python_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("entry count above limit must be rejected")
+                .contains("maximum")
+        );
+    }
+
+    #[test]
+    fn python_env_vars_quota_accepts_key_at_limit() {
+        let env_vars = make_python_env_vars([(
+            String::from("K").repeat(MAX_PYTHON_ENV_KEY_BYTES),
+            "value".to_string(),
+        )]);
+
+        assert!(validate_python_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn python_env_vars_quota_rejects_key_above_limit() {
+        let env_vars = make_python_env_vars([(
+            String::from("K").repeat(MAX_PYTHON_ENV_KEY_BYTES + 1),
+            "value".to_string(),
+        )]);
+
+        let result = validate_python_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("key above byte limit must be rejected")
+                .contains("env var key")
+        );
+    }
+
+    #[test]
+    fn python_env_vars_quota_accepts_value_at_limit() {
+        let env_vars = make_python_env_vars([(
+            "MIMOBOX_VALUE".to_string(),
+            String::from("v").repeat(MAX_PYTHON_ENV_VALUE_BYTES),
+        )]);
+
+        assert!(validate_python_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn python_env_vars_quota_rejects_value_above_limit() {
+        let env_vars = make_python_env_vars([(
+            "MIMOBOX_VALUE".to_string(),
+            String::from("v").repeat(MAX_PYTHON_ENV_VALUE_BYTES + 1),
+        )]);
+
+        let result = validate_python_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("value above byte limit must be rejected")
+                .contains("env var value for MIMOBOX_VALUE")
+        );
+    }
+
+    #[test]
+    fn python_env_vars_quota_accepts_total_size_at_limit() {
+        let env_vars = make_python_env_vars((0u8..8).map(|index| {
+            let value_len = if index == 7 {
+                MAX_PYTHON_ENV_VALUE_BYTES - 8
+            } else {
+                MAX_PYTHON_ENV_VALUE_BYTES
+            };
+            (single_char_key(index), String::from("v").repeat(value_len))
+        }));
+
+        assert_eq!(
+            env_vars
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>(),
+            MAX_PYTHON_ENV_TOTAL_BYTES
+        );
+        assert!(validate_python_env_vars_quota(&env_vars).is_ok());
+    }
+
+    #[test]
+    fn python_env_vars_quota_rejects_total_size_above_limit() {
+        let env_vars = make_python_env_vars((0u8..8).map(|index| {
+            (
+                single_char_key(index),
+                String::from("v").repeat(MAX_PYTHON_ENV_VALUE_BYTES),
+            )
+        }));
+
+        let result = validate_python_env_vars_quota(&env_vars);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("total env size above limit must be rejected")
+                .contains("total size")
+        );
+    }
+
+    #[test]
+    fn python_config_builder_rejects_invalid_env_key_without_runtime() {
+        let result = build_python_config(PythonConfigOptions {
+            env_vars: Some(make_python_env_vars([(
+                "MIMOBOX TOKEN".to_string(),
+                "value".to_string(),
+            )])),
+            ..Default::default()
+        });
+
+        assert!(matches!(result, Err(message) if message.contains("invalid key")));
+    }
+
+    #[test]
+    fn python_config_builder_rejects_env_value_nul_without_runtime() {
+        let result = build_python_config(PythonConfigOptions {
+            env_vars: Some(make_python_env_vars([(
+                "MIMOBOX_TOKEN".to_string(),
+                "value\0tail".to_string(),
+            )])),
+            ..Default::default()
+        });
+
+        assert!(matches!(result, Err(message) if message.contains("NUL")));
+    }
+
+    #[test]
+    fn python_config_builder_rejects_blocked_env_key_without_runtime() {
+        let result = build_python_config(PythonConfigOptions {
+            env_vars: Some(make_python_env_vars([(
+                "PATH".to_string(),
+                "/tmp/bin".to_string(),
+            )])),
+            ..Default::default()
+        });
+
+        assert!(matches!(result, Err(message) if message.contains("blocked")));
     }
 
     #[test]
