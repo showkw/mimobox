@@ -811,7 +811,8 @@ fn spawn_pipe_reader(
 
     std::thread::spawn(move || {
         set_nonblocking(fd);
-        // SAFETY: fd 的所有权只转移给当前读取线程，由 File 在 drop 时关闭。
+        // SAFETY: fd 来自 create_pipe_cloexec() 创建的管道，RawFdGuard 通过 into_raw_fd()
+        // 将唯一所有权转移给当前读取线程；没有任何其他代码路径持有或关闭此 fd。
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let capture = read_limited_output(
             &mut file,
@@ -1043,9 +1044,13 @@ fn apply_security_policies_and_exec(
                 // SAFETY: The mask is local stack memory, and sigprocmask only updates this process.
                 unsafe {
                     let mut mask: libc::sigset_t = std::mem::zeroed();
-                    libc::sigemptyset(&mut mask);
-                    libc::sigaddset(&mut mask, libc::SIGTERM);
-                    libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
+                    if libc::sigemptyset(&mut mask) != 0
+                        || libc::sigaddset(&mut mask, libc::SIGTERM) != 0
+                        || libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) != 0
+                    {
+                        write_error(2, "sigprocmask(SIG_BLOCK, SIGTERM) failed in intermediate process");
+                        libc::_exit(125);
+                    }
                 }
 
                 // 中间进程：等待孙进程退出后转发退出码

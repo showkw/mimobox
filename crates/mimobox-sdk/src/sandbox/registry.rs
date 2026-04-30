@@ -79,7 +79,12 @@ pub fn get(id: Uuid) -> Option<SandboxInfo> {
 fn registry_entries() -> std::sync::MutexGuard<'static, HashMap<Uuid, SandboxInfo>> {
     SANDBOX_REGISTRY.lock().unwrap_or_else(|error| {
         tracing::warn!("sandbox registry mutex was poisoned; recovering snapshot state");
-        error.into_inner()
+        let guard = error.into_inner();
+        tracing::warn!(
+            "sandbox registry recovered after mutex poison: {} entries retained",
+            guard.len()
+        );
+        guard
     })
 }
 

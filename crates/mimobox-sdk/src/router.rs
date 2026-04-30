@@ -63,7 +63,9 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
     }
 
     // Prefer Wasm file detection.
-    if is_wasm_executable(first_command_token(command)) {
+    // 跳过包含空格的可执行路径，避免误判带空格的 .wasm 路径。
+    let token = first_command_token(command);
+    if !token.contains(' ') && is_wasm_executable(token) {
         return route_wasm_or_os();
     }
 
@@ -78,7 +80,7 @@ fn auto_route_executable(
         return require_microvm_for_untrusted();
     }
 
-    if is_wasm_executable(executable) {
+    if !executable.contains(' ') && is_wasm_executable(executable) {
         return route_wasm_or_os();
     }
 
@@ -122,7 +124,7 @@ fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
         Err(SdkError::sandbox(
             ErrorCode::UnsupportedPlatform,
             "Untrusted isolation level requires microVM backend, which is not supported on current platform",
-            Some("Use IsolationLevel::Os as alternative".to_string()),
+            Some("Use IsolationLevel::MicroVm or reject execution".to_string()),
         ))
     }
 }
@@ -134,6 +136,10 @@ fn is_wasm_command(command: &str) -> bool {
     is_wasm_executable(first_command_token(command))
 }
 
+/// 提取命令字符串的第一个空白分隔 token 作为可执行路径。
+///
+/// 注意：此函数按空白切分，不支持带空格的可执行路径。
+/// 带空格的路径会被截断，可能导致 Wasm 路由误判。
 fn first_command_token(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or(command)
 }
@@ -189,7 +195,7 @@ mod tests {
                 );
                 assert_eq!(
                     suggestion.as_deref(),
-                    Some("Use IsolationLevel::Os as alternative")
+                    Some("Use IsolationLevel::MicroVm or reject execution")
                 );
             }
             other => panic!("expected structured fail-closed error, got: {other:?}"),
@@ -219,7 +225,7 @@ mod tests {
                 );
                 assert_eq!(
                     suggestion.as_deref(),
-                    Some("Use IsolationLevel::Os as alternative")
+                    Some("Use IsolationLevel::MicroVm or reject execution")
                 );
             }
             Ok(IsolationLevel::Wasm) => panic!("Untrusted .wasm should not route to Wasm backend"),
