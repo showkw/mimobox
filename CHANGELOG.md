@@ -11,31 +11,61 @@ and version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 - `Sandbox::list()` global sandbox registry — list all active sandbox instances
 - `Sandbox::id()` — unique UUID for each sandbox instance
-- `Sandbox::info()` — get sandbox registration info (isolation level, ready state, creation time)
-- `Sandbox::metrics()` — runtime resource metrics (CPU, memory, I/O, Wasm fuel)
+- `Sandbox::info` — get sandbox registration info (isolation level, ready state, creation time)
+- `Sandbox::metrics` — runtime resource metrics (CPU, memory, I/O, Wasm fuel)
 - `Config::env_var()` / `Config::env_vars()` — persistent environment variables at sandbox creation
 - MCP Server: `make_dir`, `stat`, `remove_file`, `rename` file management tools (15 tools total)
 - MCP Server: `env_vars` parameter in `create_sandbox`
 - MCP Server: `sandbox_uuid` field in sandbox responses
-- Python SDK: `Sandbox.id`, `Sandbox.list()`, `Sandbox.metrics()`, `SandboxInfo`, `SandboxMetrics`
+- MCP Server: HTTP URL validation (scheme whitelist + private IP rejection)
+- MCP Server: `WWW-Authenticate: Bearer` header on 401 responses
+- MCP Server: HTTP response body dual encoding (UTF-8 / base64)
+- MCP Server: per-sandbox operation locks for concurrent safety
+- Python SDK: `Sandbox.id`, `Sandbox.list()`, `Sandbox.metrics`, `SandboxInfo`, `SandboxMetrics`
 - Python SDK: `env_vars` parameter in `Sandbox()` constructor
+- Python SDK: `stream_execute` supports `env`, `timeout`, `cwd` parameters
+- Python SDK: `__repr__` on `StreamEvent`, `SandboxInfo` for readable output
+- Python SDK: `info` and `metrics` as properties (not methods)
 
 ### Changed
 
 - All user-facing strings internationalized to English
 - MCP file tools path validation hardened (`validate_mcp_guest_path`)
 - MCP HTTP server requires authentication token by default
+- MCP quota check moved inside Mutex to prevent TOCTOU race
 - SDK default `/tmp` access removed (per-sandbox private tmpdir)
+- SDK Router: Untrusted trust level now recommends MicroVM or reject (not downgrade)
+- SDK error mapping: `SandboxError::Other` now maps to granular error types (not generic CommandKilled)
 - Linux fail-closed semantics for /proc remount and cgroup failures
 - Wasm compile-time limits: 50MB module size + 30s wall-clock timeout
+- Wasm `_start`/`main` error handling deduplicated into `handle_execution_error()`
+- Wasm `private_tmp_path` nonce uses AtomicU64 instead of SystemTime
 - macOS Seatbelt default read scope narrowed
+- CLI `--timeout 0` now shows warning about indefinite execution
+- CLI `destroy_sandbox` returns actual destroy status (not always true)
+- CLI `requested_command` truncated to 200 chars in JSON output
+- Upgraded wasmtime 43.0.1 → 43.0.2 (RUSTSEC-2026-0114)
 
 ### Fixed
 
+- Empty command causing `index out of bounds` panic in `parse_command`
 - Linux CI regression: cgroup pids.max write permission in containers
+- Linux kill errors silently ignored (now logged with `tracing::warn`)
+- Linux SIGTERM mask in intermediate process now checks return values
 - MCP path traversal vulnerability in file tools
+- MCP HTTP response body corruption for binary content (now base64-encoded)
+- PTY 4MB output limit not terminating child process (now drains to prevent hang)
+- PTY cleanup mutex poison skipping cleanup callback (now recovers with `into_inner`)
+- PTY timeout signal failure silently ignored (now logged)
 - Python atexit UAF in sandbox registry
+- Python `stream_execute` env/timeout/cwd parameters silently ignored (now applied)
+- Python `is_ready` missing `#[getter]` annotation
 - FD inheritance leak (macOS/Linux)
+- Registry mutex poison recovery now logs registry size for diagnostics
+- CLI snapshot path validation (blocks /dev/, /proc/, /sys/ paths)
+- CLI `write --file` now has 100MB size limit to prevent OOM
+- CLI `mcp_init` temp file naming uses PID to avoid conflicts
+- CLI SAFETY comments enhanced for `from_raw_fd` ownership proofs
 
 
 ## [0.1.0-alpha] - 2026-04-26
