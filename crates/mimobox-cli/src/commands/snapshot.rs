@@ -8,9 +8,52 @@ use mimobox_sdk::Sandbox as SdkSandbox;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
 use mimobox_sdk::SandboxSnapshot as SdkSnapshot;
 #[cfg(all(target_os = "linux", feature = "kvm"))]
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::*;
+
+/// 验证文件路径安全性：拒绝虚拟文件系统路径，警告符号链接。
+///
+/// CLI 是本地工具，不需要过度限制，但基本防护（防止写入 /dev、/proc、/sys）
+/// 和 symlink 提醒应该有。
+#[cfg(all(target_os = "linux", feature = "kvm"))]
+fn validate_file_path(path: &str, purpose: &str) -> Result<(), CliError> {
+    let path = std::path::Path::new(path);
+
+    // 解析路径（不要求文件存在，使用 canonicalize 的父目录）
+    // 检查路径是否指向虚拟文件系统
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("/dev/")
+        || path_str.starts_with("/proc/")
+        || path_str.starts_with("/sys/")
+    {
+        return Err(CliError::Sdk(format!(
+            "refusing to {purpose} virtual filesystem path: {path_str}"
+        )));
+    }
+
+    // 如果路径已存在且是符号链接，发出警告
+    if path.is_symlink() {
+        match std::fs::canonicalize(path) {
+            Ok(resolved) => {
+                warn!(
+                    path = %path_str,
+                    resolved = %resolved.display(),
+                    "{purpose} path is a symlink; resolved to"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    path = %path_str,
+                    error = %e,
+                    "{purpose} path is a dangling symlink"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Handles the snapshot request.
 pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
@@ -77,6 +120,7 @@ pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, Cl
         };
 
         let snapshot_bytes = snapshot.to_bytes().map_err(map_sdk_error)?;
+        validate_file_path(&args.output, "write snapshot to")?;
         fs::write(&args.output, &snapshot_bytes)?;
         sandbox.destroy().map_err(map_sdk_error)?;
 
@@ -105,6 +149,7 @@ pub(crate) fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliEr
             "preparing to execute restore subcommand"
         );
 
+        validate_file_path(&args.snapshot, "read snapshot from")?;
         let snapshot_bytes = fs::read(&args.snapshot)?;
         let snapshot = SdkSnapshot::from_bytes(&snapshot_bytes).map_err(map_sdk_error)?;
         let argv = parse_command(&args.command)?;

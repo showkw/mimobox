@@ -92,7 +92,7 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) memory: Option<u64>,
 
-    /// Timeout in seconds; pass 0 for no timeout
+    /// Timeout in seconds; pass 0 to disable timeout (commands may run indefinitely)
     #[arg(long)]
     pub(crate) timeout: Option<u64>,
 
@@ -135,7 +135,7 @@ pub(crate) struct ShellArgs {
     #[arg(long)]
     pub(crate) memory: Option<u64>,
 
-    /// Timeout in seconds; pass 0 for no timeout
+    /// Timeout in seconds; pass 0 to disable timeout (commands may run indefinitely)
     #[arg(long)]
     pub(crate) timeout: Option<u64>,
 
@@ -162,7 +162,7 @@ pub(crate) struct CodeArgs {
     #[arg(short = 'c', long)]
     pub(crate) code: String,
 
-    /// Timeout in seconds; pass 0 for no timeout
+    /// Timeout in seconds; pass 0 to disable timeout (commands may run indefinitely)
     #[arg(short = 't', long)]
     pub(crate) timeout: Option<u64>,
 }
@@ -222,7 +222,7 @@ pub(crate) struct SnapshotArgs {
     #[arg(long)]
     pub(crate) memory: Option<u64>,
 
-    /// Timeout in seconds; pass 0 for no timeout
+    /// Timeout in seconds; pass 0 to disable timeout (commands may run indefinitely)
     #[arg(long)]
     pub(crate) timeout: Option<u64>,
 
@@ -617,9 +617,17 @@ pub(crate) fn resolve_run_deny_network(args: &RunArgs) -> bool {
 }
 
 /// Provides the normalize timeout operation.
+///
+/// 当传入 `--timeout 0` 时返回 `None`（无超时限制），并发出警告。
+/// 默认使用 `DEFAULT_TIMEOUT_SECS`。
 pub(crate) fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
     match timeout {
-        Some(0) => None,
+        Some(0) => {
+            tracing::warn!(
+                "timeout=0 disables execution timeout; commands may run indefinitely"
+            );
+            None
+        }
         Some(value) => Some(value),
         None => Some(DEFAULT_TIMEOUT_SECS),
     }

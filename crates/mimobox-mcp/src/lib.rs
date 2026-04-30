@@ -490,10 +490,6 @@ impl MimoboxServer {
         result.map_err(format_sdk_error)
     }
 
-    async fn current_sandbox_count(&self) -> usize {
-        let sandboxes = self.sandboxes.lock().await;
-        sandboxes.len() + self.ephemeral_count.load(Ordering::Acquire)
-    }
 }
 
 impl Default for MimoboxServer {
@@ -523,8 +519,11 @@ impl MimoboxServer {
         } = request;
         let isolation = parse_isolation_level(isolation_level.as_deref()).map_err(to_error)?;
         let network = parse_network_policy(network.as_deref()).map_err(to_error)?;
-        if self.current_sandbox_count().await >= MAX_SANDBOXES {
-            return Err(to_error(sandbox_quota_exceeded()));
+        {
+            let sandboxes = self.sandboxes.lock().await;
+            if sandboxes.len() + self.ephemeral_count.load(Ordering::Acquire) >= MAX_SANDBOXES {
+                return Err(to_error(sandbox_quota_exceeded()));
+            }
         }
 
         let sandbox = tokio::task::spawn_blocking(move || {
@@ -962,6 +961,9 @@ impl MimoboxServer {
         {
             let method = request.method.to_ascii_uppercase();
             validate_mcp_http_method(&method).map_err(to_error)?;
+
+            // SECURITY: 验证 URL 格式和目标地址安全性（防 SSRF）
+            validate_http_url(&request.url).map_err(to_error)?;
 
             let url = request.url;
             let headers = request.headers.unwrap_or_default();
@@ -1579,6 +1581,100 @@ fn validate_mcp_http_method(method: &str) -> Result<(), String> {
         "HTTP method '{method}' is not supported. Tip: use one of {}",
         MCP_HTTP_METHODS.join(", ")
     ))
+}
+
+/// 验证 HTTP 请求 URL 的安全性。
+///
+/// 检查项：
+/// 1. scheme 必须是 http 或 https（由 proxy 层强制 HTTPS）
+/// 2. host 不能为空
+/// 3. 拒绝私有 IP 段（防 SSRF）
+/// 4. 拒绝直接 IP 访问（仅允许域名）
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+fn validate_http_url(url: &str) -> Result<(), String> {
+    use std::net::IpAddr;
+
+    // 基本格式：必须以 http:// 或 https:// 开头
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| "URL must include a scheme (http:// or https://)".to_string())?;
+
+    if !matches!(scheme, "http" | "https") {
+        return Err(format!(
+            "URL scheme must be http or https, got '{scheme}'"
+        ));
+    }
+
+    // 提取 host 部分（去掉 path/query/fragment 和 port）
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host = if let Some(bracket_end) = host_port.find(']') {
+        // IPv6: [::1]:port -> ::1
+        let inner = host_port.strip_prefix('[').unwrap_or(host_port);
+        &inner[..bracket_end.saturating_sub(1)]
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+
+    if host.is_empty() {
+        return Err("URL host must not be empty".to_string());
+    }
+
+    // 检查是否是 IP 地址
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip_addr(ip) {
+            return Err(format!(
+                "URL points to a private/reserved IP address ({host}); SSRF protection blocks this"
+            ));
+        }
+        // 即使是公网 IP，也不允许直接 IP 访问（安全策略）
+        return Err(format!(
+            "direct IP access is forbidden; use a domain name instead (got '{host}')"
+        ));
+    }
+
+    Ok(())
+}
+
+/// 检查 IP 是否属于私有/保留地址段（防 SSRF）。
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+
+    match ip {
+        IpAddr::V4(v4) => is_non_public_ipv4_addr(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_ipv4_addr(v4);
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || is_ipv6_doc_addr(v6)
+        }
+    }
+}
+
+fn is_ipv6_doc_addr(ip: std::net::Ipv6Addr) -> bool {
+    let segs = ip.segments();
+    segs[0] == 0x2001 && segs[1] == 0x0db8
+}
+
+fn is_non_public_ipv4_addr(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || (a == 100 && (64..=127).contains(&b))
+        || ip.is_multicast()
+        || a >= 240
+        || (a == 192 && b == 0)
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
 }
 
 fn format_isolation_level(level: IsolationLevel) -> &'static str {
