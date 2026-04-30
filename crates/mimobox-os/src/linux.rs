@@ -510,7 +510,9 @@ fn format_pids_max(config: &SandboxConfig) -> String {
 
 #[cfg(target_os = "linux")]
 fn cgroup_process_limit_failure_is_fatal(config: &SandboxConfig) -> bool {
-    config.allow_fork || config.cpu_quota_us.is_some()
+    // Only cpu_quota makes cgroup failure truly fatal (cannot enforce CPU limits without cgroup).
+    // allow_fork without cgroup is suboptimal but not fatal — RLIMIT_NPROC provides a fallback.
+    config.cpu_quota_us.is_some()
 }
 
 #[cfg(target_os = "linux")]
@@ -2072,11 +2074,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cgroup_process_limit_is_fatal_when_forking_is_allowed() {
-        let mut config = SandboxConfig::default();
-        config.allow_fork = true;
+    fn cgroup_process_limit_is_fatal_only_with_cpu_quota() {
+        let config_no_quota = SandboxConfig::default();
+        assert!(!cgroup_process_limit_failure_is_fatal(&config_no_quota));
 
-        assert!(cgroup_process_limit_failure_is_fatal(&config));
+        let mut config_with_quota = SandboxConfig::default();
+        config_with_quota.cpu_quota_us = Some(50_000);
+        assert!(cgroup_process_limit_failure_is_fatal(&config_with_quota));
     }
 
     #[test]
