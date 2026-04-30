@@ -39,6 +39,8 @@ use tracing::{error, warn};
 
 use crate::{DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECS};
 
+const MAX_DISPLAY_COMMAND_CHARS: usize = 200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum, Default)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Backend {
@@ -315,6 +317,7 @@ pub(crate) enum CommandResponse {
 pub(crate) struct RunResponse {
     pub(crate) backend: Backend,
     pub(crate) requested_backend: Backend,
+    #[serde(serialize_with = "serialize_requested_command")]
     pub(crate) requested_command: String,
     pub(crate) argv: Vec<String>,
     pub(crate) exit_code: Option<i32>,
@@ -326,6 +329,25 @@ pub(crate) struct RunResponse {
     pub(crate) timeout_secs: Option<u64>,
     pub(crate) deny_network: bool,
     pub(crate) allow_fork: bool,
+}
+
+fn serialize_requested_command<S>(command: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&truncate_for_display(command))
+}
+
+fn truncate_for_display(value: &str) -> String {
+    let mut truncated = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if index == MAX_DISPLAY_COMMAND_CHARS {
+            truncated.push_str("...");
+            return truncated;
+        }
+        truncated.push(character);
+    }
+    value.to_string()
 }
 
 #[derive(Debug, Serialize)]

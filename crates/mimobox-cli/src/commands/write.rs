@@ -3,6 +3,9 @@ use tracing::info;
 
 use super::*;
 
+#[cfg(feature = "kvm")]
+const MAX_WRITE_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Handles the write request.
 pub(crate) fn handle_write(args: WriteArgs) -> Result<WriteResponse, CliError> {
     #[cfg(not(feature = "kvm"))]
@@ -46,7 +49,17 @@ pub(crate) fn handle_write(args: WriteArgs) -> Result<WriteResponse, CliError> {
 fn resolve_write_data(content: Option<String>, file: Option<String>) -> Result<Vec<u8>, CliError> {
     match (content, file) {
         (Some(content), None) => Ok(content.into_bytes()),
-        (None, Some(file)) => std::fs::read(file).map_err(CliError::Io),
+        (None, Some(file)) => {
+            let metadata = std::fs::metadata(&file).map_err(CliError::Io)?;
+            if metadata.len() > MAX_WRITE_FILE_BYTES {
+                return Err(CliError::Args(format!(
+                    "--file is too large: {} bytes, exceeding the {} byte limit",
+                    metadata.len(),
+                    MAX_WRITE_FILE_BYTES
+                )));
+            }
+            std::fs::read(file).map_err(CliError::Io)
+        }
         (None, None) => Err(CliError::Args(
             "either --content or --file must be provided".to_string(),
         )),

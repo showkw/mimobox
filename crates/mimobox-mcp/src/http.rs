@@ -333,38 +333,59 @@ async fn auth_middleware(
     // SECURITY: 拒绝空/纯空白 token，防止配置失误导致认证旁路。
     if expected_token.trim().is_empty() {
         tracing::error!("auth_token is empty; rejecting all requests");
-        return unauthorized_response();
+        return unauthorized_response(None);
     }
 
-    if bearer_token(req.headers())
-        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
-    {
-        return next.run(req).await;
+    match bearer_token(req.headers()) {
+        Ok(token) if constant_time_eq(token.as_bytes(), expected_token.as_bytes()) => {
+            return next.run(req).await;
+        }
+        Err(AuthHeaderError::InvalidScheme) => {
+            return unauthorized_response(Some("Expected Bearer authentication scheme"));
+        }
+        Ok(_) | Err(AuthHeaderError::MissingOrInvalid) => {}
     }
 
-    unauthorized_response()
+    unauthorized_response(None)
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthHeaderError {
+    MissingOrInvalid,
+    InvalidScheme,
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, AuthHeaderError> {
     let authorization = headers
-        .get(HeaderName::from_static("authorization"))?
+        .get(HeaderName::from_static("authorization"))
+        .ok_or(AuthHeaderError::MissingOrInvalid)?
         .to_str()
-        .ok()?;
-    let (scheme, token) = authorization.split_once(' ')?;
+        .map_err(|_| AuthHeaderError::MissingOrInvalid)?;
+    let (scheme, token) = authorization
+        .split_once(' ')
+        .ok_or(AuthHeaderError::MissingOrInvalid)?;
 
-    if scheme == "Bearer" {
-        Some(token)
-    } else {
-        None
+    if scheme != "Bearer" {
+        return Err(AuthHeaderError::InvalidScheme);
     }
+
+    Ok(token)
 }
 
-fn unauthorized_response() -> Response {
-    let mut response = Response::new(Body::from(r#"{"error":"unauthorized"}"#));
+fn unauthorized_response(message: Option<&str>) -> Response {
+    let body = match message {
+        Some(message) => format!(r#"{{"error":"unauthorized","message":"{message}"}}"#),
+        None => r#"{"error":"unauthorized"}"#.to_string(),
+    };
+    let mut response = Response::new(Body::from(body));
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     response.headers_mut().insert(
         HeaderName::from_static("content-type"),
         HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("www-authenticate"),
+        HeaderValue::from_static("Bearer"),
     );
     response
 }

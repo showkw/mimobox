@@ -158,7 +158,7 @@ fn backup_mcp_config(config_path: &Path) -> Result<(), CliError> {
 }
 
 fn write_mcp_config_atomically(config_path: &Path, content: &str) -> Result<(), CliError> {
-    let tmp_path = path_with_suffix(config_path, ".tmp");
+    let tmp_path = path_with_suffix(config_path, &format!(".{}.tmp", std::process::id()));
     fs::write(&tmp_path, content).map_err(|error| {
         CliError::McpInit(format!(
             "failed to write temporary MCP config {}: {error}",

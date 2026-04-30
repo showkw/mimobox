@@ -249,6 +249,7 @@ pub struct ExecuteResponse {
 pub struct DestroySandboxResponse {
     sandbox_id: u64,
     destroyed: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -298,7 +299,9 @@ pub struct McpHttpResponse {
     sandbox_id: u64,
     status: u16,
     headers: HashMap<String, String>,
-    body: String,
+    body: Option<String>,
+    body_base64: Option<String>,
+    encoding: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -596,7 +599,7 @@ impl MimoboxServer {
             .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
         drop(sandboxes);
 
-        match tokio::task::spawn_blocking(move || {
+        let destroy_error = match tokio::task::spawn_blocking(move || {
             use std::panic::{AssertUnwindSafe, catch_unwind};
 
             // The sandbox is already removed from the active map; catch unwind so
@@ -614,26 +617,31 @@ impl MimoboxServer {
         })
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => None,
             Ok(Err(err)) => {
+                let error_message = format_sdk_error(err);
                 error!(
                     sandbox_id = request.sandbox_id,
-                    error = %format_sdk_error(err),
+                    error = %error_message,
                     "Sandbox destroy failed, instance removed from active list"
                 );
+                Some(error_message)
             }
             Err(err) => {
+                let error_message = format_join_error(err);
                 error!(
                     sandbox_id = request.sandbox_id,
-                    error = %format_join_error(err),
+                    error = %error_message,
                     "Sandbox destroy task failed, instance removed from active list"
                 );
+                Some(error_message)
             }
-        }
+        };
 
         Ok(Json(DestroySandboxResponse {
             sandbox_id: request.sandbox_id,
-            destroyed: true,
+            destroyed: destroy_error.is_none(),
+            error: destroy_error,
         }))
     }
 
@@ -993,11 +1001,22 @@ impl MimoboxServer {
                 )));
             }
 
+            let (body, body_base64, encoding) = match String::from_utf8(response.body) {
+                Ok(body) => (Some(body), None, "utf-8".to_string()),
+                Err(error) => (
+                    None,
+                    Some(STANDARD.encode(error.into_bytes())),
+                    "base64".to_string(),
+                ),
+            };
+
             Ok(Json(McpHttpResponse {
                 sandbox_id: request.sandbox_id,
                 status: response.status,
                 headers: response.headers,
-                body: String::from_utf8_lossy(&response.body).into_owned(),
+                body,
+                body_base64,
+                encoding,
             }))
         }
 
