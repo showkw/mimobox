@@ -2,24 +2,22 @@
 #
 # mimobox defines an exception hierarchy:
 #   SandboxError (base class)
-#   ├── SandboxProcessError  — Command exits non-zero or is killed
+#   ├── SandboxProcessError  — Backend-level process failures, such as killed commands
 #   ├── SandboxHttpError     — HTTP proxy request failed or domain not whitelisted
 #   └── SandboxLifecycleError — Create/destroy/restore failed
 
 from mimobox import (
     Sandbox,
     SandboxError,
-    SandboxProcessError,
     SandboxHttpError,
     SandboxLifecycleError,
 )
 
-# 1. Catch SandboxProcessError: command exits with non-zero code
-try:
-    with Sandbox() as sandbox:
-        sandbox.execute("exit 42")
-except SandboxProcessError as exc:
-    print(f"[SandboxProcessError] {exc}")
+# 1. Non-zero process exit is returned as ExecuteResult; check exit_code explicitly.
+with Sandbox() as sandbox:
+    result = sandbox.execute("false")
+    if result.exit_code != 0:
+        print(f"[non-zero exit] exit_code={result.exit_code}")
 
 # 2. Catch SandboxHttpError: request to non-whitelisted domain
 try:
@@ -35,9 +33,9 @@ try:
 except SandboxError as exc:
     print(f"[SandboxError/Timeout] {exc}")
 
-# 4. Exception hierarchy: all specific exceptions can be caught by SandboxError
+# 4. Exception hierarchy: all mimobox-specific exceptions can be caught by SandboxError
 try:
-    with Sandbox() as sandbox:
-        sandbox.execute("exit 1")
+    with Sandbox(isolation="microvm", allowed_http_domains=[]) as sandbox:
+        sandbox.http_request("GET", "https://example.com/")
 except SandboxError as exc:
     print(f"[caught by base class] type={type(exc).__name__}")

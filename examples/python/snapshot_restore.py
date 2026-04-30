@@ -5,8 +5,8 @@
 from mimobox import Sandbox, Snapshot
 
 # Phase 1: Create state in the original sandbox
-sandbox = Sandbox()
-sandbox.execute("echo 'initial state' > /tmp/state.txt")
+sandbox = Sandbox(isolation="microvm")
+sandbox.write_file("/tmp/state.txt", b"initial state\n")
 print("original sandbox: wrote initial state")
 
 # Phase 2: Capture snapshot

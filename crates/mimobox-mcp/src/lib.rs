@@ -30,8 +30,8 @@ use std::{
 #[cfg(feature = "vm")]
 use base64::{Engine, engine::general_purpose::STANDARD};
 use mimobox_sdk::{
-    Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, Sandbox,
-    SdkError, TrustLevel,
+    Config, DirEntry, ExecuteResult, FileType, IsolationLevel, MAX_MEMORY_LIMIT_MB, NetworkPolicy,
+    Sandbox, SdkError, TrustLevel,
 };
 use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::JsonSchema;
@@ -81,6 +81,9 @@ const MAX_ENV_KEY_BYTES: usize = 128;
 const MAX_ENV_VALUE_BYTES: usize = 8 * 1024;
 /// Maximum combined UTF-8 bytes across all environment variable keys and values.
 const MAX_ENV_TOTAL_BYTES: usize = 64 * 1024;
+/// HTTP methods accepted by the MCP http_request tool. CONNECT and TRACE remain blocked.
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+const MCP_HTTP_METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 
 #[derive(Clone)]
 pub struct MimoboxServer {
@@ -104,7 +107,27 @@ pub struct CreateSandboxRequest {
     timeout_ms: Option<u64>,
     /// Sandbox memory limit in MiB.
     memory_limit_mb: Option<u64>,
+    /// Network policy: deny_all (default), allow_domains, or allow_all.
+    network: Option<String>,
+    /// Domains allowed for host-mediated HTTP requests. Supports exact hosts and *.example.com wildcards.
+    allowed_http_domains: Option<Vec<String>>,
+    /// HTTP ACL allow rules in 'METHOD host/path' format, for example 'GET api.example.com/v1/*'.
+    http_acl_allow: Option<Vec<String>>,
+    /// HTTP ACL deny rules in 'METHOD host/path' format. Deny rules take precedence over allow rules.
+    http_acl_deny: Option<Vec<String>>,
     /// 创建沙箱时设置的持久环境变量，会应用到后续所有命令。
+    env_vars: Option<HashMap<String, String>>,
+}
+
+#[derive(Default)]
+struct SandboxCreationOptions {
+    isolation: IsolationLevel,
+    timeout_ms: Option<u64>,
+    memory_limit_mb: Option<u64>,
+    network: Option<NetworkPolicy>,
+    allowed_http_domains: Option<Vec<String>>,
+    http_acl_allow: Option<Vec<String>>,
+    http_acl_deny: Option<Vec<String>>,
     env_vars: Option<HashMap<String, String>>,
 }
 
@@ -155,7 +178,7 @@ pub struct ListSandboxesRequest {}
 pub struct ReadFileRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// File path inside the sandbox.
+    /// File path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
 }
 
@@ -164,7 +187,7 @@ pub struct ReadFileRequest {
 pub struct WriteFileRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// File path inside the sandbox.
+    /// File path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
     /// Base64-encoded file content.
     content: String,
@@ -191,15 +214,19 @@ pub struct McpHttpRequest {
     sandbox_id: u64,
     /// Request URL (HTTPS only).
     url: String,
-    /// HTTP method: GET or POST.
+    /// HTTP method: GET, HEAD, POST, PUT, PATCH, or DELETE.
     method: String,
+    /// Optional HTTP headers to forward. Hop-by-hop and sensitive headers are filtered by the proxy.
+    headers: Option<HashMap<String, String>>,
+    /// Optional UTF-8 request body.
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListDirRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// Directory path inside the sandbox.
+    /// Directory path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
 }
 
@@ -288,7 +315,7 @@ pub struct ListDirResponse {
 pub struct MakeDirRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// Directory path to create inside the sandbox.
+    /// Directory path to create inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
 }
 
@@ -297,7 +324,7 @@ pub struct MakeDirRequest {
 pub struct StatRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// File or directory path inside the sandbox.
+    /// File or directory path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
 }
 
@@ -306,7 +333,7 @@ pub struct StatRequest {
 pub struct RemoveFileRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// File or directory path to remove inside the sandbox.
+    /// File or directory path to remove inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     path: String,
 }
 
@@ -315,9 +342,9 @@ pub struct RemoveFileRequest {
 pub struct RenameRequest {
     /// Target sandbox ID.
     sandbox_id: u64,
-    /// Source path inside the sandbox.
+    /// Source path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     from_path: String,
-    /// Destination path inside the sandbox.
+    /// Destination path inside the sandbox. Must be absolute, start with /sandbox/, and must not contain .., NUL, newline, or carriage return.
     to_path: String,
 }
 
@@ -467,16 +494,24 @@ impl Default for MimoboxServer {
 #[tool_router]
 impl MimoboxServer {
     #[tool(
-        description = "Create a reusable sandbox instance. Supports isolation levels: auto (default, routes to best backend), os (OS-level sandbox), wasm (WebAssembly sandbox), microvm (KVM-based microVM, Linux only). Optional timeout_ms and memory_limit_mb."
+        description = "Create a reusable sandbox instance. Supports isolation levels: auto (default), os, wasm, microvm. Optional timeout_ms, memory_limit_mb, env_vars, network, allowed_http_domains, http_acl_allow, and http_acl_deny."
     )]
     async fn create_sandbox(
         &self,
         Parameters(request): Parameters<CreateSandboxRequest>,
     ) -> Result<Json<CreateSandboxResponse>, Json<ErrorResponse>> {
-        let isolation =
-            parse_isolation_level(request.isolation_level.as_deref()).map_err(to_error)?;
-        let timeout_ms = request.timeout_ms;
-        let memory_limit_mb = request.memory_limit_mb;
+        let CreateSandboxRequest {
+            isolation_level,
+            timeout_ms,
+            memory_limit_mb,
+            network,
+            allowed_http_domains,
+            http_acl_allow,
+            http_acl_deny,
+            env_vars,
+        } = request;
+        let isolation = parse_isolation_level(isolation_level.as_deref()).map_err(to_error)?;
+        let network = parse_network_policy(network.as_deref()).map_err(to_error)?;
         {
             let sandboxes = self.sandboxes.lock().await;
             if sandboxes.len() >= MAX_SANDBOXES {
@@ -484,9 +519,17 @@ impl MimoboxServer {
             }
         }
 
-        let env_vars = request.env_vars;
         let sandbox = tokio::task::spawn_blocking(move || {
-            create_sandbox_with_options(isolation, timeout_ms, memory_limit_mb, env_vars)
+            create_sandbox_with_options(SandboxCreationOptions {
+                isolation,
+                timeout_ms,
+                memory_limit_mb,
+                network,
+                allowed_http_domains,
+                http_acl_allow,
+                http_acl_deny,
+                env_vars,
+            })
         })
         .await
         .map_err(|error| to_error(format_join_error(error)))?
@@ -676,7 +719,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Read a file from a sandbox and return its content as base64. Requires microVM isolation level. The path must be absolute."
+        description = "Read a file from a sandbox and return its content as base64. Requires microVM isolation level. Path constraints: absolute path under /sandbox/, with no .., NUL, newline, or carriage return."
     )]
     async fn read_file(
         &self,
@@ -719,7 +762,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Write base64-encoded content to a file in a sandbox. Requires microVM isolation level. The path must be absolute."
+        description = "Write base64-encoded content to a file in a sandbox. Requires microVM isolation level. Path constraints: absolute path under /sandbox/, with no .., NUL, newline, or carriage return."
     )]
     async fn write_file(
         &self,
@@ -884,7 +927,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Send an HTTP GET or POST request through the sandbox proxy. Requires microVM isolation level with domain whitelist configured. Only HTTPS targets on whitelisted domains are allowed."
+        description = "Send an HTTP request through the sandbox proxy. Supports GET, HEAD, POST, PUT, PATCH, and DELETE plus optional headers/body. Requires microVM isolation level with domain whitelist or HTTP ACL configured. Only HTTPS targets on allowed domains are permitted."
     )]
     async fn http_request(
         &self,
@@ -893,16 +936,14 @@ impl MimoboxServer {
         #[cfg(feature = "vm")]
         {
             let method = request.method.to_ascii_uppercase();
-            if !matches!(method.as_str(), "GET" | "POST") {
-                return Err(to_error(
-                    "HTTP method only supports GET and POST. Tip: use GET or POST".to_string(),
-                ));
-            }
+            validate_mcp_http_method(&method).map_err(to_error)?;
 
             let url = request.url;
+            let headers = request.headers.unwrap_or_default();
+            let body = request.body.map(String::into_bytes);
             let response = self
                 .with_managed_sandbox(request.sandbox_id, move |sandbox| {
-                    sandbox.http_request(&method, &url, HashMap::new(), None)
+                    sandbox.http_request(&method, &url, headers, body.as_deref())
                 })
                 .await
                 .map_err(to_error)?;
@@ -923,7 +964,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "List directory entries in a sandbox. Returns file name, type (file/dir/symlink), size, and symlink flag for each entry. Requires microVM isolation level."
+        description = "List directory entries in a sandbox. Requires path under /sandbox/ with no .., NUL, newline, or carriage return. Returns file name, type, size, and symlink flag for each entry."
     )]
     async fn list_dir(
         &self,
@@ -974,7 +1015,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Create a directory inside a sandbox. Uses mkdir -p to create parent directories as needed."
+        description = "Create a directory inside a sandbox. Path constraints: absolute path under /sandbox/, with no .., NUL, newline, or carriage return. Uses mkdir -p to create parent directories as needed."
     )]
     async fn make_dir(
         &self,
@@ -1004,7 +1045,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Get file or directory metadata inside a sandbox. Returns file type, size, permissions, and modification time. Requires microVM isolation level."
+        description = "Get file or directory metadata inside a sandbox. Requires microVM isolation level. Path constraints: absolute path under /sandbox/, with no .., NUL, newline, or carriage return."
     )]
     async fn stat(
         &self,
@@ -1051,7 +1092,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Remove a file or empty directory inside a sandbox. Requires microVM isolation level."
+        description = "Remove a file or empty directory inside a sandbox. Requires microVM isolation level. Path constraints: absolute path under /sandbox/, with no .., NUL, newline, or carriage return."
     )]
     async fn remove_file(
         &self,
@@ -1084,7 +1125,7 @@ impl MimoboxServer {
     }
 
     #[tool(
-        description = "Rename or move a file inside a sandbox. Requires microVM isolation level."
+        description = "Rename or move a file inside a sandbox. Requires microVM isolation level. Both paths must be under /sandbox/ with no .., NUL, newline, or carriage return."
     )]
     async fn rename(
         &self,
@@ -1220,7 +1261,7 @@ impl MimoboxServer {
 impl ServerHandler for MimoboxServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents.\n\nProvides 15 tools for secure code execution and sandbox management:\n\nLIFECYCLE: create_sandbox (isolation: auto/os/wasm/microvm), destroy_sandbox, list_sandboxes\nEXECUTION: execute_code (python/node/bash/sh), execute_command (shell commands)\nFILES: read_file, write_file, list_dir, make_dir, stat, remove_file, rename (microVM only for read/write/stat/rename/remove_file)\nADVANCED: snapshot, fork (microVM CoW memory cloning), http_request (HTTPS proxy with domain whitelist)\n\nTYPICAL WORKFLOW:\n1. create_sandbox -> get sandbox_id\n2. execute_code/execute_command with sandbox_id for persistent sessions\n3. Use file tools (write_file, stat, rename) to manage sandbox contents\n4. Use snapshot+fork for fast parallel execution from pre-warmed state\n5. destroy_sandbox when done\n\nOr use execute_code/execute_command without sandbox_id for fire-and-forget ephemeral execution.",
+            "MimoBox MCP Server — Local Sandbox Runtime for AI Agents.\n\nProvides 15 tools for secure code execution and sandbox management:\n\nLIFECYCLE: create_sandbox (isolation: auto/os/wasm/microvm; network: deny_all/allow_domains/allow_all; allowed_http_domains/http_acl_*), destroy_sandbox, list_sandboxes\nEXECUTION: execute_code (python/node/bash/sh), execute_command (shell commands)\nFILES: read_file, write_file, list_dir, make_dir, stat, remove_file, rename (paths must be under /sandbox/ and must not contain ..)\nADVANCED: snapshot, fork (microVM CoW memory cloning), http_request (HTTPS proxy with domain whitelist or HTTP ACL)\n\nTYPICAL WORKFLOW:\n1. create_sandbox -> get sandbox_id\n2. execute_code/execute_command with sandbox_id for persistent sessions\n3. Use file tools (write_file, stat, rename) to manage sandbox contents under /sandbox/\n4. Use snapshot+fork for fast parallel execution from pre-warmed state\n5. destroy_sandbox when done\n\nOr use execute_code/execute_command without sandbox_id for fire-and-forget ephemeral execution.",
         )
     }
 }
@@ -1233,12 +1274,18 @@ fn unix_timestamp_ms() -> u64 {
     millis.min(u128::from(u64::MAX)) as u64
 }
 
-fn create_sandbox_with_options(
-    isolation: IsolationLevel,
-    timeout_ms: Option<u64>,
-    memory_limit_mb: Option<u64>,
-    env_vars: Option<HashMap<String, String>>,
-) -> Result<Sandbox, SdkError> {
+fn create_sandbox_with_options(options: SandboxCreationOptions) -> Result<Sandbox, SdkError> {
+    let SandboxCreationOptions {
+        isolation,
+        timeout_ms,
+        memory_limit_mb,
+        network,
+        allowed_http_domains,
+        http_acl_allow,
+        http_acl_deny,
+        env_vars,
+    } = options;
+
     validate_create_sandbox_memory_limit(memory_limit_mb)?;
     validate_timeout_ms(timeout_ms).map_err(SdkError::Config)?;
     if let Some(env_vars) = env_vars.as_ref() {
@@ -1254,6 +1301,20 @@ fn create_sandbox_with_options(
     if let Some(memory_limit_mb) = memory_limit_mb {
         builder = builder.memory_limit_mb(memory_limit_mb);
     }
+    if let Some(domains) = allowed_http_domains {
+        builder = builder.allowed_http_domains(domains);
+    }
+    if let Some(rules) = http_acl_allow {
+        let rule_refs = rules.iter().map(String::as_str).collect::<Vec<_>>();
+        builder = builder.http_acl_allow_str(&rule_refs)?;
+    }
+    if let Some(rules) = http_acl_deny {
+        let rule_refs = rules.iter().map(String::as_str).collect::<Vec<_>>();
+        builder = builder.http_acl_deny_str(&rule_refs)?;
+    }
+    if let Some(network) = network {
+        builder = builder.network(network);
+    }
     if let Some(env_vars) = env_vars {
         builder = builder.env_vars(env_vars);
     }
@@ -1268,12 +1329,12 @@ fn run_ephemeral_sandbox<F>(
 where
     F: FnOnce(&mut Sandbox) -> Result<ExecuteResult, SdkError>,
 {
-    let mut sandbox = Some(create_sandbox_with_options(
-        IsolationLevel::Auto,
+    let mut sandbox = Some(create_sandbox_with_options(SandboxCreationOptions {
+        isolation: IsolationLevel::Auto,
         timeout_ms,
-        Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-        None,
-    )?);
+        memory_limit_mb: Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+        ..SandboxCreationOptions::default()
+    })?);
 
     let operation_result = catch_unwind(AssertUnwindSafe(|| {
         let Some(sandbox) = sandbox.as_mut() else {
@@ -1445,6 +1506,35 @@ fn parse_isolation_level(value: Option<&str>) -> Result<IsolationLevel, String> 
             "unsupported isolation level '{other}'. Tip: valid values are auto, os, wasm, and microvm; use auto to select the best backend automatically"
         )),
     }
+}
+
+fn parse_network_policy(value: Option<&str>) -> Result<Option<NetworkPolicy>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "deny_all" | "deny-all" | "deny" => Ok(Some(NetworkPolicy::DenyAll)),
+        "allow_domains" | "allow-domains" | "domains" => {
+            Ok(Some(NetworkPolicy::AllowDomains(Vec::new())))
+        }
+        "allow_all" | "allow-all" | "all" => Ok(Some(NetworkPolicy::AllowAll)),
+        other => Err(format!(
+            "unsupported network policy '{other}'. Tip: valid values are deny_all, allow_domains, and allow_all"
+        )),
+    }
+}
+
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+fn validate_mcp_http_method(method: &str) -> Result<(), String> {
+    if MCP_HTTP_METHODS.contains(&method) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "HTTP method '{method}' is not supported. Tip: use one of {}",
+        MCP_HTTP_METHODS.join(", ")
+    ))
 }
 
 fn format_isolation_level(level: IsolationLevel) -> &'static str {
@@ -1727,13 +1817,68 @@ mod tests {
     }
 
     #[test]
-    fn test_create_sandbox_rejects_memory_limit_above_global_max() {
-        let result = create_sandbox_with_options(
-            IsolationLevel::Auto,
-            None,
-            Some(MAX_MEMORY_LIMIT_MB + 1),
-            None,
+    fn test_parse_network_policy_accepts_values_and_aliases() {
+        assert!(
+            parse_network_policy(None)
+                .expect("missing network policy should parse")
+                .is_none()
         );
+        assert!(matches!(
+            parse_network_policy(Some("deny_all"))
+                .expect("deny_all should parse")
+                .expect("policy should be present"),
+            NetworkPolicy::DenyAll
+        ));
+        assert!(matches!(
+            parse_network_policy(Some("allow-all"))
+                .expect("allow-all should parse")
+                .expect("policy should be present"),
+            NetworkPolicy::AllowAll
+        ));
+
+        match parse_network_policy(Some("allow_domains"))
+            .expect("allow_domains should parse")
+            .expect("policy should be present")
+        {
+            NetworkPolicy::AllowDomains(domains) => assert!(domains.is_empty()),
+            _ => panic!("allow_domains should parse to NetworkPolicy::AllowDomains"),
+        }
+    }
+
+    #[test]
+    fn test_parse_network_policy_rejects_invalid_value() {
+        let result = parse_network_policy(Some("internet"));
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("invalid network policy must be rejected")
+                .contains("unsupported network policy")
+        );
+    }
+
+    #[test]
+    fn test_validate_mcp_http_method_accepts_allowed_methods() {
+        for method in MCP_HTTP_METHODS {
+            validate_mcp_http_method(method).expect("allowed HTTP method should pass");
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_http_method_rejects_blocked_methods() {
+        for method in ["CONNECT", "TRACE", "OPTIONS"] {
+            let result = validate_mcp_http_method(method);
+            assert!(result.is_err(), "{method} should be rejected");
+        }
+    }
+
+    #[test]
+    fn test_create_sandbox_rejects_memory_limit_above_global_max() {
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            memory_limit_mb: Some(MAX_MEMORY_LIMIT_MB + 1),
+            ..SandboxCreationOptions::default()
+        });
 
         assert!(
             matches!(result, Err(SdkError::Config(message)) if message.contains("create_sandbox memory_limit_mb"))
@@ -1743,12 +1888,11 @@ mod tests {
     #[test]
     fn test_create_sandbox_rejects_timeout_above_max() {
         let excessive_timeout_ms = (MAX_SANDBOX_TIMEOUT_SECS + 1) * 1000;
-        let result = create_sandbox_with_options(
-            IsolationLevel::Auto,
-            Some(excessive_timeout_ms),
-            None,
-            None,
-        );
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            timeout_ms: Some(excessive_timeout_ms),
+            ..SandboxCreationOptions::default()
+        });
 
         assert!(matches!(result, Err(SdkError::Config(message)) if message.contains("timeout_ms")));
     }
@@ -1756,8 +1900,11 @@ mod tests {
     #[test]
     fn test_create_sandbox_accepts_timeout_at_max() {
         let max_timeout_ms = MAX_SANDBOX_TIMEOUT_SECS * 1000;
-        let result =
-            create_sandbox_with_options(IsolationLevel::Auto, Some(max_timeout_ms), None, None);
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            timeout_ms: Some(max_timeout_ms),
+            ..SandboxCreationOptions::default()
+        });
 
         // 可能因后端不可用失败，但不应因 timeout 校验失败
         if let Err(SdkError::Config(message)) = &result {
@@ -1943,12 +2090,13 @@ mod tests {
         let env_vars =
             make_env_vars((0..=MAX_ENV_VARS).map(|index| (format!("KEY_{index}"), String::new())));
 
-        let result = create_sandbox_with_options(
-            IsolationLevel::Auto,
-            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
-            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-            Some(env_vars),
-        );
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            timeout_ms: Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            memory_limit_mb: Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            env_vars: Some(env_vars),
+            ..SandboxCreationOptions::default()
+        });
 
         assert!(
             matches!(result, Err(SdkError::Config(message)) if message.contains("env_vars contains"))
@@ -1959,12 +2107,13 @@ mod tests {
     fn test_create_sandbox_rejects_invalid_env_var_key_before_backend_creation() {
         let env_vars = make_env_vars([("MIMOBOX=TOKEN".to_string(), "value".to_string())]);
 
-        let result = create_sandbox_with_options(
-            IsolationLevel::Auto,
-            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
-            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-            Some(env_vars),
-        );
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            timeout_ms: Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            memory_limit_mb: Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            env_vars: Some(env_vars),
+            ..SandboxCreationOptions::default()
+        });
 
         let error = match result {
             Ok(_) => panic!("invalid env key must reject create_sandbox"),
@@ -1978,12 +2127,13 @@ mod tests {
     fn test_create_sandbox_rejects_env_var_nul_value_before_backend_creation() {
         let env_vars = make_env_vars([("MIMOBOX_TOKEN".to_string(), "value\0tail".to_string())]);
 
-        let result = create_sandbox_with_options(
-            IsolationLevel::Auto,
-            Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
-            Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-            Some(env_vars),
-        );
+        let result = create_sandbox_with_options(SandboxCreationOptions {
+            isolation: IsolationLevel::Auto,
+            timeout_ms: Some(DEFAULT_EPHEMERAL_TIMEOUT_MS),
+            memory_limit_mb: Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+            env_vars: Some(env_vars),
+            ..SandboxCreationOptions::default()
+        });
 
         let error = match result {
             Ok(_) => panic!("env value containing NUL must reject create_sandbox"),

@@ -15,8 +15,9 @@ async def run_demo() -> str:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY environment variable is required.")
 
-    # Sandbox uses a context manager to ensure automatic resource cleanup after the Agent finishes.
-    with Sandbox() as sandbox:
+    # File APIs require a backend that supports guest file operations.
+    # Use microVM explicitly so read_file/write_file do not depend on auto-routing.
+    with Sandbox(isolation="microvm") as sandbox:
 
         @function_tool
         def execute_code(language: str, code: str, timeout: float = 10.0) -> str:

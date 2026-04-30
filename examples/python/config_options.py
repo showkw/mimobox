@@ -22,9 +22,9 @@ with Sandbox(isolation="os") as sandbox:
     print(f"os:   {result.stdout.strip()}")
 
 # 3. Explicit Wasm isolation (Wasmtime sandbox)
-with Sandbox(isolation="wasm") as sandbox:
-    result = sandbox.execute("echo 'Wasm isolation'")
-    print(f"wasm: {result.stdout.strip()}")
+# Wasm isolation executes .wasm modules instead of shell commands, so this
+# configuration is documented here rather than running "echo" through execute().
+print("wasm: use Sandbox(isolation='wasm') for .wasm modules")
 
 # 4. Explicit microVM isolation (KVM, strongest isolation)
 with Sandbox(isolation="microvm") as sandbox:

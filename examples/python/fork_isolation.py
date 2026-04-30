@@ -18,7 +18,7 @@ if platform.system() != 'Linux':
 try:
     # 1. Create microVM sandbox and write initial state
     with Sandbox(isolation='microvm') as sb:
-        sb.execute("echo 'original state' > /tmp/state.txt")
+        sb.write_file('/tmp/state.txt', b'original state\n')
         print('parent: wrote initial state')
 
         # 2. Fork — millisecond-level copy-on-write
@@ -28,7 +28,7 @@ try:
         print(f'fork completed in {(t1 - t0) * 1000:.1f}ms')
 
         # 3. Child sandbox modifies its own state
-        child.execute("echo 'modified by child' > /tmp/state.txt")
+        child.write_file('/tmp/state.txt', b'modified by child\n')
         print('child:  overwrote state')
 
         # 4. Verify isolation — parent sandbox is unaffected

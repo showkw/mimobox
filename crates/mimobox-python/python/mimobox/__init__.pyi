@@ -404,8 +404,9 @@ class Sandbox:
     ) -> ExecuteResult:
         """Execute code in the given language inside the sandbox.
 
-        Supported languages: ``"bash"``, ``"sh"``, ``"python"``, ``"python3"``,
-        ``"py"``, ``"javascript"``, ``"js"``, ``"node"``, ``"nodejs"``.
+        Supported languages: ``"bash"``, ``"sh"``, ``"shell"``, ``"python"``,
+        ``"python3"``, ``"py"``, ``"javascript"``, ``"js"``, ``"node"``,
+        ``"nodejs"``.
 
         Args:
             language: Programming language name.

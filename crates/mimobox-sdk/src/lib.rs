@@ -50,9 +50,11 @@ mod vm_helpers;
 pub use config::{Config, ConfigBuilder, IsolationLevel, NetworkPolicy, TrustLevel};
 pub use error::SdkError;
 pub use mimobox_core::{
-    DirEntry, ErrorCode, FileStat, FileType, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, PtyConfig,
-    PtyEvent, PtySize, SandboxMetrics,
+    DirEntry, ErrorCode, FileStat, FileType, HttpAclPolicy, HttpAclRule, HttpMethod,
+    MAX_MEMORY_LIMIT_MB, NamespaceDegradation, PtyConfig, PtyEvent, PtySize, SandboxMetrics,
 };
+#[cfg(feature = "vm")]
+pub use mimobox_vm::{VmPoolConfig, VmSecurityProfile};
 pub use sandbox::registry::SandboxInfo;
 pub use sandbox::{Sandbox, SdkExecOptions};
 pub use types::{ExecuteResult, HttpResponse, PtySession, SandboxSnapshot, StreamEvent};
