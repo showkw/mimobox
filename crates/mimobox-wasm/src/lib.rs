@@ -16,8 +16,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -41,6 +42,22 @@ use mimobox_core::{
 struct StoreData {
     wasi: WasiP1Ctx,
     limits: StoreLimits,
+}
+
+enum ExecutionExit {
+    ExitCode(i32),
+    TimedOut(SandboxResult),
+    Unhandled,
+}
+
+struct ExecutionErrorContext<'a> {
+    store: &'a mut Store<StoreData>,
+    instance: &'a wasmtime::Instance,
+    started_at: Instant,
+    stdout_reader: &'a MemoryOutputPipe,
+    stderr_reader: &'a MemoryOutputPipe,
+    fuel_limit: u64,
+    fallback_message: &'static str,
 }
 
 /// Fuel estimation factor: about 15 million Wasm instructions (fuel) per second, including 50% headroom.
@@ -86,6 +103,8 @@ const WASMTIME_CACHE_VERSION: &str = "43.0.1";
 
 /// Engine configuration namespace for serialized module cache entries.
 const ENGINE_CONFIG_CACHE_KEY: &str = "opt-speed-fuel-epoch-stack512k-parallel";
+
+static PRIVATE_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Dynamically calculates the fuel limit from `timeout_secs`.
 ///
@@ -171,6 +190,53 @@ impl WasmSandbox {
     /// 返回最近一次 Wasm 后端执行缓存的资源指标。
     pub fn metrics(&self) -> Option<SandboxMetrics> {
         self.cached_metrics.clone()
+    }
+
+    fn handle_execution_error(
+        &mut self,
+        context: ExecutionErrorContext<'_>,
+        error: wasmtime::Error,
+    ) -> Result<ExecutionExit, SandboxError> {
+        let ExecutionErrorContext {
+            store,
+            instance,
+            started_at,
+            stdout_reader,
+            stderr_reader,
+            fuel_limit,
+            fallback_message,
+        } = context;
+
+        if let Some(exit) = find_exit_code(&error) {
+            return Ok(ExecutionExit::ExitCode(exit));
+        }
+
+        if is_fuel_exhausted(&*store) || is_epoch_interrupt(&error) {
+            warn!("Execution timed out (fuel exhausted or epoch deadline exceeded)");
+            self.cache_wasm_metrics(instance, store, fuel_limit);
+            let elapsed = started_at.elapsed();
+            let stdout = truncate_output(stdout_reader.contents().to_vec(), "stdout");
+            let stderr = truncate_output(stderr_reader.contents().to_vec(), "stderr");
+            return Ok(ExecutionExit::TimedOut(SandboxResult {
+                stdout,
+                stderr,
+                exit_code: None,
+                elapsed,
+                timed_out: true,
+            }));
+        }
+
+        if is_memory_trap(&error) {
+            warn!("Wasm memory limit exceeded (OOM)");
+            self.cache_wasm_metrics(instance, store, fuel_limit);
+            return Err(SandboxError::ExecutionFailed {
+                kind: ExecutionFailureKind::Oom,
+                message: "wasm memory limit exceeded".into(),
+            });
+        }
+
+        warn!("{}: {}", fallback_message, error);
+        Ok(ExecutionExit::Unhandled)
     }
 
     fn cache_wasm_metrics(
@@ -624,10 +690,7 @@ fn private_tmp_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "cache".into());
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
+    let nonce = PRIVATE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     path.with_file_name(format!(
         "{}.{}.{}.tmp",
@@ -1280,82 +1343,46 @@ impl Sandbox for WasmSandbox {
         // WASI Command 通过 _start 进入，正常退出时调用 proc_exit(code)，
         // 这会触发 I32Exit 错误，其中包含退出码。
         let exit_code = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
-            Ok(start_func) => {
-                match start_func.call(&mut store, ()) {
-                    Ok(()) => Some(0),
-                    Err(e) => {
-                        // 检查是否是 WASI 正常退出（I32Exit）
-                        // I32Exit 可能被包装在 error chain 中，需要遍历查找
-                        if let Some(exit) = find_exit_code(&e) {
-                            Some(exit)
-                        } else if is_fuel_exhausted(&store) || is_epoch_interrupt(&e) {
-                            warn!(
-                                "Execution timed out (fuel exhausted or epoch deadline exceeded)"
-                            );
-                            self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
-                            let elapsed = start.elapsed();
-                            let stdout =
-                                truncate_output(stdout_reader.contents().to_vec(), "stdout");
-                            let stderr =
-                                truncate_output(stderr_reader.contents().to_vec(), "stderr");
-                            return Ok(SandboxResult {
-                                stdout,
-                                stderr,
-                                exit_code: None,
-                                elapsed,
-                                timed_out: true,
-                            });
-                        } else if is_memory_trap(&e) {
-                            warn!("Wasm memory limit exceeded (OOM)");
-                            self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
-                            return Err(SandboxError::ExecutionFailed {
-                                kind: ExecutionFailureKind::Oom,
-                                message: "wasm memory limit exceeded".into(),
-                            });
-                        } else {
-                            warn!("Wasm execution error: {}", e);
-                            None
-                        }
-                    }
-                }
-            }
+            Ok(start_func) => match start_func.call(&mut store, ()) {
+                Ok(()) => Some(0),
+                Err(e) => match self.handle_execution_error(
+                    ExecutionErrorContext {
+                        store: &mut store,
+                        instance: &instance,
+                        started_at: start,
+                        stdout_reader: &stdout_reader,
+                        stderr_reader: &stderr_reader,
+                        fuel_limit,
+                        fallback_message: "Wasm execution error",
+                    },
+                    e,
+                )? {
+                    ExecutionExit::ExitCode(exit) => Some(exit),
+                    ExecutionExit::TimedOut(result) => return Ok(result),
+                    ExecutionExit::Unhandled => None,
+                },
+            },
             Err(_) => {
                 // 没有 _start 函数，尝试查找 main 函数
                 match instance.get_typed_func::<(), i32>(&mut store, "main") {
                     Ok(main_func) => match main_func.call(&mut store, ()) {
                         Ok(code) => Some(code),
-                        Err(e) => {
-                            if let Some(exit) = find_exit_code(&e) {
-                                Some(exit)
-                            } else if is_fuel_exhausted(&store) || is_epoch_interrupt(&e) {
-                                warn!(
-                                    "Execution timed out (fuel exhausted or epoch deadline exceeded)"
-                                );
-                                self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
-                                let elapsed = start.elapsed();
-                                let stdout =
-                                    truncate_output(stdout_reader.contents().to_vec(), "stdout");
-                                let stderr =
-                                    truncate_output(stderr_reader.contents().to_vec(), "stderr");
-                                return Ok(SandboxResult {
-                                    stdout,
-                                    stderr,
-                                    exit_code: None,
-                                    elapsed,
-                                    timed_out: true,
-                                });
-                            } else if is_memory_trap(&e) {
-                                warn!("Wasm memory limit exceeded (OOM)");
-                                self.cache_wasm_metrics(&instance, &mut store, fuel_limit);
-                                return Err(SandboxError::ExecutionFailed {
-                                    kind: ExecutionFailureKind::Oom,
-                                    message: "wasm memory limit exceeded".into(),
-                                });
-                            } else {
-                                warn!("main function execution failed: {}", e);
-                                None
-                            }
-                        }
+                        Err(e) => match self.handle_execution_error(
+                            ExecutionErrorContext {
+                                store: &mut store,
+                                instance: &instance,
+                                started_at: start,
+                                stdout_reader: &stdout_reader,
+                                stderr_reader: &stderr_reader,
+                                fuel_limit,
+                                fallback_message: "main function execution failed",
+                            },
+                            e,
+                        )? {
+                            ExecutionExit::ExitCode(exit) => Some(exit),
+                            ExecutionExit::TimedOut(result) => return Ok(result),
+                            ExecutionExit::Unhandled => None,
+                        },
                     },
                     Err(_) => {
                         return Err(SandboxError::Config {
@@ -1416,6 +1443,15 @@ fn is_epoch_interrupt(error: &wasmtime::Error) -> bool {
 }
 
 /// Checks whether an error is caused by Wasm memory access or growth limits.
+///
+/// The primary check uses Wasmtime's typed `Trap::MemoryOutOfBounds` variant,
+/// which is stable and avoids relying on display text. The string check below is
+/// intentionally only a fallback for future Wasmtime memory-limit errors that may
+/// not be represented as `Trap` values.
+///
+/// The fallback depends on Wasmtime error message wording. Re-validate this logic
+/// when upgrading Wasmtime, because message format changes could cause false
+/// positives or false negatives.
 fn is_memory_trap(error: &wasmtime::Error) -> bool {
     if let Some(trap) = error.downcast_ref::<Trap>()
         && matches!(trap, Trap::MemoryOutOfBounds)

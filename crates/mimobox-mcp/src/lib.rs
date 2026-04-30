@@ -94,10 +94,13 @@ const MAX_HTTP_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct MimoboxServer {
     pub(crate) sandboxes: Arc<Mutex<HashMap<u64, ManagedSandbox>>>,
+    operation_locks: Arc<Mutex<HashMap<u64, SandboxOperationLock>>>,
     pub(crate) ephemeral_count: Arc<AtomicUsize>,
     pub next_id: Arc<AtomicU64>,
     pub tool_router: ToolRouter<Self>,
 }
+
+type SandboxOperationLock = Arc<Mutex<()>>;
 
 struct ManagedSandbox {
     sandbox: Sandbox,
@@ -401,6 +404,7 @@ impl MimoboxServer {
     pub fn new() -> Self {
         Self {
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
+            operation_locks: Arc::new(Mutex::new(HashMap::new())),
             ephemeral_count: Arc::new(AtomicUsize::new(0)),
             next_id: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
@@ -413,6 +417,7 @@ impl MimoboxServer {
         let count = sandboxes.len();
         let drained = sandboxes.drain().collect::<Vec<_>>();
         drop(sandboxes);
+        self.operation_locks.lock().await.clear();
 
         for (id, managed) in drained {
             tracing::debug!(sandbox_id = id, "Signal cleanup: destroying sandbox");
@@ -454,15 +459,44 @@ impl MimoboxServer {
         tracing::info!(count, "Signal cleanup complete");
     }
 
+    async fn sandbox_operation_lock(&self, sandbox_id: u64) -> SandboxOperationLock {
+        let mut locks = self.operation_locks.lock().await;
+        locks
+            .entry(sandbox_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn remove_sandbox_operation_lock(&self, sandbox_id: u64) {
+        self.operation_locks.lock().await.remove(&sandbox_id);
+    }
+
+    /// Runs a blocking operation against a managed sandbox while preserving map consistency.
+    ///
+    /// The method uses a remove-operate-insert pattern: it removes the `ManagedSandbox`
+    /// from the shared map, runs the operation with exclusive access, then inserts the entry
+    /// back under the same `sandbox_id`. The async map `Mutex` protects the registry, and a
+    /// per-sandbox operation `Mutex` serializes concurrent requests for the same `sandbox_id`
+    /// before the remove step, so later callers wait instead of observing a transient missing
+    /// entry.
+    ///
+    /// The operation runs inside `spawn_blocking` so synchronous sandbox execution does not
+    /// block the Tokio runtime. `catch_unwind` restores the removed sandbox even if the user
+    /// operation panics, preventing the active sandbox entry from being lost.
     async fn with_managed_sandbox<T, F>(&self, sandbox_id: u64, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&mut Sandbox) -> Result<T, SdkError> + Send + 'static,
     {
+        let operation_lock = self.sandbox_operation_lock(sandbox_id).await;
+        let _operation_guard = operation_lock.lock().await;
+
         let mut sandboxes = self.sandboxes.lock().await;
-        let mut managed = sandboxes
-            .remove(&sandbox_id)
-            .ok_or_else(|| sandbox_not_found(sandbox_id))?;
+        let Some(mut managed) = sandboxes.remove(&sandbox_id) else {
+            drop(sandboxes);
+            self.remove_sandbox_operation_lock(sandbox_id).await;
+            return Err(sandbox_not_found(sandbox_id));
+        };
         drop(sandboxes);
 
         let (managed, result) = tokio::task::spawn_blocking(move || {
@@ -593,11 +627,17 @@ impl MimoboxServer {
         &self,
         Parameters(request): Parameters<DestroySandboxRequest>,
     ) -> Result<Json<DestroySandboxResponse>, Json<ErrorResponse>> {
+        let operation_lock = self.sandbox_operation_lock(request.sandbox_id).await;
+        let _operation_guard = operation_lock.lock().await;
+
         let mut sandboxes = self.sandboxes.lock().await;
-        let managed = sandboxes
-            .remove(&request.sandbox_id)
-            .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+        let Some(managed) = sandboxes.remove(&request.sandbox_id) else {
+            drop(sandboxes);
+            self.remove_sandbox_operation_lock(request.sandbox_id).await;
+            return Err(to_error(sandbox_not_found(request.sandbox_id)));
+        };
         drop(sandboxes);
+        self.remove_sandbox_operation_lock(request.sandbox_id).await;
 
         let destroy_error = match tokio::task::spawn_blocking(move || {
             use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -875,10 +915,15 @@ impl MimoboxServer {
     ) -> Result<Json<ForkResponse>, Json<ErrorResponse>> {
         #[cfg(feature = "vm")]
         {
+            let operation_lock = self.sandbox_operation_lock(request.sandbox_id).await;
+            let _operation_guard = operation_lock.lock().await;
+
             let mut sandboxes = self.sandboxes.lock().await;
-            let mut managed = sandboxes
-                .remove(&request.sandbox_id)
-                .ok_or_else(|| to_error(sandbox_not_found(request.sandbox_id)))?;
+            let Some(mut managed) = sandboxes.remove(&request.sandbox_id) else {
+                drop(sandboxes);
+                self.remove_sandbox_operation_lock(request.sandbox_id).await;
+                return Err(to_error(sandbox_not_found(request.sandbox_id)));
+            };
             drop(sandboxes);
 
             let (managed, fork_result) = tokio::task::spawn_blocking(move || {
@@ -1817,6 +1862,11 @@ fn format_list_dir_fallback_entries(stdout: &[u8]) -> Vec<ListDirEntry> {
 ///
 /// Replaces common host path prefixes with placeholders to prevent MCP error responses
 /// from leaking host filesystem layout details such as /Users/alice/..., /home/..., and rootfs paths.
+///
+/// This implementation intentionally uses simple prefix matching. It can over-redact strings
+/// that contain tokens such as `/home/` or `/tmp/` outside a real path context, for example in
+/// explanatory text. A future improvement can use a regular expression or path-aware scanner to
+/// match absolute path patterns more precisely while keeping host path leakage blocked.
 fn sanitize_error_message(message: &str) -> String {
     let mut result = message.to_string();
     // 替换绝对路径模式：/Users/<name>/..., /home/<name>/..., /tmp/mimobox-..., /var/folders/...
