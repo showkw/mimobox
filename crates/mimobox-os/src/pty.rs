@@ -195,6 +195,19 @@ impl OsPtySession {
                 return Err(error);
             }
         };
+
+        // If a timeout is configured and the process exited quickly with a
+        // non-zero code, briefly yield to let the timeout thread set its flag.
+        // In sandboxed environments (PID namespaces, Docker) the child may
+        // exit with an exec-failure code before the timeout thread fires,
+        // but the timeout thread will set `timed_out` shortly after.
+        if self.timeout.is_some()
+            && status.code != 0
+            && !self.timed_out.load(Ordering::SeqCst)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         self.cached_exit_status = Some(status);
         self.run_cleanup();
         if self.is_timeout_status(status) {
