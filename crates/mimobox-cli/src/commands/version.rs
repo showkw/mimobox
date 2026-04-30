@@ -2,6 +2,7 @@ use tracing::info;
 
 use super::VersionResponse;
 
+/// Handles the version request.
 pub(crate) fn handle_version() -> VersionResponse {
     info!("preparing to print version info");
 

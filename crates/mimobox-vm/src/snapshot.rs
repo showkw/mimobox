@@ -189,6 +189,7 @@ fn map_snapshot_error(error: SandboxError) -> MicrovmError {
     }
 }
 
+/// Provides the memory sha256 hex operation.
 pub(crate) fn memory_sha256_hex(memory: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(memory);
@@ -262,6 +263,7 @@ fn verify_memory_hash_file(
     verify_memory_hash(memory_path, &actual_hash, expected_hash)
 }
 
+/// Provides the snapshot root dir operation.
 pub(crate) fn snapshot_root_dir() -> Result<PathBuf, MicrovmError> {
     let home_dir = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         MicrovmError::SnapshotFormat(

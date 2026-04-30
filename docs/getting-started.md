@@ -11,14 +11,14 @@
 - Rust 1.87+
 - KVM support is required when enabling microVM on Linux
 - Full sandbox tests on Linux should have `sudo` privileges, cgroups v2, and common system paths (`/usr`, `/bin`, `/proc`, etc.)
-- macOS currently supports the OS backend; Windows is still planned
+- macOS currently supports OS and Wasm backends; microVM/KVM is Linux-only. Windows is still planned.
 
 ### 2.2 Basic Build
 
 Run this from the repository root:
 
 ```bash
-cargo build --workspace
+bash scripts/build.sh
 ```
 
 This builds the default workspace members. By default, it focuses on the OS backend and does not include the Wasm crate or the microVM CLI feature.
@@ -83,7 +83,7 @@ docker compose run --rm mimobox
 
 The current repository has two layers of feature names. They are not a single unified global switch, so keep the distinction clear:
 
-- Default build: run `cargo build --workspace` directly
+- Default build: run `bash scripts/build.sh`
   - `mimobox-sdk` enables `os` by default
   - The default workspace members do not include `mimobox-wasm`
   - Suitable for validating OS capabilities and the basic SDK interfaces first
@@ -93,30 +93,30 @@ The current repository has two layers of feature names. They are not a single un
   - Common build command:
 
 ```bash
-cargo build --workspace --features mimobox-cli/kvm,mimobox-sdk/vm
+bash scripts/build.sh --workspace --features mimobox-cli/kvm,mimobox-sdk/vm
 ```
 
 - `wasm`: the Wasm backend switch
   - `mimobox-cli` uses `wasm`
   - `mimobox-sdk` also uses `wasm`
-  - Because the workspace excludes `mimobox-wasm` by default, enable it explicitly:
+  - Because the workspace default members exclude `mimobox-wasm`, enable it explicitly:
 
 ```bash
-cargo build --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
+bash scripts/build.sh --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
 ```
 
 If you want to enable both Wasm and microVM:
 
 ```bash
-cargo build --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
+bash scripts/build.sh --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
 ```
 
 ## 2.5 Platform Limitations
 
 ### macOS Limitations
 
-- Only OS-level sandbox (Seatbelt) is available — no microVM or KVM support
-- `stream_execute`, `read_file`, `write_file`, `http_request`, `snapshot`, and `fork` are microVM-only and return `UnsupportedPlatform` on macOS
+- OS-level sandbox (Seatbelt) and Wasm are available; microVM/KVM is not available
+- `stream_execute` is available as result-derived events on OS/Wasm and true backend streaming on microVM; `read_file`, `write_file`, `http_request`, `snapshot`, and `fork` require microVM support
 - Memory limits are enforced via `ulimit` (soft boundary) rather than cgroups (hard boundary)
 - Filesystem isolation uses Seatbelt profiles with broader default read access than Linux's Landlock
 
@@ -201,7 +201,7 @@ use mimobox_sdk::{Config, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .timeout(Duration::from_secs(2))
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let result = sandbox.execute("python3 -c 'import time; time.sleep(1); print(42)'")?;
@@ -253,7 +253,7 @@ names such as `LD_PRELOAD`, `BASH_ENV`, `PATH`, `HOME`, `TMPDIR`, `PWD`,
 
 ### 4.3 Streaming Output (`stream_execute`)
 
-`stream_execute` currently supports only the microVM backend on Linux. Calls against the OS and Wasm backends return `UnsupportedPlatform`.
+`stream_execute` is available across SDK backends. OS, macOS, and Wasm emit result-derived events after command completion; microVM can stream backend events as they arrive.
 
 #### Iterator Mode
 
@@ -263,7 +263,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let receiver = sandbox.stream_execute("/bin/sh -c 'echo start; echo err >&2; echo done'")?;
@@ -302,11 +302,11 @@ Suitable scenarios:
 Unsuitable scenarios:
 
 - One-off short commands; use `execute` directly
-- Non-Linux environments or builds without microVM enabled
+- Cases that require true incremental backend streaming on non-microVM backends
 
 ### 4.4 File Operations (`read_file` / `write_file`)
 
-File transfer currently supports only the microVM backend on Linux. When these two APIs are called with `IsolationLevel::Auto`, the microVM path is also forced.
+File transfer currently requires the microVM backend on Linux. Configure `IsolationLevel::MicroVm` explicitly; `IsolationLevel::Auto` does not guarantee that file APIs will force a microVM backend.
 
 #### Read and Write Files Inside the Sandbox
 
@@ -316,7 +316,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.write_file("/tmp/message.txt", b"hello from host\n")?;
@@ -349,7 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
         .allowed_http_domains(["api.github.com"])
-        .build();
+        .build()?;
 
     let mut sandbox = Sandbox::with_config(config)?;
     let mut headers = HashMap::new();
@@ -417,7 +417,7 @@ if __name__ == "__main__":
 
 #### Current Python API Status
 
-- `Sandbox()` is currently equivalent to `Sandbox::new()` on the Rust side and does not expose a separate `ConfigBuilder`
+- `Sandbox()` does not expose a separate Python `ConfigBuilder`, but its constructor exposes common configuration such as `isolation`, `allowed_http_domains`, `http_acl_allow`, `http_acl_deny`, `memory_limit_mb`, `timeout_secs`, `max_processes`, `trust_level`, `network`, and `env_vars`
 - `execute(command: str)` returns `ExecuteResult`
 - `stream_execute(command: str)` returns a Python iterator
 - `id`, `info()`, `Sandbox.list()`, `metrics()`, and `env_vars` expose runtime state and persistent env config
@@ -436,15 +436,22 @@ The current fields of `mimobox_sdk::Config` are as follows.
 | `network` | `NetworkPolicy` | `DenyAll` | Network policy abstraction |
 | `timeout` | `Option<Duration>` | `Some(30s)` | Execution timeout |
 | `memory_limit_mb` | `Option<u64>` | `Some(512)` | Unified memory limit |
+| `max_processes` | `Option<u32>` | `None` | Maximum process count |
+| `cpu_quota_us` | `Option<u64>` | `None` | CPU quota in microseconds per period |
+| `cpu_period_us` | `u64` | `100000` | CPU quota period in microseconds |
 | `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths inside the sandbox |
-| `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write paths inside the sandbox |
+| `fs_readwrite` | `Vec<PathBuf>` | empty | Read-write paths inside the sandbox |
+| `sandbox_tmp_dir` | `Option<PathBuf>` | `None` | Optional temporary directory appended to read-write paths during backend conversion |
 | `env_vars` | `HashMap<String, String>` | empty | Persistent environment variables applied to every command |
 | `allowed_http_domains` | `Vec<String>` | empty | host HTTP proxy allowlist |
+| `http_acl` | `HttpAclPolicy` | empty | HTTP proxy method/host/path ACL policy |
 | `allow_fork` | `bool` | `false` | Whether fork is allowed |
+| `namespace_degradation` | `NamespaceDegradation` | `FailClosed` | Namespace degradation policy |
 | `vm_vcpu_count` | `u8` | `1` | Number of microVM vCPUs |
 | `vm_memory_mb` | `u32` | `256` | microVM Guest memory |
 | `kernel_path` | `Option<PathBuf>` | `None` | Custom microVM kernel path |
 | `rootfs_path` | `Option<PathBuf>` | `None` | Custom microVM rootfs path |
+| `vm_security_profile` | `VmSecurityProfile` | `Secure` | microVM kernel security profile, available with the `vm` feature |
 
 ### 5.1 Common Field Notes
 

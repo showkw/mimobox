@@ -12,6 +12,7 @@ thread_local! {
     pub(crate) static STDERR_LOGGING_ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 #[cfg(unix)]
+/// Provides the capture benchmark output operation.
 pub(crate) fn capture_benchmark_output<F>(run: F) -> Result<String, CliError>
 where
     F: FnOnce() -> Result<(), CliError>,
@@ -27,6 +28,7 @@ where
 }
 
 #[cfg(not(unix))]
+/// Provides the capture benchmark output operation.
 pub(crate) fn capture_benchmark_output<F>(_run: F) -> Result<String, CliError>
 where
     F: FnOnce() -> Result<(), CliError>,
@@ -35,6 +37,7 @@ where
 }
 
 #[cfg(unix)]
+/// Provides the capture stderr bytes operation.
 pub(crate) fn capture_stderr_bytes<F, T>(run: F) -> Result<(T, Vec<u8>), CliError>
 where
     F: FnOnce() -> T,
@@ -43,6 +46,7 @@ where
 }
 
 #[cfg(not(unix))]
+/// Provides the capture stderr bytes operation.
 pub(crate) fn capture_stderr_bytes<F, T>(run: F) -> Result<(T, Vec<u8>), CliError>
 where
     F: FnOnce() -> T,
@@ -51,6 +55,7 @@ where
 }
 
 #[cfg(unix)]
+/// Provides the capture fd output operation.
 pub(crate) fn capture_fd_output<F, T>(
     target_fd: libc::c_int,
     run: F,
@@ -73,6 +78,7 @@ where
 }
 
 #[cfg(unix)]
+/// Provides the fd capture lock operation.
 pub(crate) fn fd_capture_lock() -> &'static Mutex<()> {
     static FD_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     FD_CAPTURE_LOCK.get_or_init(|| Mutex::new(()))
@@ -157,6 +163,7 @@ impl Drop for FdCapture {
 }
 
 #[cfg(unix)]
+/// Provides the flush standard fd operation.
 pub(crate) fn flush_standard_fd(target_fd: libc::c_int) -> Result<(), CliError> {
     match target_fd {
         libc::STDOUT_FILENO => io::stdout().flush()?,
@@ -170,6 +177,7 @@ pub(crate) struct StderrLoggingGuard {
 }
 
 impl StderrLoggingGuard {
+    /// Provides the suspend operation.
     pub(crate) fn suspend() -> Self {
         let previous = STDERR_LOGGING_ENABLED.with(|flag| flag.replace(false));
         Self { previous }

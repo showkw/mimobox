@@ -216,6 +216,7 @@ impl From<mimobox_vm::GuestExecOptions> for SdkExecOptions {
 
 impl SdkExecOptions {
     #[cfg(all(feature = "vm", target_os = "linux"))]
+    /// Provides the to guest exec options operation.
     pub(crate) fn to_guest_exec_options(&self) -> mimobox_vm::GuestExecOptions {
         mimobox_vm::GuestExecOptions {
             env: self.env.clone(),
@@ -360,6 +361,7 @@ fn validate_env_key(key: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Validates the cwd value.
 pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
     use std::path::Component;
     if std::path::Path::new(cwd)
@@ -397,6 +399,7 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
     feature = "wasm",
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
+/// Maps the core file error value.
 pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     match error {
         SandboxError::Io(io_err) => SdkError::Io(io_err),
@@ -408,6 +411,7 @@ pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     feature = "wasm",
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
+/// Provides the read file via core operation.
 pub(crate) fn read_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
@@ -419,6 +423,7 @@ pub(crate) fn read_file_via_core(
     feature = "wasm",
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
+/// Provides the write file via core operation.
 pub(crate) fn write_file_via_core(
     sandbox: &mut impl CoreSandbox,
     path: &str,
@@ -428,6 +433,7 @@ pub(crate) fn write_file_via_core(
 }
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+/// Provides the os file operation unsupported operation.
 pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'static str) -> SdkError {
     SdkError::sandbox(
         ErrorCode::UnsupportedPlatform,
@@ -439,6 +445,7 @@ pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'stati
 }
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
+/// Maps the os core file error value.
 pub(crate) fn map_os_core_file_error(
     operation: &str,
     unsupported_message: &str,
@@ -696,6 +703,7 @@ impl Sandbox {
         })
     }
 
+    /// Provides the ensure backend operation.
     pub(crate) fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
         let isolation = resolve_isolation(&self.config, command)?;
 
@@ -738,6 +746,7 @@ impl Sandbox {
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
+    /// Provides the ensure backend for file ops operation.
     pub(crate) fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto | IsolationLevel::MicroVm => IsolationLevel::MicroVm,
@@ -768,6 +777,7 @@ impl Sandbox {
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
+    /// Provides the ensure backend for snapshot operation.
     pub(crate) fn ensure_backend_for_snapshot(&mut self) -> Result<(), SdkError> {
         if self.inner.is_some() {
             return match self.active_isolation {
@@ -812,10 +822,12 @@ impl Sandbox {
     }
 
     #[cfg(all(feature = "vm", not(target_os = "linux")))]
+    /// Provides the ensure backend for file ops operation.
     pub(crate) fn ensure_backend_for_file_ops(&mut self) -> Result<(), SdkError> {
         Err(SdkError::unsupported_backend("microvm"))
     }
 
+    /// Provides the ensure backend for pty operation.
     pub(crate) fn ensure_backend_for_pty(&mut self) -> Result<(), SdkError> {
         let isolation = match self.config.isolation {
             IsolationLevel::Auto => {
@@ -863,6 +875,7 @@ impl Sandbox {
     }
 
     #[allow(dead_code)]
+    /// Provides the from initialized inner operation.
     pub(crate) fn from_initialized_inner(inner: SandboxInner, config: Config) -> Self {
         let id = registry::register();
         registry::update_isolation(id, Some(config.isolation), Some(IsolationLevel::MicroVm));
@@ -879,6 +892,7 @@ impl Sandbox {
         }
     }
 
+    /// Provides the sync cached metrics from inner operation.
     pub(crate) fn sync_cached_metrics_from_inner(&mut self) {
         self.cached_metrics = self.inner.as_ref().and_then(SandboxInner::metrics);
     }

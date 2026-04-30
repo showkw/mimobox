@@ -131,7 +131,23 @@ class SandboxInfo:
 
     id: str
     is_ready: bool
+    configured_isolation: Optional[_IsolationLevel]
     active_isolation: Optional[_IsolationLevel]
+
+
+class SandboxMetrics:
+    """Runtime resource usage metrics collected from the active sandbox backend."""
+
+    memory_usage_bytes: Optional[int]
+    memory_limit_bytes: Optional[int]
+    cpu_time_user_us: Optional[int]
+    cpu_time_system_us: Optional[int]
+    wasm_fuel_consumed: Optional[int]
+    io_read_bytes: Optional[int]
+    io_write_bytes: Optional[int]
+    collected_at: Optional[float]
+
+    def __repr__(self) -> str: ...
 
 
 class StreamEvent:
@@ -276,9 +292,11 @@ class Sandbox:
         network: Network policy. One of ``"deny_all"``, ``"allow_domains"``,
             or ``"allow_all"``. Defaults to ``"deny_all"``.
         allowed_http_domains: List of domains allowed for HTTP proxy requests.
-            Supports glob patterns like ``"*.openai.com"``.
+            Supports exact hosts, ``*``, and leading-dot wildcard domains such as
+            ``*.openai.com``.
         http_acl_allow: Optional list of HTTP ACL allow rules in 'METHOD host/path' format.
-            Supports glob patterns like 'GET api.openai.com/v1/*'.
+            Hosts support exact matches, ``*``, and leading-dot wildcard domains.
+            Paths support exact matches, ``/*``, and prefix rules ending in ``/*``.
         http_acl_deny: Optional list of HTTP ACL deny rules. Deny rules take precedence over allow.
         env_vars: Persistent environment variables set at sandbox creation, applied to all subsequent commands.
     """
@@ -343,7 +361,7 @@ class Sandbox:
 
         Raises:
             SandboxError: If the sandbox is destroyed or execution fails.
-            SandboxProcessError: If the command exits non-zero or is killed.
+            SandboxProcessError: If the backend reports a command-exit or killed error.
         """
         ...
 
@@ -370,7 +388,7 @@ class Sandbox:
 
         Raises:
             SandboxError: If the sandbox is destroyed or execution fails.
-            SandboxProcessError: If the command exits non-zero or is killed.
+            SandboxProcessError: If the backend reports a command-exit or killed error.
             ValueError: If argv is empty.
         """
         ...
@@ -459,6 +477,19 @@ class Sandbox:
         initialization.  Useful for querying the result of ``Auto``
         routing after the first execute.
         """
+        ...
+
+    def info(self) -> SandboxInfo:
+        """Return the current sandbox registration snapshot."""
+        ...
+
+    @property
+    def env_vars(self) -> Dict[str, str]:
+        """Return persistent environment variables configured at sandbox creation."""
+        ...
+
+    def metrics(self) -> SandboxMetrics:
+        """Return the latest resource usage metrics."""
         ...
 
     def is_ready(self) -> bool:
@@ -620,7 +651,7 @@ class SandboxError(Exception):
     All sandbox-related exceptions inherit from this class. Catch this to handle
     any sandbox error uniformly. Specific subclasses provide finer-grained handling:
 
-    - SandboxProcessError: command exits non-zero or is killed
+    - SandboxProcessError: backend reports command exit or killed errors
     - SandboxHttpError: HTTP proxy request denied or failed
     - SandboxLifecycleError: sandbox create/destroy/restore failures
 
@@ -644,9 +675,10 @@ class SandboxError(Exception):
 
 
 class SandboxProcessError(SandboxError):
-    """Raised when a sandbox command exits non-zero or is forcibly killed.
+    """Raised when the backend reports a command-exit or forcibly-killed error.
 
     Maps from ErrorCode::CommandExit(code) and ErrorCode::CommandKilled.
+    The current Rust binding does not attach captured output to this error.
     """
     exit_code: int
     stdout: bytes
@@ -709,6 +741,7 @@ __all__ = [
     "PtySession",
     "Sandbox",
     "SandboxInfo",
+    "SandboxMetrics",
     "SandboxCpuLimitError",
     "SandboxError",
     "SandboxHttpError",

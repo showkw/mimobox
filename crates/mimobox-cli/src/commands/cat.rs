@@ -3,6 +3,7 @@ use tracing::info;
 
 use super::*;
 
+/// Handles the cat request.
 pub(crate) fn handle_cat(args: CatArgs) -> Result<CatResponse, CliError> {
     #[cfg(not(feature = "kvm"))]
     {

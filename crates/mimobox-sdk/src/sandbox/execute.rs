@@ -262,6 +262,7 @@ impl Sandbox {
         self.execute_with_sdk_options(command, options.into())
     }
 
+    /// Provides the execute with sdk options operation.
     pub(crate) fn execute_with_sdk_options(
         &mut self,
         command: &str,

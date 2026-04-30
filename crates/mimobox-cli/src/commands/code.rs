@@ -21,6 +21,7 @@ fn language_needs_fork(language: &str) -> bool {
     )
 }
 
+/// Handles the code request.
 pub(crate) fn handle_code(args: CodeArgs) -> Result<CodeResponse, CliError> {
     validate_resource_args(None, args.timeout, 1)?;
     let allow_fork = language_needs_fork(&args.language);

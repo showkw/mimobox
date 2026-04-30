@@ -7,6 +7,7 @@ use super::*;
 pub(super) const KVM_RUNTIME_STATE_MAGIC_V2: &[u8; 8] = b"KVMSNAP2";
 pub(super) const KVM_RUNTIME_STATE_MAGIC_V3: &[u8; 8] = b"KVMSNAP3";
 
+/// Encodes the runtime state payload.
 pub(super) fn encode_runtime_state(backend: &KvmBackend) -> Result<Vec<u8>, MicrovmError> {
     let mut state = Vec::new();
     let serial_fifo = backend
@@ -35,6 +36,7 @@ pub(super) fn encode_runtime_state(backend: &KvmBackend) -> Result<Vec<u8>, Micr
     Ok(state)
 }
 
+/// Provides the restore runtime state v2 operation.
 pub(super) fn restore_runtime_state_v2(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
@@ -48,6 +50,7 @@ pub(super) fn restore_runtime_state_v2(
     })
 }
 
+/// Provides the restore runtime tail operation.
 pub(super) fn restore_runtime_tail(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
@@ -77,6 +80,7 @@ pub(super) fn restore_runtime_tail(
     Ok(())
 }
 
+/// Provides the restore runtime state v3 operation.
 pub(super) fn restore_runtime_state_v3(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
@@ -100,6 +104,7 @@ pub(super) fn restore_runtime_state_v3(
     })
 }
 
+/// Encodes the vcpu ids payload.
 pub(super) fn encode_vcpu_ids(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {
     let count = u32::try_from(vcpus.len())
         .map_err(|_| MicrovmError::Backend("vCPU count exceeds u32 limit".into()))?;
@@ -110,6 +115,7 @@ pub(super) fn encode_vcpu_ids(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(),
     Ok(())
 }
 
+/// Provides the restore vcpu ids operation.
 pub(super) fn restore_vcpu_ids(
     vcpus: &[VcpuFd],
     cursor: &mut ByteCursor<'_>,
@@ -136,6 +142,7 @@ pub(super) fn restore_vcpu_ids(
     Ok(())
 }
 
+/// Encodes the vm state payload.
 pub(super) fn encode_vm_state(out: &mut Vec<u8>, backend: &KvmBackend) -> Result<(), MicrovmError> {
     let clock = backend.vm_fd.get_clock().map_err(to_backend_error)?;
     append_pod(out, &clock);
@@ -162,6 +169,7 @@ pub(super) fn encode_vm_state(out: &mut Vec<u8>, backend: &KvmBackend) -> Result
     Ok(())
 }
 
+/// Provides the restore vm state operation.
 pub(super) fn restore_vm_state(
     backend: &mut KvmBackend,
     cursor: &mut ByteCursor<'_>,
@@ -200,6 +208,7 @@ pub(super) fn restore_vm_state(
     Ok(())
 }
 
+/// Encodes the vcpu states payload.
 pub(super) fn encode_vcpu_states(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<(), MicrovmError> {
     for vcpu in vcpus {
         encode_vcpu_state(out, vcpu)?;
@@ -207,6 +216,7 @@ pub(super) fn encode_vcpu_states(out: &mut Vec<u8>, vcpus: &[VcpuFd]) -> Result<
     Ok(())
 }
 
+/// Encodes the vcpu state payload.
 pub(super) fn encode_vcpu_state(out: &mut Vec<u8>, vcpu: &VcpuFd) -> Result<(), MicrovmError> {
     append_pod(out, &vcpu.get_regs().map_err(to_backend_error)?);
     append_pod(out, &vcpu.get_sregs().map_err(to_backend_error)?);
@@ -220,6 +230,7 @@ pub(super) fn encode_vcpu_state(out: &mut Vec<u8>, vcpu: &VcpuFd) -> Result<(), 
     Ok(())
 }
 
+/// Provides the restore vcpu states operation.
 pub(super) fn restore_vcpu_states(
     vcpus: &[VcpuFd],
     cursor: &mut ByteCursor<'_>,
@@ -230,6 +241,7 @@ pub(super) fn restore_vcpu_states(
     Ok(())
 }
 
+/// Provides the restore vcpu state operation.
 pub(super) fn restore_vcpu_state(
     vcpu: &VcpuFd,
     cursor: &mut ByteCursor<'_>,
@@ -264,6 +276,7 @@ pub(super) fn restore_vcpu_state(
     Ok(())
 }
 
+/// Provides the snapshot vcpu msrs operation.
 pub(super) fn snapshot_vcpu_msrs(vcpu: &VcpuFd) -> Result<Vec<kvm_msr_entry>, MicrovmError> {
     let template = tracked_msr_entries_template();
     let mut msrs = Msrs::from_entries(&template).map_err(to_backend_error)?;
@@ -277,6 +290,7 @@ pub(super) fn snapshot_vcpu_msrs(vcpu: &VcpuFd) -> Result<Vec<kvm_msr_entry>, Mi
     Ok(msrs.as_slice().to_vec())
 }
 
+/// Provides the restore vcpu msrs operation.
 pub(super) fn restore_vcpu_msrs(
     vcpu: &VcpuFd,
     entries: &[kvm_msr_entry],
@@ -292,6 +306,7 @@ pub(super) fn restore_vcpu_msrs(
     Ok(())
 }
 
+/// Provides the tracked msr entries template operation.
 pub(super) fn tracked_msr_entries_template() -> [kvm_msr_entry; 12] {
     [
         kvm_msr_entry {
@@ -357,6 +372,7 @@ pub(super) fn tracked_msr_entries_template() -> [kvm_msr_entry; 12] {
     ]
 }
 
+/// Encodes the e820 entry payload.
 pub(super) fn encode_e820_entry(
     dst: &mut [u8],
     addr: u64,
@@ -372,6 +388,7 @@ pub(super) fn encode_e820_entry(
     Ok(())
 }
 
+/// Provides the append bytes operation.
 pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), MicrovmError> {
     let len = u32_from_len(bytes.len(), "byte block length exceeds u32 limit")?;
     out.extend_from_slice(&len.to_le_bytes());
@@ -379,6 +396,7 @@ pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Microv
     Ok(())
 }
 
+/// Provides the append msr entries operation.
 pub(super) fn append_msr_entries(
     out: &mut Vec<u8>,
     entries: &[kvm_msr_entry],
@@ -391,6 +409,7 @@ pub(super) fn append_msr_entries(
     Ok(())
 }
 
+/// Provides the read msr entries operation.
 pub(super) fn read_msr_entries(
     cursor: &mut ByteCursor<'_>,
 ) -> Result<Vec<kvm_msr_entry>, MicrovmError> {
@@ -404,6 +423,7 @@ pub(super) fn read_msr_entries(
     Ok(entries)
 }
 
+/// Provides the append pod operation.
 pub(super) fn append_pod<T>(out: &mut Vec<u8>, value: &T) {
     // SAFETY: KVM binding structs are byte-copyable kernel ABI data. Current snapshots
     // are only restored on the same architecture and process version, so storing raw
@@ -414,6 +434,7 @@ pub(super) fn append_pod<T>(out: &mut Vec<u8>, value: &T) {
     out.extend_from_slice(bytes);
 }
 
+/// Provides the read pod operation.
 pub(super) fn read_pod<T: Default>(cursor: &mut ByteCursor<'_>) -> Result<T, MicrovmError> {
     let bytes = cursor.read_exact(mem::size_of::<T>())?;
     let mut value = T::default();
@@ -430,6 +451,7 @@ pub(super) fn read_pod<T: Default>(cursor: &mut ByteCursor<'_>) -> Result<T, Mic
     Ok(value)
 }
 
+/// Provides the exit reason to u8 operation.
 pub(super) fn exit_reason_to_u8(reason: Option<KvmExitReason>) -> u8 {
     match reason {
         None => 0,
@@ -440,6 +462,7 @@ pub(super) fn exit_reason_to_u8(reason: Option<KvmExitReason>) -> u8 {
     }
 }
 
+/// Provides the exit reason from u8 operation.
 pub(super) fn exit_reason_from_u8(value: u8) -> Result<Option<KvmExitReason>, MicrovmError> {
     match value {
         0 => Ok(None),
@@ -453,6 +476,7 @@ pub(super) fn exit_reason_from_u8(value: u8) -> Result<Option<KvmExitReason>, Mi
     }
 }
 
+/// Provides the checked slice operation.
 pub(super) fn checked_slice(
     bytes: &[u8],
     offset: usize,
@@ -469,24 +493,28 @@ pub(super) fn checked_slice(
     })
 }
 
+/// Provides the read u16 at operation.
 pub(super) fn read_u16_at(bytes: &[u8], offset: usize) -> Result<u16, MicrovmError> {
     let mut raw = [0u8; 2];
     raw.copy_from_slice(checked_slice(bytes, offset, 2)?);
     Ok(u16::from_le_bytes(raw))
 }
 
+/// Provides the read u32 at operation.
 pub(super) fn read_u32_at(bytes: &[u8], offset: usize) -> Result<u32, MicrovmError> {
     let mut raw = [0u8; 4];
     raw.copy_from_slice(checked_slice(bytes, offset, 4)?);
     Ok(u32::from_le_bytes(raw))
 }
 
+/// Provides the read u64 at operation.
 pub(super) fn read_u64_at(bytes: &[u8], offset: usize) -> Result<u64, MicrovmError> {
     let mut raw = [0u8; 8];
     raw.copy_from_slice(checked_slice(bytes, offset, 8)?);
     Ok(u64::from_le_bytes(raw))
 }
 
+/// Provides the write u16 operation.
 pub(super) fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(), MicrovmError> {
     let dst = bytes
         .get_mut(offset..offset + 2)
@@ -495,6 +523,7 @@ pub(super) fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(
     Ok(())
 }
 
+/// Provides the write u32 operation.
 pub(super) fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(), MicrovmError> {
     let dst = bytes
         .get_mut(offset..offset + 4)
@@ -503,6 +532,7 @@ pub(super) fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(
     Ok(())
 }
 
+/// Provides the align up operation.
 pub(super) fn align_up(value: u64, align: u64) -> Result<u64, MicrovmError> {
     if align == 0 {
         return Err(MicrovmError::Backend("alignment must not be zero".into()));
@@ -513,23 +543,28 @@ pub(super) fn align_up(value: u64, align: u64) -> Result<u64, MicrovmError> {
     Ok(adjusted / align * align)
 }
 
+/// Provides the lower u32 operation.
 pub(super) fn lower_u32(value: u64) -> Result<u32, MicrovmError> {
     Ok((value & 0xffff_ffff) as u32)
 }
 
+/// Provides the upper u32 operation.
 pub(super) fn upper_u32(value: u64) -> Result<u32, MicrovmError> {
     Ok((value >> 32) as u32)
 }
 
+/// Provides the usize from u64 operation.
 pub(super) fn usize_from_u64(value: u64) -> Result<usize, MicrovmError> {
     usize::try_from(value)
         .map_err(|_| MicrovmError::Backend("u64 cannot be converted to usize".into()))
 }
 
+/// Provides the u32 from len operation.
 pub(super) fn u32_from_len(len: usize, message: &str) -> Result<u32, MicrovmError> {
     u32::try_from(len).map_err(|_| MicrovmError::Backend(message.into()))
 }
 
+/// Provides the to backend error operation.
 pub(super) fn to_backend_error(err: impl std::fmt::Display) -> MicrovmError {
     MicrovmError::Backend(err.to_string())
 }
@@ -540,10 +575,12 @@ pub(super) struct ByteCursor<'a> {
 }
 
 impl<'a> ByteCursor<'a> {
+    /// Creates a new instance.
     pub(super) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
+    /// Provides the read exact operation.
     pub(super) fn read_exact(&mut self, len: usize) -> Result<&'a [u8], MicrovmError> {
         let slice = checked_slice(self.bytes, self.offset, len)
             .map_err(|err| MicrovmError::SnapshotFormat(err.to_string()))?;
@@ -551,22 +588,26 @@ impl<'a> ByteCursor<'a> {
         Ok(slice)
     }
 
+    /// Provides the read u8 operation.
     pub(super) fn read_u8(&mut self) -> Result<u8, MicrovmError> {
         Ok(self.read_exact(1)?[0])
     }
 
+    /// Provides the read u32 operation.
     pub(super) fn read_u32(&mut self) -> Result<u32, MicrovmError> {
         let mut raw = [0u8; 4];
         raw.copy_from_slice(self.read_exact(4)?);
         Ok(u32::from_le_bytes(raw))
     }
 
+    /// Provides the read u64 operation.
     pub(super) fn read_u64(&mut self) -> Result<u64, MicrovmError> {
         let mut raw = [0u8; 8];
         raw.copy_from_slice(self.read_exact(8)?);
         Ok(u64::from_le_bytes(raw))
     }
 
+    /// Provides the read bytes operation.
     pub(super) fn read_bytes(&mut self) -> Result<Vec<u8>, MicrovmError> {
         let len = usize::try_from(self.read_u32()?).map_err(|_| {
             MicrovmError::SnapshotFormat(
@@ -576,6 +617,7 @@ impl<'a> ByteCursor<'a> {
         Ok(self.read_exact(len)?.to_vec())
     }
 
+    /// Returns whether the eof condition holds.
     pub(super) fn is_eof(&self) -> bool {
         self.offset == self.bytes.len()
     }

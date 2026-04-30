@@ -361,6 +361,7 @@ pub struct ErrorResponse {
 }
 
 impl MimoboxServer {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             sandboxes: Arc::new(Mutex::new(HashMap::new())),

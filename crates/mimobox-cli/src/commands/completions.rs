@@ -18,6 +18,7 @@ pub(crate) enum Shell {
     Powershell,
 }
 
+/// Handles the completions request.
 pub(crate) fn handle_completions(args: CompletionsArgs) {
     let mut command = Cli::command();
     let shell = match args.shell {

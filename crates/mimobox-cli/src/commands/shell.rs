@@ -20,6 +20,7 @@ pub(crate) static SHELL_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 pub(crate) static SHELL_SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+/// Handles the shell request.
 pub(crate) fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
     #[cfg(not(unix))]
     {
@@ -75,6 +76,7 @@ pub(crate) fn handle_shell(args: ShellArgs) -> Result<i32, CliError> {
     }
 }
 
+/// Builds the shell sdk config value.
 pub(crate) fn build_shell_sdk_config(args: &ShellArgs, deny_network: bool) -> SdkConfig {
     let mut config = build_sdk_config(args.memory, args.timeout, deny_network, true);
     config.isolation = backend_to_sdk_isolation(args.backend);
@@ -95,6 +97,7 @@ fn resolve_shell_deny_network(args: &ShellArgs) -> bool {
 }
 
 #[cfg(unix)]
+/// Runs the shell session operation.
 pub(crate) fn run_shell_session(session: &mut mimobox_sdk::PtySession) -> Result<i32, CliError> {
     let (input_tx, input_rx) = mpsc::channel();
     spawn_stdin_forwarder(input_tx);
@@ -143,6 +146,7 @@ pub(crate) fn run_shell_session(session: &mut mimobox_sdk::PtySession) -> Result
 }
 
 #[cfg(unix)]
+/// Provides the spawn stdin forwarder operation.
 pub(crate) fn spawn_stdin_forwarder(input_tx: mpsc::Sender<Vec<u8>>) {
     std::thread::spawn(move || {
         let stdin = io::stdin();
@@ -168,6 +172,7 @@ pub(crate) fn spawn_stdin_forwarder(input_tx: mpsc::Sender<Vec<u8>>) {
 }
 
 #[cfg(unix)]
+/// Returns the current terminal size value.
 pub(crate) fn current_terminal_size() -> Option<SdkPtySize> {
     // SAFETY: `winsize` is allocated on this stack frame, and `ioctl` only writes to this struct.
     let mut winsize = unsafe { std::mem::zeroed::<libc::winsize>() };
@@ -184,6 +189,7 @@ pub(crate) fn current_terminal_size() -> Option<SdkPtySize> {
 }
 
 #[cfg(unix)]
+/// Provides the install shell signal handlers operation.
 pub(crate) fn install_shell_signal_handlers() {
     SHELL_SIGINT_RECEIVED.store(false, Ordering::SeqCst);
     SHELL_SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
@@ -202,11 +208,13 @@ pub(crate) fn install_shell_signal_handlers() {
 }
 
 #[cfg(unix)]
+/// Provides the shell sigint received operation.
 pub(crate) fn shell_sigint_received() -> bool {
     SHELL_SIGINT_RECEIVED.swap(false, Ordering::SeqCst)
 }
 
 #[cfg(unix)]
+/// Provides the shell sigwinch received operation.
 pub(crate) fn shell_sigwinch_received() -> bool {
     SHELL_SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst)
 }

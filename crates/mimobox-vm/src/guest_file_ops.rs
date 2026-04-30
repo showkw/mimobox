@@ -69,6 +69,7 @@ modified=$(stat -c %Y "$path") || exit 12
 printf '%s\t%s\t%s\t%s\n' "$kind" "$size" "$mode" "$modified"
 "#;
 
+/// Lists entries in a sandbox directory.
 pub(crate) fn list_dir<F>(path: &str, mut execute: F) -> Result<Vec<DirEntry>, MicrovmError>
 where
     F: FnMut(&[String]) -> Result<GuestCommandResult, MicrovmError>,
@@ -80,6 +81,7 @@ where
     parse_list_dir_output(&stdout)
 }
 
+/// Checks whether a sandbox path exists.
 pub(crate) fn file_exists<F>(path: &str, mut execute: F) -> Result<bool, MicrovmError>
 where
     F: FnMut(&[String]) -> Result<GuestCommandResult, MicrovmError>,
@@ -100,6 +102,7 @@ where
     }
 }
 
+/// Removes a file or directory from the sandbox filesystem.
 pub(crate) fn remove_file<F>(path: &str, mut execute: F) -> Result<(), MicrovmError>
 where
     F: FnMut(&[String]) -> Result<GuestCommandResult, MicrovmError>,
@@ -110,6 +113,7 @@ where
     ensure_success(result, "remove_file", path)
 }
 
+/// Renames a sandbox filesystem path.
 pub(crate) fn rename<F>(from: &str, to: &str, mut execute: F) -> Result<(), MicrovmError>
 where
     F: FnMut(&[String]) -> Result<GuestCommandResult, MicrovmError>,
@@ -121,6 +125,7 @@ where
     ensure_success(result, "rename", from)
 }
 
+/// Returns metadata for a sandbox filesystem path.
 pub(crate) fn stat<F>(path: &str, mut execute: F) -> Result<FileStat, MicrovmError>
 where
     F: FnMut(&[String]) -> Result<GuestCommandResult, MicrovmError>,

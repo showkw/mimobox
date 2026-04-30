@@ -410,6 +410,7 @@ pub(crate) enum RunCommandInput {
 }
 
 impl RunCommandInput {
+    /// Provides the requested command operation.
     pub(crate) fn requested_command(&self) -> String {
         match self {
             Self::Command { command, .. } => command.clone(),
@@ -417,6 +418,7 @@ impl RunCommandInput {
         }
     }
 
+    /// Provides the argv operation.
     pub(crate) fn argv(&self) -> &[String] {
         match self {
             Self::Command { argv, .. } | Self::Argv(argv) => argv,
@@ -479,6 +481,7 @@ pub(crate) enum CliError {
 }
 
 impl CliError {
+    /// Provides the code operation.
     pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Args(_) => "args_error",
@@ -520,6 +523,7 @@ pub(crate) struct RunExecution {
     pub(crate) result: SandboxResult,
 }
 
+/// Builds the sandbox config value.
 pub(crate) fn build_sandbox_config(
     memory: Option<u64>,
     timeout: Option<u64>,
@@ -535,6 +539,7 @@ pub(crate) fn build_sandbox_config(
     config
 }
 
+/// Builds the sdk config value.
 pub(crate) fn build_sdk_config(
     memory: Option<u64>,
     timeout: Option<u64>,
@@ -550,6 +555,7 @@ pub(crate) fn build_sdk_config(
     }
 }
 
+/// Builds the cli sdk config value.
 pub(crate) fn build_cli_sdk_config(
     backend: Backend,
     timeout: Option<u64>,
@@ -560,6 +566,7 @@ pub(crate) fn build_cli_sdk_config(
     config
 }
 
+/// Provides the backend to sdk isolation operation.
 pub(crate) fn backend_to_sdk_isolation(backend: Backend) -> SdkIsolationLevel {
     match backend {
         Backend::Auto => SdkIsolationLevel::Auto,
@@ -570,6 +577,7 @@ pub(crate) fn backend_to_sdk_isolation(backend: Backend) -> SdkIsolationLevel {
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+/// Builds the snapshot sdk config value.
 pub(crate) fn build_snapshot_sdk_config(
     args: &SnapshotArgs,
     deny_network: bool,
@@ -594,6 +602,7 @@ pub(crate) fn build_snapshot_sdk_config(
     Ok(config)
 }
 
+/// Builds the sdk network policy value.
 pub(crate) fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
     if deny_network {
         SdkNetworkPolicy::DenyAll
@@ -602,10 +611,12 @@ pub(crate) fn build_sdk_network_policy(deny_network: bool) -> SdkNetworkPolicy {
     }
 }
 
+/// Resolves the run deny network value.
 pub(crate) fn resolve_run_deny_network(args: &RunArgs) -> bool {
     !args.allow_network
 }
 
+/// Provides the normalize timeout operation.
 pub(crate) fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
     match timeout {
         Some(0) => None,
@@ -614,6 +625,7 @@ pub(crate) fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
     }
 }
 
+/// Resolves the seccomp profile value.
 pub(crate) fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> SeccompProfile {
     match (deny_network, allow_fork) {
         (true, true) => SeccompProfile::EssentialWithFork,
@@ -623,6 +635,7 @@ pub(crate) fn resolve_seccomp_profile(deny_network: bool, allow_fork: bool) -> S
     }
 }
 
+/// Parses the command value.
 pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
     let argv = shlex::split(command).ok_or_else(|| {
         CliError::CommandParse("command string contains unclosed quotes".to_string())
@@ -633,6 +646,7 @@ pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, CliError> {
     Ok(argv)
 }
 
+/// Resolves the run command value.
 pub(crate) fn resolve_run_command(
     command: Option<String>,
     argv: Vec<String>,
@@ -649,6 +663,7 @@ pub(crate) fn resolve_run_command(
     Err(CliError::EmptyCommand)
 }
 
+/// Provides the sdk result into sandbox result operation.
 pub(crate) fn sdk_result_into_sandbox_result(result: SdkExecuteResult) -> SandboxResult {
     SandboxResult {
         stdout: result.stdout,
@@ -659,10 +674,12 @@ pub(crate) fn sdk_result_into_sandbox_result(result: SdkExecuteResult) -> Sandbo
     }
 }
 
+/// Maps the sdk error value.
 pub(crate) fn map_sdk_error(error: mimobox_sdk::SdkError) -> CliError {
     error.into()
 }
 
+/// Validates the resource args value.
 pub(crate) fn validate_resource_args(
     memory: Option<u64>,
     timeout: Option<u64>,
@@ -689,6 +706,7 @@ pub(crate) fn validate_resource_args(
     Ok(())
 }
 
+/// Provides the finish sdk operation operation.
 pub(crate) fn finish_sdk_operation<T>(
     sandbox: SdkSandbox,
     result: Result<T, mimobox_sdk::SdkError>,
@@ -713,6 +731,7 @@ pub(crate) fn finish_sdk_operation<T>(
     }
 }
 
+/// Provides the destroy sdk sandbox after success operation.
 pub(crate) fn destroy_sdk_sandbox_after_success(sandbox: SdkSandbox) -> Result<(), CliError> {
     sandbox.destroy().map_err(|error| {
         let cli_error = map_sdk_error(error);
@@ -725,6 +744,7 @@ pub(crate) fn destroy_sdk_sandbox_after_success(sandbox: SdkSandbox) -> Result<(
     })
 }
 
+/// Provides the destroy sdk sandbox quietly operation.
 pub(crate) fn destroy_sdk_sandbox_quietly(sandbox: SdkSandbox, context: &str) {
     if let Err(error) = sandbox.destroy() {
         let cli_error = map_sdk_error(error);
@@ -737,6 +757,7 @@ pub(crate) fn destroy_sdk_sandbox_quietly(sandbox: SdkSandbox, context: &str) {
     }
 }
 
+/// Applies the stderr fallback behavior.
 pub(crate) fn apply_stderr_fallback(stderr: &mut Vec<u8>, fallback: Vec<u8>) {
     // Prefer stderr explicitly returned by the backend; use process-level fallback capture only when missing.
     if stderr.is_empty() && !fallback.is_empty() {
@@ -744,6 +765,7 @@ pub(crate) fn apply_stderr_fallback(stderr: &mut Vec<u8>, fallback: Vec<u8>) {
     }
 }
 
+/// Provides the backend from sdk isolation operation.
 pub(crate) fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option<Backend> {
     match isolation {
         SdkIsolationLevel::Auto => None,
@@ -753,6 +775,7 @@ pub(crate) fn backend_from_sdk_isolation(isolation: SdkIsolationLevel) -> Option
     }
 }
 
+/// Provides the success exit code operation.
 pub(crate) fn success_exit_code(response: &CommandResponse) -> Option<i32> {
     match response {
         CommandResponse::Run(run) => run.exit_code.filter(|code| *code != 0),
@@ -767,6 +790,7 @@ pub(crate) fn success_exit_code(response: &CommandResponse) -> Option<i32> {
     }
 }
 
+/// Emits the success json payload.
 pub(crate) fn emit_success_json(response: &CommandResponse) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -782,6 +806,7 @@ pub(crate) fn emit_success_json(response: &CommandResponse) -> Result<(), CliErr
     Ok(())
 }
 
+/// Emits the error json payload.
 pub(crate) fn emit_error_json(error: &CliError) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -798,6 +823,7 @@ pub(crate) fn emit_error_json(error: &CliError) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Provides the panic payload to string operation.
 pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()

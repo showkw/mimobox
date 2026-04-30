@@ -78,6 +78,7 @@ pub(in crate::kvm) struct CreateVmProfile {
 }
 
 impl CreateVmProfile {
+    /// Provides the profiled create vm total operation.
     pub(in crate::kvm) fn profiled_create_vm_total(&self) -> Duration {
         self.kvm_fd_open
             + self.kvm_create_vm
@@ -92,12 +93,14 @@ impl CreateVmProfile {
             + self.boot_params
     }
 
+    /// Creates the vm misc resource.
     pub(in crate::kvm) fn create_vm_misc(&self) -> Duration {
         self.create_vm_total
             .checked_sub(self.profiled_create_vm_total())
             .unwrap_or_default()
     }
 
+    /// Provides the cold start total operation.
     pub(in crate::kvm) fn cold_start_total(&self) -> Duration {
         self.create_vm_total + self.cpuid_config + self.vcpu_register_config + self.boot_wait
     }
@@ -119,6 +122,7 @@ pub(crate) struct RestoreProfile {
 }
 
 impl RestoreProfile {
+    /// Provides the total without resume operation.
     pub(in crate::kvm) fn total_without_resume(&self) -> Duration {
         self.kvm_fd_open
             + self.kvm_create_vm
@@ -132,6 +136,7 @@ impl RestoreProfile {
             + self.device_state_restore
     }
 
+    /// Provides the total with resume operation.
     pub(in crate::kvm) fn total_with_resume(&self) -> Duration {
         self.total_without_resume() + self.resume_kvm_run.unwrap_or_default()
     }
@@ -151,6 +156,7 @@ pub(crate) struct RuntimeRestoreProfile {
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 impl BootProfile {
+    /// Provides the start operation.
     pub(in crate::kvm) fn start() -> Self {
         Self {
             t_total_start: Some(Instant::now()),
@@ -159,84 +165,104 @@ impl BootProfile {
         }
     }
 
+    /// Marks the kvm open timestamp.
     pub(in crate::kvm) fn mark_kvm_open(&mut self) {
         self.t_kvm_open = Some(Instant::now());
     }
 
+    /// Marks the vm create timestamp.
     pub(in crate::kvm) fn mark_vm_create(&mut self) {
         self.t_vm_create = Some(Instant::now());
     }
 
+    /// Marks the memory setup timestamp.
     pub(in crate::kvm) fn mark_memory_setup(&mut self) {
         self.t_memory_setup = Some(Instant::now());
     }
 
+    /// Marks the kernel load timestamp.
     pub(in crate::kvm) fn mark_kernel_load(&mut self) {
         self.t_kernel_load = Some(Instant::now());
     }
 
+    /// Marks the rootfs load timestamp.
     pub(in crate::kvm) fn mark_rootfs_load(&mut self) {
         self.t_rootfs_load = Some(Instant::now());
     }
 
+    /// Marks the vcpu setup timestamp.
     pub(in crate::kvm) fn mark_vcpu_setup(&mut self) {
         self.t_vcpu_setup = Some(Instant::now());
     }
 
+    /// Marks the boot start timestamp.
     pub(in crate::kvm) fn mark_boot_start(&mut self) {
         self.t_boot_start = Some(Instant::now());
     }
 
+    /// Marks the boot ready timestamp.
     pub(in crate::kvm) fn mark_boot_ready(&mut self) {
         let now = Instant::now();
         self.t_boot_ready = Some(now);
         self.t_total_end = Some(now);
     }
 
+    /// Adds the vcpu create duration measurement.
     pub(in crate::kvm) fn add_vcpu_create_duration(&mut self, started_at: Instant) {
         self.vcpu_create_duration += started_at.elapsed();
     }
 
+    /// Adds the memory alloc duration measurement.
     pub(in crate::kvm) fn add_memory_alloc_duration(&mut self, started_at: Instant) {
         self.memory_alloc_duration += started_at.elapsed();
     }
 
+    /// Adds the memory register duration measurement.
     pub(in crate::kvm) fn add_memory_register_duration(&mut self, started_at: Instant) {
         self.memory_register_duration += started_at.elapsed();
     }
 
+    /// Adds the kernel load duration measurement.
     pub(in crate::kvm) fn add_kernel_load_duration(&mut self, started_at: Instant) {
         self.kernel_load_duration += started_at.elapsed();
     }
 
+    /// Adds the rootfs load duration measurement.
     pub(in crate::kvm) fn add_rootfs_load_duration(&mut self, started_at: Instant) {
         self.rootfs_load_duration += started_at.elapsed();
     }
 
+    /// Adds the vcpu config duration measurement.
     pub(in crate::kvm) fn add_vcpu_config_duration(&mut self, started_at: Instant) {
         self.vcpu_config_duration += started_at.elapsed();
     }
 
+    /// Adds the boot params duration measurement.
     pub(in crate::kvm) fn add_boot_params_duration(&mut self, started_at: Instant) {
         self.boot_params_duration += started_at.elapsed();
     }
 
+    /// Returns whether to parse guest line.
     pub(in crate::kvm) fn should_parse_guest_line(&self) -> bool {
         self.capture_guest_boot_lines
     }
 
+    /// Provides the record guest time operation.
     pub(in crate::kvm) fn record_guest_time(&mut self, stage: &str, timestamp_ns: u64) {
         self.guest.record(stage, timestamp_ns);
     }
 
+    /// Provides the close guest capture operation.
     pub(in crate::kvm) fn close_guest_capture(&mut self) {
         self.capture_guest_boot_lines = false;
     }
 
+    /// Provides the host total duration operation.
     pub(in crate::kvm) fn host_total_duration(&self) -> Option<Duration> {
         duration_between(self.t_total_start, self.t_total_end)
     }
 
+    /// Provides the host step duration operation.
     pub(in crate::kvm) fn host_step_duration(
         &self,
         start: Option<Instant>,
@@ -245,22 +271,27 @@ impl BootProfile {
         duration_between(start, end)
     }
 
+    /// Provides the memory step duration operation.
     pub(in crate::kvm) fn memory_step_duration(&self) -> Duration {
         self.memory_alloc_duration + self.memory_register_duration
     }
 
+    /// Provides the kernel step duration operation.
     pub(in crate::kvm) fn kernel_step_duration(&self) -> Duration {
         self.kernel_load_duration
     }
 
+    /// Provides the rootfs step duration operation.
     pub(in crate::kvm) fn rootfs_step_duration(&self) -> Duration {
         self.rootfs_load_duration
     }
 
+    /// Provides the vcpu step duration operation.
     pub(in crate::kvm) fn vcpu_step_duration(&self) -> Duration {
         self.vcpu_create_duration + self.vcpu_config_duration
     }
 
+    /// Provides the guest command loop recorded operation.
     pub(in crate::kvm) fn guest_command_loop_recorded(&self) -> bool {
         self.guest.command_loop_recorded()
     }
@@ -319,6 +350,7 @@ fn log_guest_boot_profile_line(label: &str, delta_ns: u64, total_ns: u64) {
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
+/// Parses the guest boot time line value.
 pub(in crate::kvm) fn parse_guest_boot_time_line(
     line: &str,
     boot_profile: &mut BootProfile,
@@ -340,6 +372,7 @@ pub(in crate::kvm) fn parse_guest_boot_time_line(
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
+/// Provides the log guest boot profile operation.
 pub(in crate::kvm) fn log_guest_boot_profile(boot_profile: &BootProfile) {
     let Some(init_entry_ns) = boot_profile.guest.init_entry_ns else {
         return;
@@ -364,6 +397,7 @@ pub(in crate::kvm) fn log_guest_boot_profile(boot_profile: &BootProfile) {
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
+/// Provides the log guest boot profile extension operation.
 pub(in crate::kvm) fn log_guest_boot_profile_extension(boot_profile: &mut BootProfile) {
     let Some(init_entry_ns) = boot_profile.guest.init_entry_ns else {
         return;
@@ -386,6 +420,7 @@ pub(in crate::kvm) fn log_guest_boot_profile_extension(boot_profile: &mut BootPr
 }
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
+/// Provides the log boot profile operation.
 pub(in crate::kvm) fn log_boot_profile(boot_profile: &mut BootProfile) {
     if boot_profile.host_logged {
         return;

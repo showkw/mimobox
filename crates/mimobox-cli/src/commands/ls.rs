@@ -3,6 +3,7 @@ use tracing::info;
 
 use super::*;
 
+/// Handles the ls request.
 pub(crate) fn handle_ls(args: LsArgs) -> Result<LsResponse, CliError> {
     info!(
         backend = ?args.backend,

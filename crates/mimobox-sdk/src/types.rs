@@ -183,6 +183,7 @@ impl SandboxSnapshot {
         self.inner.size()
     }
 
+    /// Provides the from core operation.
     pub(crate) fn from_core(inner: mimobox_core::SandboxSnapshot) -> Self {
         Self { inner }
     }
@@ -319,6 +320,7 @@ impl PtySession {
         all(feature = "os", any(target_os = "linux", target_os = "macos")),
         all(feature = "vm", target_os = "linux")
     ))]
+    /// Provides the from inner operation.
     pub(crate) fn from_inner(inner: Box<dyn mimobox_core::PtySession>) -> Self {
         Self { inner }
     }

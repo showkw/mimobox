@@ -47,6 +47,7 @@ struct VmAssetPaths {
     rootfs_path: PathBuf,
 }
 
+/// Runs environment diagnostics and returns an exit code.
 pub fn run_doctor() -> i32 {
     let results = collect_doctor_results();
     let exit_code = exit_code_for_results(&results);
@@ -61,6 +62,7 @@ pub fn run_doctor() -> i32 {
     exit_code
 }
 
+/// Runs setup checks and returns an exit code.
 pub fn run_setup() -> i32 {
     let stdout = io::stdout();
     let mut handle = stdout.lock();

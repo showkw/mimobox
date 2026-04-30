@@ -3,6 +3,7 @@ use tracing::info;
 
 use super::*;
 
+/// Handles the write request.
 pub(crate) fn handle_write(args: WriteArgs) -> Result<WriteResponse, CliError> {
     #[cfg(not(feature = "kvm"))]
     {

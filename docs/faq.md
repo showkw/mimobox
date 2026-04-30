@@ -9,18 +9,18 @@ Prebuilt release binaries may not be published yet. Build from source instead, f
 ```bash
 git clone https://github.com/showkw/mimobox.git
 cd mimobox
-cargo build --workspace --release
+bash scripts/build.sh --workspace --release
 ```
 
 ### Q: `pip install mimobox` fails. Is the Python package available on PyPI?
 
-The Python package is published on [PyPI](https://pypi.org/project/mimobox/). Install it directly:
+If the Python package is available from your configured package index, install it directly:
 
 ```bash
 pip install mimobox
 ```
 
-If `pip install` fails, ensure your Python version is 3.8 or newer. To build from source instead, use `maturin`:
+If `pip install` fails, ensure your Python version is 3.8 or newer and build from source with `maturin`:
 
 ```bash
 git clone https://github.com/showkw/mimobox.git
@@ -34,15 +34,15 @@ pip install target/wheels/*.whl
 Install a C compiler, linker, and required system development libraries for your platform. On Linux, also verify that common system paths such as `/usr`, `/bin`, and `/proc` exist for sandbox tests.
 
 ```bash
-cargo build --workspace
+bash scripts/build.sh
 ```
 
 ### Q: The Wasm feature is not found, or `mimobox-wasm` is missing. Why?
 
-The default workspace build excludes `mimobox-wasm`. Enable Wasm explicitly for both the CLI and SDK, as described in [getting-started](getting-started.md).
+The workspace includes `mimobox-wasm`, but the default workspace members exclude it. Enable Wasm explicitly for both the CLI and SDK, as described in [getting-started](getting-started.md).
 
 ```bash
-cargo build --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
+bash scripts/build.sh --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
 ```
 
 ### Q: How do I build with both Wasm and microVM support?
@@ -50,7 +50,7 @@ cargo build --workspace --features mimobox-cli/wasm,mimobox-sdk/wasm
 Use the CLI feature names and SDK feature names together. The CLI microVM feature is `kvm`; the SDK feature is `vm`.
 
 ```bash
-cargo build --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
+bash scripts/build.sh --workspace --features mimobox-cli/kvm,mimobox-cli/wasm,mimobox-sdk/vm,mimobox-sdk/wasm
 ```
 
 ## Platform & Features
@@ -74,7 +74,7 @@ Landlock requires Linux kernel 5.13 or newer. Full Linux sandbox validation also
 
 ### Q: `stream_execute`, `read_file`, or `write_file` returns `UnsupportedPlatform`. Why?
 
-These operations are microVM-only. They require Linux + KVM and a build with VM support; on macOS they return `UnsupportedPlatform` by design.
+`stream_execute` supports multiple backends, but OS/Wasm produce result-derived events after command completion while microVM can stream backend events incrementally. `read_file` and `write_file` require the microVM file API; they require Linux + KVM and a build with VM support.
 
 ### Q: What backend should I use for default local execution?
 
@@ -103,7 +103,7 @@ Verify that `command` points to an executable `mimobox-mcp` binary. Use an absol
 You are likely running the default MCP binary without VM support. Use the VM binary variant or build `mimobox-mcp` from source with `--features vm`; see [mcp-server](mcp-server.md).
 
 ```bash
-cargo build --release -p mimobox-mcp --features vm
+bash scripts/build.sh --release -p mimobox-mcp --features vm
 ```
 
 ### Q: How do I configure MCP for Cursor or Windsurf?
@@ -117,11 +117,11 @@ mimobox mcp-init windsurf
 
 ### Q: Can I run the MCP server on macOS?
 
-Not currently. The `mimobox-mcp` binary is Linux-only at this time; macOS users can use the CLI and SDK, but not the MCP server.
+The MCP server crate is not Linux-only in source, but release artifacts may be platform-specific. microVM-backed MCP tools still require Linux + KVM; macOS users can use OS/Wasm capabilities where a macOS MCP binary is available or built locally.
 
 ### Q: Which MCP tools require the VM feature?
 
-`read_file`, `write_file`, `snapshot`, `fork`, and `http_request` require the `vm` feature. Default MCP builds expose OS-level lifecycle and execution tools only.
+`read_file`, `write_file`, `stat`, `remove_file`, `rename`, `snapshot`, `fork`, and `http_request` require the `vm` feature. Default MCP builds expose lifecycle, execution, and non-VM fallback tools only.
 
 ## Security
 

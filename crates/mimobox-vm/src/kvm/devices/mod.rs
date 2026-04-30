@@ -32,10 +32,12 @@ use self::serial::{
     SERIAL_PORT_LAST,
 };
 
+/// Returns whether the serial port condition holds.
 pub(super) fn is_serial_port(port: u16) -> bool {
     (SERIAL_PORT_COM1..=SERIAL_PORT_LAST).contains(&port)
 }
 
+/// Returns whether the boot legacy pio port condition holds.
 pub(super) fn is_boot_legacy_pio_port(port: u16) -> bool {
     matches!(
         port,
@@ -48,6 +50,7 @@ pub(super) fn is_boot_legacy_pio_port(port: u16) -> bool {
     )
 }
 
+/// Provides the emulate boot legacy pio read operation.
 pub(super) fn emulate_boot_legacy_pio_read(port: u16, data: &mut [u8]) -> bool {
     if !is_boot_legacy_pio_port(port) {
         return false;
@@ -59,6 +62,7 @@ pub(super) fn emulate_boot_legacy_pio_read(port: u16, data: &mut [u8]) -> bool {
 
 #[cfg(any(debug_assertions, feature = "boot-profile"))]
 #[allow(clippy::too_many_arguments)]
+/// Handles the serial write request.
 pub(super) fn handle_serial_write(
     serial_device: &mut SerialDevice,
     serial_buffer: &mut Vec<u8>,
@@ -167,6 +171,7 @@ pub(super) fn handle_serial_write(
 }
 
 #[cfg(not(any(debug_assertions, feature = "boot-profile")))]
+/// Handles the serial write request.
 pub(super) fn handle_serial_write(
     serial_device: &mut SerialDevice,
     serial_buffer: &mut Vec<u8>,
@@ -267,6 +272,7 @@ pub(super) fn handle_serial_write(
     Ok(None)
 }
 
+/// Handles the serial read request.
 pub(super) fn handle_serial_read(
     serial_device: &mut SerialDevice,
     port: u16,

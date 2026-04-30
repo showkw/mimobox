@@ -12,6 +12,7 @@ use tracing::{error, info};
 
 use super::*;
 
+/// Handles the snapshot request.
 pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, CliError> {
     validate_resource_args(args.memory, args.timeout, args.vcpu_count)?;
 
@@ -88,6 +89,7 @@ pub(crate) fn handle_snapshot(args: SnapshotArgs) -> Result<SnapshotResponse, Cl
     }
 }
 
+/// Handles the restore request.
 pub(crate) fn handle_restore(args: RestoreArgs) -> Result<RestoreResponse, CliError> {
     #[cfg(not(all(target_os = "linux", feature = "kvm")))]
     {

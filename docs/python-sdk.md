@@ -72,20 +72,14 @@ Notes:
 Constructor:
 
 ```python
-Sandbox(*, isolation=None, allowed_http_domains=None, memory_limit_mb=None, timeout_secs=None, max_processes=None, trust_level=None, network=None)
-```
-
-Current complete signature including HTTP ACL and env_vars parameters:
-
-```python
 Sandbox(*, isolation=None, allowed_http_domains=None, http_acl_allow=None, http_acl_deny=None, memory_limit_mb=None, timeout_secs=None, max_processes=None, trust_level=None, network=None, env_vars=None)
 ```
 
 Parameters:
 
 - `isolation`: Isolation level. The default `None` is equivalent to `"auto"`.
-- `allowed_http_domains`: List of domains allowed by the HTTP proxy. Wildcard patterns are supported.
-- `http_acl_allow`: Optional list of HTTP ACL allow rules in `"METHOD host/path"` format. Glob patterns are supported.
+- `allowed_http_domains`: List of domains allowed by the HTTP proxy. Exact hosts and leading wildcard domains such as `"*.example.com"` are supported.
+- `http_acl_allow`: Optional list of HTTP ACL allow rules in `"METHOD host/path"` format. Hosts support exact matches, `*`, and leading wildcard domains; paths support exact matches, `/*`, and prefix rules ending in `/*`.
 - `http_acl_deny`: Optional list of HTTP ACL deny rules in `"METHOD host/path"` format. Deny rules take precedence over allow rules.
 - `memory_limit_mb`: Memory limit in MiB. Defaults to 512.
 - `timeout_secs`: Sandbox command timeout in seconds. Defaults to 30.
@@ -103,7 +97,7 @@ stream_execute(command) -> StreamIterator
 list_dir(path) -> list[DirEntry]
 read_file(path) -> bytes
 write_file(path, data: bytes)
-snapshot() -> Snapshot
+snapshot -> SnapshotOps
 fork() -> Sandbox
 http_request(method, url, headers=None, body=None) -> HttpResponse
 wait_ready(timeout_secs=None)
@@ -149,7 +143,7 @@ Parameters:
 - `command: str`: Shell command to execute.
 - `env: dict | None`: Optional environment variables to set for the command.
 - `timeout: float | None`: Optional timeout in seconds. Must be > 0 and finite.
-- `cwd: str | None`: Optional working directory for the command. When set, the command runs as `cd <cwd> && <command>`.
+- `cwd: str | None`: Optional working directory for the command. When set, the binding parses the command and passes `cwd` through `exec_with_options` rather than concatenating a shell `cd` command.
 
 Example:
 
@@ -243,7 +237,7 @@ Methods:
 Snapshot.from_bytes(data: bytes) -> Snapshot
 Snapshot.from_file(path: str) -> Snapshot
 to_bytes() -> bytes
-size() -> int
+size -> int
 ```
 
 Notes:
@@ -251,7 +245,7 @@ Notes:
 - `from_bytes` is a classmethod that reconstructs a snapshot from its serialized byte representation.
 - `from_file` is a classmethod that loads a snapshot from a file on disk, without reading the entire file into memory. Suitable for large snapshot files previously saved via `to_bytes()`.
 - `to_bytes()` serializes the snapshot into bytes.
-- `size()` returns the snapshot size.
+- `size` returns the snapshot size.
 
 ### 3.6 `StreamEvent`
 
@@ -1022,8 +1016,8 @@ Notes:
 ### 3.32 HTTP ACL
 
 `Sandbox` accepts HTTP ACL rules through `http_acl_allow` and
-`http_acl_deny`. Rules use `"METHOD host/path"` format and support glob
-patterns. Deny rules take precedence over allow rules.
+`http_acl_deny`. Rules use `"METHOD host/path"` format. Deny rules take
+precedence over allow rules.
 
 Constructor parameters:
 
@@ -1062,7 +1056,8 @@ Notes:
 
 - Rule format is `"METHOD host/path"`, for example `"GET api.example.com/v1/*"`.
 - `METHOD` can be an HTTP method or `*`.
-- The host and path part supports glob patterns.
+- Hosts support exact matches, `*`, and leading wildcard domains such as `*.example.com`.
+- Paths support exact matches, `/*`, and prefix rules ending in `/*`.
 - Deny rules are evaluated before allow rules.
 - `allowed_http_domains` remains supported and can be used for domain-level allow lists.
 - `network="allow_all"` is not compatible with HTTP ACL rules; use allow-domain style policy when applying ACLs.
@@ -1072,13 +1067,13 @@ Notes:
 The Python SDK defines the following mimobox exceptions:
 
 - `SandboxError`: Base class.
-- `SandboxProcessError`: Command execution error, such as a non-zero exit or being killed.
+- `SandboxProcessError`: Command execution error when the backend reports `CommandExit` or `CommandKilled`. The normal execution result path returns non-zero process exits in `ExecuteResult.exit_code`.
 - `SandboxHttpError`: HTTP proxy error, such as a rejected domain, invalid URL, or oversized body.
 - `SandboxLifecycleError`: Sandbox lifecycle error, such as not ready, destroyed, or failed to create.
 
-It also maps errors to standard Python exceptions:
+It also maps backend error codes to standard or SDK-specific Python exceptions:
 
-- `TimeoutError`: Command or HTTP request timeout.
+- `SandboxTimeoutError`: Command or HTTP request timeout.
 - `FileNotFoundError`: File does not exist.
 - `PermissionError`: File permission denied.
 - `ConnectionError`: HTTP connection or TLS failure.
@@ -1104,8 +1099,8 @@ Additional exception attributes and subclasses:
 - `SandboxError.code: str | None`: Stable backend error code, such as `"command_timeout"`, or `None` when not provided.
 - `SandboxError.suggestion: str | None`: Human-readable remediation suggestion, or `None` when not provided.
 - `SandboxProcessError.exit_code: int`: Process exit code, or `-1` when the process was killed and no code is available.
-- `SandboxProcessError.stdout: bytes`: Captured stdout bytes associated with the process failure.
-- `SandboxProcessError.stderr: bytes`: Captured stderr bytes associated with the process failure.
+- `SandboxProcessError.stdout: bytes`: Currently empty bytes in the Rust binding.
+- `SandboxProcessError.stderr: bytes`: Currently empty bytes in the Rust binding.
 - `SandboxMemoryError`: Raised when the memory limit is exceeded.
 - `SandboxCpuLimitError`: Raised when the CPU limit is exceeded.
 - `SandboxTimeoutError`: Raised on command or HTTP timeout.
@@ -1184,7 +1179,7 @@ with Sandbox(isolation="auto") as sb:
 ```python
 from mimobox import Sandbox, Snapshot
 
-with Sandbox(isolation="microvm") as sb:
+with Sandbox(isolation="os") as sb:
     result = sb.execute(
         "/usr/bin/printenv MIMOBOX_MODE",
         env={"MIMOBOX_MODE": "python-demo"},

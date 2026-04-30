@@ -92,10 +92,12 @@ impl Default for SerialDevice {
 }
 
 impl SerialDevice {
+    /// Provides the queue input operation.
     pub(in crate::kvm) fn queue_input(&mut self, bytes: &[u8]) {
         self.rx_fifo.extend(bytes.iter().copied());
     }
 
+    /// Provides the read operation.
     pub(in crate::kvm) fn read(&mut self, port: u16) -> Result<u8, MicrovmError> {
         let register = port
             .checked_sub(SERIAL_PORT_COM1)
@@ -136,6 +138,7 @@ impl SerialDevice {
         Ok(value)
     }
 
+    /// Provides the write operation.
     pub(in crate::kvm) fn write(
         &mut self,
         port: u16,
@@ -182,6 +185,7 @@ impl SerialDevice {
         }
     }
 
+    /// Restores a sandbox snapshot.
     pub(in crate::kvm) fn restore(&mut self, fifo: Vec<u8>, registers: [u8; 7]) {
         self.rx_fifo = fifo.into_iter().collect();
         self.interrupt_enable = registers[0];
@@ -193,6 +197,7 @@ impl SerialDevice {
         self.divisor_latch_high = registers[6];
     }
 
+    /// Provides the snapshot registers operation.
     pub(in crate::kvm) fn snapshot_registers(&self) -> [u8; 7] {
         [
             self.interrupt_enable,
@@ -264,6 +269,7 @@ pub(in crate::kvm) enum SerialFrame {
     Stream(SerialProtocolResult),
 }
 
+/// Encodes the command payload payload.
 pub(in crate::kvm) fn encode_command_payload(
     cmd: &[String],
     env: &HashMap<String, String>,
@@ -274,19 +280,23 @@ pub(in crate::kvm) fn encode_command_payload(
     encode_text_frame(SERIAL_EXEC_PREFIX, payload.as_bytes())
 }
 
+/// Encodes the ping payload payload.
 pub(in crate::kvm) fn encode_ping_payload() -> Vec<u8> {
     format!("{SERIAL_PING_PREFIX}\n").into_bytes()
 }
 
+/// Encodes the fs read payload payload.
 pub(in crate::kvm) fn encode_fs_read_payload(path: &str) -> Result<Vec<u8>, MicrovmError> {
     encode_text_frame(SERIAL_FS_READ_PREFIX, path.as_bytes())
 }
 
 #[allow(dead_code)] // 预留给后续 host 主动 kill 当前命令的控制面。
+/// Encodes the signal kill payload payload.
 pub(in crate::kvm) fn encode_signal_kill_payload(pid: u32) -> Vec<u8> {
     format!("{SERIAL_SIGNAL_KILL_PREFIX}{pid}\n").into_bytes()
 }
 
+/// Encodes the fs write payload payload.
 pub(in crate::kvm) fn encode_fs_write_payload(
     path: &str,
     data: &[u8],
@@ -305,6 +315,7 @@ pub(in crate::kvm) fn encode_fs_write_payload(
     Ok(frame)
 }
 
+/// Builds the guest command value.
 pub(in crate::kvm) fn build_guest_command(cmd: &[String]) -> Result<String, MicrovmError> {
     if cmd.is_empty() {
         Err(MicrovmError::InvalidConfig(
@@ -315,6 +326,7 @@ pub(in crate::kvm) fn build_guest_command(cmd: &[String]) -> Result<String, Micr
     Ok(join_shell_command(cmd))
 }
 
+/// Builds the guest exec payload value.
 pub(in crate::kvm) fn build_guest_exec_payload(
     cmd: &[String],
     env: &HashMap<String, String>,
@@ -360,6 +372,7 @@ fn encode_text_frame(prefix: &str, payload: &[u8]) -> Result<Vec<u8>, MicrovmErr
     Ok(frame)
 }
 
+/// Parses the serial line value.
 pub(in crate::kvm) fn parse_serial_line(
     line: &str,
     response: &mut CommandResponse,
@@ -398,6 +411,7 @@ pub(in crate::kvm) fn parse_serial_line(
     }
 }
 
+/// Provides the preview serial output operation.
 pub(in crate::kvm) fn preview_serial_output(serial: &[u8]) -> String {
     if serial.is_empty() {
         "<empty>".to_string()
@@ -413,6 +427,7 @@ pub(in crate::kvm) fn preview_serial_output(serial: &[u8]) -> String {
     }
 }
 
+/// Provides the take serial frame operation.
 pub(in crate::kvm) fn take_serial_frame(
     frame_buffer: &mut Vec<u8>,
 ) -> Result<Option<SerialFrame>, MicrovmError> {

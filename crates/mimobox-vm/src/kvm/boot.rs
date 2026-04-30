@@ -189,6 +189,7 @@ impl KvmBackend {
         Ok(())
     }
 
+    /// Provides the configure boot vcpus operation.
     pub(in crate::kvm) fn configure_boot_vcpus(&self) -> Result<VcpuSetupProfile, MicrovmError> {
         #[cfg(target_arch = "x86_64")]
         {
@@ -212,6 +213,7 @@ impl KvmBackend {
         ))
     }
 
+    /// Provides the prepare restored vcpus operation.
     pub(crate) fn prepare_restored_vcpus(&self) -> Result<Duration, MicrovmError> {
         #[cfg(target_arch = "x86_64")]
         {
@@ -249,6 +251,7 @@ fn configure_boot_fpu(vcpu: &VcpuFd) -> Result<(), MicrovmError> {
 }
 
 #[cfg(target_arch = "x86_64")]
+/// Provides the inject hypervisor timing cpuid operation.
 pub(super) fn inject_hypervisor_timing_cpuid(
     entries: &mut Vec<kvm_cpuid_entry2>,
     tsc_khz: u32,

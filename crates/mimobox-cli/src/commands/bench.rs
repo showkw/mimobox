@@ -6,6 +6,7 @@ use crate::capture::capture_benchmark_output;
 use crate::{DEFAULT_BENCH_ITERATIONS, DEFAULT_POOL_SIZE};
 use tracing::info;
 
+/// Handles the bench request.
 pub(crate) fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
     info!(
         target = ?args.target,

@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::Os)
         .timeout(std::time::Duration::from_secs(10))
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     let result = sandbox.execute("/bin/echo configured")?;
     assert_eq!(result.exit_code, Some(0));
@@ -138,7 +138,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     // Note: requires `vm` feature + Linux
     let pool_config = mimobox_vm::VmPoolConfig {
         min_size: 1,
@@ -165,7 +165,7 @@ Executes a command inside the sandbox and waits for completion. The command stri
 - `SdkError::Config` if the command string has mismatched quotes.
 - `SdkError::BackendUnavailable` if the required backend feature is not enabled.
 - `SdkError::Sandbox` with `CommandTimeout` if the command exceeds the configured timeout.
-- `SdkError::Sandbox` with `CommandExit(code)` if the command exits with a non-zero code.
+- Non-zero process exit is normally returned in `ExecuteResult.exit_code`; it is not automatically raised as an error by the SDK wrapper.
 
 ```rust
 use mimobox_sdk::Sandbox;
@@ -213,10 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::execute_with_env`
 
-*(requires `vm` feature for native support; env injection via `execute()` is available on all backends in Python SDK and CLI)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn execute_with_env(
     &mut self,
     command: &str,
@@ -224,14 +221,11 @@ pub fn execute_with_env(
 ) -> Result<ExecuteResult, SdkError>
 ```
 
-Executes a command with additional environment variables injected into the microVM guest. Only available on the microVM backend.
+Executes a command with additional environment variables. The microVM backend passes these as native guest execution options; other backends use a safe argv wrapper where supported.
 
 ### `Sandbox::execute_with_timeout`
 
-*(requires `vm` feature for per-command timeout; global timeout is available on all backends)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn execute_with_timeout(
     &mut self,
     command: &str,
@@ -243,10 +237,7 @@ Executes a command with a per-call timeout override. This overrides the global `
 
 ### `Sandbox::execute_with_env_and_timeout`
 
-*(requires `vm` feature for native env injection and per-command timeout; env injection via `execute()` is available on all backends in Python SDK and CLI; global timeout is available on all backends)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn execute_with_env_and_timeout(
     &mut self,
     command: &str,
@@ -265,7 +256,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     let mut env = HashMap::new();
     env.insert("MY_VAR".to_string(), "hello".to_string());
@@ -282,14 +273,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::execute_with_cwd`
 
-*(requires `vm` feature for native support; cwd via `execute()` is available on all backends in Python SDK and CLI)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn execute_with_cwd(&mut self, command: &str, cwd: &str) -> Result<ExecuteResult, SdkError>
 ```
 
-Executes a command with a working directory override inside the microVM guest. The `cwd` path must exist in the guest filesystem before the command starts.
+Executes a command with a working directory override. The `cwd` path must be absolute and must exist in the selected backend before the command starts. The microVM backend passes `cwd` as a native guest option; other backends use a safe argv wrapper where supported.
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox};
@@ -297,7 +285,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.execute("/bin/mkdir -p /workspace")?;
     sandbox.write_file("/workspace/input.txt", b"hello")?;
@@ -310,8 +298,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::stream_execute`
 
-*(requires `vm` feature + Linux)*
-
 ```rust
 pub fn stream_execute(
     &mut self,
@@ -319,11 +305,11 @@ pub fn stream_execute(
 ) -> Result<std::sync::mpsc::Receiver<StreamEvent>, SdkError>
 ```
 
-Executes a command and returns a channel receiver for streaming output events. Only available on the microVM backend.
+Executes a command and returns a channel receiver for output events. The microVM backend can stream backend events as they arrive. OS, macOS, and Wasm backends return result-derived events after the command completes.
 
 **Use cases**: Long-running commands, real-time log processing, Agent tasks that consume output incrementally.
 
-**Errors**: Returns `UnsupportedPlatform` on non-microVM backends.
+**Errors**: Backend initialization, parsing, timeout, and sandbox errors are returned as `SdkError`. A backend may still return `UnsupportedPlatform` if its selected implementation cannot provide the requested capability.
 
 ```rust
 use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
@@ -331,7 +317,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox, StreamEvent};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     let rx = sandbox.stream_execute("/bin/sh -c 'echo start; sleep 1; echo done'")?;
     for event in rx.iter() {
@@ -364,7 +350,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.wait_ready(Duration::from_secs(30))?;
     let result = sandbox.execute("/bin/echo ready")?;
@@ -397,14 +383,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::read_file`
 
-*(requires `vm` feature + Linux)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SdkError>
 ```
 
-Reads a file from inside the sandbox guest filesystem. The file is transferred over the serial control channel.
+Reads a file from inside the sandbox guest filesystem. The method is always present in the SDK API, but runtime support is backend-dependent. The microVM backend transfers bytes over the guest control channel; unsupported backends return `UnsupportedPlatform`.
 
 **Errors**: Returns `FileNotFound` if the path does not exist, `FilePermissionDenied` if access is denied.
 
@@ -414,7 +397,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.write_file("/tmp/test.txt", b"hello")?;
     let content = sandbox.read_file("/tmp/test.txt")?;
@@ -426,14 +409,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::write_file`
 
-*(requires `vm` feature + Linux)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SdkError>
 ```
 
-Writes a file into the sandbox guest filesystem.
+Writes a file into the sandbox guest filesystem. The method is always present in the SDK API, but runtime support is backend-dependent. The microVM backend currently provides the primary implementation; unsupported backends return `UnsupportedPlatform`.
 
 ### `Sandbox::list_dir`
 
@@ -441,15 +421,18 @@ Writes a file into the sandbox guest filesystem.
 pub fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SdkError>
 ```
 
-Lists directory entries inside the sandbox filesystem. Supported by OS-level and microVM backends.
+Lists directory entries inside the sandbox filesystem. The method is always present in the SDK API. Runtime support is backend-dependent: microVM and Wasm can provide directory operations; OS-level backends currently return `UnsupportedPlatform`.
 
 **Errors**: Returns `FileNotFound` if the path does not exist, `FilePermissionDenied` if access is denied.
 
 ```rust
-use mimobox_sdk::Sandbox;
+use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sandbox = Sandbox::new()?;
+    let config = Config::builder()
+        .isolation(IsolationLevel::MicroVm)
+        .build()?;
+    let mut sandbox = Sandbox::with_config(config)?;
     sandbox.write_file("/tmp/example.txt", b"hello")?;
     let entries = sandbox.list_dir("/tmp")?;
     for entry in entries {
@@ -462,10 +445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### `Sandbox::http_request`
 
-*(requires `vm` feature + Linux)*
-
 ```rust
-#[cfg(feature = "vm")]
 pub fn http_request(
     &mut self,
     method: &str,
@@ -475,7 +455,7 @@ pub fn http_request(
 ) -> Result<HttpResponse, SdkError>
 ```
 
-Sends an HTTP request through the host-side controlled proxy. The request is executed by the host on behalf of the sandbox guest.
+Sends an HTTP request through the host-side controlled proxy. The method is always present in the SDK API, but runtime support currently requires the microVM HTTP proxy path; unsupported backends return `UnsupportedPlatform`.
 
 **Important**: 
 - Only HTTPS URLs are supported.
@@ -492,7 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
         .allowed_http_domains(["api.github.com"])
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     let response = sandbox.http_request(
         "GET",
@@ -554,7 +534,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.execute("/bin/echo setup")?;
     let snapshot = sandbox.snapshot()?;
@@ -592,7 +572,7 @@ use mimobox_sdk::{Config, IsolationLevel, Sandbox};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let mut sandbox = Sandbox::with_config(config)?;
     sandbox.execute("/bin/echo parent")?;
     let mut child = sandbox.fork()?;
@@ -808,9 +788,11 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 | `cpu_quota_us` | `Option<u64>` | `None` | CPU quota in microseconds per period. `None` means unlimited |
 | `cpu_period_us` | `u64` | `100000` | CPU quota period in microseconds (100ms) |
 | `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths |
-| `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write mount paths |
+| `fs_readwrite` | `Vec<PathBuf>` | `[]` | Read-write mount paths |
+| `sandbox_tmp_dir` | `Option<PathBuf>` | `None` | Optional sandbox temporary directory appended to read-write paths during backend conversion |
 | `env_vars` | `HashMap<String, String>` | `{}` | Persistent environment variables set at sandbox creation. Applied to every subsequent command. Security-critical names are blocked (see below) |
 | `allowed_http_domains` | `Vec<String>` | `[]` | HTTP proxy domain whitelist |
+| `http_acl` | `HttpAclPolicy` | empty allow/deny rules | HTTP proxy method/host/path ACL policy |
 | `allow_fork` | `bool` | `false` | Allow child process creation |
 | `max_processes` | `Option<u32>` | `None` | Maximum process count per sandbox (cgroup v2 pids.max). `None` uses backend default |
 | `namespace_degradation` | `NamespaceDegradation` | `FailClosed` | Namespace degradation policy: `FailClosed` (fail on any namespace error) or `AllowDegradation` (warn and continue) |
@@ -818,12 +800,15 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 | `vm_memory_mb` | `u32` | `256` | microVM guest memory in MiB |
 | `kernel_path` | `Option<PathBuf>` | `None` | Custom microVM kernel path |
 | `rootfs_path` | `Option<PathBuf>` | `None` | Custom microVM rootfs path |
+| `vm_security_profile` | `VmSecurityProfile` | `Secure` | microVM kernel security profile *(requires `vm` feature)* |
 
 ### Key behaviors
 
 - **`memory_limit_mb` vs `vm_memory_mb`**: For the microVM backend, the effective guest memory is `min(memory_limit_mb, vm_memory_mb)`.
 - **`timeout` precision**: Timeout is rounded up to whole seconds internally. For example, `1500ms` becomes `2s`.
-- **`allowed_http_domains`**: Supports glob patterns like `*.openai.com`. Combined with `NetworkPolicy::AllowDomains`.
+- **`fs_readwrite` and `sandbox_tmp_dir`**: `fs_readwrite` defaults to an empty list. If `sandbox_tmp_dir` is configured, it is appended to the backend read-write path list during conversion.
+- **`allowed_http_domains`**: Supports exact hosts and leading wildcard domains like `*.openai.com`. It does not support arbitrary glob syntax.
+- **`http_acl`**: ACL rules support methods or `*`, exact hosts or leading wildcard hosts, and exact paths, `/*`, or prefix paths ending in `/*`.
 - **`MicrovmConfig.memory_mb`**: The default value (256 MiB) is unified with `Config.vm_memory_mb` to ensure consistency between the SDK-level and backend-level defaults.
 - **`env_vars` merge priority** (low to high): backend built-in minimum < `env_vars` (persistent) < per-command `env` parameter.
 - **`env_vars` security**: The following environment variable names are blocked at `build()` time to prevent sandbox escape or baseline environment override: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `HOME`, `TMPDIR`, `PWD`, `SHELL`, `USER`, `LOGNAME`. Keys containing `=`, NUL, or spaces, or values containing NUL, are also rejected.
@@ -863,24 +848,30 @@ Fluent builder for constructing `Config` instances.
 | `cpu_period(period_us)` | `u64` | Set CPU quota period in microseconds |
 | `fs_readonly(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-only mount paths |
 | `fs_readwrite(paths)` | `impl IntoIterator<Item = impl Into<PathBuf>>` | Set read-write mount paths |
+| `sandbox_tmp_dir(path)` | `impl Into<PathBuf>` | Set the sandbox temporary directory |
 | `allow_fork(allow)` | `bool` | Allow child process creation |
 | `max_processes(processes)` | `u32` | Set maximum process count per sandbox |
 | `namespace_degradation(policy)` | `NamespaceDegradation` | Set namespace degradation policy |
 | `allowed_http_domains(domains)` | `impl IntoIterator<Item = impl Into<String>>` | Set HTTP proxy domain whitelist |
+| `http_acl_allow_str(rules)` | `&[&str]` | Parse and append HTTP ACL allow rules |
+| `http_acl_allow(rules)` | `Vec<HttpAclRule>` | Set parsed HTTP ACL allow rules |
+| `http_acl_deny_str(rules)` | `&[&str]` | Parse and append HTTP ACL deny rules |
+| `http_acl_deny(rules)` | `Vec<HttpAclRule>` | Set parsed HTTP ACL deny rules |
 | `vm_vcpu_count(count)` | `u8` | Set microVM vCPU count |
 | `vm_memory_mb(mb)` | `u32` | Set microVM guest memory in MiB |
 | `kernel_path(path)` | `impl Into<PathBuf>` | Set microVM kernel image path |
 | `rootfs_path(path)` | `impl Into<PathBuf>` | Set microVM rootfs path |
+| `vm_security_profile(profile)` | `mimobox_vm::VmSecurityProfile` | Set the microVM host-side seccomp profile |
 | `env_var(key, value)` | `impl Into<String>, impl Into<String>` | Add a single persistent environment variable |
 | `env_vars(vars)` | `HashMap<String, String>` | Set all persistent environment variables (replaces existing) |
 | `no_timeout()` | - | Remove timeout, allow unlimited execution |
-| `build()` | - | Produce final `Config` |
+| `build()` | - | Validate and return `Result<Config, SdkError>` |
 
 ```rust
 use std::time::Duration;
 use mimobox_sdk::{Config, IsolationLevel, NetworkPolicy, TrustLevel};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
         .trust_level(TrustLevel::Untrusted)
@@ -895,10 +886,11 @@ fn main() {
         .vm_memory_mb(256)
         .kernel_path("/opt/mimobox/vmlinux")
         .rootfs_path("/opt/mimobox/rootfs.cpio.gz")
-        .build();
+        .build()?;
 
     assert_eq!(config.vm_vcpu_count, 2);
     assert_eq!(config.kernel_path, Some(std::path::PathBuf::from("/opt/mimobox/vmlinux")));
+    Ok(())
 }
 ```
 
@@ -1083,7 +1075,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## FileType / DirEntry
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileType {
     File,
     Dir,
@@ -1091,7 +1084,8 @@ pub enum FileType {
     Other,
 }
 
-#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirEntry {
     pub name: String,
     pub file_type: FileType,
@@ -1260,7 +1254,7 @@ use mimobox_sdk::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_config = Config::builder()
         .isolation(IsolationLevel::MicroVm)
-        .build();
+        .build()?;
     let pool_config = RestorePoolConfig {
         pool_size: 2,
         base_config,
@@ -1269,7 +1263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Take a snapshot from a running sandbox
     let mut sandbox = Sandbox::with_config(
-        Config::builder().isolation(IsolationLevel::MicroVm).build()
+        Config::builder().isolation(IsolationLevel::MicroVm).build()?
     )?;
     sandbox.execute("/bin/echo setup")?;
     let snapshot = sandbox.snapshot()?;
@@ -1394,7 +1388,7 @@ pub enum SdkError {
         message: String,
         suggestion: Option<String>,
     },
-    #[error("backend unavailable: {0}")]
+    #[error("backend unavailable: {0} (enable the corresponding feature)")]
     BackendUnavailable(&'static str),
     #[error("config error: {0}")]
     Config(String),
@@ -1426,7 +1420,9 @@ pub enum ErrorCode {
     FileNotFound,
     FilePermissionDenied,
     FileTooLarge,
+    NotDirectory,
     HttpDeniedHost,
+    HttpDeniedAcl,
     HttpTimeout,
     HttpBodyTooLarge,
     HttpConnectFail,
@@ -1452,7 +1448,9 @@ Each variant has a stable string representation via `as_str()`:
 | `FileNotFound` | `"file_not_found"` | Target file does not exist |
 | `FilePermissionDenied` | `"file_permission_denied"` | Insufficient file permissions |
 | `FileTooLarge` | `"file_too_large"` | File or transfer exceeds size limit |
+| `NotDirectory` | `"not_directory"` | Target path is not a directory |
 | `HttpDeniedHost` | `"http_denied_host"` | Domain not in whitelist |
+| `HttpDeniedAcl` | `"http_denied_acl"` | HTTP proxy request denied by ACL rule |
 | `HttpTimeout` | `"http_timeout"` | HTTP request timed out |
 | `HttpBodyTooLarge` | `"http_body_too_large"` | Response body exceeds limit |
 | `HttpConnectFail` | `"http_connect_fail"` | Failed to establish connection |
@@ -1483,6 +1481,11 @@ pub trait Sandbox {
     fn create_pty(&mut self, config: PtyConfig) -> Result<Box<dyn PtySession>, SandboxError>;
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError>;
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), SandboxError>;
+    fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, SandboxError>;
+    fn file_exists(&mut self, path: &str) -> Result<bool, SandboxError>;
+    fn remove_file(&mut self, path: &str) -> Result<(), SandboxError>;
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), SandboxError>;
+    fn stat(&mut self, path: &str) -> Result<FileStat, SandboxError>;
     fn snapshot(&mut self) -> Result<SandboxSnapshot, SandboxError>;
     fn fork(&mut self) -> Result<Self, SandboxError> where Self: Sized;
     fn destroy(self) -> Result<(), SandboxError>;
@@ -1509,6 +1512,8 @@ pub struct SandboxConfig {
     pub max_processes: Option<u32>,
     pub namespace_degradation: NamespaceDegradation,
     pub allowed_http_domains: Vec<String>,
+    pub http_acl: HttpAclPolicy,
+    pub env_vars: HashMap<String, String>,
 }
 ```
 
@@ -1523,12 +1528,19 @@ pub enum SandboxError {
     MountFailed(String),
     LandlockFailed(String),
     SeccompFailed(String),
-    ExecutionFailed(String),
+    ExecutionFailed {
+        kind: ExecutionFailureKind,
+        message: String,
+    },
     InvalidSnapshot,
     Timeout,
     PipeError(String),
     Syscall(String),
     Io(std::io::Error),
+    WithSuggestion {
+        error: Box<SandboxError>,
+        suggestion: Option<String>,
+    },
 }
 ```
 

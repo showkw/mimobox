@@ -201,6 +201,7 @@ pub(in crate::kvm) struct VsockCommandChannel {
 }
 
 impl VsockCommandChannel {
+    /// Creates a new instance.
     pub(in crate::kvm) fn new() -> Result<Self, MicrovmError> {
         // SAFETY: `socket` only asks the kernel for an AF_VSOCK stream fd and does not
         // directly operate on Rust memory.
@@ -251,10 +252,12 @@ impl VsockCommandChannel {
         })
     }
 
+    /// Returns whether the connected condition holds.
     pub(in crate::kvm) fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
 
+    /// Provides the accept connection operation.
     pub(in crate::kvm) fn accept_connection(
         &mut self,
         timeout: Duration,
@@ -315,6 +318,7 @@ impl VsockCommandChannel {
         }
     }
 
+    /// Sends the command payload.
     pub(in crate::kvm) fn send_command(&self, cmd: &[u8]) -> Result<(), MicrovmError> {
         let stream = self
             .stream
@@ -329,6 +333,7 @@ impl VsockCommandChannel {
         Ok(())
     }
 
+    /// Receives the result payload.
     pub(in crate::kvm) fn recv_result(&self) -> Result<GuestCommandResult, MicrovmError> {
         let stream = self
             .stream
@@ -349,6 +354,7 @@ impl VsockCommandChannel {
         })
     }
 
+    /// Provides the probe round trip operation.
     pub(in crate::kvm) fn probe_round_trip(&self, timeout: Duration) -> Result<(), MicrovmError> {
         let stream = self
             .stream

@@ -402,6 +402,7 @@ impl Config {
 
     #[cfg(feature = "vm")]
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Provides the to microvm config operation.
     pub(crate) fn to_microvm_config(&self) -> Result<mimobox_vm::MicrovmConfig, SdkError> {
         let defaults = mimobox_vm::MicrovmConfig::default();
         let memory_mb = resolve_vm_memory_mb(self)?;

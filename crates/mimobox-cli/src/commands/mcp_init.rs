@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+/// Handles the mcp init request.
 pub(crate) fn handle_mcp_init(args: McpInitArgs) -> Result<(), CliError> {
     let clients = if args.all {
         vec![
@@ -32,6 +33,7 @@ pub(crate) fn handle_mcp_init(args: McpInitArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Provides the configure mcp client operation.
 pub(crate) fn configure_mcp_client(
     client: McpClient,
     config_path: &Path,
@@ -61,6 +63,7 @@ pub(crate) fn configure_mcp_client(
     Ok(())
 }
 
+/// Provides the read existing mcp config operation.
 pub(crate) fn read_existing_mcp_config(config_path: &Path) -> Result<serde_json::Value, CliError> {
     match fs::read_to_string(config_path) {
         Ok(content) => {
@@ -83,6 +86,7 @@ pub(crate) fn read_existing_mcp_config(config_path: &Path) -> Result<serde_json:
     }
 }
 
+/// Provides the inject mcp config operation.
 pub(crate) fn inject_mcp_config(
     mut config: serde_json::Value,
     binary_path: &str,
@@ -118,6 +122,7 @@ pub(crate) fn inject_mcp_config(
     Ok(config)
 }
 
+/// Resolves the mimobox mcp binary value.
 pub(crate) fn resolve_mimobox_mcp_binary() -> String {
     let binary_name = "mimobox-mcp";
 
@@ -213,6 +218,7 @@ pub(crate) enum McpOs {
     Linux,
 }
 
+/// Returns the current mcp os value.
 pub(crate) fn current_mcp_os() -> McpOs {
     if cfg!(target_os = "macos") {
         McpOs::Macos
@@ -221,6 +227,7 @@ pub(crate) fn current_mcp_os() -> McpOs {
     }
 }
 
+/// Provides the mcp config path operation.
 pub(crate) fn mcp_config_path(client: McpClient, os: McpOs, home_dir: &Path) -> PathBuf {
     match client {
         McpClient::Claude => match os {
@@ -244,6 +251,7 @@ pub(crate) fn mcp_config_path(client: McpClient, os: McpOs, home_dir: &Path) -> 
 }
 
 impl McpClient {
+    /// Provides the display name operation.
     pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::Claude => "Claude",

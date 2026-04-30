@@ -20,6 +20,7 @@ use super::*;
 use crate::DEFAULT_MEMORY_MB;
 use crate::capture::capture_stderr_bytes;
 
+/// Handles the run request.
 pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     validate_resource_args(args.memory, args.timeout, args.vcpu_count)?;
     let run_command = resolve_run_command(args.command.clone(), args.argv.clone())?;
@@ -103,6 +104,7 @@ pub(crate) fn handle_run(args: RunArgs) -> Result<RunResponse, CliError> {
     })
 }
 
+/// Resolves the run execution mode value.
 pub(crate) fn resolve_run_execution_mode(backend: Backend) -> RunExecutionMode {
     match backend {
         Backend::Auto => RunExecutionMode::Sdk,
@@ -110,6 +112,7 @@ pub(crate) fn resolve_run_execution_mode(backend: Backend) -> RunExecutionMode {
     }
 }
 
+/// Handles the run via sdk request.
 pub(crate) fn handle_run_via_sdk(
     command: &str,
     memory: Option<u64>,
@@ -129,6 +132,7 @@ pub(crate) fn handle_run_via_sdk(
     handle_run_via_sdk_with(config, |sandbox| sandbox.execute(command))
 }
 
+/// Handles the run argv via sdk request.
 pub(crate) fn handle_run_argv_via_sdk(
     argv: &[String],
     memory: Option<u64>,
@@ -222,6 +226,7 @@ where
 }
 
 #[cfg(target_os = "linux")]
+/// Provides the execute os backend operation.
 pub(crate) fn execute_os_backend(
     config: SandboxConfig,
     argv: &[String],
@@ -231,6 +236,7 @@ pub(crate) fn execute_os_backend(
 }
 
 #[cfg(target_os = "macos")]
+/// Provides the execute os backend operation.
 pub(crate) fn execute_os_backend(
     config: SandboxConfig,
     argv: &[String],
@@ -240,6 +246,7 @@ pub(crate) fn execute_os_backend(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Provides the execute os backend operation.
 pub(crate) fn execute_os_backend(
     _config: SandboxConfig,
     _argv: &[String],
@@ -248,6 +255,7 @@ pub(crate) fn execute_os_backend(
 }
 
 #[cfg(feature = "wasm")]
+/// Provides the execute wasm backend operation.
 pub(crate) fn execute_wasm_backend(
     config: SandboxConfig,
     argv: &[String],
@@ -257,6 +265,7 @@ pub(crate) fn execute_wasm_backend(
 }
 
 #[cfg(not(feature = "wasm"))]
+/// Provides the execute wasm backend operation.
 pub(crate) fn execute_wasm_backend(
     _config: SandboxConfig,
     _argv: &[String],
@@ -265,6 +274,7 @@ pub(crate) fn execute_wasm_backend(
 }
 
 #[cfg(all(target_os = "linux", feature = "kvm"))]
+/// Provides the execute kvm backend operation.
 pub(crate) fn execute_kvm_backend(
     config: SandboxConfig,
     argv: &[String],
@@ -304,6 +314,7 @@ pub(crate) fn execute_kvm_backend(
 }
 
 #[cfg(not(all(target_os = "linux", feature = "kvm")))]
+/// Provides the execute kvm backend operation.
 pub(crate) fn execute_kvm_backend(
     _config: SandboxConfig,
     _argv: &[String],
@@ -312,6 +323,7 @@ pub(crate) fn execute_kvm_backend(
     Err(CliError::KvmFeatureDisabled)
 }
 
+/// Provides the execute with sandbox operation.
 pub(crate) fn execute_with_sandbox<S>(
     config: SandboxConfig,
     argv: &[String],
@@ -324,6 +336,7 @@ where
     })
 }
 
+/// Provides the execute with sandbox specific operation.
 pub(crate) fn execute_with_sandbox_specific<S, F>(
     config: SandboxConfig,
     argv: &[String],

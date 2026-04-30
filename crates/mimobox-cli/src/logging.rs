@@ -13,6 +13,7 @@ pub(crate) struct SharedFileWriter {
     pub(crate) file: Arc<Mutex<File>>,
 }
 
+/// Provides the init tracing operation.
 pub(crate) fn init_tracing() -> Result<(), CliError> {
     let log_dir = std::env::var("HOME")
         .map(|home| std::path::PathBuf::from(home).join(".mimobox").join("logs"))

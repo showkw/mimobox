@@ -20,6 +20,7 @@ use std::sync::Arc;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use std::sync::mpsc;
 
+/// Provides the destroy backend inner operation.
 pub(crate) fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError> {
     match inner {
         #[cfg(all(feature = "os", target_os = "linux"))]
@@ -51,12 +52,14 @@ pub(crate) fn destroy_backend_inner(inner: SandboxInner) -> Result<(), SdkError>
     }
 }
 
+/// Parses the command value.
 pub(crate) fn parse_command(command: &str) -> Result<Vec<String>, SdkError> {
     shlex::split(command).ok_or_else(|| {
         SdkError::Config("command parsing failed: mismatched shell-style quotes".to_string())
     })
 }
 
+/// Builds the code command value.
 pub(crate) fn build_code_command(language: &str, code: &str) -> Result<String, SdkError> {
     let quoted = shlex::try_quote(code).map_err(|_| {
         SdkError::Config("code contains characters that cannot be shell-escaped".to_string())
@@ -83,6 +86,7 @@ pub(crate) fn build_code_command(language: &str, code: &str) -> Result<String, S
     all(feature = "os", any(target_os = "linux", target_os = "macos")),
     all(feature = "vm", target_os = "linux")
 ))]
+/// Maps the pty create error value.
 pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
@@ -98,6 +102,7 @@ pub(crate) fn map_pty_create_error(error: mimobox_core::SandboxError) -> SdkErro
     }
 }
 
+/// Maps the pty session error value.
 pub(crate) fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::UnsupportedOperation(message) => SdkError::sandbox(
@@ -118,6 +123,7 @@ pub(crate) fn map_pty_session_error(error: mimobox_core::SandboxError) -> SdkErr
     }
 }
 
+/// Maps the snapshot bytes error value.
 pub(crate) fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> SdkError {
     match error {
         mimobox_core::SandboxError::InvalidSnapshot => SdkError::sandbox(
@@ -145,6 +151,7 @@ pub(crate) fn map_snapshot_bytes_error(error: mimobox_core::SandboxError) -> Sdk
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
+/// Provides the bridge vm stream operation.
 pub(crate) fn bridge_vm_stream(
     source: mpsc::Receiver<mimobox_vm::StreamEvent>,
 ) -> mpsc::Receiver<StreamEvent> {
@@ -166,11 +173,13 @@ pub(crate) fn bridge_vm_stream(
 }
 
 #[cfg(feature = "vm")]
+/// Returns whether to prepare vm pool.
 pub(crate) fn should_prepare_vm_pool(config: &Config) -> bool {
     matches!(resolve_isolation(config, ""), Ok(IsolationLevel::MicroVm))
 }
 
 #[cfg(feature = "vm")]
+/// Provides the initialize default vm pool operation.
 pub(crate) fn initialize_default_vm_pool(
     config: &Config,
 ) -> Result<Option<Arc<mimobox_vm::VmPool>>, SdkError> {
@@ -199,6 +208,7 @@ pub(crate) fn initialize_default_vm_pool(
 }
 
 #[cfg(feature = "vm")]
+/// Maps the http proxy error value.
 pub(crate) fn map_http_proxy_error(error: mimobox_vm::HttpProxyError) -> SdkError {
     use mimobox_vm::HttpProxyError;
 
@@ -248,6 +258,7 @@ pub(crate) fn map_http_proxy_error(error: mimobox_vm::HttpProxyError) -> SdkErro
 }
 
 #[cfg(feature = "vm")]
+/// Maps the microvm error value.
 pub(crate) fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
     use mimobox_vm::MicrovmError;
 
@@ -329,6 +340,7 @@ pub(crate) fn map_microvm_error(error: mimobox_vm::MicrovmError) -> SdkError {
 }
 
 #[cfg(feature = "vm")]
+/// Maps the pool error value.
 pub(crate) fn map_pool_error(error: mimobox_vm::PoolError) -> SdkError {
     match error {
         mimobox_vm::PoolError::InvalidConfig { min_size, max_size } => SdkError::Config(format!(
@@ -342,6 +354,7 @@ pub(crate) fn map_pool_error(error: mimobox_vm::PoolError) -> SdkError {
 }
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
+/// Maps the restore pool error value.
 pub(crate) fn map_restore_pool_error(error: mimobox_vm::RestorePoolError) -> SdkError {
     match error {
         mimobox_vm::RestorePoolError::InvalidConfig { min_size, max_size } => SdkError::Config(

@@ -29,6 +29,7 @@ struct VmAsset {
     size: u64,
 }
 
+/// Downloads missing VM assets into the target directory.
 pub fn download_vm_assets(assets_dir: &Path, writer: &mut impl Write) -> Result<bool, String> {
     let client = build_client()?;
     let manifest = match fetch_manifest(&client) {
