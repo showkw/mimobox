@@ -217,7 +217,7 @@ mod tests {
         update_ready(id, true);
         unregister(id);
 
-        assert!(list().is_empty());
+        assert!(get(id).is_none());
     }
 
     #[test]
