@@ -93,7 +93,7 @@ Public methods:
 ```python
 execute(command, env=None, timeout=None, cwd=None) -> ExecuteResult
 execute_code(language, code, *, env=None, timeout=None, cwd=None) -> ExecuteResult
-stream_execute(command) -> StreamIterator
+stream_execute(command, env=None, timeout=None, cwd=None) -> StreamIterator
 list_dir(path) -> list[DirEntry]
 read_file(path) -> bytes
 write_file(path, data: bytes)
@@ -101,7 +101,7 @@ snapshot -> SnapshotOps
 fork() -> Sandbox
 http_request(method, url, headers=None, body=None) -> HttpResponse
 wait_ready(timeout_secs=None)
-is_ready() -> bool
+is_ready -> bool
 close()
 ```
 
@@ -112,9 +112,9 @@ exec(argv, env=None, timeout=None, cwd=None) -> ExecuteResult
 stream_exec(argv) -> StreamIterator
 active_isolation -> str | None
 id -> str | None
-info() -> SandboxInfo
+info -> SandboxInfo
 env_vars -> dict[str, str]
-metrics() -> SandboxMetrics
+metrics -> SandboxMetrics
 make_dir(path)
 stat(path) -> FileStat
 file_exists(path) -> bool
@@ -470,10 +470,10 @@ Notes:
 - Closed sandboxes are automatically unregistered.
 - Useful for orchestration, dashboard displays, and resource auditing.
 
-### 3.15 `Sandbox.metrics()`
+### 3.15 `Sandbox.metrics`
 
 ```python
-metrics() -> SandboxMetrics
+metrics -> SandboxMetrics
 ```
 
 Returns runtime resource usage metrics from the most recent command execution. If no command has been executed yet, all fields return `None`.
@@ -486,7 +486,7 @@ from mimobox import Sandbox
 with Sandbox() as sb:
     result = sb.execute("/bin/echo hello")
 
-    m = sb.metrics()
+    m = sb.metrics
     if m.memory_usage_bytes is not None:
         print(f"memory: {m.memory_usage_bytes} bytes")
     if m.cpu_time_user_us is not None:
@@ -507,10 +507,10 @@ Notes:
 - Not all backends populate every field.
 - `collected_at` is exposed as seconds elapsed since metric collection.
 
-### 3.16 `Sandbox.info()`
+### 3.16 `Sandbox.info`
 
 ```python
-info() -> SandboxInfo
+info -> SandboxInfo
 ```
 
 Returns a registry snapshot for the current sandbox. It is equivalent to
@@ -522,7 +522,7 @@ Example:
 from mimobox import Sandbox
 
 with Sandbox() as sb:
-    info = sb.info()
+    info = sb.info
     print(info.id)
     print(info.configured_isolation)
     print(info.active_isolation)
@@ -564,7 +564,7 @@ Example:
 from mimobox import Sandbox
 
 with Sandbox() as sb:
-    info = sb.info()
+    info = sb.info
     print(info.id)
     print(info.configured_isolation)
     print(info.is_ready)
