@@ -6,6 +6,8 @@ use crate::capture::capture_benchmark_output;
 use crate::{DEFAULT_BENCH_ITERATIONS, DEFAULT_POOL_SIZE};
 use tracing::info;
 
+const MAX_BENCH_RAW_OUTPUT_BYTES: usize = 10 * 1024;
+
 /// Handles the bench request.
 pub(crate) fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
     info!(
@@ -44,7 +46,22 @@ pub(crate) fn handle_bench(args: BenchArgs) -> Result<BenchResponse, CliError> {
         target: args.target,
         pool_size: DEFAULT_POOL_SIZE,
         iterations: DEFAULT_BENCH_ITERATIONS,
-        raw_output: raw_output.trim().to_string(),
+        raw_output: truncate_bench_raw_output(raw_output.trim()),
         note,
     })
+}
+
+fn truncate_bench_raw_output(raw_output: &str) -> String {
+    if raw_output.len() <= MAX_BENCH_RAW_OUTPUT_BYTES {
+        return raw_output.to_string();
+    }
+
+    let truncate_at = raw_output
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= MAX_BENCH_RAW_OUTPUT_BYTES)
+        .last()
+        .unwrap_or(0);
+
+    format!("{}\n... [truncated]", &raw_output[..truncate_at])
 }

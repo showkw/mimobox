@@ -132,7 +132,20 @@ pub(crate) fn resolve_mimobox_mcp_binary() -> String {
                 .map(|path| path.join(binary_name))
                 .find(|candidate| candidate.is_file())
         })
-        .map(|path| fs::canonicalize(&path).unwrap_or(path))
+        .map(|path| match fs::canonicalize(&path) {
+            Ok(canonical_path) => {
+                if canonical_path != path {
+                    tracing::info!(
+                        original_path = %path.display(),
+                        resolved_path = %canonical_path.display(),
+                        "resolved mimobox-mcp binary symlink"
+                    );
+                }
+
+                canonical_path
+            }
+            Err(_) => path,
+        })
     else {
         return binary_name.to_string();
     };
