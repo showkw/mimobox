@@ -1048,7 +1048,10 @@ fn apply_security_policies_and_exec(
                         || libc::sigaddset(&mut mask, libc::SIGTERM) != 0
                         || libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) != 0
                     {
-                        write_error(2, "sigprocmask(SIG_BLOCK, SIGTERM) failed in intermediate process");
+                        write_error(
+                            2,
+                            "sigprocmask(SIG_BLOCK, SIGTERM) failed in intermediate process",
+                        );
                         libc::_exit(125);
                     }
                 }

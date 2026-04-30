@@ -489,7 +489,6 @@ impl MimoboxServer {
 
         result.map_err(format_sdk_error)
     }
-
 }
 
 impl Default for MimoboxServer {
@@ -1600,9 +1599,7 @@ fn validate_http_url(url: &str) -> Result<(), String> {
         .ok_or_else(|| "URL must include a scheme (http:// or https://)".to_string())?;
 
     if !matches!(scheme, "http" | "https") {
-        return Err(format!(
-            "URL scheme must be http or https, got '{scheme}'"
-        ));
+        return Err(format!("URL scheme must be http or https, got '{scheme}'"));
     }
 
     // 提取 host 部分（去掉 path/query/fragment 和 port）

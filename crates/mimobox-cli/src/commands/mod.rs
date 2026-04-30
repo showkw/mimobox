@@ -623,9 +623,7 @@ pub(crate) fn resolve_run_deny_network(args: &RunArgs) -> bool {
 pub(crate) fn normalize_timeout(timeout: Option<u64>) -> Option<u64> {
     match timeout {
         Some(0) => {
-            tracing::warn!(
-                "timeout=0 disables execution timeout; commands may run indefinitely"
-            );
+            tracing::warn!("timeout=0 disables execution timeout; commands may run indefinitely");
             None
         }
         Some(value) => Some(value),
