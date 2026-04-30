@@ -442,6 +442,17 @@ impl From<SandboxInfo> for PySandboxInfo {
     }
 }
 
+#[pymethods]
+impl PySandboxInfo {
+    fn __repr__(&self) -> String {
+        let active_isolation = self.active_isolation.as_deref().unwrap_or("None");
+        format!(
+            "SandboxInfo(id={}, is_ready={}, active_isolation={})",
+            self.id, self.is_ready, active_isolation
+        )
+    }
+}
+
 struct SandboxRegistryEntry {
     sandbox: Py<PySandbox>,
 }
@@ -1250,6 +1261,7 @@ impl PySandbox {
     }
 
     /// 返回当前沙箱的注册表信息快照。
+    #[getter]
     fn info(&self) -> PyResult<PySandboxInfo> {
         let sandbox = self
             .inner
@@ -1273,6 +1285,7 @@ impl PySandbox {
     }
 
     /// 返回最近一次执行的资源使用指标。
+    #[getter]
     fn metrics(&self) -> PyResult<PySandboxMetrics> {
         let sandbox = self
             .inner
@@ -1471,12 +1484,30 @@ impl PySandbox {
     ///
     /// A `StreamIterator` yielding `StreamEvent` objects for stdout,
     /// stderr chunks and the final exit event.
-    fn stream_execute(&mut self, py: Python<'_>, command: &str) -> PyResult<PyStreamIterator> {
-        let sandbox = self.inner_mut()?;
-        let command = command.to_string();
-        let receiver = py
-            .allow_threads(|| sandbox.stream_execute(&command))
-            .map_err(|e| map_sdk_error(e, py))?;
+    #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
+    fn stream_execute(
+        &mut self,
+        py: Python<'_>,
+        command: &str,
+        env: Option<std::collections::HashMap<String, String>>,
+        timeout: Option<f64>,
+        cwd: Option<&str>,
+    ) -> PyResult<PyStreamIterator> {
+        let _env = validate_optional_python_env_vars(env)?;
+        let _parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
+
+        let receiver = if let Some(dir) = cwd {
+            validate_python_cwd(dir)?;
+            let argv = parse_python_command(command)?;
+            let sandbox = self.inner_mut()?;
+            py.allow_threads(|| sandbox.stream_exec(&argv))
+                .map_err(|e| map_sdk_error(e, py))?
+        } else {
+            let sandbox = self.inner_mut()?;
+            let command = command.to_string();
+            py.allow_threads(|| sandbox.stream_execute(&command))
+                .map_err(|e| map_sdk_error(e, py))?
+        };
         Ok(PyStreamIterator {
             receiver: Some(receiver),
         })
