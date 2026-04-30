@@ -25,6 +25,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const MAX_PYTHON_TIMEOUT_SECS: f64 = 86_400.0;
+const MAX_PYTHON_ENV_VARS: usize = 64;
+const MAX_PYTHON_ENV_KEY_BYTES: usize = 128;
+const MAX_PYTHON_ENV_VALUE_BYTES: usize = 8 * 1024;
+const MAX_PYTHON_ENV_TOTAL_BYTES: usize = 64 * 1024;
 
 fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     use pyo3::types::PyBytes;
@@ -396,6 +400,8 @@ struct PySandboxInfo {
     #[pyo3(get)]
     is_ready: bool,
     #[pyo3(get)]
+    configured_isolation: Option<String>,
+    #[pyo3(get)]
     active_isolation: Option<String>,
 }
 
@@ -404,6 +410,10 @@ impl From<SandboxInfo> for PySandboxInfo {
         Self {
             id: info.id.to_string(),
             is_ready: info.is_ready,
+            configured_isolation: info
+                .configured_isolation
+                .map(format_python_isolation)
+                .map(str::to_string),
             active_isolation: info
                 .active_isolation
                 .map(format_python_isolation)
@@ -1191,6 +1201,29 @@ impl PySandbox {
         self.inner.as_ref().map(|sandbox| sandbox.id().to_string())
     }
 
+    /// 返回当前沙箱的注册表信息快照。
+    fn info(&self) -> PyResult<PySandboxInfo> {
+        let sandbox = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))?;
+        Ok(sandbox.info().into())
+    }
+
+    /// 返回创建沙箱时配置的持久环境变量副本。
+    #[getter]
+    fn env_vars<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let sandbox = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Sandbox has been closed"))?;
+        let dict = PyDict::new(py);
+        for (key, value) in sandbox.env_vars() {
+            dict.set_item(key, value)?;
+        }
+        Ok(dict)
+    }
+
     /// 返回最近一次执行的资源使用指标。
     fn metrics(&self) -> PyResult<PySandboxMetrics> {
         let sandbox = self
@@ -1277,6 +1310,7 @@ impl PySandbox {
         timeout: Option<f64>,
         cwd: Option<&str>,
     ) -> PyResult<PyExecuteResult> {
+        let env = validate_optional_python_env_vars(env)?;
         let sandbox = self.inner_mut()?;
         let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
         let result = if let Some(dir) = cwd {
@@ -1322,6 +1356,7 @@ impl PySandbox {
             return Err(PyValueError::new_err("argv must not be empty"));
         }
 
+        let env = validate_optional_python_env_vars(env)?;
         let sandbox = self.inner_mut()?;
         let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
 
@@ -1437,6 +1472,7 @@ impl PySandbox {
         cwd: Option<String>,
         timeout: Option<f64>,
     ) -> PyResult<PyPtySession> {
+        validate_python_env_vars_quota(&env).map_err(PyValueError::new_err)?;
         let sandbox = self.inner_mut()?;
         let config = PtyConfig {
             command,
@@ -2004,10 +2040,64 @@ fn build_python_config(options: PythonConfigOptions<'_>) -> Result<Config, Strin
     }
 
     if let Some(env_vars) = options.env_vars {
+        validate_python_env_vars_quota(&env_vars)?;
         builder = builder.env_vars(env_vars);
     }
 
     builder.build().map_err(|e| e.to_string())
+}
+
+fn validate_optional_python_env_vars(
+    env_vars: Option<HashMap<String, String>>,
+) -> PyResult<Option<HashMap<String, String>>> {
+    if let Some(env_vars) = env_vars.as_ref() {
+        validate_python_env_vars_quota(env_vars).map_err(PyValueError::new_err)?;
+    }
+    Ok(env_vars)
+}
+
+fn validate_python_env_vars_quota(env_vars: &HashMap<String, String>) -> Result<(), String> {
+    if env_vars.len() > MAX_PYTHON_ENV_VARS {
+        return Err(format!(
+            "env_vars contains {} entries, maximum is {MAX_PYTHON_ENV_VARS}",
+            env_vars.len()
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    for (key, value) in env_vars {
+        validate_python_text_max_bytes("env var key", key, MAX_PYTHON_ENV_KEY_BYTES)?;
+        validate_python_text_max_bytes(
+            &format!("env var value for {key}"),
+            value,
+            MAX_PYTHON_ENV_VALUE_BYTES,
+        )?;
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+
+    if total_bytes > MAX_PYTHON_ENV_TOTAL_BYTES {
+        return Err(format!(
+            "env_vars total size is {total_bytes} bytes, maximum is {MAX_PYTHON_ENV_TOTAL_BYTES} bytes"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_python_text_max_bytes(
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), String> {
+    let len = value.len();
+    if len > max_bytes {
+        return Err(format!(
+            "{field} is {len} bytes, maximum is {max_bytes} bytes"
+        ));
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]

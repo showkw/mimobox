@@ -30,7 +30,6 @@ const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
 const FALLBACK_PAGE_SIZE_BYTES: u64 = 4096;
 const PROC_STAT_UTIME_INDEX: usize = 11;
-const PROC_STAT_STIME_INDEX: usize = 12;
 
 #[derive(Debug)]
 struct OutputCapture {
@@ -258,16 +257,16 @@ pub fn sample_metrics(pid: i32, memory_limit_mb: Option<u64>) -> SandboxMetrics 
         && let Some(close_paren) = stat_content.rfind(')')
     {
         // /proc/{pid}/stat 在 comm 后从 state 开始，utime/stime 分别是第 14/15 个原始字段。
-        let fields: Vec<&str> = stat_content[close_paren + 1..].split_whitespace().collect();
-        if fields.len() > PROC_STAT_STIME_INDEX {
-            let clk_tck = clock_ticks_per_second();
-            if let Some(clk_tck) = clk_tck {
-                if let Ok(utime) = fields[PROC_STAT_UTIME_INDEX].parse::<u64>() {
-                    metrics.cpu_time_user_us = Some(utime.saturating_mul(1_000_000) / clk_tck);
-                }
-                if let Ok(stime) = fields[PROC_STAT_STIME_INDEX].parse::<u64>() {
-                    metrics.cpu_time_system_us = Some(stime.saturating_mul(1_000_000) / clk_tck);
-                }
+        let mut fields = stat_content[close_paren + 1..].split_whitespace();
+        let utime = fields.nth(PROC_STAT_UTIME_INDEX);
+        let stime = fields.next();
+        if let (Some(utime), Some(stime), Some(clk_tck)) = (utime, stime, clock_ticks_per_second())
+        {
+            if let Ok(utime) = utime.parse::<u64>() {
+                metrics.cpu_time_user_us = Some(utime.saturating_mul(1_000_000) / clk_tck);
+            }
+            if let Ok(stime) = stime.parse::<u64>() {
+                metrics.cpu_time_system_us = Some(stime.saturating_mul(1_000_000) / clk_tck);
             }
         }
     }

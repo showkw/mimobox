@@ -92,7 +92,7 @@ Parameters:
 - `max_processes`: Maximum process count. Defaults to backend default (unlimited).
 - `trust_level`: Trust level: `"trusted"`, `"semi_trusted"`, or `"untrusted"`. Defaults to `"semi_trusted"`.
 - `network`: Network policy: `"deny_all"`, `"allow_domains"`, or `"allow_all"`. Defaults to `"deny_all"`.
-- `env_vars`: Optional dict of persistent environment variables set at sandbox creation. These are applied to every subsequent command. Security-critical names (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`) are blocked. Keys with `=`, NUL, or spaces, and values with NUL, are rejected.
+- `env_vars`: Optional dict of persistent environment variables set at sandbox creation. These are applied to every subsequent command. Security-critical and baseline names (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `HOME`, `TMPDIR`, `PWD`, `SHELL`, `USER`, `LOGNAME`) are blocked. Keys with `=`, NUL, or spaces, and values with NUL, are rejected. The Python layer also caps this input to 64 variables, 128 bytes per key, 8 KiB per value, and 64 KiB total.
 
 Public methods:
 
@@ -118,6 +118,8 @@ exec(argv, env=None, timeout=None, cwd=None) -> ExecuteResult
 stream_exec(argv) -> StreamIterator
 active_isolation -> str | None
 id -> str | None
+info() -> SandboxInfo
+env_vars -> dict[str, str]
 metrics() -> SandboxMetrics
 make_dir(path)
 stat(path) -> FileStat
@@ -511,7 +513,47 @@ Notes:
 - Not all backends populate every field.
 - `collected_at` is exposed as seconds elapsed since metric collection.
 
-### 3.16 `SandboxInfo`
+### 3.16 `Sandbox.info()`
+
+```python
+info() -> SandboxInfo
+```
+
+Returns a registry snapshot for the current sandbox. It is equivalent to
+searching `Sandbox.list()` by `sb.id`, but avoids the extra lookup in user code.
+
+Example:
+
+```python
+from mimobox import Sandbox
+
+with Sandbox() as sb:
+    info = sb.info()
+    print(info.id)
+    print(info.configured_isolation)
+    print(info.active_isolation)
+    print(info.is_ready)
+```
+
+### 3.17 `Sandbox.env_vars`
+
+```python
+env_vars -> dict[str, str]
+```
+
+Returns a copy of the persistent environment variables configured at sandbox
+creation. Backend built-in defaults such as `HOME` and `PATH` are not included.
+
+Example:
+
+```python
+from mimobox import Sandbox
+
+with Sandbox(env_vars={"MIMOBOX_MODE": "audit"}) as sb:
+    print(sb.env_vars["MIMOBOX_MODE"])
+```
+
+### 3.18 `SandboxInfo`
 
 `SandboxInfo` represents a snapshot of a sandbox instance's registration info. Returned by `Sandbox.list()`.
 
@@ -519,6 +561,7 @@ Attributes:
 
 - `id: str`: UUID string of the sandbox instance.
 - `is_ready: bool`: Whether the backend is initialized and ready.
+- `configured_isolation: str | None`: Configured isolation level string.
 - `active_isolation: str | None`: Active isolation level string, such as `"os"`, `"wasm"`, or `"microvm"`. `None` before the first command.
 
 Example:
@@ -529,11 +572,12 @@ from mimobox import Sandbox
 with Sandbox() as sb:
     info = sb.info()
     print(info.id)
+    print(info.configured_isolation)
     print(info.is_ready)
     print(info.active_isolation)
 ```
 
-### 3.17 `SandboxMetrics`
+### 3.19 `SandboxMetrics`
 
 `SandboxMetrics` represents runtime resource usage metrics. Returned by `Sandbox.metrics()`.
 
@@ -548,7 +592,7 @@ Attributes:
 - `io_write_bytes: int | None`: I/O write bytes.
 - `collected_at: float | None`: Seconds elapsed since metric collection.
 
-### 3.18 `env_vars` Parameter
+### 3.20 `env_vars` Parameter
 
 The `Sandbox` constructor accepts `env_vars` as an optional dict of persistent environment variables:
 
@@ -568,10 +612,11 @@ Notes:
 
 - `env_vars` are set at creation time and apply to every command.
 - Per-command `env` parameter takes precedence over `env_vars`.
-- Security-critical names are blocked: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`.
+- Security-critical and baseline names are blocked: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `HOME`, `TMPDIR`, `PWD`, `SHELL`, `USER`, `LOGNAME`.
+- Python input quotas: maximum 64 variables, 128 bytes per key, 8 KiB per value, and 64 KiB total.
 - Keys containing `=`, NUL, or spaces are rejected. Values containing NUL are rejected.
 
-### 3.19 `make_dir()`
+### 3.21 `make_dir()`
 
 ```python
 make_dir(path)
@@ -600,7 +645,7 @@ Notes:
 - Invalid paths such as empty strings, NUL bytes, or parent traversal raise `ValueError`.
 - A backend failure raises `SandboxError`.
 
-### 3.20 `FileStat`
+### 3.22 `FileStat`
 
 `FileStat` represents file metadata returned by `Sandbox.stat()` and
 `Sandbox.fs.stat()`.
@@ -637,7 +682,7 @@ Notes:
 - `modified_ms` can be `None` when the backend cannot provide a timestamp.
 - Use `is_file` and `is_dir` instead of deriving file type from `mode`.
 
-### 3.21 `stat()`
+### 3.23 `stat()`
 
 ```python
 stat(path) -> FileStat
@@ -671,7 +716,7 @@ Notes:
 - Missing paths can raise `FileNotFoundError`.
 - Permission or backend failures can raise `PermissionError` or `SandboxError`.
 
-### 3.22 `file_exists()`
+### 3.24 `file_exists()`
 
 ```python
 file_exists(path) -> bool
@@ -701,7 +746,7 @@ Notes:
 - Use `stat()` when you need file type, size, mode, or modification time.
 - Backend errors can still raise `SandboxError`.
 
-### 3.23 `remove_file()`
+### 3.25 `remove_file()`
 
 ```python
 remove_file(path)
@@ -732,7 +777,7 @@ Notes:
 - It is not a recursive directory delete operation.
 - Missing paths, non-empty directories, permission errors, or backend failures can raise an exception.
 
-### 3.24 `rename()`
+### 3.26 `rename()`
 
 ```python
 rename(from, to)
@@ -764,7 +809,7 @@ Notes:
 - Parent directories for the destination must already exist.
 - Permission errors or backend failures can raise an exception.
 
-### 3.25 `FileSystem`
+### 3.27 `FileSystem`
 
 `Sandbox.fs` provides a file system namespace for common file operations.
 
@@ -815,7 +860,7 @@ Notes:
 - `mkdir()` creates missing parent directories.
 - `copy()` copies files; use `rename()` when you want move semantics.
 
-### 3.26 `Process`
+### 3.28 `Process`
 
 `Sandbox.process` provides a process namespace for execution operations.
 
@@ -854,7 +899,7 @@ Notes:
 - A `list[str]` command delegates to `exec()` and uses argv-style execution.
 - `stream()` accepts only a shell command string and delegates to `stream_execute()`.
 
-### 3.27 `SnapshotOps`
+### 3.29 `SnapshotOps`
 
 `Sandbox.snapshot` provides a snapshot namespace. It is also callable for
 backward compatibility, so `sb.snapshot()` still captures a snapshot.
@@ -893,7 +938,7 @@ Notes:
 - `snapshot.fork()` delegates to `Sandbox.fork()` and returns an independent `Sandbox`.
 - Snapshot support depends on backend capabilities; microVM is the intended backend for full snapshot behavior.
 
-### 3.28 `Network`
+### 3.30 `Network`
 
 `Sandbox.network` provides a network namespace for HTTP proxy requests.
 
@@ -929,7 +974,7 @@ Notes:
 - `body` is `bytes | None`.
 - Requests are subject to `network`, `allowed_http_domains`, and HTTP ACL configuration.
 
-### 3.29 `PtySession`, `Pty`, `PtyOutput`, and `PtyExit`
+### 3.31 `PtySession`, `Pty`, `PtyOutput`, and `PtyExit`
 
 `Sandbox.pty` provides interactive PTY sessions.
 
@@ -974,7 +1019,7 @@ Notes:
 - `PtyExit.code` is `int`.
 - The context manager kills the PTY session on exit if it is still active.
 
-### 3.30 HTTP ACL
+### 3.32 HTTP ACL
 
 `Sandbox` accepts HTTP ACL rules through `http_acl_allow` and
 `http_acl_deny`. Rules use `"METHOD host/path"` format and support glob

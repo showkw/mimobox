@@ -12,7 +12,7 @@ fn default_cpu_period_us() -> u64 {
 
 fn has_invalid_domain_wildcard(domain: &str) -> bool {
     let wildcard_count = domain.chars().filter(|character| *character == '*').count();
-    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*."))
+    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*.") || domain.len() <= 2)
 }
 
 fn is_plain_ip_domain(domain: &str) -> bool {
@@ -27,7 +27,7 @@ fn is_plain_ip_domain(domain: &str) -> bool {
 }
 
 /// Environment variables blocked from persistent sandbox injection because they
-/// can affect dynamic loaders or shell startup behavior.
+/// can affect dynamic loaders, shell startup behavior, or sandbox baseline paths.
 pub const BLOCKED_ENV_VARS: &[&str] = &[
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -35,6 +35,13 @@ pub const BLOCKED_ENV_VARS: &[&str] = &[
     "ENV",
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "PWD",
+    "SHELL",
+    "USER",
+    "LOGNAME",
 ];
 
 fn validate_persistent_env_vars(
@@ -1515,9 +1522,11 @@ mod tests {
 
     #[test]
     fn sandbox_config_allows_denied_network_with_http_proxy_whitelist() {
-        let mut config = SandboxConfig::default();
-        config.deny_network = true;
-        config.allowed_http_domains = vec!["api.openai.com".to_string()];
+        let config = SandboxConfig {
+            deny_network: true,
+            allowed_http_domains: vec!["api.openai.com".to_string()],
+            ..Default::default()
+        };
 
         config
             .validate()
@@ -1526,8 +1535,10 @@ mod tests {
 
     #[test]
     fn sandbox_config_rejects_memory_limit_above_global_max() {
-        let mut config = SandboxConfig::default();
-        config.memory_limit_mb = Some(MAX_MEMORY_LIMIT_MB + 1);
+        let config = SandboxConfig {
+            memory_limit_mb: Some(MAX_MEMORY_LIMIT_MB + 1),
+            ..Default::default()
+        };
 
         let error = config
             .validate()

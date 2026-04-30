@@ -354,6 +354,7 @@ impl Config {
     /// Converts to the internal `mimobox_core::SandboxConfig`.
     pub(crate) fn to_sandbox_config(&self) -> SandboxConfig {
         let deny_network = resolve_deny_network(&self.network);
+        let domains = resolve_allowed_http_domains(self);
 
         let mut config = SandboxConfig::default();
         config.fs_readonly = self.fs_readonly.clone();
@@ -374,13 +375,12 @@ impl Config {
         config.timeout_secs = self.timeout.map(round_up_timeout_secs);
         config.seccomp_profile = resolve_seccomp_profile(deny_network, self.allow_fork);
         config.allow_fork = self.allow_fork;
-        config.allowed_http_domains = resolve_allowed_http_domains(self);
+        config.allowed_http_domains = domains.clone();
         config.namespace_degradation = self.namespace_degradation;
         config.http_acl = self.http_acl.clone();
         config.env_vars = self.env_vars.clone();
 
         // Convert allowed_http_domains into http_acl allow rules for backward compatibility.
-        let domains = resolve_allowed_http_domains(self);
         for domain in &domains {
             let already_covered = config.http_acl.allow.iter().any(|rule| {
                 rule.host == *domain
@@ -534,7 +534,7 @@ fn invalid_config(message: impl Into<String>, suggestion: impl Into<String>) -> 
 
 fn has_invalid_domain_wildcard(domain: &str) -> bool {
     let wildcard_count = domain.chars().filter(|character| *character == '*').count();
-    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*."))
+    wildcard_count > 0 && (wildcard_count != 1 || !domain.starts_with("*.") || domain.len() <= 2)
 }
 
 fn is_plain_ip_domain(domain: &str) -> bool {
@@ -1237,9 +1237,11 @@ mod tests {
 
     #[test]
     fn test_untrusted_rejects_no_memory_limit() {
-        let mut config = Config::default();
-        config.trust_level = TrustLevel::Untrusted;
-        config.memory_limit_mb = None;
+        let config = Config {
+            trust_level: TrustLevel::Untrusted,
+            memory_limit_mb: None,
+            ..Default::default()
+        };
 
         let result = config.validate().map(|()| config);
 

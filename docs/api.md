@@ -26,6 +26,7 @@ mimobox-sdk = { version = "0.1", features = ["vm", "wasm"] }
 - [Sandbox::id](#sandboxid)
 - [Sandbox::info](#sandboxinfo)
 - [Sandbox::metrics](#sandboxmetrics)
+- [Sandbox::env_vars](#sandboxenv_vars)
 - [Sandbox::execute_code](#sandboxexecute_code)
 - [Sandbox::list_dir](#sandboxlist_dir)
 - [Sandbox::execute_with_cwd](#sandboxexecute_with_cwd)
@@ -743,6 +744,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### `Sandbox::env_vars`
+
+```rust
+pub fn env_vars(&self) -> &HashMap<String, String>
+```
+
+Returns the persistent environment variables configured at sandbox creation.
+The returned map is read-only and does not include backend built-in defaults
+such as `HOME`, `PATH`, or `TMPDIR`.
+
+Merge priority is: backend minimal environment < persistent `env_vars` <
+per-command `env`. Persistent variables reject dynamic-loader, shell-startup,
+and sandbox baseline names such as `LD_PRELOAD`, `BASH_ENV`, `PATH`, `HOME`,
+`TMPDIR`, `PWD`, `SHELL`, `USER`, and `LOGNAME`.
+
+```rust
+use mimobox_sdk::{Config, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .env_var("MIMOBOX_MODE", "audit")
+        .build()?;
+    let sandbox = Sandbox::with_config(config)?;
+
+    assert_eq!(
+        sandbox.env_vars().get("MIMOBOX_MODE").map(String::as_str),
+        Some("audit")
+    );
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
 ### `Sandbox::destroy`
 
 ```rust
@@ -791,7 +826,7 @@ SDK-level configuration that controls isolation level, resource limits, filesyst
 - **`allowed_http_domains`**: Supports glob patterns like `*.openai.com`. Combined with `NetworkPolicy::AllowDomains`.
 - **`MicrovmConfig.memory_mb`**: The default value (256 MiB) is unified with `Config.vm_memory_mb` to ensure consistency between the SDK-level and backend-level defaults.
 - **`env_vars` merge priority** (low to high): backend built-in minimum < `env_vars` (persistent) < per-command `env` parameter.
-- **`env_vars` security**: The following environment variable names are blocked at `build()` time to prevent sandbox escape: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`. Keys containing `=`, NUL, or spaces, or values containing NUL, are also rejected.
+- **`env_vars` security**: The following environment variable names are blocked at `build()` time to prevent sandbox escape or baseline environment override: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `HOME`, `TMPDIR`, `PWD`, `SHELL`, `USER`, `LOGNAME`. Keys containing `=`, NUL, or spaces, or values containing NUL, are also rejected.
 
 ```rust
 use mimobox_sdk::Config;

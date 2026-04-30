@@ -231,7 +231,19 @@ pub(crate) fn merge_env_vars(
     config_env: &HashMap<String, String>,
     command_env: &HashMap<String, String>,
 ) -> HashMap<String, String> {
-    let mut merged = config_env.clone();
+    if config_env.is_empty() {
+        return command_env.clone();
+    }
+    if command_env.is_empty() {
+        return config_env.clone();
+    }
+
+    let mut merged = HashMap::with_capacity(config_env.len() + command_env.len());
+    merged.extend(
+        config_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     merged.extend(
         command_env
             .iter()
@@ -339,9 +351,8 @@ fn build_env_assignments(env: &HashMap<String, String>) -> Result<Vec<String>, S
     Ok(assignments)
 }
 
-#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 fn validate_env_key(key: &str) -> Result<(), SdkError> {
-    if key.is_empty() || key.contains('=') || key.contains('\0') {
+    if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
         return Err(SdkError::Config(format!(
             "invalid environment variable name: `{key}`"
         )));

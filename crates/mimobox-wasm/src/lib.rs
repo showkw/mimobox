@@ -203,8 +203,13 @@ fn sample_wasm_metrics(
 ) -> SandboxMetrics {
     let mut metrics = SandboxMetrics::default();
 
-    if let Ok(remaining_fuel) = store.get_fuel() {
-        metrics.wasm_fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+    match store.get_fuel() {
+        Ok(remaining_fuel) => {
+            metrics.wasm_fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+        }
+        Err(error) => {
+            warn!("Failed to sample Wasm fuel: {}", error);
+        }
     }
     metrics.memory_usage_bytes = memory_usage_bytes;
     if let Some(limit_mb) = memory_limit_mb {
@@ -1380,7 +1385,13 @@ impl Sandbox for WasmSandbox {
 
 /// Checks whether the Store fuel is exhausted.
 fn is_fuel_exhausted(store: &Store<StoreData>) -> bool {
-    store.get_fuel().is_ok_and(|f| f == 0)
+    match store.get_fuel() {
+        Ok(fuel) => fuel == 0,
+        Err(error) => {
+            warn!("Failed to query Wasm fuel for timeout detection: {}", error);
+            false
+        }
+    }
 }
 
 /// Checks whether an error is an epoch interruption, indicating wall-clock timeout.

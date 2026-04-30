@@ -17,7 +17,7 @@ use std::time::Duration;
     all(feature = "vm", target_os = "linux")
 ))]
 use super::SandboxInner;
-use super::{Sandbox, SdkExecOptions, merge_env_vars, validate_cwd};
+use super::{Sandbox, SdkExecOptions, merge_env_vars, validate_cwd, validate_env_key};
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 use super::{build_fallback_argv_args, build_fallback_command_args};
 
@@ -118,7 +118,7 @@ impl Sandbox {
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(sandbox) => sandbox.stream_execute_for_sdk(&args),
             #[allow(unreachable_patterns)]
-            _ => unreachable!("no backend variant matched"),
+            _ => Err(backend_variant_mismatch()),
         }
     }
 
@@ -178,7 +178,7 @@ impl Sandbox {
             #[cfg(feature = "wasm")]
             SandboxInner::Wasm(sandbox) => sandbox.stream_execute_for_sdk(&args),
             #[allow(unreachable_patterns)]
-            _ => unreachable!("no backend variant matched"),
+            _ => Err(backend_variant_mismatch()),
         }
     }
 
@@ -270,17 +270,17 @@ impl Sandbox {
         if let Some(cwd) = options.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+        validate_exec_options(&options)?;
         let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
         let options = SdkExecOptions {
             env: merged_env,
             ..options
         };
-        let _ = (&options.env, options.timeout);
 
         self.cached_metrics = None;
         self.ensure_backend(command)?;
 
-        let result = {
+        let result = (|| {
             let inner = self.require_inner()?;
             match inner {
                 #[cfg(all(feature = "os", target_os = "linux"))]
@@ -344,9 +344,9 @@ impl Sandbox {
                     sandbox.execute_for_sdk(&args)
                 }
                 #[allow(unreachable_patterns)]
-                _ => unreachable!("no backend variant matched"),
+                _ => Err(backend_variant_mismatch()),
             }
-        };
+        })();
         self.sync_cached_metrics_from_inner();
         result
     }
@@ -382,18 +382,18 @@ impl Sandbox {
         if let Some(cwd) = options.cwd.as_deref() {
             validate_cwd(cwd)?;
         }
+        validate_exec_options(&options)?;
         let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
         let options = SdkExecOptions {
             env: merged_env,
             ..options
         };
-        let _ = (&options.env, options.timeout);
 
         let command = args.join(" ");
         self.cached_metrics = None;
         self.ensure_backend(&command)?;
 
-        let result = {
+        let result = (|| {
             let inner = self.require_inner()?;
             match inner {
                 #[cfg(all(feature = "os", target_os = "linux"))]
@@ -465,9 +465,9 @@ impl Sandbox {
                     }
                 }
                 #[allow(unreachable_patterns)]
-                _ => unreachable!("no backend variant matched"),
+                _ => Err(backend_variant_mismatch()),
             }
-        };
+        })();
         self.sync_cached_metrics_from_inner();
         result
     }
@@ -478,8 +478,42 @@ fn argv_to_strings<A: AsRef<str>>(argv: &[A]) -> Result<Vec<String>, SdkError> {
         return Err(SdkError::Config("argv must not be empty".to_string()));
     }
 
-    Ok(argv
-        .iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>())
+    let mut args = Vec::with_capacity(argv.len());
+    for (index, arg) in argv.iter().enumerate() {
+        let arg = arg.as_ref();
+        if index == 0 && arg.is_empty() {
+            return Err(SdkError::Config("argv[0] must not be empty".to_string()));
+        }
+        if arg.contains('\0') {
+            return Err(SdkError::Config(format!(
+                "argv[{index}] must not contain NUL bytes"
+            )));
+        }
+        args.push(arg.to_string());
+    }
+
+    Ok(args)
+}
+
+fn validate_exec_options(options: &SdkExecOptions) -> Result<(), SdkError> {
+    if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err(SdkError::Config(
+            "per-command timeout must be greater than zero".to_string(),
+        ));
+    }
+
+    for (key, value) in &options.env {
+        validate_env_key(key)?;
+        if value.contains('\0') {
+            return Err(SdkError::Config(format!(
+                "environment variable `{key}` contains NUL byte"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn backend_variant_mismatch() -> SdkError {
+    SdkError::internal("no backend variant matched the current feature/platform configuration")
 }

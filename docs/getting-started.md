@@ -214,7 +214,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 4.2 Streaming Output (`stream_execute`)
+### 4.2 Runtime Observability And Persistent Env
+
+Use `Sandbox::id()`, `Sandbox::info()`, `Sandbox::list()`, and
+`Sandbox::metrics()` to connect execution results with runtime state. Use
+`Config::env_var()` / `Config::env_vars()` for persistent environment variables.
+
+```rust
+use mimobox_sdk::{Config, Sandbox};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .env_var("MIMOBOX_MODE", "quickstart")
+        .build()?;
+    let mut sandbox = Sandbox::with_config(config)?;
+
+    println!("sandbox id = {}", sandbox.id());
+    println!("configured env = {:?}", sandbox.env_vars());
+
+    let result = sandbox.execute("/usr/bin/printenv MIMOBOX_MODE")?;
+    println!("stdout = {}", String::from_utf8_lossy(&result.stdout));
+
+    let info = sandbox.info();
+    println!("ready = {}, active = {:?}", info.is_ready, info.active_isolation);
+
+    let metrics = sandbox.metrics();
+    println!("memory = {:?}", metrics.memory_usage_bytes);
+    println!("registered sandboxes = {}", Sandbox::list().len());
+
+    sandbox.destroy()?;
+    Ok(())
+}
+```
+
+Persistent `env_vars` reject dynamic-loader, shell-startup, and sandbox baseline
+names such as `LD_PRELOAD`, `BASH_ENV`, `PATH`, `HOME`, `TMPDIR`, `PWD`,
+`SHELL`, `USER`, and `LOGNAME`.
+
+### 4.3 Streaming Output (`stream_execute`)
 
 `stream_execute` currently supports only the microVM backend on Linux. Calls against the OS and Wasm backends return `UnsupportedPlatform`.
 
@@ -267,7 +304,7 @@ Unsuitable scenarios:
 - One-off short commands; use `execute` directly
 - Non-Linux environments or builds without microVM enabled
 
-### 4.3 File Operations (`read_file` / `write_file`)
+### 4.4 File Operations (`read_file` / `write_file`)
 
 File transfer currently supports only the microVM backend on Linux. When these two APIs are called with `IsolationLevel::Auto`, the microVM path is also forced.
 
@@ -295,7 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 4.4 HTTP Proxy (`http_request`)
+### 4.5 HTTP Proxy (`http_request`)
 
 The HTTP proxy currently supports only the microVM backend on Linux and executes requests through a host proxy. The documentation must make two facts clear:
 
@@ -341,7 +378,7 @@ Recommended practice:
 - Handle request body size, timeouts, and error responses explicitly
 - Do not describe this API as a general substitute for enabling arbitrary networking
 
-### 4.5 Python SDK
+### 4.6 Python SDK
 
 The current Python binding crate is named `mimobox-python`. The exported Python module is named `mimobox`, and it is built with `PyO3 + maturin`.
 
@@ -383,6 +420,7 @@ if __name__ == "__main__":
 - `Sandbox()` is currently equivalent to `Sandbox::new()` on the Rust side and does not expose a separate `ConfigBuilder`
 - `execute(command: str)` returns `ExecuteResult`
 - `stream_execute(command: str)` returns a Python iterator
+- `id`, `info()`, `Sandbox.list()`, `metrics()`, and `env_vars` expose runtime state and persistent env config
 - `read_file` / `write_file` / `http_request` are exposed
 - `stdout` / `stderr` are decoded with UTF-8 lossy decoding on the Python side
 - When the exit code is missing, the Python side maps `exit_code` to `-1`
@@ -400,6 +438,7 @@ The current fields of `mimobox_sdk::Config` are as follows.
 | `memory_limit_mb` | `Option<u64>` | `Some(512)` | Unified memory limit |
 | `fs_readonly` | `Vec<PathBuf>` | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/dev`, `/proc`, `/etc` | Read-only mount paths inside the sandbox |
 | `fs_readwrite` | `Vec<PathBuf>` | `/tmp` | Read-write paths inside the sandbox |
+| `env_vars` | `HashMap<String, String>` | empty | Persistent environment variables applied to every command |
 | `allowed_http_domains` | `Vec<String>` | empty | host HTTP proxy allowlist |
 | `allow_fork` | `bool` | `false` | Whether fork is allowed |
 | `vm_vcpu_count` | `u8` | `1` | Number of microVM vCPUs |
@@ -435,6 +474,14 @@ The current fields of `mimobox_sdk::Config` are as follows.
 - Used for the host HTTP proxy allowlist
 - Not a general networking allow switch
 - Should be used together with `IsolationLevel::MicroVm`
+
+#### `env_vars`
+
+- Applied at sandbox creation and reused for every command
+- Per-command `env` values override persistent `env_vars`
+- Blocked names include `LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `ENV`,
+  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PATH`, `HOME`, `TMPDIR`,
+  `PWD`, `SHELL`, `USER`, and `LOGNAME`
 
 #### `network`
 

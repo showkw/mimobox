@@ -19,6 +19,7 @@
 
 use std::{
     collections::HashMap,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -72,6 +73,14 @@ const MAX_SANDBOX_TIMEOUT_SECS: u64 = 3600;
 const DEFAULT_EPHEMERAL_TIMEOUT_MS: u64 = 30_000;
 /// Default memory limit for temporary MCP sandboxes, satisfying the Untrusted memory-limit requirement.
 const DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB: u64 = 256;
+/// Maximum number of environment variables accepted from one MCP request.
+const MAX_ENV_VARS: usize = 64;
+/// Maximum UTF-8 bytes in one environment variable key.
+const MAX_ENV_KEY_BYTES: usize = 128;
+/// Maximum UTF-8 bytes in one environment variable value.
+const MAX_ENV_VALUE_BYTES: usize = 8 * 1024;
+/// Maximum combined UTF-8 bytes across all environment variable keys and values.
+const MAX_ENV_TOTAL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct MimoboxServer {
@@ -1148,17 +1157,7 @@ impl MimoboxServer {
         let command = command.to_string();
         let timeout_ms = Some(timeout_ms.unwrap_or(DEFAULT_EPHEMERAL_TIMEOUT_MS));
         let result = tokio::task::spawn_blocking(move || {
-            let mut sandbox = create_sandbox_with_options(
-                IsolationLevel::Auto,
-                timeout_ms,
-                Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-                None,
-            )?;
-            let result = sandbox.execute(&command);
-            if let Err(err) = sandbox.destroy() {
-                error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
-            }
-            result
+            run_ephemeral_sandbox(timeout_ms, |sandbox| sandbox.execute(&command))
         })
         .await;
 
@@ -1206,17 +1205,7 @@ impl MimoboxServer {
         let argv = argv.to_vec();
         let timeout_ms = Some(timeout_ms.unwrap_or(DEFAULT_EPHEMERAL_TIMEOUT_MS));
         let result = tokio::task::spawn_blocking(move || {
-            let mut sandbox = create_sandbox_with_options(
-                IsolationLevel::Auto,
-                timeout_ms,
-                Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
-                None,
-            )?;
-            let result = sandbox.exec(&argv);
-            if let Err(err) = sandbox.destroy() {
-                error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
-            }
-            result
+            run_ephemeral_sandbox(timeout_ms, |sandbox| sandbox.exec(&argv))
         })
         .await;
 
@@ -1251,6 +1240,9 @@ fn create_sandbox_with_options(
 ) -> Result<Sandbox, SdkError> {
     validate_create_sandbox_memory_limit(memory_limit_mb)?;
     validate_timeout_ms(timeout_ms).map_err(SdkError::Config)?;
+    if let Some(env_vars) = env_vars.as_ref() {
+        validate_env_vars_quota(env_vars).map_err(SdkError::Config)?;
+    }
 
     let mut builder = Config::builder()
         .isolation(isolation)
@@ -1266,6 +1258,42 @@ fn create_sandbox_with_options(
     }
 
     Sandbox::with_config(builder.build()?)
+}
+
+fn run_ephemeral_sandbox<F>(
+    timeout_ms: Option<u64>,
+    operation: F,
+) -> Result<ExecuteResult, SdkError>
+where
+    F: FnOnce(&mut Sandbox) -> Result<ExecuteResult, SdkError>,
+{
+    let mut sandbox = Some(create_sandbox_with_options(
+        IsolationLevel::Auto,
+        timeout_ms,
+        Some(DEFAULT_EPHEMERAL_MEMORY_LIMIT_MB),
+        None,
+    )?);
+
+    let operation_result = catch_unwind(AssertUnwindSafe(|| {
+        let Some(sandbox) = sandbox.as_mut() else {
+            return Err(SdkError::internal("temporary sandbox missing"));
+        };
+        operation(sandbox)
+    }));
+
+    if let Some(sandbox) = sandbox.take()
+        && let Err(err) = sandbox.destroy()
+    {
+        error!(error = %format_sdk_error(err), "Temporary sandbox destroy failed");
+    }
+
+    match operation_result {
+        Ok(result) => result,
+        Err(_) => {
+            error!("Temporary sandbox operation panicked");
+            Err(SdkError::internal("temporary sandbox operation panicked"))
+        }
+    }
 }
 
 fn validate_create_sandbox_memory_limit(memory_limit_mb: Option<u64>) -> Result<(), SdkError> {
@@ -1295,6 +1323,32 @@ fn validate_timeout_ms(timeout_ms: Option<u64>) -> Result<(), String> {
                 MAX_SANDBOX_TIMEOUT_SECS * 1000
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_env_vars_quota(env_vars: &HashMap<String, String>) -> Result<(), String> {
+    if env_vars.len() > MAX_ENV_VARS {
+        return Err(format!(
+            "env_vars contains {} entries, maximum is {MAX_ENV_VARS}",
+            env_vars.len()
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    for (key, value) in env_vars {
+        validate_text_max_bytes("env_vars key", key, MAX_ENV_KEY_BYTES)?;
+        validate_text_max_bytes(&format!("env_vars[{key}]"), value, MAX_ENV_VALUE_BYTES)?;
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+
+    if total_bytes > MAX_ENV_TOTAL_BYTES {
+        return Err(format!(
+            "env_vars total size is {total_bytes} bytes, maximum is {MAX_ENV_TOTAL_BYTES} bytes"
+        ));
     }
 
     Ok(())

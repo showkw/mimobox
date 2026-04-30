@@ -181,40 +181,6 @@ impl MacOsSandbox {
     }
 }
 
-/// 通过 proc_pidrusage 采样进程资源指标。
-///
-/// 在 waitpid 之后调用，获取子进程最终资源使用快照。
-#[cfg(target_os = "macos")]
-pub fn sample_metrics(pid: i32, memory_limit_mb: Option<u64>) -> SandboxMetrics {
-    // SAFETY: RUsageInfoV2 是 repr(C) 且字段均为整数/字节数组，零初始化有效；
-    // proc_pidrusage 会按 RUSAGE_INFO_V2 布局写入调用方提供的缓冲区。
-    let mut rusage: RUsageInfoV2 = unsafe { std::mem::zeroed() };
-    // SAFETY: pid 来自当前沙箱启动的子进程；rusage 指向栈上有效缓冲区，
-    // 按 Darwin API 要求转换为 rusage_info_t 指针输出槽。
-    let result = unsafe {
-        proc_pidrusage(
-            pid,
-            RUSAGE_INFO_V2,
-            &mut rusage as *mut _ as *mut libc::rusage_info_t,
-        )
-    };
-
-    let mut metrics = SandboxMetrics::default();
-    if result == 0 {
-        // ri_user_time 和 ri_system_time 单位是纳秒。
-        metrics.cpu_time_user_us = Some(rusage.ri_user_time / 1000);
-        metrics.cpu_time_system_us = Some(rusage.ri_system_time / 1000);
-        metrics.memory_usage_bytes = Some(rusage.ri_resident_size);
-        metrics.io_read_bytes = Some(rusage.ri_diskio_bytesread);
-        metrics.io_write_bytes = Some(rusage.ri_diskio_byteswritten);
-    }
-    if let Some(limit_mb) = memory_limit_mb {
-        metrics.memory_limit_bytes = limit_mb.checked_mul(1024 * 1024);
-    }
-    metrics.collected_at = Some(std::time::Instant::now());
-    metrics
-}
-
 fn detect_seatbelt_backend_failure(exit_code: Option<i32>, stderr: &[u8]) -> Option<String> {
     let stderr_text = String::from_utf8_lossy(stderr);
 
@@ -241,15 +207,47 @@ fn command_log_summary(cmd: &[String]) -> String {
     format!("program={name}, argc={}", cmd.len())
 }
 
-fn waitpid_raw(pid: libc::pid_t) -> std::io::Result<i32> {
+struct WaitOutcome {
+    status: std::process::ExitStatus,
+    metrics: SandboxMetrics,
+}
+
+fn wait4_raw(pid: libc::pid_t, memory_limit_mb: Option<u64>) -> std::io::Result<WaitOutcome> {
     let mut status = 0;
-    // SAFETY: pid 来自刚刚 spawn 的子进程，status 指向栈上有效内存。
-    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    // SAFETY: libc::rusage 是纯 C 数据结构，零初始化可作为 wait4 输出缓冲区。
+    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: pid 来自刚刚 spawn 的子进程，status 和 rusage 均指向栈上有效内存。
+    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
     if ret < 0 {
         Err(std::io::Error::last_os_error())
     } else {
-        Ok(status)
+        Ok(WaitOutcome {
+            status: std::process::ExitStatus::from_raw(status),
+            metrics: metrics_from_wait4_rusage(&rusage, memory_limit_mb),
+        })
     }
+}
+
+fn metrics_from_wait4_rusage(
+    rusage: &libc::rusage,
+    memory_limit_mb: Option<u64>,
+) -> SandboxMetrics {
+    SandboxMetrics {
+        cpu_time_user_us: timeval_to_micros(rusage.ru_utime),
+        cpu_time_system_us: timeval_to_micros(rusage.ru_stime),
+        memory_usage_bytes: (rusage.ru_maxrss > 0)
+            .then(|| u64::try_from(rusage.ru_maxrss).ok())
+            .flatten(),
+        memory_limit_bytes: memory_limit_mb.and_then(|limit_mb| limit_mb.checked_mul(1024 * 1024)),
+        collected_at: Some(std::time::Instant::now()),
+        ..Default::default()
+    }
+}
+
+fn timeval_to_micros(timeval: libc::timeval) -> Option<u64> {
+    let seconds = u64::try_from(timeval.tv_sec).ok()?;
+    let micros = u64::try_from(timeval.tv_usec).ok()?;
+    seconds.checked_mul(1_000_000)?.checked_add(micros)
 }
 
 #[cfg(target_os = "macos")]
@@ -386,21 +384,18 @@ fn apply_seatbelt_policy_or_exit(profile: *const libc::c_char) {
 fn wait_child_with_timeout(
     pid: libc::pid_t,
     timeout: Duration,
-) -> Result<(std::process::ExitStatus, bool), SandboxError> {
+    memory_limit_mb: Option<u64>,
+) -> Result<(std::process::ExitStatus, bool, SandboxMetrics), SandboxError> {
     let (tx, rx) = mpsc::sync_channel(1);
     let waiter = std::thread::spawn(move || {
-        let _ = tx.send(waitpid_raw(pid));
+        let _ = tx.send(wait4_raw(pid, memory_limit_mb));
     });
 
     match rx.recv_timeout(timeout) {
-        Ok(status) => {
+        Ok(outcome) => {
             let _ = waiter.join();
-            Ok((
-                std::process::ExitStatus::from_raw(
-                    status.map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))?,
-                ),
-                false,
-            ))
+            let outcome = outcome.map_err(|e| SandboxError::new(format!("wait4 failed: {e}")))?;
+            Ok((outcome.status, false, outcome.metrics))
         }
         Err(RecvTimeoutError::Timeout) => {
             tracing::warn!(
@@ -411,16 +406,12 @@ fn wait_child_with_timeout(
             // 否则其派生进程会在 supervisor 返回后继续存活。
             // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
             let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
-            let status = rx.recv().map_err(|_| {
+            let outcome = rx.recv().map_err(|_| {
                 SandboxError::new("waitpid waiter thread disconnected unexpectedly")
             })?;
             let _ = waiter.join();
-            Ok((
-                std::process::ExitStatus::from_raw(
-                    status.map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))?,
-                ),
-                true,
-            ))
+            let outcome = outcome.map_err(|e| SandboxError::new(format!("wait4 failed: {e}")))?;
+            Ok((outcome.status, true, outcome.metrics))
         }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
@@ -847,15 +838,15 @@ impl Sandbox for MacOsSandbox {
         });
 
         let wait_result = if let Some(dur) = timeout {
-            wait_child_with_timeout(pid, dur)
+            wait_child_with_timeout(pid, dur, self.config.memory_limit_mb)
         } else {
-            waitpid_raw(pid)
-                .map(|status| (std::process::ExitStatus::from_raw(status), false))
-                .map_err(|e| SandboxError::new(format!("waitpid failed: {e}")))
+            wait4_raw(pid, self.config.memory_limit_mb)
+                .map(|outcome| (outcome.status, false, outcome.metrics))
+                .map_err(|e| SandboxError::new(format!("wait4 failed: {e}")))
         };
         child_running.store(false, Ordering::SeqCst);
-        let (exit_status, mut timed_out) = wait_result?;
-        self.cached_metrics = Some(sample_metrics(pid, self.config.memory_limit_mb));
+        let (exit_status, mut timed_out, metrics) = wait_result?;
+        self.cached_metrics = Some(metrics);
         if oom_killed.load(Ordering::SeqCst) {
             timed_out = true;
         }
@@ -1584,7 +1575,7 @@ mod tests {
         fs::create_dir_all(&test_dir).expect("failed to create test directory");
         fs::write(&secret_file, "super-secret").expect("failed to write sensitive file");
 
-        let policy = vec![
+        let policy = [
             "(version 1)".to_string(),
             "(deny default)".to_string(),
             system_file_read_rule(),
@@ -1630,7 +1621,7 @@ mod tests {
         fs::create_dir_all(&test_dir).expect("failed to create test directory");
         fs::write(&secret_file, "super-secret").expect("failed to write sensitive file");
 
-        let policy = vec![
+        let policy = [
             "(version 1)".to_string(),
             "(deny default)".to_string(),
             system_file_read_rule(),
@@ -1702,7 +1693,7 @@ mod tests {
         fs::set_permissions(&script_path, permissions)
             .expect("failed to set test script executable permissions");
 
-        let policy = vec![
+        let policy = [
             "(version 1)".to_string(),
             "(deny default)".to_string(),
             system_file_read_rule(),
@@ -1739,21 +1730,9 @@ mod tests {
         let dir_two = TempDir::new_in("/tmp").expect("failed to create second temp directory");
 
         let mut config_one = test_config();
-        config_one.fs_readwrite = vec![
-            dir_one
-                .path()
-                .canonicalize()
-                .expect("canonicalize failed")
-                .into(),
-        ];
+        config_one.fs_readwrite = vec![dir_one.path().canonicalize().expect("canonicalize failed")];
         let mut config_two = test_config();
-        config_two.fs_readwrite = vec![
-            dir_two
-                .path()
-                .canonicalize()
-                .expect("canonicalize failed")
-                .into(),
-        ];
+        config_two.fs_readwrite = vec![dir_two.path().canonicalize().expect("canonicalize failed")];
 
         let mut sb_one = MacOsSandbox::new(config_one).expect("failed to create first sandbox");
         let mut sb_two = MacOsSandbox::new(config_two).expect("failed to create second sandbox");
