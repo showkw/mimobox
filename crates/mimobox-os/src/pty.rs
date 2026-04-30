@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mimobox_core::{PtyConfig, PtyEvent, PtySession, PtySize as CorePtySize, SandboxError};
 use portable_pty::{MasterPty, NativePtySystem, PtySystem};
@@ -117,11 +117,20 @@ struct OsPtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     output_rx: Receiver<PtyEvent>,
-    exit_rx: Receiver<i32>,
-    cached_exit_code: Option<i32>,
+    exit_rx: Receiver<PtyExitStatus>,
+    cached_exit_status: Option<PtyExitStatus>,
     exited: Arc<AtomicBool>,
     timed_out: Arc<AtomicBool>,
+    started_at: Instant,
+    timeout: Option<Duration>,
     cleanup: Mutex<Option<PtyCleanup>>,
+}
+
+#[derive(Clone, Copy)]
+struct PtyExitStatus {
+    code: i32,
+    /// 等待线程观察到退出事件的耗时，用于关闭超时线程标记竞态窗口。
+    elapsed: Duration,
 }
 
 impl OsPtySession {
@@ -135,9 +144,16 @@ impl OsPtySession {
         let (exit_tx, exit_rx) = mpsc::channel();
         let exited = Arc::new(AtomicBool::new(false));
         let timed_out = Arc::new(AtomicBool::new(false));
+        let started_at = Instant::now();
 
         spawn_reader_thread(allocated.reader, output_tx.clone());
-        spawn_wait_thread(child_pid, output_tx, exit_tx, Arc::clone(&exited));
+        spawn_wait_thread(
+            child_pid,
+            output_tx,
+            exit_tx,
+            Arc::clone(&exited),
+            started_at,
+        );
 
         if let Some(timeout) = timeout {
             spawn_timeout_thread(
@@ -154,35 +170,87 @@ impl OsPtySession {
             writer: allocated.writer,
             output_rx,
             exit_rx,
-            cached_exit_code: None,
+            cached_exit_status: None,
             exited,
             timed_out,
+            started_at,
+            timeout,
             cleanup: Mutex::new(cleanup),
         }
     }
 
     fn wait_internal(&mut self) -> Result<i32, SandboxError> {
-        if let Some(code) = self.cached_exit_code {
-            if self.timed_out.load(Ordering::SeqCst) {
+        if let Some(status) = self.cached_exit_status {
+            if self.is_timeout_status(status) {
                 self.run_cleanup();
                 return Err(SandboxError::Timeout);
             }
-            return Ok(code);
+            return Ok(status.code);
         }
 
-        let code = match self.exit_rx.recv() {
-            Ok(code) => code,
-            Err(_) => {
+        let status = match self.recv_exit_status() {
+            Ok(status) => status,
+            Err(error) => {
                 self.run_cleanup();
-                return Err(SandboxError::new("PTY exit event channel closed"));
+                return Err(error);
             }
         };
-        self.cached_exit_code = Some(code);
+        self.cached_exit_status = Some(status);
         self.run_cleanup();
-        if self.timed_out.load(Ordering::SeqCst) {
+        if self.is_timeout_status(status) {
             return Err(SandboxError::Timeout);
         }
-        Ok(code)
+        Ok(status.code)
+    }
+
+    fn recv_exit_status(&self) -> Result<PtyExitStatus, SandboxError> {
+        let Some(timeout) = self.timeout else {
+            return self
+                .exit_rx
+                .recv()
+                .map_err(|_| SandboxError::new("PTY exit event channel closed"));
+        };
+
+        let elapsed = self.started_at.elapsed();
+        let remaining = timeout.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+        match self.exit_rx.recv_timeout(remaining) {
+            Ok(status) => Ok(status),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.mark_timed_out_and_terminate();
+                self.exit_rx
+                    .recv()
+                    .map_err(|_| SandboxError::new("PTY exit event channel closed after timeout"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(SandboxError::new("PTY exit event channel closed"))
+            }
+        }
+    }
+
+    fn is_timeout_status(&self, status: PtyExitStatus) -> bool {
+        if self.timed_out.load(Ordering::SeqCst) {
+            return true;
+        }
+
+        if self
+            .timeout
+            .is_some_and(|timeout| status.elapsed >= timeout)
+        {
+            self.timed_out.store(true, Ordering::SeqCst);
+            return true;
+        }
+
+        false
+    }
+
+    fn mark_timed_out_and_terminate(&self) {
+        if self.timed_out.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        if let Err(error) = terminate_process_group(self.child_pid, &self.exited) {
+            tracing::warn!("Failed to terminate PTY process group after timeout: {error}");
+        }
     }
 
     fn run_cleanup(&self) {
@@ -278,17 +346,22 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, output_tx: mpsc::Sender
 fn spawn_wait_thread(
     child_pid: libc::pid_t,
     output_tx: mpsc::Sender<PtyEvent>,
-    exit_tx: mpsc::Sender<i32>,
+    exit_tx: mpsc::Sender<PtyExitStatus>,
     exited: Arc<AtomicBool>,
+    started_at: Instant,
 ) {
     std::thread::spawn(move || {
         let exit_code = wait_for_child(child_pid).unwrap_or_else(|error| {
             tracing::warn!("Failed to wait for PTY child process: {error}");
             -1
         });
+        let status = PtyExitStatus {
+            code: exit_code,
+            elapsed: started_at.elapsed(),
+        };
         exited.store(true, Ordering::SeqCst);
         let _ = output_tx.send(PtyEvent::Exit(exit_code));
-        let _ = exit_tx.send(exit_code);
+        let _ = exit_tx.send(status);
     });
 }
 
