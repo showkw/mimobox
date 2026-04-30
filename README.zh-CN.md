@@ -48,8 +48,19 @@ mimobox run --backend auto --command "/bin/echo hello from MimoBox!"
 
 ### Python
 
-```bash
-pip install mimobox
+```python
+from mimobox import Sandbox
+
+# 创建使用默认设置的沙箱
+with Sandbox() as sb:
+    # 安全地执行命令
+    result = sb.execute("echo 'Hello from sandbox!'")
+    print(result.stdout)
+
+    # 沙箱会隔离进程：
+    # - 文件系统访问受限
+    # - 网络访问默认被阻止
+    # - 资源限制被强制执行
 ```
 
 ### Rust
@@ -59,7 +70,18 @@ pip install mimobox
 mimobox-sdk = "0.1.0-alpha"
 ```
 
-### MCP Server
+### MCP Server（仅限 Linux）
+
+安装 MCP server binary：
+
+```bash
+# 方式一：与 CLI 一起安装
+curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash -s -- --with-mcp
+
+# 方式二：单独下载
+curl -fsSL https://github.com/showkw/mimobox/releases/latest/download/mimobox-mcp-$(uname -s)-$(uname -m) -o /usr/local/bin/mimobox-mcp
+chmod +x /usr/local/bin/mimobox-mcp
+```
 
 ```bash
 mimobox-mcp                              # stdio mode (default)
@@ -122,7 +144,7 @@ with Sandbox() as sb:
 ```
 
 ```python
-# File API
+# File API（需要 Linux + KVM / microVM 后端）
 with Sandbox() as sandbox:
     sandbox.write_file("/tmp/hello.py", "print('hello')")
     result = sandbox.execute("python3 /tmp/hello.py")

@@ -5,9 +5,9 @@ set -euo pipefail
 
 REPO="showkw/mimobox"
 VERSION="latest"
-WITH_MCP=""
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="mimobox"
+WITH_MCP=""
 TMP_FILE="${TMPDIR:-/tmp}/mimobox-install.$$"
 TMP_CHECKSUM="${TMPDIR:-/tmp}/mimobox-install.$$.sha256"
 
@@ -47,7 +47,7 @@ die() {
 }
 
 cleanup() {
-  rm -f "$TMP_FILE" "$TMP_CHECKSUM" "${TMPDIR:-/tmp}/mimobox-mcp-install.92917"
+  rm -f "$TMP_FILE" "$TMP_CHECKSUM" "${TMPDIR:-/tmp}/mimobox-mcp-install.$$"
 }
 
 usage() {
@@ -59,7 +59,7 @@ Download and install mimobox CLI from GitHub Releases.
 Options:
   --help              Show this help message
   --version VERSION   Install a specific version instead of latest
-  --with-mcp          Also install mimobox-mcp if available
+  --with-mcp          Also install mimobox-mcp binary
 
 Environment variables:
   INSTALL_DIR         Installation directory (default: /usr/local/bin)
@@ -69,6 +69,7 @@ Examples:
   INSTALL_DIR=/opt/bin bash scripts/install.sh
   bash scripts/install.sh --version v0.1.0
   bash scripts/install.sh --with-mcp
+  bash scripts/install.sh --version v0.1.0 --with-mcp
 EOF
 }
 
@@ -259,7 +260,7 @@ verify() {
 
 install_mcp() {
   MCP_BIN_NAME="mimobox-mcp"
-  MCP_TMP_FILE="${TMPDIR:-/tmp}/mimobox-mcp-install.92917"
+  MCP_TMP_FILE="${TMPDIR:-/tmp}/mimobox-mcp-install.$$"
 
   if [ "$VERSION" = "latest" ]; then
     MCP_DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/mimobox-mcp-$TARGET"
