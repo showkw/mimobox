@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -431,10 +432,18 @@ fn resolve_deny_network(network: &NetworkPolicy) -> bool {
 }
 
 fn resolve_allowed_http_domains(config: &Config) -> Vec<String> {
-    let mut domains = config.allowed_http_domains.clone();
+    let mut domains = Vec::with_capacity(config.allowed_http_domains.len());
+    let mut seen = HashSet::with_capacity(config.allowed_http_domains.len());
+
+    for domain in &config.allowed_http_domains {
+        if seen.insert(domain.as_str()) {
+            domains.push(domain.clone());
+        }
+    }
+
     if let NetworkPolicy::AllowDomains(network_domains) = &config.network {
         for domain in network_domains {
-            if !domains.contains(domain) {
+            if seen.insert(domain.as_str()) {
                 domains.push(domain.clone());
             }
         }
