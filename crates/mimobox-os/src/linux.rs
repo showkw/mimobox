@@ -2284,6 +2284,14 @@ mod tests {
     #[test]
     fn pty_timeout_returns_timeout_error() {
         let mut config = test_config();
+        config.fs_readonly = vec![
+            "/usr".into(),
+            "/lib".into(),
+            "/lib64".into(),
+            "/bin".into(),
+            "/sbin".into(),
+        ];
+        config.fs_readwrite = vec!["/tmp".into()];
         config.memory_limit_mb = None;
         let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
         let mut session = sb
