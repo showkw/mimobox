@@ -404,10 +404,14 @@ fn spawn_timeout_thread(
         }
 
         timed_out.store(true, Ordering::SeqCst);
-        let _ = send_signal_to_child_tree(child_pid, libc::SIGTERM);
+        if let Err(error) = send_signal_to_child_tree(child_pid, libc::SIGTERM) {
+            tracing::warn!("Timeout thread failed to send SIGTERM to child tree: {error}");
+        }
         std::thread::sleep(Duration::from_millis(150));
         if !exited.load(Ordering::SeqCst) {
-            let _ = send_signal_to_child_tree(child_pid, libc::SIGKILL);
+            if let Err(error) = send_signal_to_child_tree(child_pid, libc::SIGKILL) {
+                tracing::warn!("Timeout thread failed to send SIGKILL to child tree: {error}");
+            }
         }
     });
 }
