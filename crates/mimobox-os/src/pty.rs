@@ -240,6 +240,16 @@ impl OsPtySession {
             return true;
         }
 
+        // 超时清理会发送 SIGTERM/SIGKILL；等待线程可能先观察到信号退出再看到超时标记。
+        if is_timeout_kill_status(status.code)
+            && self
+                .timeout
+                .is_some_and(|timeout| status.elapsed + Duration::from_millis(200) >= timeout)
+        {
+            self.timed_out.store(true, Ordering::SeqCst);
+            return true;
+        }
+
         false
     }
 
@@ -262,6 +272,10 @@ impl OsPtySession {
             cleanup();
         }
     }
+}
+
+fn is_timeout_kill_status(code: i32) -> bool {
+    code == -libc::SIGTERM || code == -libc::SIGKILL
 }
 
 impl PtySession for OsPtySession {

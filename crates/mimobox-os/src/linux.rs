@@ -998,6 +998,16 @@ fn apply_security_policies_and_exec(
         // SAFETY: This child intentionally forks once after CLONE_NEWPID so the namespace takes effect.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
+                // Block SIGTERM so the intermediate process survives the timeout signal,
+                // allowing it to properly reap and forward the grandchild's exit status.
+                // SAFETY: The mask is local stack memory, and sigprocmask only updates this process.
+                unsafe {
+                    let mut mask: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut mask);
+                    libc::sigaddset(&mut mask, libc::SIGTERM);
+                    libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
+                }
+
                 // 中间进程：等待孙进程退出后转发退出码
                 loop {
                     match waitpid(child, None) {
