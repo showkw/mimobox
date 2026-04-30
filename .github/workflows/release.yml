@@ -26,6 +26,10 @@ jobs:
             os: ubuntu-latest
             cli_features: wasm,kvm
             build_mcp: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cli_features: wasm,kvm
+            build_mcp: true
           - target: aarch64-apple-darwin
             os: macos-latest
             cli_features: wasm
@@ -45,11 +49,24 @@ jobs:
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cross
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build CLI
-        run: cargo build --release -p mimobox-cli --features ${{ matrix.cli_features }} --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            cross build --release -p mimobox-cli --features ${{ matrix.cli_features }} --target ${{ matrix.target }}
+          else
+            cargo build --release -p mimobox-cli --features ${{ matrix.cli_features }} --target ${{ matrix.target }}
+          fi
       - name: Build MCP
         if: matrix.build_mcp
-        run: cargo build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            cross build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+          else
+            cargo build --release -p mimobox-mcp --features vm --target ${{ matrix.target }}
+          fi
       - name: Rename binaries
         run: |
           cd target/${{ matrix.target }}/release
@@ -81,14 +98,21 @@ jobs:
             target/${{ matrix.target }}/release/mimobox-mcp-*
 
   github-release:
-    needs: build-binaries
+    needs: [build-binaries, build-wheels]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheels
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: mimobox-*/mimobox*
+          files: |
+            mimobox-*/mimobox*
+            wheels/*/*.whl
           generate_release_notes: true
 
   build-wheels:
