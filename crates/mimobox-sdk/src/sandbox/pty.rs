@@ -56,6 +56,11 @@ impl Sandbox {
     }
 
     /// Creates an interactive terminal session with a complete `PtyConfig`.
+    ///
+    /// `PtyConfig::timeout = None` means the PTY session is unbounded.
+    /// `Some(Duration::ZERO)` is rejected; positive values are honored with
+    /// `Duration` precision because PTY sessions are interactive and may need
+    /// shorter deadlines than batch `execute()` calls.
     pub fn create_pty_with_config(
         &mut self,
         mut config: PtyConfig,
@@ -68,6 +73,11 @@ impl Sandbox {
 
         if let Some(cwd) = config.cwd.as_deref() {
             validate_cwd(cwd)?;
+        }
+        if config.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SdkError::Config(
+                "PTY timeout must be greater than zero; use None for no timeout".to_string(),
+            ));
         }
 
         config.env = merge_env_vars(&self.config.env_vars, &config.env)?;

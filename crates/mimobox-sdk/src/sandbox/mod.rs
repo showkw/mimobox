@@ -31,10 +31,7 @@ use crate::vm_helpers::{initialize_default_vm_pool, map_pool_error};
     all(feature = "vm", target_os = "linux")
 ))]
 use mimobox_core::Sandbox as CoreSandbox;
-#[cfg(any(
-    feature = "wasm",
-    all(feature = "os", any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(feature = "wasm")]
 use mimobox_core::SandboxError;
 use mimobox_core::{BLOCKED_ENV_VARS, ErrorCode, MAX_ENV_KEY_BYTES, SandboxMetrics};
 use std::collections::HashMap;
@@ -423,10 +420,7 @@ pub(crate) fn validate_cwd(cwd: &str) -> Result<(), SdkError> {
 
 // -- File error mapping helpers --
 
-#[cfg(any(
-    feature = "wasm",
-    all(feature = "os", any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(feature = "wasm")]
 /// Maps the core file error value.
 pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     match error {
@@ -435,10 +429,7 @@ pub(crate) fn map_core_file_error(error: SandboxError) -> SdkError {
     }
 }
 
-#[cfg(any(
-    feature = "wasm",
-    all(feature = "os", any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(feature = "wasm")]
 /// Provides the read file via core operation.
 pub(crate) fn read_file_via_core(
     sandbox: &mut impl CoreSandbox,
@@ -447,10 +438,7 @@ pub(crate) fn read_file_via_core(
     CoreSandbox::read_file(sandbox, path)
 }
 
-#[cfg(any(
-    feature = "wasm",
-    all(feature = "os", any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(feature = "wasm")]
 /// Provides the write file via core operation.
 pub(crate) fn write_file_via_core(
     sandbox: &mut impl CoreSandbox,
@@ -470,24 +458,6 @@ pub(crate) fn os_file_operation_unsupported(operation: &str, suggestion: &'stati
         ),
         Some(suggestion.to_string()),
     )
-}
-
-#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-/// Maps the os core file error value.
-pub(crate) fn map_os_core_file_error(
-    operation: &str,
-    unsupported_message: &str,
-    error: SandboxError,
-) -> SdkError {
-    match error {
-        SandboxError::ExecutionFailed { message, .. } if message == unsupported_message => {
-            os_file_operation_unsupported(
-                operation,
-                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
-            )
-        }
-        other => map_core_file_error(other),
-    }
 }
 
 // -- Sandbox lifecycle methods --
@@ -546,14 +516,13 @@ impl Sandbox {
     pub fn with_config(config: Config) -> Result<Self, SdkError> {
         config.validate()?;
 
-        let sandbox = Self::new_uninitialized(config);
-
         #[cfg(feature = "vm")]
-        let mut sandbox = sandbox;
+        let vm_pool = initialize_default_vm_pool(&config)?;
 
+        let mut sandbox = Self::new_uninitialized(config);
         #[cfg(feature = "vm")]
         {
-            sandbox.vm_pool = initialize_default_vm_pool(&sandbox.config)?;
+            sandbox.vm_pool = vm_pool;
         }
 
         Ok(sandbox)
@@ -574,11 +543,11 @@ impl Sandbox {
     ) -> Result<Self, SdkError> {
         config.validate()?;
 
-        let mut sandbox = Self::new_uninitialized(config);
-        let sandbox_config = sandbox.config.to_sandbox_config();
-        let microvm_config = sandbox.config.to_microvm_config()?;
+        let sandbox_config = config.to_sandbox_config();
+        let microvm_config = config.to_microvm_config()?;
         let pool = mimobox_vm::VmPool::new_with_base(sandbox_config, microvm_config, pool_config)
             .map_err(map_pool_error)?;
+        let mut sandbox = Self::new_uninitialized(config);
         sandbox.vm_pool = Some(Arc::new(pool));
         Ok(sandbox)
     }
@@ -674,7 +643,17 @@ impl Sandbox {
             other => other,
         };
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
-            self.wait_ready_inner(timeout)?;
+            if let Err(error) = self.wait_ready_inner(timeout) {
+                registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+                registry::update_ready(self.id, false);
+                if let Err(cleanup_error) = self.destroy_backend() {
+                    tracing::warn!(
+                        error = %cleanup_error,
+                        "Failed to clean backend after wait_ready failure"
+                    );
+                }
+                return Err(error);
+            }
             registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
             registry::update_ready(self.id, true);
             return Ok(());
@@ -685,7 +664,17 @@ impl Sandbox {
         }
         self.inner = Some(self.create_inner(isolation)?);
         self.active_isolation = Some(isolation);
-        self.wait_ready_inner(timeout)?;
+        if let Err(error) = self.wait_ready_inner(timeout) {
+            registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
+            registry::update_ready(self.id, false);
+            if let Err(cleanup_error) = self.destroy_backend() {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    "Failed to clean backend after wait_ready initialization failure"
+                );
+            }
+            return Err(error);
+        }
         registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
         registry::update_ready(self.id, true);
         Ok(())
@@ -1005,8 +994,17 @@ impl Sandbox {
     }
 
     fn destroy_inner(&mut self) -> Result<(), SdkError> {
-        registry::unregister(self.id);
-        self.destroy_backend()
+        match self.destroy_backend() {
+            Ok(()) => {
+                registry::unregister(self.id);
+                Ok(())
+            }
+            Err(error) => {
+                registry::update_isolation(self.id, Some(self.config.isolation), None);
+                registry::update_ready(self.id, false);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -1518,6 +1516,25 @@ mod tests {
 
         drop(session);
         sandbox.destroy().expect("sandbox destroy failed");
+    }
+
+    #[test]
+    fn create_pty_with_zero_timeout_is_rejected() {
+        let mut sandbox = Sandbox::with_config(Config::default()).expect("sandbox creation failed");
+
+        let result = sandbox.create_pty_with_config(mimobox_core::PtyConfig {
+            command: vec!["/bin/sh".to_string()],
+            size: mimobox_core::PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: Some(Duration::ZERO),
+        });
+
+        let error = result.expect_err("zero PTY timeout should be rejected");
+        assert!(
+            error.to_string().contains("greater than zero"),
+            "error should explain zero timeout handling: {error}"
+        );
     }
 
     #[test]

@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mimobox_core::{PtyConfig, PtyEvent, PtySession, PtySize as CorePtySize, SandboxError};
@@ -67,9 +67,12 @@ pub(crate) fn build_session(
     allocated: AllocatedPty,
     child_pid: libc::pid_t,
     timeout: Option<Duration>,
+    cleanup: Option<PtyCleanup>,
 ) -> Box<dyn PtySession> {
-    Box::new(OsPtySession::new(allocated, child_pid, timeout))
+    Box::new(OsPtySession::new(allocated, child_pid, timeout, cleanup))
 }
+
+pub(crate) type PtyCleanup = Box<dyn FnOnce() + Send + 'static>;
 
 /// 构建 PTY 子进程使用的净化环境变量集合。
 ///
@@ -117,19 +120,32 @@ struct OsPtySession {
     exit_rx: Receiver<i32>,
     cached_exit_code: Option<i32>,
     exited: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    cleanup: Mutex<Option<PtyCleanup>>,
 }
 
 impl OsPtySession {
-    fn new(allocated: AllocatedPty, child_pid: libc::pid_t, timeout: Option<Duration>) -> Self {
+    fn new(
+        allocated: AllocatedPty,
+        child_pid: libc::pid_t,
+        timeout: Option<Duration>,
+        cleanup: Option<PtyCleanup>,
+    ) -> Self {
         let (output_tx, output_rx) = mpsc::channel();
         let (exit_tx, exit_rx) = mpsc::channel();
         let exited = Arc::new(AtomicBool::new(false));
+        let timed_out = Arc::new(AtomicBool::new(false));
 
         spawn_reader_thread(allocated.reader, output_tx.clone());
         spawn_wait_thread(child_pid, output_tx, exit_tx, Arc::clone(&exited));
 
         if let Some(timeout) = timeout {
-            spawn_timeout_thread(child_pid, timeout, Arc::clone(&exited));
+            spawn_timeout_thread(
+                child_pid,
+                timeout,
+                Arc::clone(&exited),
+                Arc::clone(&timed_out),
+            );
         }
 
         Self {
@@ -140,20 +156,43 @@ impl OsPtySession {
             exit_rx,
             cached_exit_code: None,
             exited,
+            timed_out,
+            cleanup: Mutex::new(cleanup),
         }
     }
 
     fn wait_internal(&mut self) -> Result<i32, SandboxError> {
         if let Some(code) = self.cached_exit_code {
+            if self.timed_out.load(Ordering::SeqCst) {
+                self.run_cleanup();
+                return Err(SandboxError::Timeout);
+            }
             return Ok(code);
         }
 
-        let code = self
-            .exit_rx
-            .recv()
-            .map_err(|_| SandboxError::new("PTY exit event channel closed"))?;
+        let code = match self.exit_rx.recv() {
+            Ok(code) => code,
+            Err(_) => {
+                self.run_cleanup();
+                return Err(SandboxError::new("PTY exit event channel closed"));
+            }
+        };
         self.cached_exit_code = Some(code);
+        self.run_cleanup();
+        if self.timed_out.load(Ordering::SeqCst) {
+            return Err(SandboxError::Timeout);
+        }
         Ok(code)
+    }
+
+    fn run_cleanup(&self) {
+        let Ok(mut cleanup) = self.cleanup.lock() else {
+            tracing::warn!("PTY cleanup mutex poisoned; skipping cleanup callback");
+            return;
+        };
+        if let Some(cleanup) = cleanup.take() {
+            cleanup();
+        }
     }
 }
 
@@ -189,6 +228,7 @@ impl Drop for OsPtySession {
         if !self.exited.load(Ordering::SeqCst) {
             let _ = terminate_process_group(self.child_pid, &self.exited);
         }
+        self.run_cleanup();
     }
 }
 
@@ -252,17 +292,23 @@ fn spawn_wait_thread(
     });
 }
 
-fn spawn_timeout_thread(child_pid: libc::pid_t, timeout: Duration, exited: Arc<AtomicBool>) {
+fn spawn_timeout_thread(
+    child_pid: libc::pid_t,
+    timeout: Duration,
+    exited: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
         if exited.load(Ordering::SeqCst) {
             return;
         }
 
-        let _ = send_signal_to_group(child_pid, libc::SIGTERM);
+        timed_out.store(true, Ordering::SeqCst);
+        let _ = send_signal_to_child_tree(child_pid, libc::SIGTERM);
         std::thread::sleep(Duration::from_millis(150));
         if !exited.load(Ordering::SeqCst) {
-            let _ = send_signal_to_group(child_pid, libc::SIGKILL);
+            let _ = send_signal_to_child_tree(child_pid, libc::SIGKILL);
         }
     });
 }
@@ -299,18 +345,38 @@ fn terminate_process_group(
         return Ok(());
     }
 
-    send_signal_to_group(child_pid, libc::SIGTERM)?;
+    send_signal_to_child_tree(child_pid, libc::SIGTERM)?;
     std::thread::sleep(Duration::from_millis(150));
-    if !exited.load(Ordering::SeqCst) && process_group_exists(child_pid) {
-        send_signal_to_group(child_pid, libc::SIGKILL)?;
+    if !exited.load(Ordering::SeqCst) {
+        send_signal_to_child_tree(child_pid, libc::SIGKILL)?;
     }
 
     Ok(())
 }
 
-fn send_signal_to_group(child_pid: libc::pid_t, signal: libc::c_int) -> Result<(), SandboxError> {
+fn send_signal_to_child_tree(
+    child_pid: libc::pid_t,
+    signal: libc::c_int,
+) -> Result<(), SandboxError> {
     // SAFETY: 传入负 pid 表示向该进程组发信号；pid 由父进程保存且仅用于同一子进程组。
     let result = unsafe { libc::kill(-child_pid, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return send_signal_to_process(child_pid, signal);
+    }
+
+    Err(SandboxError::new(format!(
+        "failed to send signal {signal} to PTY process group: {error}"
+    )))
+}
+
+fn send_signal_to_process(child_pid: libc::pid_t, signal: libc::c_int) -> Result<(), SandboxError> {
+    // SAFETY: child_pid 来自成功 spawn/fork 的子进程；ESRCH 表示进程已退出，按幂等清理处理。
+    let result = unsafe { libc::kill(child_pid, signal) };
     if result == 0 {
         return Ok(());
     }
@@ -321,17 +387,6 @@ fn send_signal_to_group(child_pid: libc::pid_t, signal: libc::c_int) -> Result<(
     }
 
     Err(SandboxError::new(format!(
-        "failed to send signal {signal} to PTY process group: {error}"
+        "failed to send signal {signal} to PTY process: {error}"
     )))
-}
-
-fn process_group_exists(child_pid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 仅做存在性探测，不会真正发送信号。
-    let result = unsafe { libc::kill(-child_pid, 0) };
-    if result == 0 {
-        return true;
-    }
-
-    let error = std::io::Error::last_os_error();
-    error.raw_os_error() != Some(libc::ESRCH)
 }

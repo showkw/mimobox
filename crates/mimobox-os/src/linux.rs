@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::io::Read;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +9,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use nix::errno::Errno;
 use nix::sched::CloneFlags;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
@@ -28,6 +29,7 @@ const CGROUP_V2_ROOT: &str = "/sys/fs/cgroup";
 const DEFAULT_MAX_PROCESSES: u32 = 64;
 const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const FALLBACK_PAGE_SIZE_BYTES: u64 = 4096;
 const PROC_STAT_UTIME_INDEX: usize = 11;
 
@@ -38,22 +40,77 @@ struct OutputCapture {
     read_error: Option<String>,
 }
 
+fn format_io_resource_error(context: &str, error: std::io::Error, errno: Option<i32>) -> String {
+    let errno_text = errno
+        .map(|errno| format!(", errno={errno}"))
+        .unwrap_or_default();
+    let hint = match error.raw_os_error() {
+        Some(libc::EMFILE) => {
+            "; hint: current process file descriptor limit reached, raise `ulimit -n` or reduce concurrent sandboxes"
+        }
+        Some(libc::ENFILE) => {
+            "; hint: system-wide file descriptor table is full, reduce sandbox concurrency or raise kernel fs.file-max"
+        }
+        Some(libc::EAGAIN) => {
+            "; hint: process/thread limit reached, reduce concurrent sandboxes or increase pids.max/ulimit -u"
+        }
+        Some(libc::ENOMEM) => {
+            "; hint: host memory exhausted while creating sandbox process resources, reduce concurrency or increase host memory"
+        }
+        _ => "",
+    };
+    format!("{context}: {error}{errno_text}{hint}")
+}
+
 /// Creates a pipe with `pipe2` and `O_CLOEXEC`.
 ///
 /// `O_CLOEXEC` ensures pipe file descriptors close automatically after `fork`+`exec`,
 /// preventing leaks into sandboxed processes.
-fn create_pipe_cloexec() -> Result<(RawFd, RawFd), SandboxError> {
+fn create_pipe_cloexec() -> Result<(RawFdGuard, RawFdGuard), SandboxError> {
     let mut fds: [libc::c_int; 2] = [-1, -1];
     // SAFETY: pipe2 系统调用，fds 是有效的输出缓冲区
     let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     if ret < 0 {
         // SAFETY: errno is thread-local and can be read immediately after the failed libc call.
         let errno = unsafe { *libc::__errno_location() };
-        return Err(SandboxError::PipeError(format!(
-            "pipe2(O_CLOEXEC) failed: errno={errno}"
+        return Err(SandboxError::PipeError(format_io_resource_error(
+            "pipe2(O_CLOEXEC) failed",
+            std::io::Error::last_os_error(),
+            Some(errno),
         )));
     }
-    Ok((fds[0], fds[1]))
+    Ok((RawFdGuard::new(fds[0]), RawFdGuard::new(fds[1])))
+}
+
+#[derive(Debug)]
+struct RawFdGuard {
+    fd: RawFd,
+}
+
+impl RawFdGuard {
+    fn new(fd: RawFd) -> Self {
+        Self { fd }
+    }
+}
+
+impl IntoRawFd for RawFdGuard {
+    fn into_raw_fd(self) -> RawFd {
+        let fd = self.fd;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl Drop for RawFdGuard {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            // SAFETY: fd 由当前 guard 独占；close 失败时只能记录，不能在 Drop 中 panic。
+            unsafe {
+                libc::close(self.fd);
+            }
+            self.fd = -1;
+        }
+    }
 }
 
 fn child_env_pairs() -> &'static [(&'static std::ffi::CStr, &'static std::ffi::CStr)] {
@@ -473,7 +530,7 @@ fn configure_sandbox_cgroup(
     }
 
     if let Err(error) = fs::write(cgroup_path.join("pids.max"), format_pids_max(config)) {
-        cleanup_cgroup(&cgroup_path);
+        let _ = cleanup_cgroup(&cgroup_path);
         tracing::warn!(
             "Failed to write cgroup pids.max, skipping pids.max process limit: path={}, max_processes={}, error={error}",
             cgroup_path.display(),
@@ -488,13 +545,13 @@ fn configure_sandbox_cgroup(
     if config.cpu_quota_us.is_some() {
         // Write cpu.max as "quota period"; "max period" means unlimited.
         if let Err(error) = fs::write(cgroup_path.join("cpu.max"), format_cpu_max(config)) {
-            cleanup_cgroup(&cgroup_path);
+            let _ = cleanup_cgroup(&cgroup_path);
             return Err(error.into());
         }
     }
 
     if let Err(error) = fs::write(cgroup_path.join("cgroup.procs"), pid.to_string()) {
-        cleanup_cgroup(&cgroup_path);
+        let _ = cleanup_cgroup(&cgroup_path);
         tracing::warn!(
             "Failed to write cgroup.procs, skipping pids.max process limit: path={}, pid={pid}, error={error}",
             cgroup_path.display()
@@ -509,12 +566,46 @@ fn configure_sandbox_cgroup(
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_cgroup(path: &Path) {
-    if let Err(error) = fs::remove_dir(path) {
-        tracing::debug!(
-            "Failed to clean up cgroup: path={}, error={error}",
-            path.display()
-        );
+fn cleanup_cgroup(path: &Path) -> std::io::Result<()> {
+    let mut last_error = None;
+
+    for attempt in 0..3 {
+        kill_cgroup_processes(path);
+
+        match fs::remove_dir(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                tracing::debug!(
+                    "Failed to clean up cgroup: path={}, attempt={}, error={error}",
+                    path.display(),
+                    attempt + 1
+                );
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(50 * (attempt + 1) as u64));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::other(format!("failed to clean cgroup {}", path.display()))
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn kill_cgroup_processes(path: &Path) {
+    if fs::write(path.join("cgroup.kill"), "1").is_ok() {
+        return;
+    }
+
+    let Ok(procs) = fs::read_to_string(path.join("cgroup.procs")) else {
+        return;
+    };
+    for pid in procs
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+    {
+        kill_process(pid, Signal::SIGKILL);
     }
 }
 
@@ -582,7 +673,33 @@ fn kill_process(pid: libc::pid_t, signal: Signal) {
     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal);
 }
 
-fn read_limited_output<R, F>(reader: &mut R, label: &'static str, mut on_limit: F) -> OutputCapture
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: fcntl(F_GETFL/F_SETFL) 只修改当前 fd 的非阻塞标志。
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        tracing::debug!(
+            "Failed to read fd flags before nonblocking output capture: fd={fd}, error={}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+
+    // SAFETY: flags 来自 F_GETFL，追加 O_NONBLOCK 后写回同一 fd。
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        tracing::debug!(
+            "Failed to enable nonblocking output capture: fd={fd}, error={}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+fn read_limited_output<R, F>(
+    reader: &mut R,
+    label: &'static str,
+    mut on_limit: F,
+    stop_requested: &AtomicBool,
+) -> OutputCapture
 where
     R: Read,
     F: FnMut(),
@@ -619,6 +736,19 @@ where
                 };
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if stop_requested.load(Ordering::SeqCst) {
+                    return OutputCapture {
+                        data,
+                        truncated: false,
+                        read_error: Some(format!(
+                            "{label} output drain stopped after child cleanup deadline"
+                        )),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             Err(error) => {
                 return OutputCapture {
                     data,
@@ -635,26 +765,50 @@ fn spawn_pipe_reader(
     fd: RawFd,
     child_pid: libc::pid_t,
     output_limit_triggered: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
 ) -> Receiver<OutputCapture> {
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
+        set_nonblocking(fd);
         // SAFETY: fd 的所有权只转移给当前读取线程，由 File 在 drop 时关闭。
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let capture = read_limited_output(&mut file, label, || {
-            if !output_limit_triggered.swap(true, Ordering::SeqCst) {
-                kill_process_group(child_pid, Signal::SIGKILL);
-            }
-        });
+        let capture = read_limited_output(
+            &mut file,
+            label,
+            || {
+                if !output_limit_triggered.swap(true, Ordering::SeqCst) {
+                    kill_process_group(child_pid, Signal::SIGKILL);
+                }
+            },
+            &stop_requested,
+        );
         let _ = tx.send(capture);
     });
 
     rx
 }
 
-fn receive_output_capture(rx: Receiver<OutputCapture>, label: &'static str) -> OutputCapture {
-    match rx.recv() {
+fn receive_output_capture(
+    rx: Receiver<OutputCapture>,
+    label: &'static str,
+    stop_requested: &AtomicBool,
+) -> OutputCapture {
+    match rx.recv_timeout(OUTPUT_DRAIN_TIMEOUT) {
         Ok(capture) => capture,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            stop_requested.store(true, Ordering::SeqCst);
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(capture) => capture,
+                Err(error) => OutputCapture {
+                    data: Vec::new(),
+                    truncated: false,
+                    read_error: Some(format!(
+                        "{label} reader did not finish after child cleanup deadline: {error}"
+                    )),
+                },
+            }
+        }
         Err(error) => OutputCapture {
             data: Vec::new(),
             truncated: false,
@@ -855,6 +1009,14 @@ fn apply_security_policies_and_exec(
                             // SAFETY: Intermediate child exits immediately with the encoded signal status.
                             unsafe { libc::_exit(128 + sig as i32) }
                         }
+                        Err(Errno::EINTR) => continue,
+                        Err(error) => {
+                            // SAFETY: This is the forked child failure path; write_error and _exit avoid unwinding.
+                            unsafe {
+                                write_error(2, &format!("intermediate waitpid failed: {error}"));
+                                libc::_exit(125);
+                            }
+                        }
                         _ => continue,
                     }
                 }
@@ -945,8 +1107,18 @@ fn apply_security_policies_and_exec(
 impl LinuxSandbox {
     #[cfg(target_os = "linux")]
     fn cleanup_last_cgroup(&mut self) {
-        if let Some(path) = self.last_cgroup_path.take() {
-            cleanup_cgroup(&path);
+        if let Some(path) = self.last_cgroup_path.clone() {
+            match cleanup_cgroup(&path) {
+                Ok(()) => {
+                    self.last_cgroup_path = None;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to clean sandbox cgroup, will retry later: path={}, error={error}",
+                        path.display()
+                    );
+                }
+            }
         }
     }
 
@@ -1255,29 +1427,26 @@ impl Sandbox for LinuxSandbox {
         // SAFETY: The parent immediately manages both branches and the child only runs fork-safe setup.
         match unsafe { fork() }.map_err(|e| SandboxError::Syscall(e.to_string()))? {
             ForkResult::Parent { child } => {
-                // SAFETY: 父进程只负责发启动信号，不读取 gate。
-                unsafe {
-                    libc::close(start_read_fd);
-                }
-                // 重要 #7 修复：父进程关闭写端（O_CLOEXEC 已在 pipe2 时设置）
-                // SAFETY: fd 有效，父进程不再需要写端
-                unsafe {
-                    libc::close(stdout_write_fd);
-                    libc::close(stderr_write_fd);
-                }
+                drop(start_read_fd);
+                drop(stdout_write_fd);
+                drop(stderr_write_fd);
+                let start_write_fd = start_write_fd.into_raw_fd();
 
                 let output_limit_triggered = Arc::new(AtomicBool::new(false));
+                let output_stop_requested = Arc::new(AtomicBool::new(false));
                 let stdout_rx = spawn_pipe_reader(
                     "stdout",
-                    stdout_read_fd,
+                    stdout_read_fd.into_raw_fd(),
                     child.as_raw(),
                     Arc::clone(&output_limit_triggered),
+                    Arc::clone(&output_stop_requested),
                 );
                 let stderr_rx = spawn_pipe_reader(
                     "stderr",
-                    stderr_read_fd,
+                    stderr_read_fd.into_raw_fd(),
                     child.as_raw(),
                     Arc::clone(&output_limit_triggered),
+                    Arc::clone(&output_stop_requested),
                 );
 
                 #[cfg(target_os = "linux")]
@@ -1294,9 +1463,12 @@ impl Sandbox for LinuxSandbox {
                         Err(error) => {
                             cancel_child_start(start_write_fd);
                             kill_process(child.as_raw(), Signal::SIGKILL);
-                            let _ = waitpid(child, None);
-                            let _ = receive_output_capture(stdout_rx, "stdout");
-                            let _ = receive_output_capture(stderr_rx, "stderr");
+                            let _ = reap_child(child);
+                            output_stop_requested.store(true, Ordering::SeqCst);
+                            let _ =
+                                receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+                            let _ =
+                                receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
                             return Err(error);
                         }
                     }
@@ -1304,9 +1476,10 @@ impl Sandbox for LinuxSandbox {
 
                 if let Err(error) = signal_child_start(start_write_fd) {
                     kill_process(child.as_raw(), Signal::SIGKILL);
-                    let _ = waitpid(child, None);
-                    let _ = receive_output_capture(stdout_rx, "stdout");
-                    let _ = receive_output_capture(stderr_rx, "stderr");
+                    let _ = reap_child(child);
+                    output_stop_requested.store(true, Ordering::SeqCst);
+                    let _ = receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+                    let _ = receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
                     #[cfg(target_os = "linux")]
                     if cgroup_path.is_some() {
                         self.cleanup_last_cgroup();
@@ -1315,11 +1488,37 @@ impl Sandbox for LinuxSandbox {
                 }
 
                 let (wait_result, timed_out, metrics) =
-                    waitpid_with_metrics(child, timeout, self.config.memory_limit_mb)?;
+                    match waitpid_with_metrics(child, timeout, self.config.memory_limit_mb) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            kill_process_group(child.as_raw(), Signal::SIGKILL);
+                            if let Some(path) = cgroup_path.as_deref() {
+                                kill_cgroup_processes(path);
+                            }
+                            output_stop_requested.store(true, Ordering::SeqCst);
+                            let _ =
+                                receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+                            let _ =
+                                receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
+                            #[cfg(target_os = "linux")]
+                            if cgroup_path.is_some() {
+                                self.cleanup_last_cgroup();
+                            }
+                            return Err(error);
+                        }
+                    };
                 self.cached_metrics = Some(metrics);
 
-                let stdout_capture = receive_output_capture(stdout_rx, "stdout");
-                let stderr_capture = receive_output_capture(stderr_rx, "stderr");
+                // 直系子进程退出后，后台子进程仍可能持有 pipe，必须先清理进程组再 drain 输出。
+                kill_process_group(child.as_raw(), Signal::SIGKILL);
+                if let Some(path) = cgroup_path.as_deref() {
+                    kill_cgroup_processes(path);
+                }
+
+                let stdout_capture =
+                    receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+                let stderr_capture =
+                    receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
                 log_output_read_error("stdout", &stdout_capture);
                 log_output_read_error("stderr", &stderr_capture);
 
@@ -1411,11 +1610,8 @@ impl Sandbox for LinuxSandbox {
                 }
             }
             ForkResult::Child => {
-                // SAFETY: 子进程只读取启动 gate，不写入。
-                unsafe {
-                    libc::close(start_write_fd);
-                }
-                if wait_for_parent_start_signal(start_read_fd).is_err() {
+                drop(start_write_fd);
+                if wait_for_parent_start_signal(start_read_fd.into_raw_fd()).is_err() {
                     // SAFETY: 父进程未完成 cgroup 设置，子进程必须 fail-closed。
                     unsafe {
                         libc::_exit(118);
@@ -1426,9 +1622,9 @@ impl Sandbox for LinuxSandbox {
                     cmd,
                     &child_config,
                     &child_env_vars,
-                    stdout_write_fd,
-                    stderr_write_fd,
-                    Some((stdout_read_fd, stderr_read_fd)),
+                    stdout_write_fd.into_raw_fd(),
+                    stderr_write_fd.into_raw_fd(),
+                    Some((stdout_read_fd.into_raw_fd(), stderr_read_fd.into_raw_fd())),
                 );
             }
         }
@@ -1440,6 +1636,12 @@ impl Sandbox for LinuxSandbox {
     ) -> Result<Box<dyn mimobox_core::PtySession>, SandboxError> {
         if config.command.is_empty() {
             return Err(SandboxError::new("PTY command must not be empty"));
+        }
+        if config.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SandboxError::new(
+                "PTY timeout must be greater than zero; use None for no timeout",
+            )
+            .suggestion("Set PtyConfig.timeout to None for an unbounded PTY session"));
         }
 
         tracing::info!(
@@ -1478,43 +1680,53 @@ impl Sandbox for LinuxSandbox {
         // SAFETY: The parent manages the child process while the child only performs fork-safe PTY setup.
         match unsafe { fork() }.map_err(|error| SandboxError::Syscall(error.to_string()))? {
             ForkResult::Parent { child } => {
-                // SAFETY: 父进程只负责发启动信号，不读取 gate。
-                unsafe {
-                    libc::close(start_read_fd);
-                }
+                drop(start_read_fd);
+                let start_write_fd = start_write_fd.into_raw_fd();
                 #[cfg(target_os = "linux")]
-                match configure_sandbox_cgroup(
+                let pty_cgroup_path = match configure_sandbox_cgroup(
                     Path::new(CGROUP_V2_ROOT),
                     child.as_raw(),
                     &self.config,
                 ) {
-                    Ok(path) => {
-                        self.last_cgroup_path = path;
-                    }
+                    Ok(path) => path,
                     Err(error) => {
                         cancel_child_start(start_write_fd);
                         kill_process(child.as_raw(), Signal::SIGKILL);
-                        let _ = waitpid(child, None);
+                        let _ = reap_child(child);
                         return Err(error);
                     }
-                }
+                };
 
                 if let Err(error) = signal_child_start(start_write_fd) {
                     kill_process(child.as_raw(), Signal::SIGKILL);
-                    let _ = waitpid(child, None);
+                    let _ = reap_child(child);
                     #[cfg(target_os = "linux")]
-                    self.cleanup_last_cgroup();
+                    if let Some(path) = pty_cgroup_path.as_deref() {
+                        let _ = cleanup_cgroup(path);
+                    }
                     return Err(error);
                 }
 
-                Ok(build_session(allocated, child.as_raw(), config.timeout))
+                let cleanup = pty_cgroup_path.map(|path| {
+                    Box::new(move || {
+                        if let Err(error) = cleanup_cgroup(&path) {
+                            tracing::warn!(
+                                "Failed to clean PTY cgroup: path={}, error={error}",
+                                path.display()
+                            );
+                        }
+                    }) as crate::pty::PtyCleanup
+                });
+                Ok(build_session(
+                    allocated,
+                    child.as_raw(),
+                    config.timeout,
+                    cleanup,
+                ))
             }
             ForkResult::Child => {
-                // SAFETY: 子进程只读取启动 gate，不写入。
-                unsafe {
-                    libc::close(start_write_fd);
-                }
-                if wait_for_parent_start_signal(start_read_fd).is_err() {
+                drop(start_write_fd);
+                if wait_for_parent_start_signal(start_read_fd.into_raw_fd()).is_err() {
                     // SAFETY: 父进程未完成 cgroup 设置，子进程必须 fail-closed。
                     unsafe {
                         libc::_exit(118);
@@ -2006,6 +2218,76 @@ mod tests {
     }
 
     #[test]
+    fn background_process_holding_stdout_does_not_block_execute_return() {
+        let mut config = test_config();
+        config.timeout_secs = Some(10);
+        config.allow_fork = true;
+        config.memory_limit_mb = None;
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
+
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 5 & echo done".to_string(),
+        ];
+        let start = Instant::now();
+        let result = sb.execute(&cmd).expect("execution failed");
+
+        if result.exit_code == Some(125) {
+            eprintln!(
+                "skipping: execvp failed, CI environment may lack complete filesystem isolation"
+            );
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "execute() should not wait for background pipe holders"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("done"),
+            "stdout should contain foreground output"
+        );
+    }
+
+    #[test]
+    fn pty_rejects_zero_timeout() {
+        let mut sb = LinuxSandbox::new(test_config()).expect("failed to create sandbox");
+        let result = sb.create_pty(mimobox_core::PtyConfig {
+            command: vec!["/bin/sh".to_string()],
+            size: mimobox_core::PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: Some(Duration::ZERO),
+        });
+
+        let Err(error) = result else {
+            panic!("zero PTY timeout should be rejected");
+        };
+        assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn pty_timeout_returns_timeout_error() {
+        let mut config = test_config();
+        config.memory_limit_mb = None;
+        let mut sb = LinuxSandbox::new(config).expect("failed to create sandbox");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/sleep".to_string(), "5".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_millis(100)),
+            })
+            .expect("failed to create PTY session");
+
+        let error = session
+            .wait()
+            .expect_err("PTY timeout should be returned as SandboxError::Timeout");
+        assert!(matches!(error, SandboxError::Timeout));
+    }
+
+    #[test]
     fn test_memory_limit() {
         // 设置极低的内存限制
         let mut config = test_config();
@@ -2247,18 +2529,34 @@ fn waitpid_with_metrics(
 }
 
 fn wait_until_exited_without_reaping(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
-    waitid(Id::Pid(child), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)
-        .map_err(|error| SandboxError::Syscall(error.to_string()))
+    loop {
+        match waitid(Id::Pid(child), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT) {
+            Ok(status) => return Ok(status),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(SandboxError::Syscall(error.to_string())),
+        }
+    }
 }
 
 fn poll_exited_without_reaping(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
-    waitid(
-        Id::Pid(child),
-        WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
-    )
-    .map_err(|error| SandboxError::Syscall(error.to_string()))
+    loop {
+        match waitid(
+            Id::Pid(child),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
+        ) {
+            Ok(status) => return Ok(status),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(SandboxError::Syscall(error.to_string())),
+        }
+    }
 }
 
 fn reap_child(child: nix::unistd::Pid) -> Result<WaitStatus, SandboxError> {
-    waitpid(child, None).map_err(|error| SandboxError::Syscall(error.to_string()))
+    loop {
+        match waitpid(child, None) {
+            Ok(status) => return Ok(status),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(SandboxError::Syscall(error.to_string())),
+        }
+    }
 }

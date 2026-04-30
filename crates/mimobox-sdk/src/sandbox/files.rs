@@ -15,13 +15,8 @@ use super::map_core_file_error;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use super::map_microvm_error;
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-use super::map_os_core_file_error;
-#[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
 use super::os_file_operation_unsupported;
-#[cfg(any(
-    feature = "wasm",
-    all(feature = "os", any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(feature = "wasm")]
 use super::{read_file_via_core, write_file_via_core};
 
 impl Sandbox {
@@ -201,21 +196,15 @@ impl Sandbox {
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => read_file_via_core(s, path).map_err(|err| {
-                map_os_core_file_error(
-                    "read_file",
-                    "file reading not supported by current backend",
-                    err,
-                )
-            }),
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "read_file",
+                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => read_file_via_core(s, path).map_err(|err| {
-                map_os_core_file_error(
-                    "read_file",
-                    "file reading not supported by current backend",
-                    err,
-                )
-            }),
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "read_file",
+                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::MicroVm(s) => s.read_file(path).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -237,21 +226,15 @@ impl Sandbox {
 
         match inner {
             #[cfg(all(feature = "os", target_os = "linux"))]
-            SandboxInner::Os(s) => write_file_via_core(s, path, data).map_err(|err| {
-                map_os_core_file_error(
-                    "write_file",
-                    "file writing not supported by current backend",
-                    err,
-                )
-            }),
+            SandboxInner::Os(_) => Err(os_file_operation_unsupported(
+                "write_file",
+                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+            )),
             #[cfg(all(feature = "os", target_os = "macos"))]
-            SandboxInner::OsMac(s) => write_file_via_core(s, path, data).map_err(|err| {
-                map_os_core_file_error(
-                    "write_file",
-                    "file writing not supported by current backend",
-                    err,
-                )
-            }),
+            SandboxInner::OsMac(_) => Err(os_file_operation_unsupported(
+                "write_file",
+                "Use microVM backend for isolated file operations, or execute commands inside the sandbox to access files",
+            )),
             #[cfg(all(feature = "vm", target_os = "linux"))]
             SandboxInner::MicroVm(s) => s.write_file(path, data).map_err(map_microvm_error),
             #[cfg(all(feature = "vm", target_os = "linux"))]

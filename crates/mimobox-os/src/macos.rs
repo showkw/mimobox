@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
@@ -90,6 +91,7 @@ const SANDBOX_INIT_FAILURE_MESSAGE: &[u8] =
     b"sandbox-exec: sandbox_apply: Operation not permitted\n";
 const OUTPUT_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SYSTEM_READ_PATHS: &[&str] = &[
     "/usr/lib/",
     "/System/Library/",
@@ -134,6 +136,79 @@ struct OutputCapture {
     read_error: Option<String>,
 }
 
+fn format_io_resource_error(context: &str, error: std::io::Error) -> String {
+    let hint = match error.raw_os_error() {
+        Some(libc::EMFILE) => {
+            "; hint: current process file descriptor limit reached, raise `ulimit -n` or reduce concurrent sandboxes"
+        }
+        Some(libc::ENFILE) => {
+            "; hint: system-wide file descriptor table is full, reduce sandbox concurrency"
+        }
+        Some(libc::ENOMEM) => {
+            "; hint: host memory exhausted while creating sandbox resources, reduce concurrency or increase host memory"
+        }
+        Some(libc::ENOSPC) => {
+            "; hint: temporary filesystem is full, clean /private/tmp or set TMPDIR to a volume with free space"
+        }
+        _ => "",
+    };
+    format!("{context}: {error}{hint}")
+}
+
+#[derive(Debug)]
+struct SandboxTempDir {
+    path: String,
+    cleaned: AtomicBool,
+}
+
+impl SandboxTempDir {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            cleaned: AtomicBool::new(false),
+        }
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn cleanup_now(&self) -> std::io::Result<()> {
+        if self.cleaned.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                self.cleaned.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.cleaned.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for SandboxTempDir {
+    fn drop(&mut self) {
+        if self.cleaned.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "Failed to clean sandbox temporary directory: {} - {}",
+                self.path,
+                error
+            );
+        }
+    }
+}
+
 fn build_safe_child_env(
     sandbox_tmp_dir: &str,
     pwd: &str,
@@ -170,7 +245,7 @@ fn build_safe_child_env(
 pub struct MacOsSandbox {
     config: SandboxConfig,
     /// Sandbox-private temporary directory to prevent cross-sandbox `/tmp` leakage.
-    sandbox_tmp_dir: String,
+    sandbox_tmp_dir: Arc<SandboxTempDir>,
     cached_metrics: Option<SandboxMetrics>,
 }
 
@@ -216,15 +291,21 @@ fn wait4_raw(pid: libc::pid_t, memory_limit_mb: Option<u64>) -> std::io::Result<
     let mut status = 0;
     // SAFETY: libc::rusage 是纯 C 数据结构，零初始化可作为 wait4 输出缓冲区。
     let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: pid 来自刚刚 spawn 的子进程，status 和 rusage 均指向栈上有效内存。
-    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(WaitOutcome {
-            status: std::process::ExitStatus::from_raw(status),
-            metrics: metrics_from_wait4_rusage(&rusage, memory_limit_mb),
-        })
+    loop {
+        // SAFETY: pid 来自刚刚 spawn 的子进程，status 和 rusage 均指向栈上有效内存。
+        let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+        if ret >= 0 {
+            return Ok(WaitOutcome {
+                status: std::process::ExitStatus::from_raw(status),
+                metrics: metrics_from_wait4_rusage(&rusage, memory_limit_mb),
+            });
+        }
+
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error);
     }
 }
 
@@ -422,7 +503,33 @@ fn wait_child_with_timeout(
     }
 }
 
-fn read_limited_output<R, F>(reader: &mut R, label: &'static str, mut on_limit: F) -> OutputCapture
+fn set_nonblocking(fd: libc::c_int) {
+    // SAFETY: fcntl(F_GETFL/F_SETFL) 只修改当前 fd 的非阻塞标志。
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        tracing::debug!(
+            "Failed to read fd flags before nonblocking output capture: fd={fd}, error={}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+
+    // SAFETY: flags 来自 F_GETFL，追加 O_NONBLOCK 后写回同一 fd。
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        tracing::debug!(
+            "Failed to enable nonblocking output capture: fd={fd}, error={}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+fn read_limited_output<R, F>(
+    reader: &mut R,
+    label: &'static str,
+    mut on_limit: F,
+    stop_requested: &AtomicBool,
+) -> OutputCapture
 where
     R: Read,
     F: FnMut(),
@@ -459,6 +566,19 @@ where
                 };
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if stop_requested.load(Ordering::SeqCst) {
+                    return OutputCapture {
+                        data,
+                        truncated: false,
+                        read_error: Some(format!(
+                            "{label} output drain stopped after child cleanup deadline"
+                        )),
+                    };
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             Err(error) => {
                 return OutputCapture {
                     data,
@@ -475,19 +595,26 @@ fn spawn_output_reader<R>(
     mut reader: R,
     child_pid: libc::pid_t,
     output_limit_triggered: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
 ) -> Receiver<OutputCapture>
 where
-    R: Read + Send + 'static,
+    R: Read + AsRawFd + Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let capture = read_limited_output(&mut reader, label, || {
-            if !output_limit_triggered.swap(true, Ordering::SeqCst) {
-                // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
-                let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
-            }
-        });
+        set_nonblocking(reader.as_raw_fd());
+        let capture = read_limited_output(
+            &mut reader,
+            label,
+            || {
+                if !output_limit_triggered.swap(true, Ordering::SeqCst) {
+                    // SAFETY: Negative pid targets the child process group created by pre_exec setpgid.
+                    let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
+                }
+            },
+            &stop_requested,
+        );
         let _ = tx.send(capture);
     });
 
@@ -497,10 +624,24 @@ where
 fn receive_output_capture(
     rx: Option<Receiver<OutputCapture>>,
     label: &'static str,
+    stop_requested: &AtomicBool,
 ) -> OutputCapture {
     match rx {
-        Some(rx) => match rx.recv() {
+        Some(rx) => match rx.recv_timeout(OUTPUT_DRAIN_TIMEOUT) {
             Ok(capture) => capture,
+            Err(RecvTimeoutError::Timeout) => {
+                stop_requested.store(true, Ordering::SeqCst);
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(capture) => capture,
+                    Err(error) => OutputCapture {
+                        data: Vec::new(),
+                        truncated: false,
+                        read_error: Some(format!(
+                            "{label} reader did not finish after child cleanup deadline: {error}"
+                        )),
+                    },
+                }
+            }
             Err(error) => OutputCapture {
                 data: Vec::new(),
                 truncated: false,
@@ -635,7 +776,7 @@ impl MacOsSandbox {
     /// 8. `(allow mach-lookup (global-name ...))` — permits only required Mach services.
     #[cfg(test)]
     fn generate_policy(&self) -> String {
-        Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir)
+        Self::build_seatbelt_policy(&self.config, self.sandbox_tmp_dir.path())
     }
 
     fn build_seatbelt_policy(config: &SandboxConfig, sandbox_tmp_dir: &str) -> String {
@@ -747,14 +888,23 @@ impl Sandbox for MacOsSandbox {
         // SECURITY: 创建沙箱专属临时目录，避免多个沙箱实例共享 /private/tmp 导致数据泄露。
         let sandbox_id = Uuid::new_v4();
         let sandbox_tmp_dir = format!("/private/tmp/mimobox-{sandbox_id}");
-        std::fs::create_dir_all(&sandbox_tmp_dir)
-            .map_err(|e| SandboxError::new(format!("failed to create sandbox tmp dir: {e}")))?;
+        std::fs::create_dir_all(&sandbox_tmp_dir).map_err(|e| {
+            SandboxError::new(format_io_resource_error(
+                "failed to create sandbox tmp dir",
+                e,
+            ))
+        })?;
         std::fs::set_permissions(&sandbox_tmp_dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| SandboxError::new(format!("failed to set tmp dir permissions: {e}")))?;
+            .map_err(|e| {
+                SandboxError::new(format_io_resource_error(
+                    "failed to set tmp dir permissions",
+                    e,
+                ))
+            })?;
 
         Ok(Self {
             config,
-            sandbox_tmp_dir,
+            sandbox_tmp_dir: Arc::new(SandboxTempDir::new(sandbox_tmp_dir)),
             cached_metrics: None,
         })
     }
@@ -772,7 +922,8 @@ impl Sandbox for MacOsSandbox {
         let timeout = self.config.timeout_secs.map(Duration::from_secs);
 
         // 生成 Seatbelt 策略，并在 fork 前转换为 CString，避免 pre_exec 中分配内存。
-        let policy = Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir);
+        let sandbox_tmp_dir = self.sandbox_tmp_dir.path().to_string();
+        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir);
         tracing::debug!(
             "Seatbelt policy generated (rules: {}, length: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -791,11 +942,11 @@ impl Sandbox for MacOsSandbox {
                 .env_clear()
                 // 内置默认 HOME/TMPDIR/PWD 指向沙箱专属目录；随后允许 env_vars 按优先级覆盖。
                 .envs(build_safe_child_env(
-                    &self.sandbox_tmp_dir,
-                    &self.sandbox_tmp_dir,
+                    &sandbox_tmp_dir,
+                    &sandbox_tmp_dir,
                     &self.config.env_vars,
                 ))
-                .current_dir(&self.sandbox_tmp_dir)
+                .current_dir(&sandbox_tmp_dir)
                 .pre_exec(move || {
                     // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
                     // stdin(0)/stdout(1)/stderr(2) 已通过 Stdio 配置设置，不需要保留其他 FD。
@@ -807,7 +958,12 @@ impl Sandbox for MacOsSandbox {
                 })
                 .spawn()
         }
-        .map_err(|e| SandboxError::new(format!("failed to start sandboxed command: {e}")))?;
+        .map_err(|e| {
+            SandboxError::new(format_io_resource_error(
+                "failed to start sandboxed command",
+                e,
+            ))
+        })?;
         let pid = child.id() as libc::pid_t;
 
         let child_running = Arc::new(AtomicBool::new(true));
@@ -830,11 +986,24 @@ impl Sandbox for MacOsSandbox {
         }
 
         let output_limit_triggered = Arc::new(AtomicBool::new(false));
+        let output_stop_requested = Arc::new(AtomicBool::new(false));
         let stdout_rx = child.stdout.take().map(|stdout| {
-            spawn_output_reader("stdout", stdout, pid, Arc::clone(&output_limit_triggered))
+            spawn_output_reader(
+                "stdout",
+                stdout,
+                pid,
+                Arc::clone(&output_limit_triggered),
+                Arc::clone(&output_stop_requested),
+            )
         });
         let stderr_rx = child.stderr.take().map(|stderr| {
-            spawn_output_reader("stderr", stderr, pid, Arc::clone(&output_limit_triggered))
+            spawn_output_reader(
+                "stderr",
+                stderr,
+                pid,
+                Arc::clone(&output_limit_triggered),
+                Arc::clone(&output_stop_requested),
+            )
         });
 
         let wait_result = if let Some(dur) = timeout {
@@ -845,16 +1014,36 @@ impl Sandbox for MacOsSandbox {
                 .map_err(|e| SandboxError::new(format!("wait4 failed: {e}")))
         };
         child_running.store(false, Ordering::SeqCst);
-        let (exit_status, mut timed_out, metrics) = wait_result?;
+        let (exit_status, timed_out, metrics) = match wait_result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                output_stop_requested.store(true, Ordering::SeqCst);
+                let _ = receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+                let _ = receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
+                return Err(error);
+            }
+        };
         self.cached_metrics = Some(metrics);
         if oom_killed.load(Ordering::SeqCst) {
-            timed_out = true;
+            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            output_stop_requested.store(true, Ordering::SeqCst);
+            return Err(SandboxError::ExecutionFailed {
+                kind: mimobox_core::ExecutionFailureKind::Oom,
+                message:
+                    "macOS sandbox memory limit exceeded; watchdog terminated the process group"
+                        .to_string(),
+            }
+            .suggestion("Increase memory_limit_mb or reduce the command memory footprint"));
         }
+
+        // 直系子进程退出后，后台子进程仍可能持有 pipe，必须先清理进程组再 drain 输出。
+        let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
 
         let elapsed = start.elapsed();
 
-        let stdout_capture = receive_output_capture(stdout_rx, "stdout");
-        let stderr_capture = receive_output_capture(stderr_rx, "stderr");
+        let stdout_capture = receive_output_capture(stdout_rx, "stdout", &output_stop_requested);
+        let stderr_capture = receive_output_capture(stderr_rx, "stderr", &output_stop_requested);
         log_output_read_error("stdout", &stdout_capture);
         log_output_read_error("stderr", &stderr_capture);
 
@@ -864,7 +1053,9 @@ impl Sandbox for MacOsSandbox {
         let mut stderr_buf = stderr_capture.data;
         append_output_truncation_marker(&mut stderr_buf, stdout_truncated, stderr_truncated);
 
-        let exit_code = exit_status.code();
+        let exit_code = exit_status
+            .code()
+            .or_else(|| exit_status.signal().map(|signal| -signal));
 
         if let Some(reason) = detect_seatbelt_backend_failure(exit_code, &stderr_buf) {
             return Err(SandboxError::new(reason));
@@ -892,6 +1083,12 @@ impl Sandbox for MacOsSandbox {
         if config.command.is_empty() {
             return Err(SandboxError::new("PTY command must not be empty"));
         }
+        if config.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SandboxError::new(
+                "PTY timeout must be greater than zero; use None for no timeout",
+            )
+            .suggestion("Set PtyConfig.timeout to None for an unbounded PTY session"));
+        }
 
         tracing::info!(
             "Creating macOS PTY session: {}",
@@ -899,7 +1096,8 @@ impl Sandbox for MacOsSandbox {
         );
 
         let allocated = allocate_pty(config.size)?;
-        let policy = Self::build_seatbelt_policy(&self.config, &self.sandbox_tmp_dir);
+        let sandbox_tmp_dir = self.sandbox_tmp_dir.path().to_string();
+        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir);
         tracing::debug!(
             "PTY Seatbelt policy generated (rules: {}, length: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -911,20 +1109,24 @@ impl Sandbox for MacOsSandbox {
             .read(true)
             .write(true)
             .open(&allocated.slave_path)
-            .map_err(|error| SandboxError::new(format!("failed to open PTY slave: {error}")))?;
-        let stdin_slave = slave_file
-            .try_clone()
-            .map_err(|error| SandboxError::new(format!("failed to clone PTY stdin: {error}")))?;
-        let stdout_slave = slave_file
-            .try_clone()
-            .map_err(|error| SandboxError::new(format!("failed to clone PTY stdout: {error}")))?;
+            .map_err(|error| {
+                SandboxError::new(format_io_resource_error("failed to open PTY slave", error))
+            })?;
+        let stdin_slave = slave_file.try_clone().map_err(|error| {
+            SandboxError::new(format_io_resource_error("failed to clone PTY stdin", error))
+        })?;
+        let stdout_slave = slave_file.try_clone().map_err(|error| {
+            SandboxError::new(format_io_resource_error(
+                "failed to clone PTY stdout",
+                error,
+            ))
+        })?;
 
         let pwd = config
             .cwd
             .clone()
-            .unwrap_or_else(|| self.sandbox_tmp_dir.clone());
-        let mut child_env =
-            build_safe_child_env(&self.sandbox_tmp_dir, &pwd, &self.config.env_vars);
+            .unwrap_or_else(|| sandbox_tmp_dir.clone());
+        let mut child_env = build_safe_child_env(&sandbox_tmp_dir, &pwd, &self.config.env_vars);
         child_env.extend(
             config
                 .env
@@ -941,7 +1143,7 @@ impl Sandbox for MacOsSandbox {
             .stdout(Stdio::from(stdout_slave))
             .stderr(Stdio::from(slave_file));
 
-        command.current_dir(config.cwd.as_deref().unwrap_or(&self.sandbox_tmp_dir));
+        command.current_dir(config.cwd.as_deref().unwrap_or(&sandbox_tmp_dir));
 
         // SAFETY: pre_exec 在子进程 exec 前接管 PTY 并应用 Seatbelt 策略；
         // 闭包捕获的 CString 在 sandbox_init 调用期间有效。
@@ -957,12 +1159,21 @@ impl Sandbox for MacOsSandbox {
             })
         }
         .spawn()
-        .map_err(|error| SandboxError::new(format!("failed to start sandboxed PTY: {error}")))?;
+        .map_err(|error| {
+            SandboxError::new(format_io_resource_error(
+                "failed to start sandboxed PTY",
+                error,
+            ))
+        })?;
+
+        let temp_dir_owner = Arc::clone(&self.sandbox_tmp_dir);
+        let cleanup = Some(Box::new(move || drop(temp_dir_owner)) as crate::pty::PtyCleanup);
 
         Ok(build_session(
             allocated,
             child.id() as libc::pid_t,
             config.timeout,
+            cleanup,
         ))
     }
 
@@ -988,22 +1199,21 @@ impl Sandbox for MacOsSandbox {
 
     fn destroy(self) -> Result<(), SandboxError> {
         tracing::debug!("Destroying macOS Seatbelt sandbox");
-        Ok(())
-    }
-}
-
-impl Drop for MacOsSandbox {
-    fn drop(&mut self) {
-        // SECURITY: 沙箱销毁时清理专属临时目录，防止数据残留。
-        if !self.sandbox_tmp_dir.is_empty() {
-            if let Err(e) = std::fs::remove_dir_all(&self.sandbox_tmp_dir) {
-                tracing::warn!(
-                    "Failed to clean sandbox temporary directory: {} - {}",
-                    self.sandbox_tmp_dir,
-                    e
-                );
-            }
+        if Arc::strong_count(&self.sandbox_tmp_dir) == 1 {
+            self.sandbox_tmp_dir.cleanup_now().map_err(|error| {
+                SandboxError::new(format!(
+                    "failed to clean sandbox tmp dir {}: {error}",
+                    self.sandbox_tmp_dir.path()
+                ))
+                .suggestion("Ensure no sandbox process is still using the directory and retry")
+            })?;
+        } else {
+            tracing::debug!(
+                "macOS sandbox tmp dir cleanup deferred until active PTY sessions are dropped: {}",
+                self.sandbox_tmp_dir.path()
+            );
         }
+        Ok(())
     }
 }
 
@@ -1847,6 +2057,92 @@ mod tests {
     }
 
     #[test]
+    fn background_process_holding_stdout_does_not_block_execute_return() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut config = test_config();
+        config.timeout_secs = Some(10);
+        let mut sb = MacOsSandbox::new(config).expect("failed to create sandbox");
+
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 5 & echo done".to_string(),
+        ];
+        let start = Instant::now();
+        let result = sb.execute(&cmd).expect("execution failed");
+
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "execute() should not wait for background pipe holders"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("done"),
+            "stdout should contain foreground output"
+        );
+    }
+
+    #[test]
+    fn self_signal_is_reported_as_negative_exit_code() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("failed to create sandbox");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "kill -TERM $$".to_string(),
+        ];
+        let result = sb.execute(&cmd).expect("execution failed");
+
+        assert_eq!(result.exit_code, Some(-libc::SIGTERM));
+        assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn pty_rejects_zero_timeout() {
+        let mut sb = MacOsSandbox::new(test_config()).expect("failed to create sandbox");
+        let result = sb.create_pty(mimobox_core::PtyConfig {
+            command: vec!["/bin/sh".to_string()],
+            size: mimobox_core::PtySize::default(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            timeout: Some(Duration::ZERO),
+        });
+
+        let Err(error) = result else {
+            panic!("zero PTY timeout should be rejected");
+        };
+        assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn pty_timeout_returns_timeout_error() {
+        if should_skip_runtime_tests() {
+            return;
+        }
+
+        let mut sb = MacOsSandbox::new(test_config()).expect("failed to create sandbox");
+        let mut session = sb
+            .create_pty(mimobox_core::PtyConfig {
+                command: vec!["/bin/sleep".to_string(), "5".to_string()],
+                size: mimobox_core::PtySize::default(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+                timeout: Some(Duration::from_millis(100)),
+            })
+            .expect("failed to create PTY session");
+
+        let error = session
+            .wait()
+            .expect_err("PTY timeout should be returned as SandboxError::Timeout");
+        assert!(matches!(error, SandboxError::Timeout));
+    }
+
+    #[test]
     fn test_empty_command_error() {
         let mut sb = MacOsSandbox::new(test_config()).expect("failed to create sandbox");
         let result = sb.execute(&[]);
@@ -1965,7 +2261,7 @@ mod tests {
             "policy should allow execution from the CommandLineTools toolchain path"
         );
         assert!(
-            policy.contains(&format!("(subpath \"{}\")", sb.sandbox_tmp_dir)),
+            policy.contains(&format!("(subpath \"{}\")", sb.sandbox_tmp_dir.path())),
             "SECURITY: policy should allow writing to the sandbox-private temporary directory"
         );
     }

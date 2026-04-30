@@ -454,8 +454,12 @@ fn resolve_allowed_http_domains(config: &Config) -> Vec<String> {
 }
 
 fn round_up_timeout_secs(timeout: Duration) -> u64 {
-    let millis = timeout.as_millis();
-    let seconds = millis.div_ceil(1_000);
+    if timeout.is_zero() {
+        return 0;
+    }
+
+    let nanos = timeout.as_nanos();
+    let seconds = nanos.div_ceil(1_000_000_000);
     u64::try_from(seconds).unwrap_or(u64::MAX)
 }
 
@@ -1363,6 +1367,12 @@ mod tests {
             .timeout(Duration::from_millis(1))
             .build()
             .expect("config validation failed");
+        assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
+
+        let config = Config::builder()
+            .timeout(Duration::from_nanos(1))
+            .build()
+            .expect("non-zero sub-millisecond timeout should round up to 1 second");
         assert_eq!(config.to_sandbox_config().timeout_secs, Some(1));
     }
 
