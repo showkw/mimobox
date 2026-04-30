@@ -109,10 +109,7 @@ fn command_type_name(cmd: &CliCommand) -> &'static str {
 fn main() -> ExitCode {
     if let Err(error) = init_tracing() {
         if let Err(print_error) = emit_error_json(&error) {
-            eprintln!(
-                "{{\"ok\":false,\"code\":\"logging_init_error\",\"message\":\"{}\"}}",
-                print_error
-            );
+            emit_fallback_error_json("logging_init_error", print_error.to_string());
         }
         return ExitCode::FAILURE;
     }
@@ -123,10 +120,7 @@ fn main() -> ExitCode {
             let message = panic_payload_to_string(payload.as_ref());
             let error = CliError::Panic(message);
             if let Err(print_error) = emit_error_json(&error) {
-                eprintln!(
-                    "{{\"ok\":false,\"code\":\"panic\",\"message\":\"{}\"}}",
-                    print_error
-                );
+                emit_fallback_error_json("panic", print_error.to_string());
             }
             ExitCode::FAILURE
         }
@@ -140,10 +134,7 @@ fn run_with_panic_guard() -> ExitCode {
         Err(error) => {
             error!(code = error.code(), message = %error, "CLI execution failed");
             if let Err(print_error) = emit_error_json(&error) {
-                eprintln!(
-                    "{{\"ok\":false,\"code\":\"json_error\",\"message\":\"{}\"}}",
-                    print_error
-                );
+                emit_fallback_error_json("json_error", print_error.to_string());
             }
             ExitCode::FAILURE
         }

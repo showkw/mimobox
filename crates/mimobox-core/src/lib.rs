@@ -19,6 +19,6 @@ pub use sandbox::{
     BLOCKED_ENV_VARS, DirEntry, ErrorCode, ExecutionFailureKind, FileStat, FileType, HttpAclPolicy,
     HttpAclRule, HttpMethod, MAX_ENV_KEY_BYTES, MAX_MEMORY_LIMIT_MB, NamespaceDegradation,
     PtyConfig, PtyEvent, PtySession, PtySize, Sandbox, SandboxConfig, SandboxError, SandboxMetrics,
-    SandboxResult, SandboxSnapshot, normalize_path,
+    SandboxResult, SandboxSnapshot, normalize_path, validate_sandbox_env_var,
 };
 pub use seccomp::SeccompProfile;

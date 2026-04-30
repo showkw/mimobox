@@ -84,6 +84,12 @@ const MAX_ENV_TOTAL_BYTES: usize = 64 * 1024;
 /// HTTP methods accepted by the MCP http_request tool. CONNECT and TRACE remain blocked.
 #[cfg_attr(not(feature = "vm"), allow(dead_code))]
 const MCP_HTTP_METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+/// MCP HTTP request bodies are capped at 1 MB before forwarding to the sandbox proxy.
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+const MAX_HTTP_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+/// MCP HTTP response bodies are capped at 4 MB before conversion into JSON strings.
+#[cfg_attr(not(feature = "vm"), allow(dead_code))]
+const MAX_HTTP_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct MimoboxServer {
@@ -483,6 +489,11 @@ impl MimoboxServer {
 
         result.map_err(format_sdk_error)
     }
+
+    async fn current_sandbox_count(&self) -> usize {
+        let sandboxes = self.sandboxes.lock().await;
+        sandboxes.len() + self.ephemeral_count.load(Ordering::Acquire)
+    }
 }
 
 impl Default for MimoboxServer {
@@ -512,11 +523,8 @@ impl MimoboxServer {
         } = request;
         let isolation = parse_isolation_level(isolation_level.as_deref()).map_err(to_error)?;
         let network = parse_network_policy(network.as_deref()).map_err(to_error)?;
-        {
-            let sandboxes = self.sandboxes.lock().await;
-            if sandboxes.len() >= MAX_SANDBOXES {
-                return Err(to_error(sandbox_quota_exceeded()));
-            }
+        if self.current_sandbox_count().await >= MAX_SANDBOXES {
+            return Err(to_error(sandbox_quota_exceeded()));
         }
 
         let sandbox = tokio::task::spawn_blocking(move || {
@@ -536,7 +544,7 @@ impl MimoboxServer {
         .map_err(|error| to_error(format_sdk_error(error)))?;
 
         let mut sandboxes = self.sandboxes.lock().await;
-        if sandboxes.len() >= MAX_SANDBOXES {
+        if sandboxes.len() + self.ephemeral_count.load(Ordering::Acquire) >= MAX_SANDBOXES {
             drop(sandboxes);
             match tokio::task::spawn_blocking(move || sandbox.destroy()).await {
                 Ok(Ok(())) => {}
@@ -733,17 +741,26 @@ impl MimoboxServer {
             let content = self
                 .with_managed_sandbox(request.sandbox_id, {
                     let path = path.clone();
-                    move |sandbox| sandbox.read_file(&path)
+                    move |sandbox| {
+                        let stat = sandbox.stat(&path)?;
+                        if stat.size > MAX_FILE_SIZE as u64 {
+                            return Err(SdkError::Config(format!(
+                                "file is too large: {} bytes, exceeding the {} byte limit. Tip: read a smaller file",
+                                stat.size, MAX_FILE_SIZE
+                            )));
+                        }
+                        let content = sandbox.read_file(&path)?;
+                        if content.len() > MAX_FILE_SIZE {
+                            return Err(SdkError::Config(format!(
+                                "file is too large: {} bytes, exceeding the {} byte limit. Tip: read a smaller file",
+                                content.len(), MAX_FILE_SIZE
+                            )));
+                        }
+                        Ok(content)
+                    }
                 })
                 .await
                 .map_err(to_error)?;
-            if content.len() > MAX_FILE_SIZE {
-                return Err(to_error(format!(
-                    "file is too large: {} bytes, exceeding the {} byte limit. Tip: read a smaller file",
-                    content.len(),
-                    MAX_FILE_SIZE
-                )));
-            }
             let size_bytes = content.len();
 
             Ok(Json(ReadFileResponse {
@@ -772,6 +789,14 @@ impl MimoboxServer {
 
         #[cfg(feature = "vm")]
         {
+            let max_encoded_len = MAX_FILE_SIZE.div_ceil(3) * 4;
+            if request.content.len() > max_encoded_len {
+                return Err(to_error(format!(
+                    "content is too large before base64 decoding: {} bytes, exceeding the {} byte encoded limit. Tip: write smaller content or split it into multiple writes",
+                    request.content.len(),
+                    max_encoded_len
+                )));
+            }
             let data = STANDARD.decode(&request.content).map_err(|err| {
                 to_error(format!(
                     "content is not valid base64: {err}. Tip: provide a standard base64-encoded string"
@@ -940,13 +965,32 @@ impl MimoboxServer {
 
             let url = request.url;
             let headers = request.headers.unwrap_or_default();
-            let body = request.body.map(String::into_bytes);
+            let body = match request.body {
+                Some(body) => {
+                    if body.len() > MAX_HTTP_REQUEST_BODY_BYTES {
+                        return Err(to_error(format!(
+                            "HTTP request body is too large: {} bytes, exceeding the {} byte limit",
+                            body.len(),
+                            MAX_HTTP_REQUEST_BODY_BYTES
+                        )));
+                    }
+                    Some(body.into_bytes())
+                }
+                None => None,
+            };
             let response = self
                 .with_managed_sandbox(request.sandbox_id, move |sandbox| {
                     sandbox.http_request(&method, &url, headers, body.as_deref())
                 })
                 .await
                 .map_err(to_error)?;
+            if response.body.len() > MAX_HTTP_RESPONSE_BODY_BYTES {
+                return Err(to_error(format!(
+                    "HTTP response body is too large: {} bytes, exceeding the {} byte limit",
+                    response.body.len(),
+                    MAX_HTTP_RESPONSE_BODY_BYTES
+                )));
+            }
 
             Ok(Json(McpHttpResponse {
                 sandbox_id: request.sandbox_id,

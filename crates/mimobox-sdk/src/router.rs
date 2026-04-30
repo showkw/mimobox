@@ -43,6 +43,17 @@ pub(crate) fn resolve_isolation(
     }
 }
 
+/// Resolves isolation for argv-style execution using argv[0] directly.
+pub(crate) fn resolve_isolation_for_executable(
+    config: &Config,
+    executable: &str,
+) -> Result<IsolationLevel, SdkError> {
+    match config.isolation {
+        IsolationLevel::Auto => auto_route_executable(config.trust_level, executable),
+        _ => resolve_isolation(config, executable),
+    }
+}
+
 /// Automatic routing logic.
 fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, SdkError> {
     // TrustLevel::Untrusted must be handled before Wasm file detection to prevent .wasm/.wat/.wast
@@ -52,23 +63,52 @@ fn auto_route(trust_level: TrustLevel, command: &str) -> Result<IsolationLevel, 
     }
 
     // Prefer Wasm file detection.
-    if is_wasm_command(command) {
-        #[cfg(feature = "wasm")]
-        return Ok(IsolationLevel::Wasm);
-
-        #[cfg(not(feature = "wasm"))]
-        {
-            // Wasm is unavailable; fall back to OS level.
-            tracing::debug!("Wasm backend unavailable, falling back to OS level");
-        }
+    if is_wasm_executable(first_command_token(command)) {
+        return route_wasm_or_os();
     }
 
-    // Default to OS level.
+    route_os()
+}
+
+fn auto_route_executable(
+    trust_level: TrustLevel,
+    executable: &str,
+) -> Result<IsolationLevel, SdkError> {
+    if trust_level == TrustLevel::Untrusted {
+        return require_microvm_for_untrusted();
+    }
+
+    if is_wasm_executable(executable) {
+        return route_wasm_or_os();
+    }
+
+    route_os()
+}
+
+fn route_wasm_or_os() -> Result<IsolationLevel, SdkError> {
+    #[cfg(feature = "wasm")]
+    {
+        Ok(IsolationLevel::Wasm)
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    {
+        // Wasm is unavailable; fall back to OS level.
+        tracing::debug!("Wasm backend unavailable, falling back to OS level");
+        route_os()
+    }
+}
+
+fn route_os() -> Result<IsolationLevel, SdkError> {
     #[cfg(feature = "os")]
-    return Ok(IsolationLevel::Os);
+    {
+        Ok(IsolationLevel::Os)
+    }
 
     #[cfg(not(feature = "os"))]
-    return Err(SdkError::BackendUnavailable("os"));
+    {
+        Err(SdkError::BackendUnavailable("os"))
+    }
 }
 
 fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
@@ -87,13 +127,19 @@ fn require_microvm_for_untrusted() -> Result<IsolationLevel, SdkError> {
     }
 }
 
+#[cfg(test)]
 fn is_wasm_command(command: &str) -> bool {
     // SECURITY: Only check the command first token (executable path), so a .wasm suffix in an argument
     // does not cause incorrect routing. For example, "run module.wasm --arg" should not route to the Wasm backend.
-    let first_token = command.split_whitespace().next().unwrap_or(command);
-    first_token.ends_with(".wasm")
-        || first_token.ends_with(".wat")
-        || first_token.ends_with(".wast")
+    is_wasm_executable(first_command_token(command))
+}
+
+fn first_command_token(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
+fn is_wasm_executable(executable: &str) -> bool {
+    executable.ends_with(".wasm") || executable.ends_with(".wat") || executable.ends_with(".wast")
 }
 
 #[cfg(test)]
@@ -212,5 +258,11 @@ mod tests {
         assert!(!is_wasm_command("run module.wasm --arg"));
         assert!(!is_wasm_command("app.py"));
         assert!(!is_wasm_command("/bin/echo hello"));
+    }
+
+    #[test]
+    fn executable_detection_allows_spaces_in_path() {
+        assert!(is_wasm_executable("/tmp/path with spaces/module.wasm"));
+        assert!(!is_wasm_command("/tmp/path with spaces/module.wasm"));
     }
 }

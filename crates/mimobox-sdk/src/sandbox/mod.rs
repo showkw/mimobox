@@ -10,7 +10,7 @@ mod snapshot;
 
 use crate::config::{Config, IsolationLevel, TrustLevel};
 use crate::error::SdkError;
-use crate::router::resolve_isolation;
+use crate::router::{resolve_isolation, resolve_isolation_for_executable};
 use crate::sandbox::registry::SandboxInfo;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 use crate::types::SandboxSnapshot;
@@ -723,7 +723,19 @@ impl Sandbox {
     /// Provides the ensure backend operation.
     pub(crate) fn ensure_backend(&mut self, command: &str) -> Result<(), SdkError> {
         let isolation = resolve_isolation(&self.config, command)?;
+        self.ensure_backend_isolation(isolation)
+    }
 
+    /// Provides argv-first backend selection without reparsing the executable path.
+    pub(crate) fn ensure_backend_for_executable(
+        &mut self,
+        executable: &str,
+    ) -> Result<(), SdkError> {
+        let isolation = resolve_isolation_for_executable(&self.config, executable)?;
+        self.ensure_backend_isolation(isolation)
+    }
+
+    fn ensure_backend_isolation(&mut self, isolation: IsolationLevel) -> Result<(), SdkError> {
         if self.active_isolation == Some(isolation) && self.inner.is_some() {
             registry::update_isolation(self.id, Some(self.config.isolation), Some(isolation));
             registry::update_ready(self.id, true);

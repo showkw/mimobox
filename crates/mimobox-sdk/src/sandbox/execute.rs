@@ -86,8 +86,7 @@ impl Sandbox {
         command: &str,
     ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
         let args = parse_command(command)?;
-        let _ = &args;
-        self.ensure_backend(command)?;
+        self.ensure_backend_for_executable(&args[0])?;
         #[cfg(all(feature = "vm", target_os = "linux"))]
         let options = SdkExecOptions {
             env: self.config.env_vars.clone(),
@@ -146,8 +145,7 @@ impl Sandbox {
         argv: &[A],
     ) -> Result<mpsc::Receiver<StreamEvent>, SdkError> {
         let args = argv_to_strings(argv)?;
-        let command = args.join(" ");
-        self.ensure_backend(&command)?;
+        self.ensure_backend_for_executable(&args[0])?;
         #[cfg(all(feature = "vm", target_os = "linux"))]
         let options = SdkExecOptions {
             env: self.config.env_vars.clone(),
@@ -272,6 +270,13 @@ impl Sandbox {
             validate_cwd(cwd)?;
         }
         validate_exec_options(&options)?;
+        #[cfg(feature = "wasm")]
+        let has_command_env = !options.env.is_empty();
+        #[cfg(feature = "wasm")]
+        let has_per_command_cwd = options.cwd.is_some();
+        #[cfg(feature = "wasm")]
+        let has_per_command_timeout = options.timeout.is_some();
+        let command_args = parse_command(command)?;
         let merged_env = merge_env_vars(&self.config.env_vars, &options.env)?;
         let options = SdkExecOptions {
             env: merged_env,
@@ -279,7 +284,7 @@ impl Sandbox {
         };
 
         self.cached_metrics = None;
-        self.ensure_backend(command)?;
+        self.ensure_backend_for_executable(&command_args[0])?;
 
         let result = (|| {
             let inner = self.require_inner()?;
@@ -296,10 +301,9 @@ impl Sandbox {
                 }
                 #[cfg(all(feature = "vm", target_os = "linux"))]
                 SandboxInner::MicroVm(sandbox) => {
-                    let args = parse_command(command)?;
                     let start = std::time::Instant::now();
                     sandbox
-                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .execute_with_options(&command_args, options.to_guest_exec_options())
                         .map(|result| ExecuteResult {
                             stdout: result.stdout,
                             stderr: result.stderr,
@@ -311,10 +315,9 @@ impl Sandbox {
                 }
                 #[cfg(all(feature = "vm", target_os = "linux"))]
                 SandboxInner::PooledMicroVm(sandbox) => {
-                    let args = parse_command(command)?;
                     let start = std::time::Instant::now();
                     sandbox
-                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .execute_with_options(&command_args, options.to_guest_exec_options())
                         .map(|result| ExecuteResult {
                             stdout: result.stdout,
                             stderr: result.stderr,
@@ -326,10 +329,9 @@ impl Sandbox {
                 }
                 #[cfg(all(feature = "vm", target_os = "linux"))]
                 SandboxInner::RestoredPooledMicroVm(sandbox) => {
-                    let args = parse_command(command)?;
                     let start = std::time::Instant::now();
                     sandbox
-                        .execute_with_options(&args, options.to_guest_exec_options())
+                        .execute_with_options(&command_args, options.to_guest_exec_options())
                         .map(|result| ExecuteResult {
                             stdout: result.stdout,
                             stderr: result.stderr,
@@ -341,8 +343,12 @@ impl Sandbox {
                 }
                 #[cfg(feature = "wasm")]
                 SandboxInner::Wasm(sandbox) => {
-                    let args = parse_command(command)?;
-                    sandbox.execute_for_sdk(&args)
+                    reject_wasm_per_command_options(
+                        has_command_env,
+                        has_per_command_cwd,
+                        has_per_command_timeout,
+                    )?;
+                    sandbox.execute_for_sdk(&command_args)
                 }
                 #[allow(unreachable_patterns)]
                 _ => Err(backend_variant_mismatch()),
@@ -384,15 +390,20 @@ impl Sandbox {
             validate_cwd(cwd)?;
         }
         validate_exec_options(&options)?;
+        #[cfg(feature = "wasm")]
+        let has_command_env = !options.env.is_empty();
+        #[cfg(feature = "wasm")]
+        let has_per_command_cwd = options.cwd.is_some();
+        #[cfg(feature = "wasm")]
+        let has_per_command_timeout = options.timeout.is_some();
         let merged_env = merge_env_vars(&self.config.env_vars, &options.env)?;
         let options = SdkExecOptions {
             env: merged_env,
             ..options
         };
 
-        let command = args.join(" ");
         self.cached_metrics = None;
-        self.ensure_backend(&command)?;
+        self.ensure_backend_for_executable(&args[0])?;
 
         let result = (|| {
             let inner = self.require_inner()?;
@@ -451,19 +462,12 @@ impl Sandbox {
                 }
                 #[cfg(feature = "wasm")]
                 SandboxInner::Wasm(sandbox) => {
-                    #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
-                    {
-                        let args = build_fallback_argv_args(&args, &options)?;
-                        sandbox.execute_for_sdk(&args)
-                    }
-
-                    #[cfg(not(all(
-                        feature = "os",
-                        any(target_os = "linux", target_os = "macos")
-                    )))]
-                    {
-                        sandbox.execute_for_sdk(&args)
-                    }
+                    reject_wasm_per_command_options(
+                        has_command_env,
+                        has_per_command_cwd,
+                        has_per_command_timeout,
+                    )?;
+                    sandbox.execute_for_sdk(&args)
                 }
                 #[allow(unreachable_patterns)]
                 _ => Err(backend_variant_mismatch()),
@@ -513,6 +517,37 @@ fn validate_exec_options(options: &SdkExecOptions) -> Result<(), SdkError> {
     }
 
     Ok(())
+}
+
+#[cfg(feature = "wasm")]
+fn reject_wasm_per_command_options(
+    has_env: bool,
+    has_cwd: bool,
+    has_timeout: bool,
+) -> Result<(), SdkError> {
+    if !has_env && !has_cwd && !has_timeout {
+        return Ok(());
+    }
+
+    let mut unsupported = Vec::new();
+    if has_env {
+        unsupported.push("env");
+    }
+    if has_cwd {
+        unsupported.push("cwd");
+    }
+    if has_timeout {
+        unsupported.push("timeout");
+    }
+
+    Err(SdkError::sandbox(
+        mimobox_core::ErrorCode::UnsupportedPlatform,
+        format!(
+            "Wasm backend does not support per-command options: {}",
+            unsupported.join(", ")
+        ),
+        Some("Use Config-level env/timeout for Wasm or choose MicroVm for per-command execution options".to_string()),
+    ))
 }
 
 fn backend_variant_mismatch() -> SdkError {
@@ -633,5 +668,14 @@ mod tests {
             .expect_err("zero per-command timeout should be rejected");
 
         assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn wasm_per_command_options_fail_closed() {
+        let error = reject_wasm_per_command_options(true, true, true)
+            .expect_err("Wasm per-command options should be rejected");
+
+        assert!(error.to_string().contains("env, cwd, timeout"));
     }
 }

@@ -17,7 +17,7 @@ use nix::unistd::{ForkResult, execvp, fork};
 
 use mimobox_core::{
     DirEntry, FileStat, NamespaceDegradation, Sandbox, SandboxConfig, SandboxError, SandboxMetrics,
-    SandboxResult, SeccompProfile,
+    SandboxResult, SeccompProfile, validate_sandbox_env_var,
 };
 
 use crate::pty::{allocate_pty, build_child_env_with_base, build_session};
@@ -147,6 +147,16 @@ fn prepare_child_env_vars(
         prepared.push((key, value));
     }
     Ok(prepared)
+}
+
+fn validate_pty_user_env_vars(
+    env_vars: &std::collections::HashMap<String, String>,
+) -> Result<(), SandboxError> {
+    for (key, value) in env_vars {
+        validate_sandbox_env_var(key, value)
+            .map_err(|message| SandboxError::new(format!("PTY env config invalid: {message}")))?;
+    }
+    Ok(())
 }
 
 /// # Safety
@@ -499,6 +509,18 @@ fn format_pids_max(config: &SandboxConfig) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn cgroup_process_limit_failure_is_fatal(config: &SandboxConfig) -> bool {
+    config.allow_fork || config.cpu_quota_us.is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_process_limit_error(context: impl Into<String>) -> SandboxError {
+    SandboxError::new(context.into()).suggestion(
+        "Enable writable cgroup v2 support or set allow_fork=false to avoid unbounded process creation",
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn cgroup_v2_available(root: &Path) -> bool {
     root.join("cgroup.controllers").is_file()
 }
@@ -514,6 +536,12 @@ fn configure_sandbox_cgroup(
             "cgroup v2 unavailable, skipping pids.max process limit: root={}",
             root.display()
         );
+        if cgroup_process_limit_failure_is_fatal(config) {
+            return Err(cgroup_process_limit_error(format!(
+                "cgroup v2 unavailable while process limiting is required: root={}",
+                root.display()
+            )));
+        }
         return Ok(None);
     }
 
@@ -523,7 +551,7 @@ fn configure_sandbox_cgroup(
             "Failed to create cgroup, skipping pids.max process limit: path={}, error={error}",
             cgroup_path.display()
         );
-        if config.cpu_quota_us.is_some() {
+        if cgroup_process_limit_failure_is_fatal(config) {
             return Err(error.into());
         }
         return Ok(None);
@@ -536,7 +564,7 @@ fn configure_sandbox_cgroup(
             cgroup_path.display(),
             effective_max_processes(config)
         );
-        if config.cpu_quota_us.is_some() {
+        if cgroup_process_limit_failure_is_fatal(config) {
             return Err(error.into());
         }
         return Ok(None);
@@ -556,7 +584,7 @@ fn configure_sandbox_cgroup(
             "Failed to write cgroup.procs, skipping pids.max process limit: path={}, pid={pid}, error={error}",
             cgroup_path.display()
         );
-        if config.cpu_quota_us.is_some() {
+        if cgroup_process_limit_failure_is_fatal(config) {
             return Err(error.into());
         }
         return Ok(None);
@@ -1162,7 +1190,10 @@ impl LinuxSandbox {
         // FATAL-02 修复：setpgid 和 close 使用裸 libc 调用，确保 async-signal-safe
         // SAFETY: setpgid(0, 0) 创建新进程组，参数合法
         unsafe {
-            libc::setpgid(0, 0);
+            if libc::setpgid(0, 0) != 0 {
+                write_error(2, "setpgid failed");
+                libc::_exit(120);
+            }
         }
         // SECURITY: 关闭所有从 3 开始的非必要继承 FD，防止文件描述符泄漏到沙箱子进程。
         // 使用原始 open + getdents64 syscall，完全 async-signal-safe。
@@ -1689,6 +1720,7 @@ impl Sandbox for LinuxSandbox {
             }
             other => other,
         };
+        validate_pty_user_env_vars(&config.env)?;
         let pty_env = build_child_env_with_base(&config, &child_config.env_vars);
         let child_env_vars = prepare_child_env_vars(&pty_env)?;
 
@@ -2036,6 +2068,28 @@ mod tests {
         assert_eq!(format_cpu_max(&unlimited), "max 100000");
         assert_eq!(format_pids_max(&unlimited), "64");
         assert_eq!(format_pids_max(&custom_process_limit), "32");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_process_limit_is_fatal_when_forking_is_allowed() {
+        let mut config = SandboxConfig::default();
+        config.allow_fork = true;
+
+        assert!(cgroup_process_limit_failure_is_fatal(&config));
+    }
+
+    #[test]
+    fn pty_user_env_rejects_blocked_baseline_override() {
+        let env_vars = std::collections::HashMap::from([(
+            "LD_PRELOAD".to_string(),
+            "/tmp/lib.so".to_string(),
+        )]);
+
+        let error = validate_pty_user_env_vars(&env_vars)
+            .expect_err("PTY env must reject loader overrides");
+
+        assert!(error.to_string().contains("PTY env config invalid"));
     }
 
     #[test]

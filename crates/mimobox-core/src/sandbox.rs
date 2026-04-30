@@ -47,26 +47,49 @@ pub const BLOCKED_ENV_VARS: &[&str] = &[
 /// Maximum environment variable key length in bytes.
 pub const MAX_ENV_KEY_BYTES: usize = 128;
 
+/// Validates one sandbox environment variable pair.
+pub fn validate_sandbox_env_var(key: &str, value: &str) -> Result<(), String> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
+        return Err(format!("env_vars contains invalid key: {key}"));
+    }
+    if key.len() > MAX_ENV_KEY_BYTES {
+        return Err(format!(
+            "env_vars key exceeds {MAX_ENV_KEY_BYTES} bytes: {key}"
+        ));
+    }
+    if value.contains('\0') {
+        return Err(format!("env_vars value for key {key} contains NUL byte"));
+    }
+    if BLOCKED_ENV_VARS
+        .iter()
+        .any(|blocked| key.eq_ignore_ascii_case(blocked))
+    {
+        return Err(format!("env_vars contains blocked security key: {key}"));
+    }
+    Ok(())
+}
+
 fn validate_persistent_env_vars(
     env_vars: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for (key, value) in env_vars {
-        if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
-            return Err(format!("env_vars contains invalid key: {key}"));
+        validate_sandbox_env_var(key, value)?;
+    }
+    Ok(())
+}
+
+fn validate_sandbox_paths(label: &str, paths: &[PathBuf]) -> Result<(), SandboxError> {
+    for path in paths {
+        if path.as_os_str().is_empty() {
+            return Err(SandboxError::new(format!("{label} contains empty path"))
+                .suggestion("Remove empty sandbox filesystem paths"));
         }
-        if key.len() > MAX_ENV_KEY_BYTES {
-            return Err(format!(
-                "env_vars key exceeds {MAX_ENV_KEY_BYTES} bytes: {key}"
-            ));
-        }
-        if value.contains('\0') {
-            return Err(format!("env_vars value for key {key} contains NUL byte"));
-        }
-        if BLOCKED_ENV_VARS
-            .iter()
-            .any(|blocked| key.eq_ignore_ascii_case(blocked))
-        {
-            return Err(format!("env_vars contains blocked security key: {key}"));
+        if path.to_str().is_none() {
+            return Err(SandboxError::new(format!(
+                "{label} contains non-UTF-8 path: {}",
+                path.display()
+            ))
+            .suggestion("Use UTF-8 filesystem paths for sandbox filesystem rules"));
         }
     }
     Ok(())
@@ -671,6 +694,9 @@ impl SandboxConfig {
             .suggestion("max_processes minimum is 1, or set to None for backend default"));
         }
 
+        validate_sandbox_paths("fs_readonly", &self.fs_readonly)?;
+        validate_sandbox_paths("fs_readwrite", &self.fs_readwrite)?;
+
         // timeout_secs may be disabled, but explicit values must not exceed 24 hours.
         if let Some(timeout_secs) = self.timeout_secs {
             const MAX_TIMEOUT_SECS: u64 = 86_400;
@@ -873,7 +899,7 @@ impl SandboxSnapshot {
     pub fn to_bytes(&self) -> Result<Vec<u8>, SandboxError> {
         match &self.inner {
             SnapshotInner::Bytes(data) => Ok(data.clone()),
-            SnapshotInner::File { path, .. } => std::fs::read(path).map_err(Into::into),
+            SnapshotInner::File { path, size } => read_file_snapshot(path, *size),
         }
     }
 
@@ -883,7 +909,7 @@ impl SandboxSnapshot {
     pub fn into_bytes(self) -> Result<Vec<u8>, SandboxError> {
         match self.inner {
             SnapshotInner::Bytes(data) => Ok(data),
-            SnapshotInner::File { path, .. } => std::fs::read(path).map_err(Into::into),
+            SnapshotInner::File { path, size } => read_file_snapshot(&path, size),
         }
     }
 
@@ -894,6 +920,29 @@ impl SandboxSnapshot {
             SnapshotInner::File { size, .. } => *size,
         }
     }
+}
+
+fn read_file_snapshot(path: &Path, expected_size: usize) -> Result<Vec<u8>, SandboxError> {
+    validate_file_snapshot_metadata(path, expected_size)?;
+    let data = std::fs::read(path)?;
+    if data.len() != expected_size {
+        return Err(SandboxError::InvalidSnapshot);
+    }
+    validate_file_snapshot_metadata(path, expected_size)?;
+    Ok(data)
+}
+
+fn validate_file_snapshot_metadata(path: &Path, expected_size: usize) -> Result<(), SandboxError> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(SandboxError::InvalidSnapshot);
+    }
+    let current_size =
+        usize::try_from(metadata.len()).map_err(|_| SandboxError::InvalidSnapshot)?;
+    if current_size != expected_size {
+        return Err(SandboxError::InvalidSnapshot);
+    }
+    Ok(())
 }
 
 /// PTY terminal dimensions.
@@ -1604,6 +1653,46 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_config_rejects_empty_filesystem_path() {
+        let config = SandboxConfig {
+            fs_readonly: vec![std::path::PathBuf::new()],
+            ..Default::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("empty sandbox filesystem path should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("fs_readonly contains empty path")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_config_rejects_non_utf8_filesystem_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::ffi::OsString::from_vec(vec![0xff]).into();
+        let config = SandboxConfig {
+            fs_readwrite: vec![path],
+            ..Default::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("non-UTF-8 sandbox filesystem path should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("fs_readwrite contains non-UTF-8 path")
+        );
+    }
+
+    #[test]
     fn sandbox_config_rejects_overlong_env_var_key() {
         let key = "A".repeat(MAX_ENV_KEY_BYTES + 1);
         let config = SandboxConfig {
@@ -1828,6 +1917,33 @@ mod tests {
                 .expect("file snapshot must be convertible into bytes"),
             b"file-backed-snapshot"
         );
+
+        fs::remove_file(path).expect("test snapshot file cleanup must succeed");
+    }
+
+    #[test]
+    fn sandbox_snapshot_file_mode_rejects_size_change() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be later than UNIX_EPOCH")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mimobox-sandbox-snapshot-resize-{}-{}.bin",
+            std::process::id(),
+            unique
+        ));
+
+        fs::write(&path, b"snapshot").expect("test snapshot file write must succeed");
+        let snapshot =
+            SandboxSnapshot::from_file(path.clone()).expect("file snapshot creation must succeed");
+        fs::write(&path, b"snapshot-replaced").expect("test snapshot replacement must succeed");
+
+        assert!(matches!(
+            snapshot
+                .to_bytes()
+                .expect_err("changed snapshot file size must be rejected"),
+            SandboxError::InvalidSnapshot
+        ));
 
         fs::remove_file(path).expect("test snapshot file cleanup must succeed");
     }

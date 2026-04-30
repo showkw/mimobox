@@ -54,8 +54,8 @@ const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
 /// writes beyond this capacity return `StreamError::Closed`.
 const OUTPUT_MAX_CAPACITY: usize = 1024 * 1024;
 
-/// Maximum returned size for a single output stream: 4 MB; excess data is truncated and logged as a warning.
-const MAX_OUTPUT_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum returned size for a single output stream, aligned with the pipe write limit.
+const MAX_OUTPUT_SIZE: usize = OUTPUT_MAX_CAPACITY;
 
 /// Maximum Wasm module file size: 50 MB.
 const MAX_WASM_FILE_SIZE: u64 = 50 * 1024 * 1024;

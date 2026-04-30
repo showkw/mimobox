@@ -322,15 +322,25 @@ impl Config {
             ));
         }
 
-        if matches!(self.network, NetworkPolicy::DenyAll) && !self.allowed_http_domains.is_empty() {
+        let resolved_domains = resolve_allowed_http_domains(self);
+        if matches!(self.network, NetworkPolicy::DenyAll)
+            && (!resolved_domains.is_empty() || !self.http_acl.allow.is_empty())
+        {
             return Err(invalid_config(
-                "network=DenyAll but allowed_http_domains is non-empty, config conflict",
-                "Use NetworkPolicy::AllowDomains or clear allowed_http_domains",
+                "network=DenyAll but HTTP allow rules are non-empty, config conflict",
+                "Use NetworkPolicy::AllowDomains or clear HTTP allow rules",
             ));
         }
 
-        for domain in resolve_allowed_http_domains(self) {
-            validate_http_domain(&domain)?;
+        for domain in &resolved_domains {
+            validate_http_domain(domain)?;
+        }
+
+        if !self.http_acl.allow.is_empty() && resolved_domains.is_empty() {
+            return Err(invalid_config(
+                "http_acl allow rules do not define any proxy domain whitelist",
+                "Set allowed_http_domains or use concrete ACL allow hosts instead of wildcard-only hosts",
+            ));
         }
 
         validate_env_vars(&self.env_vars)?;
@@ -434,23 +444,41 @@ fn resolve_deny_network(network: &NetworkPolicy) -> bool {
 }
 
 fn resolve_allowed_http_domains(config: &Config) -> Vec<String> {
-    let mut domains = Vec::with_capacity(config.allowed_http_domains.len());
-    let mut seen = HashSet::with_capacity(config.allowed_http_domains.len());
+    let capacity = config.allowed_http_domains.len()
+        + match &config.network {
+            NetworkPolicy::AllowDomains(domains) => domains.len(),
+            _ => 0,
+        }
+        + config.http_acl.allow.len();
+    let mut domains = Vec::with_capacity(capacity);
+    let mut seen = HashSet::with_capacity(capacity);
 
     for domain in &config.allowed_http_domains {
-        if seen.insert(domain.as_str()) {
-            domains.push(domain.clone());
-        }
+        push_unique_http_domain(&mut domains, &mut seen, domain);
     }
 
     if let NetworkPolicy::AllowDomains(network_domains) = &config.network {
         for domain in network_domains {
-            if seen.insert(domain.as_str()) {
-                domains.push(domain.clone());
-            }
+            push_unique_http_domain(&mut domains, &mut seen, domain);
+        }
+    }
+
+    for rule in &config.http_acl.allow {
+        if rule.host != "*" {
+            push_unique_http_domain(&mut domains, &mut seen, &rule.host);
         }
     }
     domains
+}
+
+fn push_unique_http_domain<'a>(
+    domains: &mut Vec<String>,
+    seen: &mut HashSet<&'a str>,
+    domain: &'a str,
+) {
+    if seen.insert(domain) {
+        domains.push(domain.to_string());
+    }
 }
 
 fn round_up_timeout_secs(timeout: Duration) -> u64 {
@@ -523,7 +551,10 @@ fn validate_env_vars(env_vars: &std::collections::HashMap<String, String>) -> Re
 }
 
 fn validate_microvm_artifact_paths(config: &Config) -> Result<(), SdkError> {
-    if config.isolation != IsolationLevel::MicroVm {
+    let uses_microvm = config.isolation == IsolationLevel::MicroVm
+        || (config.isolation == IsolationLevel::Auto
+            && config.trust_level == TrustLevel::Untrusted);
+    if !uses_microvm {
         return Ok(());
     }
 
@@ -1568,6 +1599,19 @@ mod tests {
     }
 
     #[test]
+    fn auto_untrusted_rejects_missing_explicit_microvm_artifact_path() {
+        let missing_path =
+            std::env::temp_dir().join(format!("mimobox-missing-rootfs-{}", std::process::id()));
+        let result = Config::builder()
+            .isolation(IsolationLevel::Auto)
+            .trust_level(TrustLevel::Untrusted)
+            .rootfs_path(missing_path)
+            .build();
+
+        assert_invalid_config_suggestion(result, "Please ensure the path exists");
+    }
+
+    #[test]
     fn builder_accepts_allowed_domains_policy() {
         let config = Config::builder()
             .network(NetworkPolicy::AllowDomains(vec![
@@ -1602,6 +1646,38 @@ mod tests {
             mimobox_core::HttpMethod::Post
         );
         assert_eq!(config.http_acl.allow[1].path, "/v1/*");
+        assert_eq!(
+            config.to_sandbox_config().allowed_http_domains,
+            vec!["api.openai.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn http_acl_allow_rules_derive_proxy_domain_whitelist() {
+        let config = Config::builder()
+            .http_acl_allow_str(&["GET api.openai.com/v1/*", "POST *.openai.com/v1/*"])
+            .expect("ACL allow rule should parse successfully")
+            .build()
+            .expect("config validation failed");
+        let sandbox_config = config.to_sandbox_config();
+
+        assert_eq!(
+            sandbox_config.allowed_http_domains,
+            vec!["api.openai.com".to_string(), "*.openai.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn http_acl_allow_wildcard_host_requires_explicit_domain_whitelist() {
+        let result = Config::builder()
+            .http_acl_allow_str(&["* * /*"])
+            .expect("ACL wildcard allow rule should parse successfully")
+            .build();
+
+        assert_invalid_config_suggestion(
+            result,
+            "Set allowed_http_domains or use concrete ACL allow hosts instead of wildcard-only hosts",
+        );
     }
 
     #[test]

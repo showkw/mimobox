@@ -823,6 +823,16 @@ pub(crate) fn emit_error_json(error: &CliError) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Emits a best-effort fallback error JSON to stderr.
+pub(crate) fn emit_fallback_error_json(code: &'static str, message: impl Into<String>) {
+    let payload = serde_json::json!({
+        "ok": false,
+        "code": code,
+        "message": message.into(),
+    });
+    eprintln!("{payload}");
+}
+
 /// Provides the panic payload to string operation.
 pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {

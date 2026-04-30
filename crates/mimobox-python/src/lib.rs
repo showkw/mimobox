@@ -16,7 +16,7 @@ use pyo3::exceptions::{
     PyRuntimeError, PyTimeoutError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyString, PyType};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path};
@@ -29,6 +29,8 @@ const MAX_PYTHON_ENV_VARS: usize = 64;
 const MAX_PYTHON_ENV_KEY_BYTES: usize = 128;
 const MAX_PYTHON_ENV_VALUE_BYTES: usize = 8 * 1024;
 const MAX_PYTHON_ENV_TOTAL_BYTES: usize = 64 * 1024;
+const MAX_PYTHON_FILE_SIZE: usize = 10 * 1024 * 1024;
+const MAX_PYTHON_PATH_BYTES: usize = 4096;
 
 fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     use pyo3::types::PyBytes;
@@ -41,6 +43,24 @@ fn extract_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
             "data must be str or bytes",
         ))
     }
+}
+
+fn extract_file_bytes_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if data.is_instance_of::<PyBytes>() {
+        let bytes = data.downcast::<PyBytes>()?.as_bytes();
+        validate_python_file_size(bytes.len())?;
+        return Ok(bytes.to_vec());
+    }
+
+    if data.is_instance_of::<PyString>() {
+        let text = data.downcast::<PyString>()?.to_str()?;
+        validate_python_file_size(text.len())?;
+        return Ok(text.as_bytes().to_vec());
+    }
+
+    let bytes = extract_bytes_data(data)?;
+    validate_python_file_size(bytes.len())?;
+    Ok(bytes)
 }
 
 mod tracing {
@@ -607,7 +627,7 @@ impl PyFileSystem {
 
     /// Write to a file.
     fn write(&self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let bytes = extract_bytes_data(data)?;
+        let bytes = extract_file_bytes_data(data)?;
         self.sandbox.call_method1(py, "write_file", (path, bytes))?;
         Ok(())
     }
@@ -1591,10 +1611,29 @@ impl PySandbox {
     /// * `PermissionError` - If access is denied.
     /// * `SandboxError` - If the read operation fails.
     fn read_file(&mut self, py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
+        validate_python_guest_file_path(path)?;
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
-        py.allow_threads(|| sandbox.read_file(&path))
-            .map_err(|e| map_sdk_error(e, py))
+        py.allow_threads(|| {
+            let stat = sandbox.stat(&path)?;
+            if stat.size > MAX_PYTHON_FILE_SIZE as u64 {
+                return Err(SdkError::Config(format!(
+                    "file is too large: {} bytes, maximum is {} bytes",
+                    stat.size, MAX_PYTHON_FILE_SIZE
+                )));
+            }
+
+            let content = sandbox.read_file(&path)?;
+            if content.len() > MAX_PYTHON_FILE_SIZE {
+                return Err(SdkError::Config(format!(
+                    "file is too large: {} bytes, maximum is {} bytes",
+                    content.len(),
+                    MAX_PYTHON_FILE_SIZE
+                )));
+            }
+            Ok(content)
+        })
+        .map_err(|e| map_sdk_error(e, py))
     }
 
     /// Write bytes to a file inside the sandbox.
@@ -1608,7 +1647,8 @@ impl PySandbox {
     ///
     /// * `SandboxError` - If the write operation fails.
     fn write_file(&mut self, py: Python<'_>, path: &str, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let bytes = extract_bytes_data(data)?;
+        validate_python_guest_file_path(path)?;
+        let bytes = extract_file_bytes_data(data)?;
         let sandbox = self.inner_mut()?;
         let path = path.to_string();
         py.allow_threads(|| sandbox.write_file(&path, &bytes))
@@ -2100,28 +2140,6 @@ fn validate_python_text_max_bytes(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn build_make_dir_command(path: &str) -> PyResult<String> {
-    validate_python_cwd(path)?;
-    let quoted = shlex::try_quote(path).map_err(|_| {
-        PyValueError::new_err("path contains characters that cannot be shell-escaped")
-    })?;
-
-    Ok(format!("mkdir -p {quoted}"))
-}
-
-#[allow(dead_code)]
-fn build_copy_file_command(src: &str, dst: &str) -> PyResult<String> {
-    let src_quoted = shlex::try_quote(src).map_err(|_| {
-        PyValueError::new_err("src contains characters that cannot be shell-escaped")
-    })?;
-    let dst_quoted = shlex::try_quote(dst).map_err(|_| {
-        PyValueError::new_err("dst contains characters that cannot be shell-escaped")
-    })?;
-
-    Ok(format!("cp {src_quoted} {dst_quoted}"))
-}
-
 fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> PyResult<String> {
     if !encoding.eq_ignore_ascii_case("utf-8") && !encoding.eq_ignore_ascii_case("utf8") {
         return Err(PyValueError::new_err(
@@ -2188,12 +2206,50 @@ fn validate_python_cwd(cwd: &str) -> PyResult<()> {
     Ok(())
 }
 
+fn validate_python_guest_file_path(path: &str) -> PyResult<()> {
+    validate_python_text_max_bytes("path", path, MAX_PYTHON_PATH_BYTES)
+        .map_err(PyValueError::new_err)?;
+    if path.is_empty() {
+        return Err(PyValueError::new_err("path must not be empty"));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(PyValueError::new_err("path must be absolute"));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err(PyValueError::new_err("path must not contain NUL bytes"));
+    }
+    if path.contains('\n') || path.contains('\r') {
+        return Err(PyValueError::new_err(
+            "path must not contain newline or carriage return characters",
+        ));
+    }
+    if Path::new(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(PyValueError::new_err(
+            "path must not contain parent directory traversal",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_python_file_size(size: usize) -> PyResult<()> {
+    if size > MAX_PYTHON_FILE_SIZE {
+        return Err(PyValueError::new_err(format!(
+            "data is {size} bytes, maximum is {MAX_PYTHON_FILE_SIZE} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn build_python_code_command(language: &str, code: &str) -> PyResult<String> {
     let quoted = shlex::try_quote(code).map_err(|_| {
         PyValueError::new_err("code contains characters that cannot be shell-escaped")
     })?;
 
-    match language {
+    let language = language.trim().to_ascii_lowercase();
+    match language.as_str() {
         "bash" => Ok(format!("bash -c {quoted}")),
         "sh" | "shell" => Ok(format!("sh -c {quoted}")),
         "python" | "python3" | "py" => Ok(format!("python3 -c {quoted}")),
@@ -2841,14 +2897,17 @@ mod tests {
     }
 
     #[test]
-    fn test_make_dir_rejects_empty_path() {
-        assert!(build_make_dir_command("").is_err());
+    fn python_guest_file_path_rejects_invalid_paths() {
+        assert!(validate_python_guest_file_path("").is_err());
+        assert!(validate_python_guest_file_path("relative/file.txt").is_err());
+        assert!(validate_python_guest_file_path("/sandbox/../etc/passwd").is_err());
+        assert!(validate_python_guest_file_path("/sandbox/file\0.txt").is_err());
+        assert!(validate_python_guest_file_path("/sandbox/file\n.txt").is_err());
     }
 
     #[test]
-    fn test_make_dir_rejects_parent_traversal() {
-        assert!(build_make_dir_command("../work").is_err());
-        assert!(build_make_dir_command("a/../work").is_err());
+    fn python_guest_file_path_accepts_absolute_sandbox_path() {
+        assert!(validate_python_guest_file_path("/sandbox/file.txt").is_ok());
     }
 
     #[test]
@@ -2859,14 +2918,18 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_file_shell_escapes_paths() {
-        let command = build_copy_file_command("/tmp/source file;$(touch pwn)", "/tmp/dest file")
-            .expect("paths with shell metacharacters should be escapable");
+    fn build_python_code_command_accepts_case_insensitive_language() {
+        let command = build_python_code_command(" Python3 ", "print('ok')")
+            .expect("case-insensitive language should be accepted");
 
-        assert_eq!(
-            command,
-            "cp '/tmp/source file;$(touch pwn)' '/tmp/dest file'"
-        );
+        assert!(command.starts_with("python3 -c "));
+    }
+
+    #[test]
+    fn python_file_size_validation_rejects_large_data() {
+        let result = validate_python_file_size(MAX_PYTHON_FILE_SIZE + 1);
+
+        assert!(result.is_err());
     }
 
     #[test]

@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use mimobox_core::{
     DirEntry, FileStat, Sandbox, SandboxConfig, SandboxError, SandboxMetrics, SandboxResult,
+    validate_sandbox_env_var,
 };
 use uuid::Uuid;
 
@@ -735,31 +736,40 @@ fn validate_sbpl_path(path: &str) -> Result<(), SandboxError> {
     Ok(())
 }
 
-fn push_sbpl_subpath(paths: &mut Vec<String>, path: &str) {
-    if validate_sbpl_path(path).is_ok() {
-        let rule = format!("(subpath \"{}\")", path);
-        if !paths.iter().any(|existing| existing == &rule) {
-            paths.push(rule);
-        }
+fn push_sbpl_subpath(paths: &mut Vec<String>, path: &str) -> Result<(), SandboxError> {
+    validate_sbpl_path(path)?;
+    let rule = format!("(subpath \"{}\")", path);
+    if !paths.iter().any(|existing| existing == &rule) {
+        paths.push(rule);
     }
+    Ok(())
 }
 
-fn push_normalized_sbpl_subpath(paths: &mut Vec<String>, path: &str) {
+fn push_normalized_sbpl_subpath(paths: &mut Vec<String>, path: &str) -> Result<(), SandboxError> {
     let raw = path.trim_end_matches('/');
     let normalized = normalize_sbpl_path(path);
-    push_sbpl_subpath(paths, &normalized);
+    push_sbpl_subpath(paths, &normalized)?;
     if raw != normalized {
-        push_sbpl_subpath(paths, raw);
+        push_sbpl_subpath(paths, raw)?;
     }
     if let Some(suffix) = raw.strip_prefix("/tmp/") {
-        push_sbpl_subpath(paths, &format!("/private/tmp/{suffix}"));
+        push_sbpl_subpath(paths, &format!("/private/tmp/{suffix}"))?;
     }
     if let Some(suffix) = raw.strip_prefix("/var/") {
-        push_sbpl_subpath(paths, &format!("/private/var/{suffix}"));
+        push_sbpl_subpath(paths, &format!("/private/var/{suffix}"))?;
     }
     if let Some(suffix) = raw.strip_prefix("/etc/") {
-        push_sbpl_subpath(paths, &format!("/private/etc/{suffix}"));
+        push_sbpl_subpath(paths, &format!("/private/etc/{suffix}"))?;
     }
+    Ok(())
+}
+
+fn validate_pty_user_env_vars(env_vars: &HashMap<String, String>) -> Result<(), SandboxError> {
+    for (key, value) in env_vars {
+        validate_sandbox_env_var(key, value)
+            .map_err(|message| SandboxError::new(format!("PTY env config invalid: {message}")))?;
+    }
+    Ok(())
 }
 
 impl MacOsSandbox {
@@ -777,9 +787,13 @@ impl MacOsSandbox {
     #[cfg(test)]
     fn generate_policy(&self) -> String {
         Self::build_seatbelt_policy(&self.config, self.sandbox_tmp_dir.path())
+            .expect("test sandbox policy should be valid")
     }
 
-    fn build_seatbelt_policy(config: &SandboxConfig, sandbox_tmp_dir: &str) -> String {
+    fn build_seatbelt_policy(
+        config: &SandboxConfig,
+        sandbox_tmp_dir: &str,
+    ) -> Result<String, SandboxError> {
         let mut rules = Vec::new();
 
         rules.push("(version 1)".to_string());
@@ -796,28 +810,46 @@ impl MacOsSandbox {
                 .map(|s| format!("(subpath \"{}\")", s.trim_end_matches('/'))),
         );
         // SECURITY: 显式允许当前沙箱实例的专属临时目录；基础临时目录只放入读取规则用于遍历。
-        push_sbpl_subpath(&mut read_paths, sandbox_tmp_dir);
+        push_sbpl_subpath(&mut read_paths, sandbox_tmp_dir)?;
         // 保留基础 /private/tmp 读取权限用于目录遍历（不包含写入权限）。
-        push_sbpl_subpath(&mut read_paths, "/private/tmp");
-        push_sbpl_subpath(&mut read_paths, "/tmp");
+        push_sbpl_subpath(&mut read_paths, "/private/tmp")?;
+        push_sbpl_subpath(&mut read_paths, "/tmp")?;
 
         for path in &config.fs_readonly {
-            push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
+            let path = path.to_str().ok_or_else(|| {
+                SandboxError::new(format!(
+                    "fs_readonly contains non-UTF-8 path: {}",
+                    path.display()
+                ))
+            })?;
+            push_normalized_sbpl_subpath(&mut read_paths, path)?;
         }
 
         for path in &config.fs_readwrite {
-            push_normalized_sbpl_subpath(&mut read_paths, path.to_string_lossy().as_ref());
+            let path = path.to_str().ok_or_else(|| {
+                SandboxError::new(format!(
+                    "fs_readwrite contains non-UTF-8 path: {}",
+                    path.display()
+                ))
+            })?;
+            push_normalized_sbpl_subpath(&mut read_paths, path)?;
         }
 
         rules.push(format!("(allow file-read* {})", read_paths.join(" ")));
 
         let mut write_paths: Vec<String> = Vec::new();
         for path in &config.fs_readwrite {
-            push_normalized_sbpl_subpath(&mut write_paths, path.to_string_lossy().as_ref());
+            let path = path.to_str().ok_or_else(|| {
+                SandboxError::new(format!(
+                    "fs_readwrite contains non-UTF-8 path: {}",
+                    path.display()
+                ))
+            })?;
+            push_normalized_sbpl_subpath(&mut write_paths, path)?;
         }
         // SECURITY: 仅当用户未配置任何自定义写入路径时，使用沙箱专属临时目录作为默认写入目录。
         if write_paths.is_empty() {
-            push_sbpl_subpath(&mut write_paths, sandbox_tmp_dir);
+            push_sbpl_subpath(&mut write_paths, sandbox_tmp_dir)?;
         }
         rules.push(format!("(allow file-write* {})", write_paths.join(" ")));
 
@@ -866,7 +898,7 @@ impl MacOsSandbox {
                 .to_string(),
         );
 
-        rules.join("\n")
+        Ok(rules.join("\n"))
     }
 }
 
@@ -884,7 +916,6 @@ impl Sandbox for MacOsSandbox {
         if config.memory_limit_mb.is_some() {
             tracing::info!("macOS memory limit will be enforced via watchdog sampling");
         }
-
         // SECURITY: 创建沙箱专属临时目录，避免多个沙箱实例共享 /private/tmp 导致数据泄露。
         let sandbox_id = Uuid::new_v4();
         let sandbox_tmp_dir = format!("/private/tmp/mimobox-{sandbox_id}");
@@ -923,7 +954,7 @@ impl Sandbox for MacOsSandbox {
 
         // 生成 Seatbelt 策略，并在 fork 前转换为 CString，避免 pre_exec 中分配内存。
         let sandbox_tmp_dir = self.sandbox_tmp_dir.path().to_string();
-        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir);
+        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir)?;
         tracing::debug!(
             "Seatbelt policy generated (rules: {}, length: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -1089,7 +1120,6 @@ impl Sandbox for MacOsSandbox {
             )
             .suggestion("Set PtyConfig.timeout to None for an unbounded PTY session"));
         }
-
         tracing::info!(
             "Creating macOS PTY session: {}",
             command_log_summary(&config.command)
@@ -1097,7 +1127,7 @@ impl Sandbox for MacOsSandbox {
 
         let allocated = allocate_pty(config.size)?;
         let sandbox_tmp_dir = self.sandbox_tmp_dir.path().to_string();
-        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir);
+        let policy = Self::build_seatbelt_policy(&self.config, &sandbox_tmp_dir)?;
         tracing::debug!(
             "PTY Seatbelt policy generated (rules: {}, length: {} bytes)",
             policy.matches("\n").count() + 1,
@@ -1122,6 +1152,7 @@ impl Sandbox for MacOsSandbox {
             ))
         })?;
 
+        validate_pty_user_env_vars(&config.env)?;
         let pwd = config
             .cwd
             .clone()
@@ -1166,15 +1197,35 @@ impl Sandbox for MacOsSandbox {
             ))
         })?;
 
-        let temp_dir_owner = Arc::clone(&self.sandbox_tmp_dir);
-        let cleanup = Some(Box::new(move || drop(temp_dir_owner)) as crate::pty::PtyCleanup);
+        let child_pid = child.id() as libc::pid_t;
+        let memory_watchdog_running = if let Some(memory_limit_mb) = self.config.memory_limit_mb {
+            let memory_limit_bytes = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                SandboxError::new(format!(
+                    "memory_limit_mb={memory_limit_mb} overflowed while converting to bytes"
+                ))
+            })?;
+            let child_running = Arc::new(AtomicBool::new(true));
+            let oom_killed = Arc::new(AtomicBool::new(false));
+            spawn_memory_watchdog(
+                child_pid,
+                memory_limit_bytes,
+                Arc::clone(&child_running),
+                oom_killed,
+            );
+            Some(child_running)
+        } else {
+            None
+        };
 
-        Ok(build_session(
-            allocated,
-            child.id() as libc::pid_t,
-            config.timeout,
-            cleanup,
-        ))
+        let temp_dir_owner = Arc::clone(&self.sandbox_tmp_dir);
+        let cleanup = Some(Box::new(move || {
+            if let Some(child_running) = memory_watchdog_running {
+                child_running.store(false, Ordering::SeqCst);
+            }
+            drop(temp_dir_owner);
+        }) as crate::pty::PtyCleanup);
+
+        Ok(build_session(allocated, child_pid, config.timeout, cleanup))
     }
 
     fn file_exists(&mut self, _path: &str) -> Result<bool, SandboxError> {
@@ -2337,6 +2388,7 @@ mod tests {
     fn test_policy_generation_allow_fork_when_config_true() {
         let mut config = SandboxConfig::default();
         config.allow_fork = true;
+        config.memory_limit_mb = None;
         let sb = MacOsSandbox::new(config).expect("failed to create sandbox");
         let policy = sb.generate_policy();
 
@@ -2344,6 +2396,19 @@ mod tests {
             policy.contains("(allow process-fork)"),
             "allow_fork=true should generate a process-fork allow rule"
         );
+    }
+
+    #[test]
+    fn test_pty_env_rejects_blocked_baseline_override() {
+        let env_vars = std::collections::HashMap::from([(
+            "DYLD_INSERT_LIBRARIES".to_string(),
+            "/tmp/lib.dylib".to_string(),
+        )]);
+
+        let error = validate_pty_user_env_vars(&env_vars)
+            .expect_err("PTY env must reject loader overrides");
+
+        assert!(error.to_string().contains("PTY env config invalid"));
     }
 
     #[test]
