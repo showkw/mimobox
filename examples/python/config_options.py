@@ -56,4 +56,4 @@ with Sandbox() as sandbox:
 # 9. Check sandbox ready state
 with Sandbox(isolation="microvm") as sandbox:
     sandbox.wait_ready(timeout_secs=10.0)
-    print(f"ready: {sandbox.is_ready()}")
+    print(f"ready: {sandbox.is_ready}")
