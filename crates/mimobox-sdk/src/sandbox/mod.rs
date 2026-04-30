@@ -36,7 +36,7 @@ use mimobox_core::Sandbox as CoreSandbox;
     all(feature = "os", any(target_os = "linux", target_os = "macos"))
 ))]
 use mimobox_core::SandboxError;
-use mimobox_core::{ErrorCode, SandboxMetrics};
+use mimobox_core::{BLOCKED_ENV_VARS, ErrorCode, MAX_ENV_KEY_BYTES, SandboxMetrics};
 use std::collections::HashMap;
 #[cfg(feature = "vm")]
 use std::sync::Arc;
@@ -231,12 +231,15 @@ impl SdkExecOptions {
 pub(crate) fn merge_env_vars(
     config_env: &HashMap<String, String>,
     command_env: &HashMap<String, String>,
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>, SdkError> {
+    validate_env_map(config_env)?;
+    validate_env_map(command_env)?;
+
     if config_env.is_empty() {
-        return command_env.clone();
+        return Ok(command_env.clone());
     }
     if command_env.is_empty() {
-        return config_env.clone();
+        return Ok(config_env.clone());
     }
 
     let mut merged = HashMap::with_capacity(config_env.len() + command_env.len());
@@ -250,7 +253,19 @@ pub(crate) fn merge_env_vars(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
-    merged
+    Ok(merged)
+}
+
+fn validate_env_map(env: &HashMap<String, String>) -> Result<(), SdkError> {
+    for (key, value) in env {
+        validate_env_key(key)?;
+        if value.contains('\0') {
+            return Err(SdkError::Config(format!(
+                "environment variable `{key}` contains NUL byte"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "os", any(target_os = "linux", target_os = "macos")))]
@@ -356,6 +371,19 @@ fn validate_env_key(key: &str) -> Result<(), SdkError> {
     if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
         return Err(SdkError::Config(format!(
             "invalid environment variable name: `{key}`"
+        )));
+    }
+    if key.len() > MAX_ENV_KEY_BYTES {
+        return Err(SdkError::Config(format!(
+            "invalid environment variable name: `{key}` exceeds {MAX_ENV_KEY_BYTES} bytes"
+        )));
+    }
+    if let Some(blocked) = BLOCKED_ENV_VARS
+        .iter()
+        .find(|blocked| key.eq_ignore_ascii_case(blocked))
+    {
+        return Err(SdkError::Config(format!(
+            "environment variable `{key}` is blocked because it can override sandbox baseline `{blocked}`"
         )));
     }
     Ok(())

@@ -44,12 +44,20 @@ pub const BLOCKED_ENV_VARS: &[&str] = &[
     "LOGNAME",
 ];
 
+/// Maximum environment variable key length in bytes.
+pub const MAX_ENV_KEY_BYTES: usize = 128;
+
 fn validate_persistent_env_vars(
     env_vars: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for (key, value) in env_vars {
         if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains(' ') {
             return Err(format!("env_vars contains invalid key: {key}"));
+        }
+        if key.len() > MAX_ENV_KEY_BYTES {
+            return Err(format!(
+                "env_vars key exceeds {MAX_ENV_KEY_BYTES} bytes: {key}"
+            ));
         }
         if value.contains('\0') {
             return Err(format!("env_vars value for key {key} contains NUL byte"));
@@ -1262,8 +1270,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        HttpAclPolicy, HttpAclRule, HttpMethod, MAX_MEMORY_LIMIT_MB, PtySize, SandboxConfig,
-        SandboxError, SandboxSnapshot, normalize_path,
+        BLOCKED_ENV_VARS, ErrorCode, HttpAclPolicy, HttpAclRule, HttpMethod, MAX_ENV_KEY_BYTES,
+        MAX_MEMORY_LIMIT_MB, PtySize, SandboxConfig, SandboxError, SandboxMetrics, SandboxSnapshot,
+        normalize_path,
     };
 
     fn parse_acl_rule(rule: &str) -> HttpAclRule {
@@ -1552,6 +1561,204 @@ mod tests {
         assert!(
             matches!(error, SandboxError::ExecutionFailed { message, .. } if message.contains("memory_limit_mb"))
         );
+    }
+
+    #[test]
+    fn sandbox_config_default_env_vars_are_empty_and_valid() {
+        let config = SandboxConfig::default();
+
+        assert!(config.env_vars.is_empty());
+        config
+            .validate()
+            .expect("default sandbox env_vars should be valid");
+    }
+
+    #[test]
+    fn sandbox_config_accepts_safe_persistent_env_vars() {
+        let mut env_vars = std::collections::HashMap::new();
+        env_vars.insert("MIMOBOX_TOKEN".to_string(), "value".to_string());
+        env_vars.insert("APP_MODE".to_string(), "test".to_string());
+        let config = SandboxConfig {
+            env_vars: env_vars.clone(),
+            ..Default::default()
+        };
+
+        config
+            .validate()
+            .expect("safe persistent env_vars should be accepted");
+        assert_eq!(config.env_vars, env_vars);
+    }
+
+    #[test]
+    fn sandbox_config_rejects_empty_env_var_key() {
+        let config = SandboxConfig {
+            env_vars: std::collections::HashMap::from([("".to_string(), "value".to_string())]),
+            ..Default::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("empty env var key should be rejected");
+
+        assert!(error.to_string().contains("env_vars config invalid"));
+    }
+
+    #[test]
+    fn sandbox_config_rejects_overlong_env_var_key() {
+        let key = "A".repeat(MAX_ENV_KEY_BYTES + 1);
+        let config = SandboxConfig {
+            env_vars: std::collections::HashMap::from([(key, "value".to_string())]),
+            ..Default::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("overlong env var key should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("exceeds {MAX_ENV_KEY_BYTES} bytes"))
+        );
+    }
+
+    #[test]
+    fn sandbox_config_rejects_every_blocked_env_var() {
+        for blocked_key in BLOCKED_ENV_VARS {
+            let config = SandboxConfig {
+                env_vars: std::collections::HashMap::from([(
+                    (*blocked_key).to_string(),
+                    "value".to_string(),
+                )]),
+                ..Default::default()
+            };
+
+            let error = config
+                .validate()
+                .expect_err("blocked env var should be rejected");
+
+            assert!(
+                error.to_string().contains("blocked security key"),
+                "blocked key {blocked_key} returned unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_env_vars_cover_loader_shell_and_baseline_keys() {
+        let expected = [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "PWD",
+            "SHELL",
+            "USER",
+            "LOGNAME",
+        ];
+
+        for key in expected {
+            assert!(
+                BLOCKED_ENV_VARS.contains(&key),
+                "BLOCKED_ENV_VARS should contain {key}"
+            );
+        }
+
+        let unique: std::collections::HashSet<_> = BLOCKED_ENV_VARS.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            BLOCKED_ENV_VARS.len(),
+            "blocked env var list should not contain duplicates"
+        );
+    }
+
+    #[test]
+    fn sandbox_metrics_default_has_every_field_empty() {
+        let metrics = SandboxMetrics::default();
+
+        assert!(metrics.memory_usage_bytes.is_none());
+        assert!(metrics.memory_limit_bytes.is_none());
+        assert!(metrics.cpu_time_user_us.is_none());
+        assert!(metrics.cpu_time_system_us.is_none());
+        assert!(metrics.wasm_fuel_consumed.is_none());
+        assert!(metrics.io_read_bytes.is_none());
+        assert!(metrics.io_write_bytes.is_none());
+        assert!(metrics.collected_at.is_none());
+    }
+
+    #[test]
+    fn sandbox_metrics_clone_preserves_every_field() {
+        let collected_at = std::time::Instant::now();
+        let metrics = SandboxMetrics {
+            memory_usage_bytes: Some(1),
+            memory_limit_bytes: Some(2),
+            cpu_time_user_us: Some(3),
+            cpu_time_system_us: Some(4),
+            wasm_fuel_consumed: Some(5),
+            io_read_bytes: Some(6),
+            io_write_bytes: Some(7),
+            collected_at: Some(collected_at),
+        };
+
+        let cloned = metrics.clone();
+
+        assert_eq!(cloned.memory_usage_bytes, Some(1));
+        assert_eq!(cloned.memory_limit_bytes, Some(2));
+        assert_eq!(cloned.cpu_time_user_us, Some(3));
+        assert_eq!(cloned.cpu_time_system_us, Some(4));
+        assert_eq!(cloned.wasm_fuel_consumed, Some(5));
+        assert_eq!(cloned.io_read_bytes, Some(6));
+        assert_eq!(cloned.io_write_bytes, Some(7));
+        assert_eq!(cloned.collected_at, Some(collected_at));
+    }
+
+    #[test]
+    fn error_code_as_str_covers_all_current_variants() {
+        let cases = [
+            (ErrorCode::CommandTimeout, "command_timeout"),
+            (ErrorCode::CommandExit(2), "command_exit"),
+            (ErrorCode::CommandKilled, "command_killed"),
+            (ErrorCode::FileNotFound, "file_not_found"),
+            (ErrorCode::FilePermissionDenied, "file_permission_denied"),
+            (ErrorCode::FileTooLarge, "file_too_large"),
+            (ErrorCode::NotDirectory, "not_directory"),
+            (ErrorCode::HttpDeniedHost, "http_denied_host"),
+            (ErrorCode::HttpTimeout, "http_timeout"),
+            (ErrorCode::HttpBodyTooLarge, "http_body_too_large"),
+            (ErrorCode::HttpConnectFail, "http_connect_fail"),
+            (ErrorCode::HttpTlsFail, "http_tls_fail"),
+            (ErrorCode::HttpInvalidUrl, "http_invalid_url"),
+            (ErrorCode::SandboxNotReady, "sandbox_not_ready"),
+            (ErrorCode::SandboxDestroyed, "sandbox_destroyed"),
+            (ErrorCode::SandboxCreateFailed, "sandbox_create_failed"),
+            (ErrorCode::InvalidConfig, "invalid_config"),
+            (ErrorCode::UnsupportedPlatform, "unsupported_platform"),
+            (ErrorCode::MemoryLimitExceeded, "memory_limit_exceeded"),
+            (ErrorCode::CpuLimitExceeded, "cpu_limit_exceeded"),
+            (ErrorCode::HttpDeniedAcl, "http_denied_acl"),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn sandbox_error_from_io_preserves_io_kind() {
+        let error: SandboxError =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+
+        match error {
+            SandboxError::Io(io_error) => {
+                assert_eq!(io_error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected SandboxError::Io, got {other:?}"),
+        }
     }
 
     #[test]

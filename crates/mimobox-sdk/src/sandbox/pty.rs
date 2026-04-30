@@ -70,7 +70,7 @@ impl Sandbox {
             validate_cwd(cwd)?;
         }
 
-        config.env = merge_env_vars(&self.config.env_vars, &config.env);
+        config.env = merge_env_vars(&self.config.env_vars, &config.env)?;
 
         self.ensure_backend_for_pty()?;
 

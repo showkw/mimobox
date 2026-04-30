@@ -87,8 +87,19 @@ fn registry_entries() -> std::sync::MutexGuard<'static, HashMap<Uuid, SandboxInf
 mod tests {
     use super::*;
 
+    static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = REGISTRY_TEST_LOCK
+            .lock()
+            .expect("registry test lock should not be poisoned");
+        registry_entries().clear();
+        guard
+    }
+
     #[test]
     fn test_register_and_list() {
+        let _guard = registry_test_guard();
         let id = register();
 
         let sandboxes = list();
@@ -99,6 +110,7 @@ mod tests {
 
     #[test]
     fn test_unregister() {
+        let _guard = registry_test_guard();
         let id = register();
 
         unregister(id);
@@ -108,6 +120,7 @@ mod tests {
 
     #[test]
     fn test_update_isolation() {
+        let _guard = registry_test_guard();
         let id = register();
 
         update_isolation(id, Some(IsolationLevel::Auto), Some(IsolationLevel::Os));
@@ -123,6 +136,7 @@ mod tests {
 
     #[test]
     fn test_update_ready() {
+        let _guard = registry_test_guard();
         let id = register();
 
         update_ready(id, true);
@@ -137,6 +151,146 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
+        let _guard = registry_test_guard();
         assert!(get(Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn list_empty_registry_returns_empty_snapshot() {
+        let _guard = registry_test_guard();
+
+        assert!(list().is_empty());
+    }
+
+    #[test]
+    fn get_empty_registry_returns_none() {
+        let _guard = registry_test_guard();
+
+        assert!(get(Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn register_initial_info_contains_default_state() {
+        let _guard = registry_test_guard();
+        let id = register();
+
+        let info = get(id).expect("registered sandbox info should exist");
+
+        assert_eq!(info.id, id);
+        assert_eq!(info.configured_isolation, None);
+        assert_eq!(info.active_isolation, None);
+        assert!(!info.is_ready);
+        assert!(info.created_at.elapsed().as_secs() < 60);
+        unregister(id);
+    }
+
+    #[test]
+    fn register_list_unregister_complete_lifecycle() {
+        let _guard = registry_test_guard();
+        let first = register();
+        let second = register();
+
+        let ids: std::collections::HashSet<_> = list().into_iter().map(|info| info.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&first));
+        assert!(ids.contains(&second));
+
+        unregister(first);
+        assert!(get(first).is_none());
+        assert!(get(second).is_some());
+
+        unregister(second);
+        assert!(list().is_empty());
+    }
+
+    #[test]
+    fn update_unknown_id_is_noop() {
+        let _guard = registry_test_guard();
+        let id = Uuid::new_v4();
+
+        update_isolation(id, Some(IsolationLevel::Wasm), Some(IsolationLevel::Wasm));
+        update_ready(id, true);
+        unregister(id);
+
+        assert!(list().is_empty());
+    }
+
+    #[test]
+    fn update_ready_can_toggle_state() {
+        let _guard = registry_test_guard();
+        let id = register();
+
+        update_ready(id, true);
+        assert!(
+            get(id)
+                .expect("registered sandbox info should exist")
+                .is_ready
+        );
+
+        update_ready(id, false);
+        assert!(
+            !get(id)
+                .expect("registered sandbox info should still exist")
+                .is_ready
+        );
+
+        unregister(id);
+    }
+
+    #[test]
+    fn update_isolation_can_clear_existing_state() {
+        let _guard = registry_test_guard();
+        let id = register();
+
+        update_isolation(id, Some(IsolationLevel::Auto), Some(IsolationLevel::Os));
+        update_isolation(id, None, None);
+        let info = get(id).expect("registered sandbox info should exist");
+
+        assert_eq!(info.configured_isolation, None);
+        assert_eq!(info.active_isolation, None);
+        unregister(id);
+    }
+
+    #[test]
+    fn concurrent_register_unregister_leaves_registry_empty() {
+        let _guard = registry_test_guard();
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let id = register();
+                    update_isolation(id, Some(IsolationLevel::Auto), Some(IsolationLevel::Os));
+                    update_ready(id, true);
+                    assert!(get(id).is_some());
+                    unregister(id);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("concurrent register/unregister thread should not panic");
+        }
+
+        assert!(list().is_empty());
+    }
+
+    #[test]
+    fn concurrent_registers_create_unique_ids() {
+        let _guard = registry_test_guard();
+        let handles: Vec<_> = (0..16).map(|_| std::thread::spawn(register)).collect();
+
+        let mut ids = Vec::with_capacity(handles.len());
+        for handle in handles {
+            ids.push(handle.join().expect("register thread should not panic"));
+        }
+
+        let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+        assert_eq!(list().len(), ids.len());
+
+        for id in ids {
+            unregister(id);
+        }
     }
 }

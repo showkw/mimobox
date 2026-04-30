@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::error::SdkError;
 use mimobox_core::{
-    BLOCKED_ENV_VARS, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, SandboxConfig, SeccompProfile,
+    BLOCKED_ENV_VARS, MAX_ENV_KEY_BYTES, MAX_MEMORY_LIMIT_MB, NamespaceDegradation, SandboxConfig,
+    SeccompProfile,
 };
 
 /// Isolation level selection strategy.
@@ -490,6 +491,12 @@ fn validate_env_vars(env_vars: &std::collections::HashMap<String, String>) -> Re
             return Err(invalid_config(
                 format!("env_vars contains invalid key: '{key}'"),
                 "Environment variable names must be non-empty and must not contain '=', NUL, or spaces",
+            ));
+        }
+        if key.len() > MAX_ENV_KEY_BYTES {
+            return Err(invalid_config(
+                format!("env_vars key '{key}' exceeds {MAX_ENV_KEY_BYTES} bytes"),
+                format!("Environment variable names must be at most {MAX_ENV_KEY_BYTES} bytes"),
             ));
         }
         if value.contains('\0') {
@@ -1061,7 +1068,7 @@ impl ConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mimobox_core::ErrorCode;
+    use mimobox_core::{BLOCKED_ENV_VARS, ErrorCode, MAX_ENV_KEY_BYTES};
 
     fn assert_invalid_config_suggestion(
         result: Result<Config, SdkError>,
@@ -1102,8 +1109,43 @@ mod tests {
     }
 
     #[test]
+    fn default_config_security_values_are_correct() {
+        let config = Config::default();
+
+        assert_eq!(config.isolation, IsolationLevel::Auto);
+        assert_eq!(config.trust_level, TrustLevel::SemiTrusted);
+        assert!(matches!(config.network, NetworkPolicy::DenyAll));
+        assert_eq!(config.timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.memory_limit_mb, Some(512));
+        assert_eq!(config.max_processes, None);
+        assert_eq!(config.cpu_quota_us, None);
+        assert_eq!(config.cpu_period_us, 100_000);
+        assert!(!config.allow_fork);
+        assert_eq!(
+            config.namespace_degradation,
+            NamespaceDegradation::FailClosed
+        );
+        assert!(config.allowed_http_domains.is_empty());
+        assert!(config.http_acl.allow.is_empty());
+        assert!(config.http_acl.deny.is_empty());
+
+        let sandbox_config = config.to_sandbox_config();
+        assert!(sandbox_config.deny_network);
+        assert_eq!(sandbox_config.timeout_secs, Some(30));
+        assert!(matches!(
+            sandbox_config.seccomp_profile,
+            SeccompProfile::Essential
+        ));
+    }
+
+    #[test]
     fn test_env_vars_rejects_nul_in_key() {
         assert_env_vars_rejected("MIMOBOX\0TOKEN", "value");
+    }
+
+    #[test]
+    fn test_env_vars_rejects_empty_key() {
+        assert_env_vars_rejected("", "value");
     }
 
     #[test]
@@ -1119,6 +1161,11 @@ mod tests {
     #[test]
     fn test_env_vars_rejects_space_in_key() {
         assert_env_vars_rejected("MIMOBOX TOKEN", "value");
+    }
+
+    #[test]
+    fn test_env_vars_rejects_overlong_key() {
+        assert_env_vars_rejected(&"A".repeat(MAX_ENV_KEY_BYTES + 1), "value");
     }
 
     #[test]
@@ -1142,6 +1189,14 @@ mod tests {
     }
 
     #[test]
+    fn test_env_vars_rejects_all_blocked_keys() {
+        for blocked_key in BLOCKED_ENV_VARS {
+            assert_env_vars_rejected(blocked_key, "value");
+            assert_env_vars_rejected(&blocked_key.to_ascii_lowercase(), "value");
+        }
+    }
+
+    #[test]
     fn test_env_vars_accepts_valid_vars() {
         let mut vars = std::collections::HashMap::new();
         vars.insert("MIMOBOX_TOKEN".to_string(), "value".to_string());
@@ -1160,6 +1215,33 @@ mod tests {
     fn test_env_vars_case_insensitive_security_check() {
         assert_env_vars_rejected("ld_preload", "/tmp/preload.so");
         assert_env_vars_rejected("dyld_library_path", "/tmp/lib");
+    }
+
+    #[test]
+    fn env_var_replaces_existing_key_value() {
+        let config = Config::builder()
+            .env_var("APP_MODE", "dev")
+            .env_var("APP_MODE", "test")
+            .build()
+            .expect("overwriting same env var key should remain valid");
+
+        assert_eq!(config.env_vars.get("APP_MODE"), Some(&"test".to_string()));
+        assert_eq!(config.env_vars.len(), 1);
+    }
+
+    #[test]
+    fn env_vars_replaces_previous_builder_env_state() {
+        let vars =
+            std::collections::HashMap::from([("FINAL_KEY".to_string(), "final-value".to_string())]);
+
+        let config = Config::builder()
+            .env_var("OLD_KEY", "old-value")
+            .env_vars(vars.clone())
+            .build()
+            .expect("replacement env_vars should pass validation");
+
+        assert_eq!(config.env_vars, vars);
+        assert!(!config.env_vars.contains_key("OLD_KEY"));
     }
 
     #[test]
@@ -1317,6 +1399,54 @@ mod tests {
                 "*.openai.com".to_string(),
                 "example.com".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn allowed_http_domains_empty_input_builds_empty_whitelist() {
+        let config = Config::builder()
+            .allowed_http_domains(Vec::<String>::new())
+            .build()
+            .expect("empty allowed_http_domains input should build");
+        let sandbox_config = config.to_sandbox_config();
+
+        assert!(sandbox_config.allowed_http_domains.is_empty());
+        assert!(sandbox_config.http_acl.allow.is_empty());
+        assert!(sandbox_config.deny_network);
+    }
+
+    #[test]
+    fn allowed_http_domains_deduplicates_explicit_entries_for_sandbox_config() {
+        let config = Config::builder()
+            .allowed_http_domains([
+                "api.openai.com",
+                "api.openai.com",
+                "*.openai.com",
+                "*.openai.com",
+            ])
+            .build()
+            .expect("duplicate allowed_http_domains should build");
+
+        assert_eq!(
+            config.to_sandbox_config().allowed_http_domains,
+            vec!["api.openai.com".to_string(), "*.openai.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn allowed_http_domains_deduplicates_network_policy_entries() {
+        let config = Config::builder()
+            .network(NetworkPolicy::AllowDomains(vec![
+                "api.openai.com".to_string(),
+                "api.openai.com".to_string(),
+                "*.openai.com".to_string(),
+            ]))
+            .build()
+            .expect("duplicate NetworkPolicy::AllowDomains entries should build");
+
+        assert_eq!(
+            config.to_sandbox_config().allowed_http_domains,
+            vec!["api.openai.com".to_string(), "*.openai.com".to_string()]
         );
     }
 

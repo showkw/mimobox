@@ -272,7 +272,7 @@ impl Sandbox {
             validate_cwd(cwd)?;
         }
         validate_exec_options(&options)?;
-        let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
+        let merged_env = merge_env_vars(&self.config.env_vars, &options.env)?;
         let options = SdkExecOptions {
             env: merged_env,
             ..options
@@ -384,7 +384,7 @@ impl Sandbox {
             validate_cwd(cwd)?;
         }
         validate_exec_options(&options)?;
-        let merged_env = merge_env_vars(&self.config.env_vars, &options.env);
+        let merged_env = merge_env_vars(&self.config.env_vars, &options.env)?;
         let options = SdkExecOptions {
             env: merged_env,
             ..options
@@ -517,4 +517,121 @@ fn validate_exec_options(options: &SdkExecOptions) -> Result<(), SdkError> {
 
 fn backend_variant_mismatch() -> SdkError {
     SdkError::internal("no backend variant matched the current feature/platform configuration")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mimobox_core::BLOCKED_ENV_VARS;
+
+    fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_env_vars_empty_maps_return_empty_map() {
+        let merged =
+            merge_env_vars(&HashMap::new(), &HashMap::new()).expect("empty env maps should merge");
+
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn merge_env_vars_config_empty_returns_command_env() {
+        let command_env = env_map(&[("REQUEST_ID", "cmd-1")]);
+
+        let merged = merge_env_vars(&HashMap::new(), &command_env)
+            .expect("command env should merge when config env is empty");
+
+        assert_eq!(merged, command_env);
+    }
+
+    #[test]
+    fn merge_env_vars_command_empty_returns_config_env() {
+        let config_env = env_map(&[("APP_MODE", "test")]);
+
+        let merged = merge_env_vars(&config_env, &HashMap::new())
+            .expect("config env should merge when command env is empty");
+
+        assert_eq!(merged, config_env);
+    }
+
+    #[test]
+    fn merge_env_vars_command_env_overrides_config_env() {
+        let config_env = env_map(&[("APP_MODE", "config"), ("CONFIG_ONLY", "yes")]);
+        let command_env = env_map(&[("APP_MODE", "command"), ("COMMAND_ONLY", "yes")]);
+
+        let merged =
+            merge_env_vars(&config_env, &command_env).expect("valid env maps should merge");
+
+        assert_eq!(merged.get("APP_MODE"), Some(&"command".to_string()));
+        assert_eq!(merged.get("CONFIG_ONLY"), Some(&"yes".to_string()));
+        assert_eq!(merged.get("COMMAND_ONLY"), Some(&"yes".to_string()));
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn merge_env_vars_rejects_blocked_command_env_keys() {
+        for blocked_key in BLOCKED_ENV_VARS {
+            let command_env = env_map(&[(blocked_key, "value")]);
+
+            let error = merge_env_vars(&HashMap::new(), &command_env)
+                .expect_err("blocked command env key should be rejected");
+
+            assert!(
+                error.to_string().contains("blocked"),
+                "blocked key {blocked_key} returned unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_env_vars_rejects_blocked_config_env_keys() {
+        let config_env = env_map(&[("HOME", "/tmp/override")]);
+        let command_env = env_map(&[("APP_MODE", "test")]);
+
+        let error = merge_env_vars(&config_env, &command_env)
+            .expect_err("config env must not override baseline HOME");
+
+        assert!(error.to_string().contains("sandbox baseline"));
+    }
+
+    #[test]
+    fn merge_env_vars_prevents_baseline_path_override() {
+        let command_env = env_map(&[("PATH", "/malicious/bin")]);
+
+        let error = merge_env_vars(&HashMap::new(), &command_env)
+            .expect_err("PATH must remain owned by sandbox baseline");
+
+        assert!(error.to_string().contains("sandbox baseline"));
+    }
+
+    #[test]
+    fn validate_exec_options_rejects_nul_env_value() {
+        let options = SdkExecOptions {
+            env: env_map(&[("SAFE_KEY", "value\0tail")]),
+            ..Default::default()
+        };
+
+        let error =
+            validate_exec_options(&options).expect_err("NUL bytes in env value should be rejected");
+
+        assert!(error.to_string().contains("NUL byte"));
+    }
+
+    #[test]
+    fn validate_exec_options_rejects_zero_timeout() {
+        let options = SdkExecOptions {
+            timeout: Some(Duration::ZERO),
+            ..Default::default()
+        };
+
+        let error = validate_exec_options(&options)
+            .expect_err("zero per-command timeout should be rejected");
+
+        assert!(error.to_string().contains("greater than zero"));
+    }
 }
