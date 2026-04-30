@@ -1535,6 +1535,7 @@ impl PySandbox {
     }
 
     /// Return whether the sandbox is currently ready.
+    #[getter]
     fn is_ready(&self) -> bool {
         self.inner.as_ref().is_some_and(|s| s.is_ready())
     }
