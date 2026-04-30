@@ -48,8 +48,19 @@ That's it -- no API keys, no Docker, no cloud. The `auto` backend picks the best
 
 ### Python
 
-```bash
-pip install mimobox
+```python
+from mimobox import Sandbox
+
+# Create a sandbox with default settings
+with Sandbox() as sb:
+    # Execute a command safely
+    result = sb.execute("echo 'Hello from sandbox!'")
+    print(result.stdout)
+    
+    # The sandbox isolates the process:
+    # - Filesystem access is restricted
+    # - Network access is blocked by default
+    # - Resource limits are enforced
 ```
 
 ### Rust
@@ -59,9 +70,18 @@ pip install mimobox
 mimobox-sdk = "0.1.0-alpha"
 ```
 
-### MCP Server
+### MCP Server (Linux only)
 
-> **Note**: MCP Server is currently available for Linux only.
+Install the MCP server binary:
+
+```bash
+# Option 1: Install together with CLI
+curl -fsSL https://raw.githubusercontent.com/showkw/mimobox/master/scripts/install.sh | bash -s -- --with-mcp
+
+# Option 2: Download separately  
+curl -fsSL https://github.com/showkw/mimobox/releases/latest/download/mimobox-mcp-$(uname -s)-$(uname -m) -o /usr/local/bin/mimobox-mcp
+chmod +x /usr/local/bin/mimobox-mcp
+```
 
 ```bash
 mimobox-mcp                              # stdio mode (default)
