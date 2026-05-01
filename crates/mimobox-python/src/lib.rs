@@ -117,10 +117,10 @@ struct PyExecuteResult {
 impl From<ExecuteResult> for PyExecuteResult {
     fn from(result: ExecuteResult) -> Self {
         let exit_code = result.exit_code.unwrap_or(-1);
-        let error_message = if exit_code != 0 {
-            Some(format!("Command exited with code {exit_code}"))
-        } else if result.timed_out {
+        let error_message = if result.timed_out {
             Some("Command timed out".to_string())
+        } else if exit_code != 0 {
+            Some(format!("Command exited with code {exit_code}"))
         } else {
             None
         };
