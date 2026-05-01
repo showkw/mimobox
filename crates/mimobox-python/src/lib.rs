@@ -96,6 +96,7 @@ create_exception!(mimobox, SandboxLifecycleError, SandboxError);
 /// * `stderr` - Standard error as a UTF-8 string (lossy decoded).
 /// * `exit_code` - Exit code of the process. `-1` when the process was killed by a signal (timeout, OOM, etc.). Use `timed_out` field and exception types (`SandboxTimeoutError`, `SandboxMemoryError`, `SandboxProcessError`) to distinguish kill reasons.
 /// * `timed_out` - Whether the command exceeded its time limit.
+/// * `error_message` - Human-readable error summary when the command failed.
 #[pyclass(name = "ExecuteResult")]
 #[derive(Debug, Clone)]
 struct PyExecuteResult {
@@ -109,23 +110,35 @@ struct PyExecuteResult {
     timed_out: bool,
     #[pyo3(get)]
     elapsed: Option<f64>,
+    #[pyo3(get)]
+    error_message: Option<String>,
 }
 
 impl From<ExecuteResult> for PyExecuteResult {
     fn from(result: ExecuteResult) -> Self {
+        let exit_code = result.exit_code.unwrap_or(-1);
+        let error_message = if exit_code != 0 {
+            Some(format!("Command exited with code {exit_code}"))
+        } else if result.timed_out {
+            Some("Command timed out".to_string())
+        } else {
+            None
+        };
+
         Self {
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
             // When the underlying process was killed (timeout, OOM, etc.), exit_code is None.
             // We map it to -1 as a sentinel value consistent with Unix convention for signal-killed processes.
             // Callers should use the timed_out field and exception types to distinguish the kill reason.
-            exit_code: result.exit_code.unwrap_or(-1),
+            exit_code,
             timed_out: result.timed_out,
             elapsed: if result.elapsed.is_zero() {
                 None
             } else {
                 Some(result.elapsed.as_secs_f64())
             },
+            error_message,
         }
     }
 }
@@ -133,10 +146,16 @@ impl From<ExecuteResult> for PyExecuteResult {
 #[pymethods]
 impl PyExecuteResult {
     fn __repr__(&self) -> String {
-        format!(
-            "ExecuteResult(exit_code={}, timed_out={})",
-            self.exit_code, self.timed_out
-        )
+        match &self.error_message {
+            Some(message) => format!(
+                "ExecuteResult(exit_code={}, timed_out={}, error_message={:?})",
+                self.exit_code, self.timed_out, message
+            ),
+            None => format!(
+                "ExecuteResult(exit_code={}, timed_out={})",
+                self.exit_code, self.timed_out
+            ),
+        }
     }
 }
 
@@ -1169,6 +1188,8 @@ impl PyPtySession {
 #[pyclass(name = "StreamIterator", unsendable)]
 struct PyStreamIterator {
     receiver: Option<mpsc::Receiver<StreamEvent>>,
+    on_stdout: Option<Py<PyAny>>,
+    on_stderr: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -1191,6 +1212,12 @@ impl PyStreamIterator {
 
         match item {
             Ok(event) => {
+                call_stream_event_callback(
+                    py,
+                    &event,
+                    self.on_stdout.as_ref(),
+                    self.on_stderr.as_ref(),
+                )?;
                 self.receiver = Some(receiver);
                 Ok(Some(event.into()))
             }
@@ -1200,6 +1227,40 @@ impl PyStreamIterator {
             }
         }
     }
+}
+
+fn call_stream_event_callback(
+    py: Python<'_>,
+    event: &StreamEvent,
+    on_stdout: Option<&Py<PyAny>>,
+    on_stderr: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    match event {
+        StreamEvent::Stdout(data) => call_stream_callback(py, on_stdout, data, "on_stdout"),
+        StreamEvent::Stderr(data) => call_stream_callback(py, on_stderr, data, "on_stderr"),
+        _ => Ok(()),
+    }
+}
+
+fn call_stream_callback(
+    py: Python<'_>,
+    callback: Option<&Py<PyAny>>,
+    data: &[u8],
+    callback_name: &str,
+) -> PyResult<()> {
+    let Some(callback) = callback else {
+        return Ok(());
+    };
+
+    let callback = callback.bind(py);
+    if !callback.is_callable() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{callback_name} must be callable"
+        )));
+    }
+
+    callback.call1((PyBytes::new(py, data),))?;
+    Ok(())
 }
 
 #[pymethods]
@@ -1507,12 +1568,14 @@ impl PySandbox {
     /// # Arguments
     ///
     /// * `command` - Shell command to execute.
+    /// * `on_stdout` - Optional callback invoked with stdout bytes chunks.
+    /// * `on_stderr` - Optional callback invoked with stderr bytes chunks.
     ///
     /// # Returns
     ///
     /// A `StreamIterator` yielding `StreamEvent` objects for stdout,
     /// stderr chunks and the final exit event.
-    #[pyo3(signature = (command, env=None, timeout=None, cwd=None))]
+    #[pyo3(signature = (command, env=None, timeout=None, cwd=None, on_stdout=None, on_stderr=None))]
     fn stream_execute(
         &mut self,
         py: Python<'_>,
@@ -1520,6 +1583,8 @@ impl PySandbox {
         env: Option<std::collections::HashMap<String, String>>,
         timeout: Option<f64>,
         cwd: Option<&str>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
     ) -> PyResult<PyStreamIterator> {
         let env = validate_optional_python_env_vars(env)?;
         let parsed_timeout = timeout.map(parse_python_timeout).transpose()?;
@@ -1558,6 +1623,8 @@ impl PySandbox {
         };
         Ok(PyStreamIterator {
             receiver: Some(receiver),
+            on_stdout,
+            on_stderr,
         })
     }
 
@@ -1584,6 +1651,8 @@ impl PySandbox {
             .map_err(|e| map_sdk_error(e, py))?;
         Ok(PyStreamIterator {
             receiver: Some(receiver),
+            on_stdout: None,
+            on_stderr: None,
         })
     }
 
